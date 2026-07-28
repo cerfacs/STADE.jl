@@ -599,18 +599,27 @@ end
 # ==================== emit_* ===================================
 # Shared Expr-building helpers used by both codegen directions.
 
-# for var = lo:hi ... end  -- or  for var = lo:step:hi ... end  when a
-# step is given, since the adjoint reverse sweep needs descending loops
-# like `for i_seq_x = i_n:-1:1` (tangent codegen never passes step).
-function emit_forloop(var::Symbol, lo, hi, body_exprs::Vector; step = nothing)
-    range_expr = step === nothing ? Expr(:call, :(:), lo, hi) :
-                                     Expr(:call, :(:), lo, step, hi)
+# for var = lo:hi ... end  -- or  for var = lo:step:hi ... end  when
+# step isn't the literal 1 (e.g. the adjoint reverse sweep's
+# descending `for i_seq_x = i_n:-1:1`). step is a required argument
+# rather than an optional/nothing-defaulted one, because it mirrors
+# a field the frozen :for statement shape *always* carries --
+# parse_kernel fills in the Int64 literal 1 itself for a plain
+# `lo:hi` header, so callers pulling straight from a parsed
+# statement (stmt.step) never have to decide whether to pass it.
+# The 2-arg-vs-3-arg choice is made right here instead, so a plain
+# forward loop still emits the cleaner `lo:hi` form.
+function emit_forloop(var::Symbol, lo, hi, step, body_exprs::Vector)
+    range_expr = step == 1 ? Expr(:call, :(:), lo, hi) :
+                              Expr(:call, :(:), lo, step, hi)
     return Expr(:for, Expr(:(=), var, range_expr), Expr(:block, body_exprs...))
 end
 
 # if cond ... else ... end -- omits the else clause entirely when
-# else_exprs is empty (rather than emitting an empty `else end` block),
-# matching skill-jade's "keep if/else to the strict minimum" spirit
+# else_exprs is empty (rather than emitting an empty `else end`
+# block), matching skill-jade's "keep if/else to the strict minimum"
+# spirit, and round-tripping parse_if's els = NamedTuple[] for a
+# source `if` with no `else`.
 function emit_if(cond, then_exprs::Vector, else_exprs::Vector)
     then_block = Expr(:block, then_exprs...)
     isempty(else_exprs) && return Expr(:if, cond, then_block)
