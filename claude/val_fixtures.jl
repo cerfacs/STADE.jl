@@ -371,9 +371,6 @@ end
 
 # ==================== M4: full complexity ============================
 
-# UNVERIFIED -- traced by hand, not executed. Please run this one
-# first and report back before trusting it as a gate.
-#
 # Live independents (traced from the primal): u at level 1 only
 # (coarse-level u is zero-initialized by the algorithm itself,
 # so u0 there is dead) and f at level 1 only (f at every other
