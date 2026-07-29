@@ -1239,10 +1239,84 @@ end
 
 
 # ==================== act_* ====================================
-# Forward taint analysis from independents through assignments.
+# Forward taint analysis from independents through assignments,
+# swept to a fixed point rather than once. Whole-variable
+# granularity, monotonic: once a variable is shown reachable from an
+# independent by some assignment, it stays marked active for the
+# rest of the map, even past a later statement that overwrites it
+# with something inactive -- activity records "does this variable
+# ever carry a derivative", not "does it carry one right now".
+#
+# A single top-down pass over the body already catches taint that
+# flows forward in textual order. It misses taint a loop carries
+# from one (conceptual) iteration into an earlier statement of the
+# *same* loop body -- e.g. `b[i] = a[i]` appearing before
+# `a[i] = x[i]` inside one `for` block only sees `a` active on the
+# lap after `a` was first activated. Re-running the whole-body pass
+# until nothing changes handles that without unrolling anything: at
+# most one variable can flip false->true per pass, so a bound of
+# (#variables + 1) passes always reaches the fixed point.
 
 function act_analyze(kernel)
-    return Dict{Symbol,Bool}()
+    active_map = Dict{Symbol,Bool}(v => false for v in keys(kernel.sig.kinds))
+    for v in kernel.sig.independents
+        active_map[v] = true
+    end
+    bound = length(active_map) + 1
+    for _ in 1:bound
+        act_propagate!(kernel.body, active_map, kernel.sig.kinds) || break
+    end
+    return active_map
+end
+
+# one pass over a statement_list, recursing into nested for/if
+# bodies; returns whether any active_map entry flipped during this
+# pass
+function act_propagate!(body::Vector{NamedTuple}, active_map::Dict{Symbol,Bool}, kinds::Dict{Symbol,Symbol})
+    changed = false
+    for stmt in body
+        if stmt.kind == :assign
+            changed = act_propagate_assign!(stmt, active_map, kinds) || changed
+        elseif stmt.kind == :for
+            # loop bounds are always Int64 (shape_*'s doing) -- only
+            # the body can possibly touch activity
+            changed = act_propagate!(stmt.body, active_map, kinds) || changed
+        elseif stmt.kind == :if
+            # both arms visited unconditionally: activity is a static
+            # may-reach property, not tied to which branch runs
+            changed = act_propagate!(stmt.then, active_map, kinds) || changed
+            changed = act_propagate!(stmt.els, active_map, kinds) || changed
+        end
+    end
+    return changed
+end
+
+# lhs becomes active the first time its rhs reads an already-active
+# variable. Int64-kinded targets (loop counters, branch selectors,
+# sizes) never become active -- only Float64/Array{Float64} can
+# carry a derivative at all (skill-jade rule 7).
+function act_propagate_assign!(stmt::NamedTuple, active_map::Dict{Symbol,Bool}, kinds::Dict{Symbol,Symbol})
+    var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+    kinds[var] in (:scalar_int, :array_int) && return false
+    active_map[var] && return false   # already active -- nothing new to learn
+    act_expr_active(stmt.rhs, active_map) || return false
+    active_map[var] = true
+    return true
+end
+
+# does expr read any variable currently marked active? Array reads
+# (`v[i]`) test the array's own name (args[1] of a :ref), matching
+# the whole-variable/whole-array granularity the map is defined at.
+function act_expr_active(expr, active_map::Dict{Symbol,Bool})
+    if expr isa Symbol
+        return get(active_map, expr, false)
+    elseif expr isa Expr
+        start = expr.head == :call ? 2 : 1   # skip the operator/function name
+        for a in expr.args[start:end]
+            act_expr_active(a, active_map) && return true
+        end
+    end
+    return false
 end
 
 
