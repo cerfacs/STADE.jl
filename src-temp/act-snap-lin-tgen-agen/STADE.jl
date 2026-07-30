@@ -69,8 +69,15 @@
 # active_map    :: Dict{Symbol,Bool}                # var/array name -> is-active
 # snapshot_site :: (kind=:value|:array|:branch|:tripcount, array::Symbol, at::Int)
 # snapshot_plan :: Vector{snapshot_site}
-# lin_node      :: (op::Symbol, args::Vector, darg_exprs::Vector)
-# lin_plan      :: Vector{lin_node}
+# lin_node/lin_plan :: BREAKING CHANGE (internal-only -- nothing else
+#     depended on the old shape yet). The original flat
+#     (op::Symbol, args::Vector, darg_exprs::Vector) node could only
+#     describe a single call, but a statement's rhs is a whole
+#     expression tree (quadloss: `(x^2*y - 3.0*y*z) + z^3`), so
+#     lin_build now returns a lin_plan that mirrors the kernel body's
+#     own for/if structure, with a real recursive lin_node tree built
+#     per :assign statement. Full shape documented at the lin_*
+#     section header below.
 # der_rule_pair :: (tangent::Function, adjoint::Function)
 
 
@@ -1323,18 +1330,281 @@ end
 # ==================== snap_* ===================================
 # Push/pop site analysis (the TBR-equivalent). For each write,
 # decide whether a later agen_ sweep needs a recorded snapshot.
+#
+# Whole-variable granularity throughout (matching act_*): a site
+# names the variable/array as a whole, never a specific index. `at`
+# is a single, shared, monotonically increasing counter assigned in
+# forward-sweep (pre-order, textual) traversal order across every
+# site of every kind -- agen_'s backward sweep pops in the exact
+# reverse of this order.
+#
+#   :array / :value -- an active variable's write whose OLD (about
+#     to be overwritten) value is genuinely needed later. Detected
+#     per :assign statement by two rules:
+#       1. self-reference: the written variable also appears
+#          somewhere on its own rhs. The one exception is a pure
+#          accumulation (`loss[1] = loss[1] + w`, `x = x + q`) --
+#          the variable appears exactly once in rhs, as a direct
+#          top-level `+` operand structurally identical to the lhs,
+#          and nowhere else -- which never needs the old value
+#          (d(new)/d(old) = 1, old and new are the same quantity for
+#          adjoint purposes; this is what keeps every
+#          `loss[1] = loss[1] + ...` accumulator in the corpus from
+#          needing a stack). Any other self-reference -- same array,
+#          a *different* location, e.g. geomrecur's
+#          `u[i] = c * u[i - 1]` -- does need one.
+#       2. cross-statement, loop-carried: the variable is written
+#          inside a `sequential=true` loop and is read by some other
+#          statement anywhere in the kernel. A sequential loop is
+#          exactly a loop with a genuine loop-carried dependency
+#          (skill-jade's `i_seq_` discipline), so a write there is at
+#          risk of being clobbered by a later lap before the reverse
+#          sweep gets to use it (e.g. advection's `du`, written once
+#          per timestep and read later that same timestep). A
+#          non-sequential loop's writes (relu_field's `v`,
+#          stencil_loss's `w`) never trigger this rule, even though
+#          the array is read again later, because nothing overwrites
+#          it again before that later read happens.
+#   :branch -- one per `if`, unconditionally (whether or not either
+#     arm touches an active variable): the reverse sweep must replay
+#     whichever arm the forward sweep actually took.
+#   :tripcount -- a `for`'s bounds reference a variable that gets
+#     reassigned somewhere else in the kernel (by a scalar :assign),
+#     so the loop's own trip count could be gone by the time the
+#     reverse sweep needs to replay it (mg_vcycle's `n`/`nc`/`nl`,
+#     reassigned level by level). Deliberately conservative: this
+#     doesn't try to prove the reassignment happens strictly *after*
+#     this loop or outside its own body -- any reassignment anywhere
+#     is treated as disqualifying, which can occasionally flag a loop
+#     that didn't strictly need it, but never misses one that did.
 
 function snap_plan(kernel, active_map)
-    return NamedTuple[]
+    reassigned = snap_collect_reassigned(kernel.body)
+    read_anywhere = snap_collect_reads(kernel.body)
+    sites = NamedTuple[]
+    counter = Ref(0)
+    snap_walk!(kernel.body, active_map, kernel.sig.kinds, false, reassigned, read_anywhere, sites, counter)
+    return sites
+end
+
+# every variable ever reassigned via a scalar (non-array) :assign,
+# anywhere in the kernel, at any nesting depth
+function snap_collect_reassigned(body)
+    reassigned = Set{Symbol}()
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(reassigned, stmt.lhs)
+        elseif stmt.kind == :for
+            union!(reassigned, snap_collect_reassigned(stmt.body))
+        elseif stmt.kind == :if
+            union!(reassigned, snap_collect_reassigned(stmt.then))
+            union!(reassigned, snap_collect_reassigned(stmt.els))
+        end
+    end
+    return reassigned
+end
+
+# every variable read anywhere in the kernel: rhs of every :assign,
+# plus every :if's condition (for-bounds are handled separately by
+# the :tripcount rule, since a bound isn't a normal "value read")
+function snap_collect_reads(body)
+    reads = Set{Symbol}()
+    for stmt in body
+        if stmt.kind == :assign
+            snap_collect_expr_vars!(stmt.rhs, reads)
+        elseif stmt.kind == :for
+            union!(reads, snap_collect_reads(stmt.body))
+        elseif stmt.kind == :if
+            snap_collect_expr_vars!(stmt.cond, reads)
+            union!(reads, snap_collect_reads(stmt.then))
+            union!(reads, snap_collect_reads(stmt.els))
+        end
+    end
+    return reads
+end
+
+# collect every Symbol leaf appearing in expr (bare read or array
+# name inside a :ref) into vars
+function snap_collect_expr_vars!(expr, vars)
+    if expr isa Symbol
+        push!(vars, expr)
+    elseif expr isa Expr
+        start = expr.head == :call ? 2 : 1
+        for a in expr.args[start:end]
+            snap_collect_expr_vars!(a, vars)
+        end
+    end
+    return nothing
+end
+
+# one forward-order pass, emitting sites as they're found; `seq` is
+# whether the walk is currently nested inside at least one
+# sequential loop
+function snap_walk!(body, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
+    for stmt in body
+        if stmt.kind == :assign
+            snap_check_assign!(stmt, active_map, kinds, seq, read_anywhere, sites, counter)
+        elseif stmt.kind == :for
+            snap_check_tripcount!(stmt, reassigned, sites, counter)
+            snap_walk!(stmt.body, active_map, kinds, seq || stmt.sequential, reassigned, read_anywhere, sites, counter)
+        elseif stmt.kind == :if
+            counter[] = counter[] + 1
+            push!(sites, (kind = :branch, array = :cond, at = counter[]))
+            snap_walk!(stmt.then, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.els, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
+        end
+    end
+    return nothing
+end
+
+function snap_check_assign!(stmt, active_map, kinds, seq, read_anywhere, sites, counter)
+    var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+    active_map[var] || return nothing
+    snap_is_pure_accumulation(stmt.lhs, stmt.rhs, var) && return nothing
+    needs_site = snap_count_var_refs(stmt.rhs, var) > 0 || (seq && var in read_anywhere)
+    needs_site || return nothing
+    kind = kinds[var] == :array_float ? :array : :value
+    counter[] = counter[] + 1
+    push!(sites, (kind = kind, array = var, at = counter[]))
+    return nothing
+end
+
+function snap_check_tripcount!(stmt, reassigned, sites, counter)
+    bound_vars = Set{Symbol}()
+    snap_collect_expr_vars!(stmt.lo, bound_vars)
+    snap_collect_expr_vars!(stmt.hi, bound_vars)
+    snap_collect_expr_vars!(stmt.step, bound_vars)
+    for bv in bound_vars
+        if bv in reassigned
+            counter[] = counter[] + 1
+            push!(sites, (kind = :tripcount, array = bv, at = counter[]))
+        end
+    end
+    return nothing
+end
+
+# is `lhs = rhs` a pure accumulation into the exact same slot it
+# reads (`loss[1] = loss[1] + w`, `x = x + q`)? -- the written
+# variable appears exactly once in rhs, as a direct top-level `+`
+# operand structurally identical to lhs, and nowhere else
+function snap_is_pure_accumulation(lhs, rhs, var)
+    (rhs isa Expr && rhs.head == :call && rhs.args[1] == :+) || return false
+    matches = 0
+    for a in rhs.args[2:end]
+        a == lhs && (matches = matches + 1)
+    end
+    matches == 1 || return false
+    return snap_count_var_refs(rhs, var) == 1
+end
+
+# how many times does `var`'s name appear anywhere in expr (as a
+# bare read, or as an array name inside a :ref)?
+function snap_count_var_refs(expr, var)
+    if expr isa Symbol
+        return expr == var ? 1 : 0
+    elseif expr isa Expr
+        start = expr.head == :call ? 2 : 1
+        total = 0
+        for a in expr.args[start:end]
+            total = total + snap_count_var_refs(a, var)
+        end
+        return total
+    end
+    return 0
 end
 
 
 # ==================== lin_* =====================================
 # Shared derivative-tree representation, swept differently by each
-# codegen direction.
+# codegen direction (tgen_ contracts tangents bottom-up; agen_
+# distributes an adjoint seed top-down). lin_build itself does
+# neither sweep -- it only builds the structure, using der_partials
+# to attach each :op node's local partial-derivative exprs so both
+# directions can read them straight off the tree.
+#
+# lin_node -- one node of a statement's rhs, mirroring its primal
+#   expression tree one-for-one:
+#     kind = :leaf  -- expr::Symbol|Number|Expr(:ref,...), the exact
+#       primal leaf (a variable/array-element read or a literal);
+#       op = :leaf, args = [], children = [], partials = [].
+#     kind = :op    -- expr = Expr(:call, op, <children's exprs>...),
+#       rebuilt from the (already-processed) children rather than
+#       re-walked from source; op::Symbol is the whitelisted
+#       operator/intrinsic; children::Vector{NamedTuple}, one lin_node
+#       per call argument, in order; args == [c.expr for c in
+#       children] (kept alongside so a consumer doesn't have to
+#       re-project it out of children every time); partials =
+#       der_partials(op, args) -- partials[i] is d(expr)/d(args[i])
+#       as a primal-valued Expr|Symbol|Number, exactly what both
+#       codegen directions contract (tangent: sum partials[i]*dchild_i;
+#       adjoint: distribute partials[i]*seed into child i).
+#   Every node also carries active::Bool -- for :leaf, active_map's
+#   entry for the referenced variable (always false for a literal);
+#   for :op, `any(c.active for c in children)`. A false here is what
+#   lets tgen_/agen_ skip generating any code for a subtree that
+#   provably can't carry a derivative.
+# lin_stmt -- one processed statement, parallel to the frozen
+#   `statement` shape; lin_build augments only the :assign case with
+#   a built tree, and just threads :for/:if's own fields through
+#   (never differentiated) alongside a recursively-processed body:
+#     (kind=:assign, lhs, active::Bool, tree::lin_node)
+#     (kind=:for, var, lo, hi, step, sequential, body::lin_plan)
+#     (kind=:if, cond, then::lin_plan, els::lin_plan)
+# lin_plan :: Vector{lin_stmt}
 
 function lin_build(kernel, active_map)
-    return NamedTuple[]
+    return lin_build_body(kernel.body, active_map)
+end
+
+function lin_build_body(body, active_map)
+    plan = NamedTuple[]
+    for stmt in body
+        push!(plan, lin_build_stmt(stmt, active_map))
+    end
+    return plan
+end
+
+function lin_build_stmt(stmt, active_map)
+    if stmt.kind == :assign
+        tree = lin_build_expr(stmt.rhs, active_map)
+        return (kind = :assign, lhs = stmt.lhs, active = tree.active, tree = tree)
+    elseif stmt.kind == :for
+        return (kind = :for, var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step,
+                sequential = stmt.sequential, body = lin_build_body(stmt.body, active_map))
+    elseif stmt.kind == :if
+        return (kind = :if, cond = stmt.cond,
+                then = lin_build_body(stmt.then, active_map),
+                els = lin_build_body(stmt.els, active_map))
+    end
+    error("lin_build_stmt: unrecognized statement kind :$(stmt.kind)")
+end
+
+# recursively mirror one primal sub-expression into a lin_node
+function lin_build_expr(expr, active_map)
+    if expr isa Symbol
+        return (kind = :leaf, expr = expr, op = :leaf, args = [], children = NamedTuple[],
+                partials = [], active = get(active_map, expr, false))
+    elseif expr isa Number
+        return (kind = :leaf, expr = expr, op = :leaf, args = [], children = NamedTuple[],
+                partials = [], active = false)
+    elseif expr isa Expr && expr.head == :ref
+        # array-element read: a leaf for differentiation purposes --
+        # the array's own name carries activity; indices are always
+        # Int64 and never differentiated
+        arr = expr.args[1]
+        return (kind = :leaf, expr = expr, op = :leaf, args = [], children = NamedTuple[],
+                partials = [], active = get(active_map, arr, false))
+    elseif expr isa Expr && expr.head == :call
+        op = expr.args[1]
+        children = [lin_build_expr(a, active_map) for a in expr.args[2:end]]
+        args = [c.expr for c in children]
+        rebuilt = Expr(:call, op, args...)
+        partials = der_partials(op, args)
+        active = any(c.active for c in children)
+        return (kind = :op, expr = rebuilt, op = op, args = args, children = children,
+                partials = partials, active = active)
+    end
+    error("lin_build_expr: unsupported primal sub-expression $expr")
 end
 
 
