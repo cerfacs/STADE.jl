@@ -1220,6 +1220,21 @@ function emit_return_nothing()
     return :(return nothing)
 end
 
+# `return nothing` when there's nothing to hand back; `return v` (one
+# var) or `return v1,v2,...` (several) otherwise -- the only way a
+# scalar function argument's new value escapes the call, since Julia
+# passes scalars by value (unlike an array argument, mutated in place
+# and needing no return at all). Shared by tgen_/agen_: forward mode
+# uses it for a reassigned scalar arg's shadow, reverse mode for
+# every scalar-float arg's accumulated adjoint, and agen_'s
+# initstacks_ generator reuses the exact same bare/tuple/nothing
+# shape to hand back its stack(s).
+function emit_return_scalars(vars::Vector{Symbol})
+    isempty(vars) && return emit_return_nothing()
+    length(vars) == 1 && return Expr(:return, vars[1])
+    return Expr(:return, Expr(:tuple, vars...))
+end
+
 # Builds the skill-jade rule-14 #-comment header:
 #   # name(arg1, arg2, ...)
 #   #
@@ -1609,20 +1624,515 @@ end
 
 
 # ==================== tgen_* =====================================
-# Forward-mode codegen: single sweep, original statement/loop order.
+# Forward-mode codegen: single sweep, original statement/loop order,
+# no snapshot stacks at all -- every active statement gets a shadow
+# ("d"-suffixed) derivative line emitted right before its own primal
+# line, computed from the CURRENT (pre-this-statement) primal+shadow
+# values. That's always safe: a statement's tangent never depends on
+# its own lhs's *new* value, only on its rhs's children, which are
+# unaffected by this statement's own primal update. The tangent line
+# is emitted even when its value collapses to a literal 0.0 -- a
+# later active use of the same shadow needs to see that reset, not a
+# stale nonzero value left over from an earlier point.
 
 function tgen_emit(kernel, lin_plan)
-    return Expr(:block, emit_return_nothing())
+    fname = tgen_fname(kernel.sig.name)
+    fargs = tgen_signature_args(kernel.sig)
+    body_exprs = tgen_body(lin_plan)
+    reassigned = tgen_reassigned_scalar_args(kernel)
+    push!(body_exprs, emit_return_scalars([tgen_shadow(v) for v in reassigned]))
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body_exprs...))
+end
+
+tgen_fname(name::Symbol) = Symbol(string(name) * "_d")
+
+# a Symbol becomes `<name>d`; an array-ref `v[i,...]` becomes
+# `vd[i,...]` -- same indices, shadowed array name
+function tgen_shadow(expr)
+    expr isa Symbol && return Symbol(string(expr) * "d")
+    if expr isa Expr && expr.head == :ref
+        return Expr(:ref, Symbol(string(expr.args[1]) * "d"), expr.args[2:end]...)
+    end
+    error("tgen_shadow: expected a Symbol or array-ref, got $expr")
+end
+
+# every float arg gets its shadow appended right after it (mirrors
+# the corpus's `loss, lossb, x, xb, ...` interleaving, "d" instead of
+# "b"); Int64 args appear once, exactly as in the primal
+function tgen_signature_args(sig)
+    fargs = Symbol[]
+    for a in sig.args
+        push!(fargs, a)
+        if sig.kinds[a] in (:scalar_float, :array_float)
+            push!(fargs, tgen_shadow(a))
+        end
+    end
+    return fargs
+end
+
+function tgen_body(plan)
+    exprs = Any[]
+    for stmt in plan
+        if stmt.kind == :assign
+            push!(exprs, Expr(:(=), tgen_shadow(stmt.lhs), tgen_tangent_expr(stmt.tree)))
+            push!(exprs, Expr(:(=), stmt.lhs, stmt.tree.expr))
+        elseif stmt.kind == :for
+            inner = tgen_body(stmt.body)
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
+        elseif stmt.kind == :if
+            then_exprs = tgen_body(stmt.then)
+            els_exprs = tgen_body(stmt.els)
+            push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
+        end
+    end
+    return exprs
+end
+
+# bottom-up: sum_i partials[i]*tangent(child_i), via der_tangent_generic
+# (which itself re-derives partials from node.op/node.args -- cheap,
+# and keeps this function from needing to know der_mul/der_sum_terms).
+# An entirely-inactive subtree collapses straight to the literal 0.0
+# rather than trusting the generic contraction to fold it down itself.
+function tgen_tangent_expr(node)
+    node.active || return 0.0
+    node.kind == :leaf && return tgen_shadow(node.expr)
+    dargs = [tgen_tangent_expr(c) for c in node.children]
+    return der_tangent_generic(node.op, node.args, dargs)
+end
+
+# scalar-float function args reassigned somewhere in the primal body
+# -- the only shadows that can't just be read straight off the
+# argument binding, since nothing else in the tangent function would
+# otherwise expose their new value to the caller
+function tgen_reassigned_scalar_args(kernel)
+    arg_set = Set(kernel.sig.args)
+    out = Symbol[]
+    tgen_collect_reassigned_scalar_args!(kernel.body, arg_set, kernel.sig.kinds, out)
+    return out
+end
+
+function tgen_collect_reassigned_scalar_args!(body, arg_set, kinds, out)
+    for stmt in body
+        if stmt.kind == :assign
+            if stmt.lhs isa Symbol && stmt.lhs in arg_set && kinds[stmt.lhs] == :scalar_float && !(stmt.lhs in out)
+                push!(out, stmt.lhs)
+            end
+        elseif stmt.kind == :for
+            tgen_collect_reassigned_scalar_args!(stmt.body, arg_set, kinds, out)
+        elseif stmt.kind == :if
+            tgen_collect_reassigned_scalar_args!(stmt.then, arg_set, kinds, out)
+            tgen_collect_reassigned_scalar_args!(stmt.els, arg_set, kinds, out)
+        end
+    end
+    return nothing
 end
 
 
 # ==================== agen_* =====================================
 # Reverse-mode codegen: forward sweep w/ pushes, reversed backward
 # sweep w/ pops, plus the companion initstacks_* generator.
+#
+# Forward sweep: replays the primal's own statements exactly, in
+# original order, unconditionally (never trying to prove a statement
+# is dead for gradient purposes -- simpler, and harmless: an unused
+# recomputation is wasted work, never a wrong answer), inserting a
+# push! right before any write that snap_plan-equivalent logic says
+# needs one. Every push targets the EXACT lhs reference being
+# overwritten (`u[i_seq_x]`, a scalar Float64) rather than a
+# whole-array `copy(...)` -- simpler and uniform, and correct
+# regardless of whether the real Tapenade ground truth happens to
+# batch a whole array at a time instead.
+#
+# Backward sweep: statement order reversed within every block; a
+# `sequential=true` loop's own iteration direction is ALSO reversed
+# (`hi:-1:lo`), but a non-sequential loop is left forward -- it has
+# no cross-iteration coupling at all (that's what non-sequential
+# means), so reversing it would be pointless, and the real corpus
+# ground truth leaves exactly these loops unreversed too. Each
+# statement's incoming adjoint seed is distributed down through its
+# lin_node tree via der_rule(op).adjoint, accumulating into
+# `argb = argb + ...` at every active leaf. Two cases per statement:
+#   - pure accumulation (`loss[1] = loss[1] + w`): the lhs's own
+#     occurrence in the rhs IS the same quantity as its own seed
+#     (d(new)/d(old) = 1), so it's skipped when distributing --
+#     giving it its own contribution would double it -- and the
+#     lhs's shadow is never reset, so whatever it holds keeps
+#     flowing to any earlier-order producer (matching lossb never
+#     getting zeroed anywhere in the corpus).
+#   - anything else: the full seed is distributed to every active
+#     leaf normally (self-references included, e.g. geomrecur's
+#     `u[i-1]`), and then the lhs's own shadow IS reset to 0.0 --
+#     it's now fully spent, and for a loop-carried lhs (func's
+#     `dub[i_x]`) must start fresh for the next reverse lap.
+# A statement whose write has a snapshot site pops the old value
+# back into the exact lhs location as the very first thing its
+# backward code does (before any contribution is computed) --
+# mirrors geomrecur_b's own `u[i_seq_x] = pop!(u_stack)` placement.
 
 function agen_emit(kernel, lin_plan, snapshot_plan)
-    return (adjoint = Expr(:block, emit_return_nothing()),
-            initstacks = Expr(:block, :(return nothing)))
+    active_map = act_analyze(kernel)
+    adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan)
+    initstacks_expr = agen_init_emit(kernel, snapshot_plan)
+    return (adjoint = adjoint_expr, initstacks = initstacks_expr)
+end
+
+agen_fname(name::Symbol) = Symbol(string(name) * "_b")
+agen_init_fname(name::Symbol) = Symbol("initstacks_" * string(name) * "_b")
+
+function agen_shadow(expr)
+    expr isa Symbol && return Symbol(string(expr) * "b")
+    if expr isa Expr && expr.head == :ref
+        return Expr(:ref, Symbol(string(expr.args[1]) * "b"), expr.args[2:end]...)
+    end
+    error("agen_shadow: expected a Symbol or array-ref, got $expr")
+end
+
+# every float arg gets its adjoint appended right after it; Int64
+# args appear once, exactly as in the primal
+function agen_signature_args(sig)
+    fargs = Symbol[]
+    for a in sig.args
+        push!(fargs, a)
+        if sig.kinds[a] in (:scalar_float, :array_float)
+            push!(fargs, agen_shadow(a))
+        end
+    end
+    return fargs
+end
+
+function agen_adjoint_emit(kernel, active_map, lin_plan, sites)
+    fname = agen_fname(kernel.sig.name)
+    stacks = agen_stack_map(sites)
+    fargs = vcat(agen_signature_args(kernel.sig), agen_stack_names(sites))
+
+    read_anywhere = agen_collect_reads(kernel.body)
+    reassigned = agen_collect_reassigned(kernel.body)
+
+    body = Any[]
+    append!(body, agen_local_primal_inits(kernel, active_map))
+    append!(body, agen_local_shadow_inits(kernel, active_map))
+    append!(body, agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks))
+    append!(body, agen_backward_body(lin_plan, false, read_anywhere, reassigned, stacks))
+
+    scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
+    push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
+
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
+end
+
+# ---- stack bookkeeping (shared by the forward sweep, backward
+#      sweep, and initstacks_ generator) --------------------------
+
+# one dedicated stack per distinct :array/:value variable; ALL
+# :branch sites share one stack, and ALL :tripcount sites share
+# another -- matches how snap_plan tags every :branch site's `array`
+# field with the fixed sentinel :cond, so they naturally collapse to
+# one name here
+function agen_site_stack_name(site)
+    site.kind in (:array, :value) && return Symbol(string(site.array) * "_stack")
+    site.kind == :branch && return :branch_stack
+    return :tripcount_stack
+end
+
+# distinct stack names, in order of first appearance in `sites`
+function agen_stack_names(sites)
+    names = Symbol[]
+    for s in sites
+        nm = agen_site_stack_name(s)
+        nm in names || push!(names, nm)
+    end
+    return names
+end
+
+# (kind, array) -> stack name, for quick lookup during codegen
+function agen_stack_map(sites)
+    m = Dict{Tuple{Symbol,Symbol},Symbol}()
+    for s in sites
+        m[(s.kind, s.array)] = agen_site_stack_name(s)
+    end
+    return m
+end
+
+# ---- initstacks_ generator ---------------------------------------
+
+function agen_init_emit(kernel, sites)
+    fname = agen_init_fname(kernel.sig.name)
+    names = agen_stack_names(sites)
+    kind_of = Dict{Symbol,Symbol}()
+    for s in sites
+        kind_of[agen_site_stack_name(s)] = s.kind
+    end
+    body = Any[Expr(:(=), nm, agen_stack_alloc_expr(kind_of[nm])) for nm in names]
+    push!(body, emit_return_scalars(names))
+    return Expr(:function, Expr(:call, fname), Expr(:block, body...))
+end
+
+# :array/:value stacks hold the popped Float64 scalar itself (every
+# push is of one exact lhs reference, never a whole-array copy);
+# :branch/:tripcount stacks hold Int64 flags/bounds
+function agen_stack_alloc_expr(kind)
+    kind in (:array, :value) && return Expr(:call, Expr(:curly, :Vector, :Float64))
+    return Expr(:call, Expr(:curly, :Vector, :Int64))
+end
+
+# ---- TBR predicate, duplicated (agen_-prefixed) from snap_*'s own
+#      logic rather than calling it directly -- skill-stade's purity
+#      rule only allows relying on another stage's *documented*
+#      input/output shape (here: the sites list itself), not
+#      reaching into its private helpers ------------------------------
+
+function agen_collect_reassigned(body)
+    reassigned = Set{Symbol}()
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(reassigned, stmt.lhs)
+        elseif stmt.kind == :for
+            union!(reassigned, agen_collect_reassigned(stmt.body))
+        elseif stmt.kind == :if
+            union!(reassigned, agen_collect_reassigned(stmt.then))
+            union!(reassigned, agen_collect_reassigned(stmt.els))
+        end
+    end
+    return reassigned
+end
+
+function agen_collect_reads(body)
+    reads = Set{Symbol}()
+    for stmt in body
+        if stmt.kind == :assign
+            agen_collect_expr_vars!(stmt.rhs, reads)
+        elseif stmt.kind == :for
+            union!(reads, agen_collect_reads(stmt.body))
+        elseif stmt.kind == :if
+            agen_collect_expr_vars!(stmt.cond, reads)
+            union!(reads, agen_collect_reads(stmt.then))
+            union!(reads, agen_collect_reads(stmt.els))
+        end
+    end
+    return reads
+end
+
+function agen_collect_expr_vars!(expr, vars)
+    if expr isa Symbol
+        push!(vars, expr)
+    elseif expr isa Expr
+        start = expr.head == :call ? 2 : 1
+        for a in expr.args[start:end]
+            agen_collect_expr_vars!(a, vars)
+        end
+    end
+    return nothing
+end
+
+function agen_is_pure_accumulation(lhs, rhs, var)
+    (rhs isa Expr && rhs.head == :call && rhs.args[1] == :+) || return false
+    matches = 0
+    for a in rhs.args[2:end]
+        a == lhs && (matches = matches + 1)
+    end
+    matches == 1 || return false
+    return agen_count_var_refs(rhs, var) == 1
+end
+
+function agen_count_var_refs(expr, var)
+    if expr isa Symbol
+        return expr == var ? 1 : 0
+    elseif expr isa Expr
+        start = expr.head == :call ? 2 : 1
+        total = 0
+        for a in expr.args[start:end]
+            total = total + agen_count_var_refs(a, var)
+        end
+        return total
+    end
+    return 0
+end
+
+function agen_needs_snapshot(lhs, rhs, var, seq, read_anywhere)
+    agen_is_pure_accumulation(lhs, rhs, var) && return false
+    agen_count_var_refs(rhs, var) > 0 && return true
+    return seq && (var in read_anywhere)
+end
+
+# bound-variables of a :for statement that are reassigned somewhere
+# else in the kernel -- the same set snap_plan's :tripcount sites are
+# keyed on
+function agen_tripcount_bound_vars(stmt, reassigned)
+    bound_vars = Set{Symbol}()
+    agen_collect_expr_vars!(stmt.lo, bound_vars)
+    agen_collect_expr_vars!(stmt.hi, bound_vars)
+    agen_collect_expr_vars!(stmt.step, bound_vars)
+    return [bv for bv in bound_vars if bv in reassigned]
+end
+
+function agen_negate_step(step)
+    step isa Number && return -step
+    return Expr(:call, :-, step)
+end
+
+# ---- forward sweep (walks the raw primal `statement_list`) ---------
+
+function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, stacks)
+    exprs = Any[]
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            # gate on THIS statement's own rhs activity, not the whole
+            # variable's -- a variable written by several statements
+            # can be active overall via one of them while another
+            # write (e.g. clamped_sumsq's `w = 0.0` in the branch
+            # opposite an active `w = u[i]^2`) is a plain inactive
+            # literal; the backward sweep only ever pops for a write
+            # whose OWN rhs is active (agen_backward_assign gates on
+            # stmt.active from lin_plan), so pushing here on every
+            # write regardless would push more than gets popped
+            if agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, seq, read_anywhere)
+                push!(exprs, Expr(:call, :push!, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs))
+            end
+            push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+        elseif stmt.kind == :for
+            for bv in agen_tripcount_bound_vars(stmt, reassigned)
+                push!(exprs, Expr(:call, :push!, stacks[(:tripcount, bv)], bv))
+            end
+            inner = agen_forward_body(stmt.body, active_map, seq || stmt.sequential, read_anywhere, reassigned, stacks)
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
+        elseif stmt.kind == :if
+            nm = stacks[(:branch, :cond)]
+            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, active_map, seq, read_anywhere, reassigned, stacks))
+            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, active_map, seq, read_anywhere, reassigned, stacks))
+            push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
+        end
+    end
+    return exprs
+end
+
+# does expr read any variable currently marked active? Duplicated
+# (agen_-prefixed) from act_*'s own act_expr_active rather than
+# calling it directly -- same purity rule as the snap_* duplicates
+# above, applied to act_*'s private helper this time.
+function agen_expr_active(expr, active_map)
+    if expr isa Symbol
+        return get(active_map, expr, false)
+    elseif expr isa Expr
+        start = expr.head == :call ? 2 : 1
+        for a in expr.args[start:end]
+            agen_expr_active(a, active_map) && return true
+        end
+    end
+    return false
+end
+
+# an active lhs is always scalar_float or array_float -- :ref means
+# the array kind (:array), a bare Symbol means the scalar kind
+# (:value), matching how snap_plan classified the same write
+agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
+
+# ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
+#      the primal's own exactly -- only :assign carries a built tree) -
+
+function agen_backward_body(plan, seq, read_anywhere, reassigned, stacks)
+    exprs = Any[]
+    for stmt in reverse(plan)
+        if stmt.kind == :assign
+            append!(exprs, agen_backward_assign(stmt, seq, read_anywhere, reassigned, stacks))
+        elseif stmt.kind == :for
+            inner = agen_backward_body(stmt.body, seq || stmt.sequential, read_anywhere, reassigned, stacks)
+            loop_expr = stmt.sequential ?
+                emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
+                emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
+            for bv in agen_tripcount_bound_vars(stmt, reassigned)
+                push!(exprs, Expr(:(=), bv, Expr(:call, :pop!, stacks[(:tripcount, bv)])))
+            end
+            push!(exprs, loop_expr)
+        elseif stmt.kind == :if
+            nm = stacks[(:branch, :cond)]
+            then_exprs = agen_backward_body(stmt.then, seq, read_anywhere, reassigned, stacks)
+            els_exprs = agen_backward_body(stmt.els, seq, read_anywhere, reassigned, stacks)
+            push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
+            push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
+        end
+    end
+    return exprs
+end
+
+function agen_backward_assign(stmt, seq, read_anywhere, reassigned, stacks)
+    stmt.active || return Any[]
+    var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+    exprs = Any[]
+    if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
+        nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
+        push!(exprs, Expr(:(=), stmt.lhs, Expr(:call, :pop!, nm)))
+    end
+    lhsb = agen_shadow(stmt.lhs)
+    if agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
+        agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = stmt.lhs)
+    else
+        agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = nothing)
+        push!(exprs, Expr(:(=), lhsb, 0.0))
+    end
+    return exprs
+end
+
+# recursively distribute `seed` down through a lin_node tree,
+# accumulating `target = target + contribution` at every active leaf.
+# `skip_expr`, when set, is only honored against a *direct child of
+# the node it's passed to* -- exactly the top-level operand a pure
+# accumulation's own lhs occupies -- and is never forwarded to deeper
+# recursion, since accumulation-skipping is a property of that one
+# top-level slot, not of the variable in general.
+function agen_distribute!(node, seed, exprs; skip_expr = nothing)
+    node.active || return nothing
+    if node.kind == :leaf
+        skip_expr !== nothing && node.expr == skip_expr && return nothing
+        target = agen_shadow(node.expr)
+        push!(exprs, Expr(:(=), target, Expr(:call, :+, target, seed)))
+        return nothing
+    end
+    contributions = der_adjoint_generic(node.op, node.args, seed)
+    for (child, contrib) in zip(node.children, contributions)
+        skip_expr !== nothing && child.expr == skip_expr && continue
+        child.active || continue
+        agen_distribute!(child, contrib, exprs)
+    end
+    return nothing
+end
+
+# ---- local shadow initialization -----------------------------------
+
+# every local (non-argument) scalar variable needs to already exist
+# before the forward sweep runs -- normally its first primal
+# assignment would establish that, but a local flagged for
+# snapshotting (clamped_sumsq's `w`, self-referencing across loop
+# iterations) gets PUSHED (reading its pre-overwrite value) as early
+# as the very first loop iteration, before any primal assignment to
+# it has ever happened. Without this, that first push would be an
+# UndefVarError. Harmless for locals that don't need it -- their
+# real first assignment overwrites the 0.0 immediately.
+function agen_local_primal_inits(kernel, active_map)
+    arg_set = Set(kernel.sig.args)
+    exprs = Any[]
+    for v in sort(collect(keys(kernel.sig.kinds)))
+        if !(v in arg_set) && kernel.sig.kinds[v] == :scalar_float && active_map[v]
+            push!(exprs, Expr(:(=), v, 0.0))
+        end
+    end
+    return exprs
+end
+
+# every ACTIVE local (non-argument) scalar variable needs its shadow
+# declared and zeroed before the backward sweep can accumulate into
+# it -- arrays can never be local under skill-jade (rule 8: no
+# in-kernel allocation, so any array must be a caller-supplied arg),
+# so this only ever has scalars to handle
+function agen_local_shadow_inits(kernel, active_map)
+    arg_set = Set(kernel.sig.args)
+    exprs = Any[]
+    for v in sort(collect(keys(kernel.sig.kinds)))
+        if !(v in arg_set) && kernel.sig.kinds[v] == :scalar_float && active_map[v]
+            push!(exprs, Expr(:(=), agen_shadow(v), 0.0))
+        end
+    end
+    return exprs
 end
 
 
