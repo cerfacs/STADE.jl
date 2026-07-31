@@ -1498,17 +1498,32 @@ function snap_check_tripcount!(stmt, reassigned, sites, counter)
     return nothing
 end
 
-# is `lhs = rhs` a pure accumulation into the exact same slot it
-# reads (`loss[1] = loss[1] + w`, `x = x + q`)? -- the written
-# variable appears exactly once in rhs, as a direct top-level `+`
-# operand structurally identical to lhs, and nowhere else
+# is `lhs = rhs` an identity-preserving self-update -- one where
+# d(new)/d(old) = 1, so "old" and "new" are the same quantity for
+# adjoint purposes and nothing needs recording? Two shapes qualify:
+#   - `loss[1] = loss[1] + w` / `x = x + q`: lhs appears exactly once
+#     in rhs, as a direct top-level `+` operand (any position -- `+`
+#     is commutative, so it doesn't matter which one).
+#   - `u[i] = u[i] - X`: lhs appears exactly once in rhs, as the
+#     LEFT/minuend operand of a binary `-` specifically. The right
+#     operand does NOT qualify (`u = X - u` has d(new)/d(old) = -1,
+#     not an identity) -- this is why the check is positional here
+#     and not "any operand" the way `+`'s is.
+# Either way, lhs must not appear anywhere else in rhs.
 function snap_is_pure_accumulation(lhs, rhs, var)
-    (rhs isa Expr && rhs.head == :call && rhs.args[1] == :+) || return false
-    matches = 0
-    for a in rhs.args[2:end]
-        a == lhs && (matches = matches + 1)
+    (rhs isa Expr && rhs.head == :call) || return false
+    op = rhs.args[1]
+    if op == :+
+        matches = 0
+        for a in rhs.args[2:end]
+            a == lhs && (matches = matches + 1)
+        end
+        matches == 1 || return false
+    elseif op == :- && length(rhs.args) == 3
+        rhs.args[2] == lhs || return false
+    else
+        return false
     end
-    matches == 1 || return false
     return snap_count_var_refs(rhs, var) == 1
 end
 
@@ -1812,7 +1827,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites)
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
     append!(body, agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks))
-    append!(body, agen_backward_body(lin_plan, false, read_anywhere, reassigned, stacks))
+    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, false, read_anywhere, reassigned, stacks))
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
     push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
@@ -1924,13 +1939,27 @@ function agen_collect_expr_vars!(expr, vars)
     return nothing
 end
 
+# see snap_is_pure_accumulation's comment -- identical logic,
+# duplicated here for the same purity-rule reason as every other
+# agen_-prefixed pair in this file. Two shapes are identity-
+# preserving (d(new)/d(old) = 1): lhs as any direct `+` operand
+# (`loss[1] = loss[1] + w`), or lhs as specifically the left/minuend
+# operand of a binary `-` (`u[i] = u[i] - X`) -- the right operand of
+# `-` does NOT qualify (d(a-b)/db = -1, not an identity).
 function agen_is_pure_accumulation(lhs, rhs, var)
-    (rhs isa Expr && rhs.head == :call && rhs.args[1] == :+) || return false
-    matches = 0
-    for a in rhs.args[2:end]
-        a == lhs && (matches = matches + 1)
+    (rhs isa Expr && rhs.head == :call) || return false
+    op = rhs.args[1]
+    if op == :+
+        matches = 0
+        for a in rhs.args[2:end]
+            a == lhs && (matches = matches + 1)
+        end
+        matches == 1 || return false
+    elseif op == :- && length(rhs.args) == 3
+        rhs.args[2] == lhs || return false
+    else
+        return false
     end
-    matches == 1 || return false
     return agen_count_var_refs(rhs, var) == 1
 end
 
@@ -2030,14 +2059,16 @@ agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
-function agen_backward_body(plan, seq, read_anywhere, reassigned, stacks)
+function agen_backward_body(plan, kinds, seq, read_anywhere, reassigned, stacks)
     exprs = Any[]
     for stmt in reverse(plan)
         if stmt.kind == :assign
-            append!(exprs, agen_backward_assign(stmt, seq, read_anywhere, reassigned, stacks))
+            append!(exprs, agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks))
         elseif stmt.kind == :for
-            inner = agen_backward_body(stmt.body, seq || stmt.sequential, read_anywhere, reassigned, stacks)
-            loop_expr = stmt.sequential ?
+            inner_seq = seq || stmt.sequential
+            inner = agen_backward_body(stmt.body, kinds, inner_seq, read_anywhere, reassigned, stacks)
+            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, inner_seq, read_anywhere, reassigned)
+            loop_expr = reverse_it ?
                 emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
                 emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
             for bv in agen_tripcount_bound_vars(stmt, reassigned)
@@ -2046,8 +2077,8 @@ function agen_backward_body(plan, seq, read_anywhere, reassigned, stacks)
             push!(exprs, loop_expr)
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
-            then_exprs = agen_backward_body(stmt.then, seq, read_anywhere, reassigned, stacks)
-            els_exprs = agen_backward_body(stmt.els, seq, read_anywhere, reassigned, stacks)
+            then_exprs = agen_backward_body(stmt.then, kinds, seq, read_anywhere, reassigned, stacks)
+            els_exprs = agen_backward_body(stmt.els, kinds, seq, read_anywhere, reassigned, stacks)
             push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
             push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
         end
@@ -2055,20 +2086,60 @@ function agen_backward_body(plan, seq, read_anywhere, reassigned, stacks)
     return exprs
 end
 
-function agen_backward_assign(stmt, seq, read_anywhere, reassigned, stacks)
-    stmt.active || return Any[]
-    var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-    exprs = Any[]
-    if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
-        nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
-        push!(exprs, Expr(:(=), stmt.lhs, Expr(:call, :pop!, nm)))
+# a loop must be reversed in the backward sweep whenever ANY push
+# happens inside it, at any nesting depth (not just its immediate
+# body, and not just when THIS loop is itself sequential=true) --
+# LIFO stack discipline requires every loop enclosing a push to run
+# in exact reverse, full stop. relu_field is the case that makes
+# this matter: its per-index `if` lives in a loop with no value
+# recurrence at all (sequential=false), yet it pushes a branch flag
+# every iteration and must be walked backward to pop them correctly
+# -- reversal here is about stack order, not about whether the loop
+# carries a genuine mathematical dependency across iterations.
+function agen_body_has_snapshot(body, seq, read_anywhere, reassigned)
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            if stmt.active && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
+                return true
+            end
+        elseif stmt.kind == :for
+            !isempty(agen_tripcount_bound_vars(stmt, reassigned)) && return true
+            agen_body_has_snapshot(stmt.body, seq || stmt.sequential, read_anywhere, reassigned) && return true
+        elseif stmt.kind == :if
+            return true   # every `if` pushes a branch flag, unconditionally
+        end
     end
-    lhsb = agen_shadow(stmt.lhs)
-    if agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
-        agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = stmt.lhs)
-    else
-        agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = nothing)
-        push!(exprs, Expr(:(=), lhsb, 0.0))
+    return false
+end
+
+function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks)
+    var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+    is_accum = agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
+    exprs = Any[]
+    if stmt.active
+        if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
+            nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
+            push!(exprs, Expr(:(=), stmt.lhs, Expr(:call, :pop!, nm)))
+        end
+        lhsb = agen_shadow(stmt.lhs)
+        if is_accum
+            agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = stmt.lhs)
+        else
+            agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = nothing)
+            push!(exprs, Expr(:(=), lhsb, 0.0))
+        end
+    elseif !is_accum && kinds[var] in (:scalar_float, :array_float)
+        # this specific write's rhs carries no active leaf at all
+        # (e.g. clamped_sumsq's `w = 0.0`, the branch opposite an
+        # active `w = u[i]^2`) -- there's nothing to distribute, but
+        # the shadow this write "produced" still needs resetting
+        # here. Skipping the reset because THIS write happens to be
+        # a constant would let whatever an earlier (already-
+        # processed-in-reverse) statement accumulated into the
+        # shadow leak into the next (chronologically earlier)
+        # iteration's contribution instead of starting fresh.
+        push!(exprs, Expr(:(=), agen_shadow(stmt.lhs), 0.0))
     end
     return exprs
 end
