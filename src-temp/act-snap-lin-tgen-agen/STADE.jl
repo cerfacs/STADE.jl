@@ -2061,8 +2061,33 @@ agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
 
 function agen_backward_body(plan, kinds, seq, read_anywhere, reassigned, stacks)
     exprs = Any[]
+    # int-kinded local assignments (index/bookkeeping helpers, e.g.
+    # mg_vcycle's `jf = j * 2`) never carry gradients, so
+    # agen_backward_assign emits nothing at all for them -- but the
+    # array indices they compute can still be needed by OTHER
+    # statements in this same block once everything else is
+    # reversed. A plain reversal would put the statement that NEEDS
+    # such an index before the statement that computes it (they're
+    # usually adjacent, index-computed-then-used, so reversing swaps
+    # their order); Julia's `for`/`if` bodies each have their own
+    # scope, so there's no other point at which this could get
+    # recomputed. Recompute them all up front instead, in their
+    # original (forward) relative order -- safe, since an int
+    # local's value only ever depends on the loop variable or other
+    # already-available ints, never on anything an adjoint statement
+    # computes.
+    for stmt in plan
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            if kinds[var] in (:scalar_int, :array_int)
+                push!(exprs, Expr(:(=), stmt.lhs, stmt.tree.expr))
+            end
+        end
+    end
     for stmt in reverse(plan)
         if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            kinds[var] in (:scalar_int, :array_int) && continue   # already hoisted above
             append!(exprs, agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks))
         elseif stmt.kind == :for
             inner_seq = seq || stmt.sequential
