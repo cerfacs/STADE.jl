@@ -1509,7 +1509,10 @@ end
 #     operand does NOT qualify (`u = X - u` has d(new)/d(old) = -1,
 #     not an identity) -- this is why the check is positional here
 #     and not "any operand" the way `+`'s is.
-# Either way, lhs must not appear anywhere else in rhs.
+# Either way, lhs's EXACT slot (not just its array name -- `u[jf,l]`
+# is a different slot from `u[j,l]`, and both may legitimately appear
+# together, e.g. `u[jf,l] = u[jf,l] + u[j,l+1]`) must not appear
+# anywhere else in rhs.
 function snap_is_pure_accumulation(lhs, rhs, var)
     (rhs isa Expr && rhs.head == :call) || return false
     op = rhs.args[1]
@@ -1524,7 +1527,7 @@ function snap_is_pure_accumulation(lhs, rhs, var)
     else
         return false
     end
-    return snap_count_var_refs(rhs, var) == 1
+    return snap_count_expr_occurrences(rhs, lhs) == 1
 end
 
 # how many times does `var`'s name appear anywhere in expr (as a
@@ -1541,6 +1544,22 @@ function snap_count_var_refs(expr, var)
         return total
     end
     return 0
+end
+
+# how many times does the exact sub-expression `target` (a whole
+# Symbol or a whole `:ref`, e.g. `u[jf, l]`) appear anywhere in expr?
+# Unlike snap_count_var_refs (which counts by bare variable name and
+# so can't tell `u[jf,l]` apart from `u[j,l+1]`), this only counts
+# occurrences of that exact slot.
+function snap_count_expr_occurrences(expr, target)
+    total = expr == target ? 1 : 0
+    if expr isa Expr
+        start = expr.head == :call ? 2 : 1
+        for a in expr.args[start:end]
+            total = total + snap_count_expr_occurrences(a, target)
+        end
+    end
+    return total
 end
 
 
@@ -1945,7 +1964,11 @@ end
 # preserving (d(new)/d(old) = 1): lhs as any direct `+` operand
 # (`loss[1] = loss[1] + w`), or lhs as specifically the left/minuend
 # operand of a binary `-` (`u[i] = u[i] - X`) -- the right operand of
-# `-` does NOT qualify (d(a-b)/db = -1, not an identity).
+# `-` does NOT qualify (d(a-b)/db = -1, not an identity). Uses exact-
+# slot counting (agen_count_expr_occurrences), not bare-variable-name
+# counting: `u[jf,l] = u[jf,l] + u[j,l+1]` must still qualify even
+# though the array name `u` appears twice -- `u[j,l+1]` is a
+# different slot, not another occurrence of the self-reference.
 function agen_is_pure_accumulation(lhs, rhs, var)
     (rhs isa Expr && rhs.head == :call) || return false
     op = rhs.args[1]
@@ -1960,7 +1983,7 @@ function agen_is_pure_accumulation(lhs, rhs, var)
     else
         return false
     end
-    return agen_count_var_refs(rhs, var) == 1
+    return agen_count_expr_occurrences(rhs, lhs) == 1
 end
 
 function agen_count_var_refs(expr, var)
@@ -1975,6 +1998,19 @@ function agen_count_var_refs(expr, var)
         return total
     end
     return 0
+end
+
+# how many times does the exact sub-expression `target` appear
+# anywhere in expr -- see snap_count_expr_occurrences's comment
+function agen_count_expr_occurrences(expr, target)
+    total = expr == target ? 1 : 0
+    if expr isa Expr
+        start = expr.head == :call ? 2 : 1
+        for a in expr.args[start:end]
+            total = total + agen_count_expr_occurrences(a, target)
+        end
+    end
+    return total
 end
 
 function agen_needs_snapshot(lhs, rhs, var, seq, read_anywhere)
@@ -2151,8 +2187,30 @@ function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stack
         if is_accum
             agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = stmt.lhs)
         else
-            agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = nothing)
-            push!(exprs, Expr(:(=), lhsb, 0.0))
+            # a leaf whose own slot exactly matches lhs (`hl = hl *
+            # 2.0`, `hl = hl / 2.0`) is a GENUINE, non-identity self-
+            # reference -- is_accum only catches the identity case
+            # (+/-, coefficient exactly 1), so this is different and
+            # needs different treatment. Such a leaf's "contribution"
+            # can't be accumulated into lhsb the normal way: lhsb is
+            # simultaneously the seed being read FROM and a target
+            # being written TO, so `lhsb = lhsb + contribution` reads
+            # its own not-yet-updated self mid-computation --
+            # harmless in isolation, except the very next line
+            # (unconditional reset) then throws that whole sum away,
+            # silently dropping the contribution entirely. Collected
+            # separately and applied as a REPLACEMENT of lhsb
+            # instead: that replacement already reflects "lhsb now
+            # represents the OLD slot's adjoint", making a further
+            # reset both wrong (it would erase the very value just
+            # computed) and unnecessary.
+            self_terms = Any[]
+            agen_distribute!(stmt.tree, lhsb, exprs; self_expr = stmt.lhs, self_terms = self_terms)
+            if isempty(self_terms)
+                push!(exprs, Expr(:(=), lhsb, 0.0))
+            else
+                push!(exprs, Expr(:(=), lhsb, der_sum_terms(self_terms)))
+            end
         end
     elseif !is_accum && kinds[var] in (:scalar_float, :array_float)
         # this specific write's rhs carries no active leaf at all
@@ -2170,16 +2228,26 @@ function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stack
 end
 
 # recursively distribute `seed` down through a lin_node tree,
-# accumulating `target = target + contribution` at every active leaf.
+# accumulating `target = target + contribution` at every active leaf
+# whose own slot differs from both `skip_expr` and `self_expr`.
 # `skip_expr`, when set, is only honored against a *direct child of
 # the node it's passed to* -- exactly the top-level operand a pure
 # accumulation's own lhs occupies -- and is never forwarded to deeper
 # recursion, since accumulation-skipping is a property of that one
-# top-level slot, not of the variable in general.
-function agen_distribute!(node, seed, exprs; skip_expr = nothing)
+# top-level slot, not of the variable in general. `self_expr`/
+# `self_terms`, by contrast, DO propagate to any depth (a genuine
+# self-reference can appear anywhere in the tree, not just at the
+# top level) -- matching leaves push their contribution onto
+# `self_terms` instead of emitting an accumulate statement, so the
+# caller can combine them into a single replacement afterward.
+function agen_distribute!(node, seed, exprs; skip_expr = nothing, self_expr = nothing, self_terms = nothing)
     node.active || return nothing
     if node.kind == :leaf
         skip_expr !== nothing && node.expr == skip_expr && return nothing
+        if self_expr !== nothing && node.expr == self_expr
+            push!(self_terms, seed)
+            return nothing
+        end
         target = agen_shadow(node.expr)
         push!(exprs, Expr(:(=), target, Expr(:call, :+, target, seed)))
         return nothing
@@ -2188,7 +2256,7 @@ function agen_distribute!(node, seed, exprs; skip_expr = nothing)
     for (child, contrib) in zip(node.children, contributions)
         skip_expr !== nothing && child.expr == skip_expr && continue
         child.active || continue
-        agen_distribute!(child, contrib, exprs)
+        agen_distribute!(child, contrib, exprs; self_expr = self_expr, self_terms = self_terms)
     end
     return nothing
 end
