@@ -36,6 +36,34 @@ conversation, even if the user's prompt doesn't repeat the rules. When
 revising existing code, bring it into compliance rather than leaving
 violations in place.
 
+## Installing Julia in this environment
+
+Julia isn't available via apt, and JuliaLang's official binary host
+(`julialang-s3.julialang.org`) isn't reachable from this network. The user
+has mirrored the official Julia 1.10.11 (LTS) linux-x86_64 tarball as a
+GitHub release asset on their own account, on hosts that are reachable
+(`github.com`, `release-assets.githubusercontent.com`). Its sha256 has been
+verified to match the official JuliaLang checksum for
+`julia-1.10.11-linux-x86_64.tar.gz`
+(`fb49c6b174600cd2051e37ba3f7330f8acf06dd00bce609bab6611387fdb37bf`) — do
+not skip re-verifying this checksum after download if the tarball, URL, or
+release tag ever changes, since that would mean re-establishing trust in a
+new artifact.
+
+```bash
+curl -sL https://github.com/luciano-drozda/julia-tar/releases/download/julia-1.10.11/julia-1.10.11-linux-x86_64.tar.gz -o /home/claude/julia.tar.gz
+echo "fb49c6b174600cd2051e37ba3f7330f8acf06dd00bce609bab6611387fdb37bf  /home/claude/julia.tar.gz" | sha256sum -c -
+tar -xzf /home/claude/julia.tar.gz -C /home/claude/
+export PATH="/home/claude/julia-1.10.11/bin:$PATH"
+julia --version
+```
+
+If the checksum check fails, stop and do not use the tarball — treat it as
+untrusted and flag this to the user rather than installing it anyway.
+
+For any subsequent `bash_tool` call in this conversation that needs Julia,
+prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
+
 ## The rules, and why they matter
 
 1. **Names are `snake_case`: lowercase letters, digits, and underscores
@@ -118,13 +146,13 @@ violations in place.
    `x[perm[i]]` is not allowed. If an index genuinely needs to be looked up
    from an array, read it into a plain `Int64` scalar on its own line first,
    then index with that scalar:
-   ```julia
+```julia
    # not allowed:
    y[idx[i]] = x[i]
    # do this instead:
    j = idx[i]
    y[j] = x[i]
-   ```
+```
 
 10. **Never use a broadcasted/dot operator (`.+`, `.-`, `.*`, `./`, `.=`,
     `sin.(x)`, etc.).** Write the explicit `for` loop over the array instead.
