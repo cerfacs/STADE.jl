@@ -2427,13 +2427,13 @@ function grab_kernel_expr(path::String, name::Symbol)
     error("no `function $name(...)` found in $path")
 end
 
-const ALL_B_PATH = joinpath(@__DIR__, "all_b.jl")
+mg_vcycle_b_path = joinpath(@__DIR__, "mg_vcycle_b.jl")
 
 # generate tangent + adjoint + initstacks for `name`, eval them into
 # Main alongside the primal itself, and return the generated Exprs
 # (handy for eyeballing on failure)
 function generate_and_eval(name::Symbol)
-    primal_expr = grab_kernel_expr(ALL_B_PATH, name)
+    primal_expr = grab_kernel_expr(mg_vcycle_b_path, name)
     tangent_expr = stade_tangent(primal_expr)
     adjoint_out = stade_adjoint(primal_expr)
     Base.eval(Main, primal_expr)
