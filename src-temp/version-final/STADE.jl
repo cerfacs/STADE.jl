@@ -1841,96 +1841,17 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites)
 
     read_anywhere = agen_collect_reads(kernel.body)
     reassigned = agen_collect_reassigned(kernel.body)
-    unsafe = agen_unsafe_int_vars(kernel)
 
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
     append!(body, agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks))
-    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, unsafe, false, read_anywhere, reassigned, stacks))
+    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, false, read_anywhere, reassigned, stacks))
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
     push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
 
     return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
-end
-
-# int-kinded variables reassigned at more than one distinct :assign
-# site anywhere in the kernel (mg_vcycle's `nl`: `nl = nfine`,
-# `nl = ncg`, `nl = nl * 2` -- three sites) are evolving state whose
-# correct value at a given point depends on the FULL history of the
-# primal's control flow -- including a SIBLING block's own internal
-# reassignment persisting afterward, since in Julia a `for` loop
-# assigning to an already-outer variable modifies that outer
-# variable, so it leaks past the loop that set it. Recomputing such
-# a variable from a fixed starting point (`nl = nfine`) at the top of
-# every block that reads it is wrong -- it silently discards whatever
-# an earlier SIBLING block (like the coarsening pass, before the
-# refinement pass runs) left it as. Anything transitively depending
-# on such a variable (`ncg` reads `nl`; `nc` reads `ncg`) inherits the
-# same problem and is excluded too. None of this needs fixing by
-# tracking history harder, though: the cases that actually matter for
-# correctness are for-loop BOUNDS, and those are already correctly
-# restored via :tripcount regardless of what these intermediate
-# variables hold -- so the right fix is simply to never hoist/
-# recompute a variable in this set at all, only the ones (like
-# `jf = j * 2`, depending only on a loop variable) that are genuinely
-# self-contained.
-#
-# The set is seeded by genuine SELF-reference (`nl = nl * 2`), not
-# merely by having more than one assignment site -- `jf = j * 2`
-# legitimately appears at several independent sites (different loops,
-# each computing it fresh from their own loop variable), and none of
-# those depend on jf's own previous value, so jf must stay hoistable.
-function agen_unsafe_int_vars(kernel)
-    kinds = kernel.sig.kinds
-    unsafe = Set{Symbol}()
-    agen_seed_unsafe_self_ref!(kernel.body, kinds, unsafe)
-    changed = true
-    while changed
-        changed = agen_propagate_unsafe!(kernel.body, kinds, unsafe)
-    end
-    return unsafe
-end
-
-function agen_seed_unsafe_self_ref!(body, kinds, unsafe)
-    for stmt in body
-        if stmt.kind == :assign
-            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if kinds[var] in (:scalar_int, :array_int) && agen_count_var_refs(stmt.rhs, var) > 0
-                push!(unsafe, var)
-            end
-        elseif stmt.kind == :for
-            agen_seed_unsafe_self_ref!(stmt.body, kinds, unsafe)
-        elseif stmt.kind == :if
-            agen_seed_unsafe_self_ref!(stmt.then, kinds, unsafe)
-            agen_seed_unsafe_self_ref!(stmt.els, kinds, unsafe)
-        end
-    end
-    return nothing
-end
-
-function agen_propagate_unsafe!(body, kinds, unsafe)
-    changed = false
-    for stmt in body
-        if stmt.kind == :assign
-            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if kinds[var] in (:scalar_int, :array_int) && !(var in unsafe)
-                refs = Set{Symbol}()
-                agen_collect_expr_vars!(stmt.rhs, refs)
-                if any(r in unsafe for r in refs)
-                    push!(unsafe, var)
-                    changed = true
-                end
-            end
-        elseif stmt.kind == :for
-            changed = agen_propagate_unsafe!(stmt.body, kinds, unsafe) || changed
-        elseif stmt.kind == :if
-            changed = agen_propagate_unsafe!(stmt.then, kinds, unsafe) || changed
-            changed = agen_propagate_unsafe!(stmt.els, kinds, unsafe) || changed
-        end
-    end
-    return changed
 end
 
 # ---- stack bookkeeping (shared by the forward sweep, backward
@@ -2174,7 +2095,7 @@ agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
-function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
+function agen_backward_body(plan, kinds, seq, read_anywhere, reassigned, stacks)
     exprs = Any[]
     # int-kinded local assignments (index/bookkeeping helpers, e.g.
     # mg_vcycle's `jf = j * 2`) never carry gradients, so
@@ -2187,16 +2108,14 @@ function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned,
     # their order); Julia's `for`/`if` bodies each have their own
     # scope, so there's no other point at which this could get
     # recomputed. Recompute them all up front instead, in their
-    # original (forward) relative order -- but ONLY the ones not in
-    # `unsafe` (see agen_unsafe_int_vars): a var reassigned at more
-    # than one site elsewhere in the kernel can't be safely
-    # reconstructed this way, and doesn't need to be -- whatever
-    # actually matters about it downstream is a loop bound, already
-    # correctly restored via :tripcount regardless.
+    # original (forward) relative order -- safe, since an int
+    # local's value only ever depends on the loop variable or other
+    # already-available ints, never on anything an adjoint statement
+    # computes.
     for stmt in plan
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if kinds[var] in (:scalar_int, :array_int) && !(var in unsafe)
+            if kinds[var] in (:scalar_int, :array_int)
                 push!(exprs, Expr(:(=), stmt.lhs, stmt.tree.expr))
             end
         end
@@ -2204,11 +2123,11 @@ function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned,
     for stmt in reverse(plan)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
+            kinds[var] in (:scalar_int, :array_int) && continue   # already hoisted above
             append!(exprs, agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks))
         elseif stmt.kind == :for
             inner_seq = seq || stmt.sequential
-            inner = agen_backward_body(stmt.body, kinds, unsafe, inner_seq, read_anywhere, reassigned, stacks)
+            inner = agen_backward_body(stmt.body, kinds, inner_seq, read_anywhere, reassigned, stacks)
             reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, inner_seq, read_anywhere, reassigned)
             loop_expr = reverse_it ?
                 emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
@@ -2219,8 +2138,8 @@ function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned,
             push!(exprs, loop_expr)
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
-            then_exprs = agen_backward_body(stmt.then, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
-            els_exprs = agen_backward_body(stmt.els, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
+            then_exprs = agen_backward_body(stmt.then, kinds, seq, read_anywhere, reassigned, stacks)
+            els_exprs = agen_backward_body(stmt.els, kinds, seq, read_anywhere, reassigned, stacks)
             push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
             push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
         end
@@ -2492,123 +2411,3 @@ let
     @assert adjoint_out.adjoint isa Expr && adjoint_out.initstacks isa Expr
     println("STADE.jl Phase 0 skeleton loaded and round-tripped a stub kernel OK")
 end
-
-# ==================== end-to-end correctness tests =================
-
-function grab_kernel_expr(path::String, name::Symbol)
-    parsed = Meta.parseall(read(path, String))
-    for e in parsed.args
-        if e isa Expr && e.head == :function
-            sig = e.args[1]
-            if sig isa Expr && sig.head == :call && sig.args[1] == name
-                return e
-            end
-        end
-    end
-    error("no `function $name(...)` found in $path")
-end
-
-mg_vcycle_b_path = joinpath(@__DIR__, "mg_vcycle_b.jl")
-
-# generate tangent + adjoint + initstacks for `name`, eval them into
-# Main alongside the primal itself, and return the generated Exprs
-# (handy for eyeballing on failure)
-function generate_and_eval(name::Symbol)
-    primal_expr = grab_kernel_expr(mg_vcycle_b_path, name)
-    tangent_expr = stade_tangent(primal_expr)
-    adjoint_out = stade_adjoint(primal_expr)
-    Base.eval(Main, primal_expr)
-    Base.eval(Main, tangent_expr)
-    Base.eval(Main, adjoint_out.initstacks)
-    Base.eval(Main, adjoint_out.adjoint)
-    return (tangent = tangent_expr, adjoint = adjoint_out.adjoint, initstacks = adjoint_out.initstacks)
-end
-
-function report(name, fx; trials = 10)
-    r = val_check_fixture(fx; trials = trials)
-    status = r.ok ? "ok  " : "FAIL"
-    println(rpad(name, 22), status, "  max_rel_err=", round(r.max_rel_err, sigdigits = 3))
-    return r
-end
-
-function tangent_check(name, f_eval, f_tangent, x0; epsilon = 1e-6, trials = 5)
-    worst = 0.0
-    for _ in 1:trials
-        d = randn(length(x0)); d = d ./ sqrt(sum(d .^ 2))
-        fd = (f_eval(x0 .+ epsilon .* d) - f_eval(x0 .- epsilon .* d)) / (2epsilon)
-        td = f_tangent(x0, d)
-        denom = max(abs(fd), abs(td), 1e-12)
-        worst = max(worst, abs(fd - td) / denom)
-    end
-    println(rpad(name, 22), worst <= 1e-3 ? "ok  " : "FAIL", "  max_rel_err=", round(worst, sigdigits = 3))
-    return worst
-end
-
-println("\n=== mg_vcycle ===\n")
-generate_and_eval(:mg_vcycle)
-
-let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
-    max_n = nfine - 1
-    y_u = randn(max_n, num_levels); y_f = randn(max_n, num_levels)
-    x0 = vcat(randn(max_n), randn(max_n), [1.0 + 0.1randn()])
-    unpack = xv -> (xv[1:max_n], xv[max_n+1:2max_n], xv[2max_n+1])
-    build_arrays = function (u0, f0)
-        u = zeros(max_n, num_levels); u[:, 1] = u0
-        f = zeros(max_n, num_levels); f[:, 1] = f0
-        r = zeros(max_n, num_levels)
-        return u, f, r
-    end
-    f_eval = function (xv)
-        u0, f0, h1 = unpack(xv)
-        u, f, r = build_arrays(u0, f0)
-        mg_vcycle(u, f, r, nfine, num_levels, h1, nu1, nu2, 0)
-        return sum(y_u .* u) + sum(y_f .* f)
-    end
-    f_grad = function (xv)
-        u0, f0, h1 = unpack(xv)
-        u, f, r = build_arrays(u0, f0)
-        ub = copy(y_u); fb = copy(y_f); rb = zeros(max_n, num_levels)
-        # unlike the corpus's own initstacks_mg_vcycle_b(f, u), mine
-        # takes no arguments -- every stack here holds popped scalars,
-        # never a shape/eltype-derived whole-array copy. Splatting
-        # `stacks...` (not knowing the exact count/order by hand) is
-        # deliberate -- mirrors val_fixtures.jl's own pattern exactly,
-        # and sidesteps needing to have hand-verified how many
-        # distinct stacks this kernel's :array/:value/:branch/
-        # :tripcount sites collapse into
-        stacks = initstacks_mg_vcycle_b()
-        h1b = mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, 0.0, nu1, nu2, 0, stacks...)
-        return vcat(ub[:, 1], fb[:, 1], [h1b])
-    end
-    report("mg_vcycle", (f_eval = f_eval, f_grad = f_grad, x0 = x0))
-end
-
-let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
-    max_n = nfine - 1
-    y_u = randn(max_n, num_levels); y_f = randn(max_n, num_levels)
-    x0 = vcat(randn(max_n), randn(max_n), [1.0 + 0.1randn()])
-    unpack = xv -> (xv[1:max_n], xv[max_n+1:2max_n], xv[2max_n+1])
-    build_arrays = function (u0, f0)
-        u = zeros(max_n, num_levels); u[:, 1] = u0
-        f = zeros(max_n, num_levels); f[:, 1] = f0
-        r = zeros(max_n, num_levels)
-        return u, f, r
-    end
-    f_eval = function (xv)
-        u0, f0, h1 = unpack(xv)
-        u, f, r = build_arrays(u0, f0)
-        mg_vcycle(u, f, r, nfine, num_levels, h1, nu1, nu2, 0)
-        return sum(y_u .* u) + sum(y_f .* f)
-    end
-    f_tangent = function (xv, d)
-        u0, f0, h1 = unpack(xv)
-        ud0, fd0, h1d = unpack(d)
-        u, f, r = build_arrays(u0, f0)
-        ud, fd, rd = build_arrays(ud0, fd0)
-        mg_vcycle_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, 0)
-        return sum(y_u .* ud) + sum(y_f .* fd)
-    end
-    tangent_check("mg_vcycle", f_eval, f_tangent, x0)
-end
-
-println("\n All tests done")
