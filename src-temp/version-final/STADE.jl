@@ -48,35 +48,19 @@
 #                    kinds::Dict{Symbol,Symbol},   # :scalar_float :scalar_int :array_float :array_int
 #                    independents::Vector{Symbol}, dependents::Vector{Symbol})
 #     independents/dependents auto-derived by parse_kernel = every
-#     float-kinded arg (matches the corpus convention: every _b.jl
-#     differentiates all floats, both directions). Never required
-#     from the caller -- see parse_override_indep_dep for the
-#     opt-in exclusion escape hatch.
+#     float-kinded arg. Override via parse_override_indep_dep if needed.
 # statement     :: one of
 #     (kind=:assign, lhs, rhs)                                  # lhs/rhs :: Expr|Symbol|Number
 #     (kind=:for, var::Symbol, lo, hi, step, sequential::Bool, body)  # body :: statement_list
 #     (kind=:if, cond, then::statement_list, els::statement_list)
 #     -- :while intentionally unsupported for now, see skill-stade.md
-#     -- BREAKING CHANGE (verified against the corpus's mg_vcycle,
-#        which needs a `hi:-1:lo` up-sweep): :for gained a `step`
-#        field, added between `hi` and `sequential`. lo/hi/step are
-#        all `Expr|Symbol|Number`; a plain `lo:hi` header (no
-#        explicit step) parses with `step` set to the Int64 literal
-#        `1`. Every stage that pattern-matches or destructures a
-#        :for statement needs to account for this key before relying
-#        on it.
+#     -- lo/hi/step are all Expr|Symbol|Number; a plain `lo:hi` header
+#        parses with `step` set to the Int64 literal `1`.
 # statement_list :: Vector{NamedTuple}
 # active_map    :: Dict{Symbol,Bool}                # var/array name -> is-active
 # snapshot_site :: (kind=:value|:array|:branch|:tripcount, array::Symbol, at::Int)
 # snapshot_plan :: Vector{snapshot_site}
-# lin_node/lin_plan :: BREAKING CHANGE (internal-only -- nothing else
-#     depended on the old shape yet). The original flat
-#     (op::Symbol, args::Vector, darg_exprs::Vector) node could only
-#     describe a single call, but a statement's rhs is a whole
-#     expression tree (quadloss: `(x^2*y - 3.0*y*z) + z^3`), so
-#     lin_build now returns a lin_plan that mirrors the kernel body's
-#     own for/if structure, with a real recursive lin_node tree built
-#     per :assign statement. Full shape documented at the lin_*
+# lin_node/lin_plan :: internal-only shape, documented at the lin_*
 #     section header below.
 # der_rule_pair :: (tangent::Function, adjoint::Function)
 
@@ -643,14 +627,8 @@ function shape_mark_int_from_comparisons!(expr, is_int::Dict{Symbol,Bool})
 end
 
 # ---- int evidence, pass 2: propagate through plain assignments ----
-# `ncg = div(nl, 2)` makes ncg Int64 even though ncg itself is never
-# directly a range bound / div argument / subscript (forward: rhs's
-# status decides lhs). A bare copy `lhs = rhs` (no arithmetic at all)
-# is stronger than that: since assignment can't change a variable's
-# kind, lhs and rhs must share one kind, so evidence has to flow
-# *both* ways -- e.g. `nl = nfine` where nl is later a `div`
-# argument (int) has to make nfine int too, even though nfine itself
-# is never directly used as an index/bound/div-argument anywhere.
+# A bare copy `lhs = rhs` forces lhs and rhs to share one kind, since
+# assignment can't change it -- evidence has to flow both ways.
 
 function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool})
     changed = false
@@ -714,16 +692,13 @@ end
 # Derivative rule table -- built fresh per call, never stored.
 #
 # Every rule pair is built from a per-operator "local partials" list:
-# partials[i] is the Expr|Symbol|Number for d(op(args...))/d(args[i]),
-# symbolic in terms of the primal args. tangent/adjoint are then just
-# the two standard contractions of that list against a seed:
-#   tangent: sum_i partials[i] * dargs[i]          (forward accumulation)
-#   adjoint: [partials[i] * out_adjoint for each i] (one contribution per
-#            arg -- turning each entry into an `argib = argib + ...`
-#            accumulation statement is agen_'s job, not ours)
-# A few algebraic simplifications (dropping *1, *0, +0 terms, folding
-# literal-Number arithmetic) keep the generated Exprs close to the
-# corpus's hand-differentiated style.
+# partials[i] is d(op(args...))/d(args[i]), symbolic in the primal
+# args. tangent/adjoint are the two standard contractions against a
+# seed: tangent sums partials[i]*dargs[i]; adjoint returns one
+# contribution per arg (partials[i]*out_adjoint), left for agen_ to
+# turn into an accumulation statement. A few algebraic simplifications
+# (dropping *1, *0, +0 terms, folding literal arithmetic) keep the
+# generated Exprs simple.
 
 function der_rule(op::Symbol)
     table = der_table()
@@ -1189,16 +1164,12 @@ end
 # ==================== emit_* ===================================
 # Shared Expr-building helpers used by both codegen directions.
 
-# for var = lo:hi ... end  -- or  for var = lo:step:hi ... end  when
-# step isn't the literal 1 (e.g. the adjoint reverse sweep's
-# descending `for i_seq_x = i_n:-1:1`). step is a required argument
-# rather than an optional/nothing-defaulted one, because it mirrors
-# a field the frozen :for statement shape *always* carries --
-# parse_kernel fills in the Int64 literal 1 itself for a plain
-# `lo:hi` header, so callers pulling straight from a parsed
-# statement (stmt.step) never have to decide whether to pass it.
-# The 2-arg-vs-3-arg choice is made right here instead, so a plain
-# forward loop still emits the cleaner `lo:hi` form.
+# for var = lo:hi ... end -- or for var = lo:step:hi ... end when
+# step isn't the literal 1 (e.g. a reversed, descending sweep). step
+# is required rather than optional, since it mirrors a field the
+# frozen :for statement shape always carries -- parse_kernel fills in
+# the Int64 literal 1 for a plain `lo:hi` header, so callers pulling
+# from a parsed statement never have to decide whether to pass it.
 function emit_forloop(var::Symbol, lo, hi, step, body_exprs::Vector)
     range_expr = step == 1 ? Expr(:call, :(:), lo, hi) :
                               Expr(:call, :(:), lo, step, hi)
@@ -1344,54 +1315,30 @@ end
 
 # ==================== snap_* ===================================
 # Push/pop site analysis (the TBR-equivalent). For each write,
-# decide whether a later agen_ sweep needs a recorded snapshot.
+# decide whether the reverse sweep needs a recorded snapshot.
 #
-# Whole-variable granularity throughout (matching act_*): a site
-# names the variable/array as a whole, never a specific index. `at`
-# is a single, shared, monotonically increasing counter assigned in
-# forward-sweep (pre-order, textual) traversal order across every
-# site of every kind -- agen_'s backward sweep pops in the exact
-# reverse of this order.
+# Whole-variable granularity: a site names the variable/array as a
+# whole, never a specific index. `at` is a shared counter assigned in
+# forward-sweep order -- the reverse sweep pops in exact reverse.
 #
-#   :array / :value -- an active variable's write whose OLD (about
-#     to be overwritten) value is genuinely needed later. Detected
-#     per :assign statement by two rules:
-#       1. self-reference: the written variable also appears
-#          somewhere on its own rhs. The one exception is a pure
-#          accumulation (`loss[1] = loss[1] + w`, `x = x + q`) --
-#          the variable appears exactly once in rhs, as a direct
-#          top-level `+` operand structurally identical to the lhs,
-#          and nowhere else -- which never needs the old value
-#          (d(new)/d(old) = 1, old and new are the same quantity for
-#          adjoint purposes; this is what keeps every
-#          `loss[1] = loss[1] + ...` accumulator in the corpus from
-#          needing a stack). Any other self-reference -- same array,
-#          a *different* location, e.g. geomrecur's
-#          `u[i] = c * u[i - 1]` -- does need one.
-#       2. cross-statement, loop-carried: the variable is written
-#          inside a `sequential=true` loop and is read by some other
-#          statement anywhere in the kernel. A sequential loop is
-#          exactly a loop with a genuine loop-carried dependency
-#          (skill-jade's `i_seq_` discipline), so a write there is at
-#          risk of being clobbered by a later lap before the reverse
-#          sweep gets to use it (e.g. advection's `du`, written once
-#          per timestep and read later that same timestep). A
-#          non-sequential loop's writes (relu_field's `v`,
-#          stencil_loss's `w`) never trigger this rule, even though
-#          the array is read again later, because nothing overwrites
-#          it again before that later read happens.
-#   :branch -- one per `if`, unconditionally (whether or not either
-#     arm touches an active variable): the reverse sweep must replay
-#     whichever arm the forward sweep actually took.
-#   :tripcount -- a `for`'s bounds reference a variable that gets
-#     reassigned somewhere else in the kernel (by a scalar :assign),
-#     so the loop's own trip count could be gone by the time the
-#     reverse sweep needs to replay it (mg_vcycle's `n`/`nc`/`nl`,
-#     reassigned level by level). Deliberately conservative: this
-#     doesn't try to prove the reassignment happens strictly *after*
-#     this loop or outside its own body -- any reassignment anywhere
-#     is treated as disqualifying, which can occasionally flag a loop
-#     that didn't strictly need it, but never misses one that did.
+#   :array / :value -- an active write whose old value is genuinely
+#     needed later. Flagged per :assign by two rules:
+#       1. self-reference: the written variable also appears on its
+#          own rhs, except a pure accumulation (same exact slot, one
+#          direct `+`/`-` operand -- see snap_is_pure_accumulation),
+#          which never needs the old value since old and new are the
+#          same quantity for adjoint purposes.
+#       2. cross-statement: written inside a sequential loop and read
+#          by some other statement anywhere in the kernel -- a write
+#          in a non-sequential loop never triggers this, even if read
+#          again later, since nothing overwrites it before that read.
+#   :branch -- one per `if`, unconditionally: the reverse sweep must
+#     replay whichever arm the forward sweep actually took.
+#   :tripcount -- a loop's bounds reference a variable reassigned
+#     elsewhere in the kernel, so its trip count could be gone by the
+#     time the reverse sweep needs to replay it. Deliberately
+#     conservative: doesn't try to prove the reassignment happens
+#     strictly after or outside this loop, just flags it regardless.
 
 function snap_plan(kernel, active_map)
     reassigned = snap_collect_reassigned(kernel.body)
@@ -1499,20 +1446,13 @@ function snap_check_tripcount!(stmt, reassigned, sites, counter)
 end
 
 # is `lhs = rhs` an identity-preserving self-update -- one where
-# d(new)/d(old) = 1, so "old" and "new" are the same quantity for
-# adjoint purposes and nothing needs recording? Two shapes qualify:
-#   - `loss[1] = loss[1] + w` / `x = x + q`: lhs appears exactly once
-#     in rhs, as a direct top-level `+` operand (any position -- `+`
-#     is commutative, so it doesn't matter which one).
-#   - `u[i] = u[i] - X`: lhs appears exactly once in rhs, as the
-#     LEFT/minuend operand of a binary `-` specifically. The right
-#     operand does NOT qualify (`u = X - u` has d(new)/d(old) = -1,
-#     not an identity) -- this is why the check is positional here
-#     and not "any operand" the way `+`'s is.
-# Either way, lhs's EXACT slot (not just its array name -- `u[jf,l]`
-# is a different slot from `u[j,l]`, and both may legitimately appear
-# together, e.g. `u[jf,l] = u[jf,l] + u[j,l+1]`) must not appear
-# anywhere else in rhs.
+# d(new)/d(old) = 1, so old and new are the same quantity for adjoint
+# purposes and nothing needs recording? Two shapes qualify: lhs as
+# any direct top-level `+` operand, or lhs as specifically the
+# left/minuend operand of a binary `-` (the right operand does not
+# qualify -- d(a-b)/db = -1, not an identity). Either way, lhs's
+# exact slot must not appear anywhere else in rhs (a different index
+# of the same array is a different slot and doesn't disqualify it).
 function snap_is_pure_accumulation(lhs, rhs, var)
     (rhs isa Expr && rhs.head == :call) || return false
     op = rhs.args[1]
@@ -1547,10 +1487,9 @@ function snap_count_var_refs(expr, var)
 end
 
 # how many times does the exact sub-expression `target` (a whole
-# Symbol or a whole `:ref`, e.g. `u[jf, l]`) appear anywhere in expr?
-# Unlike snap_count_var_refs (which counts by bare variable name and
-# so can't tell `u[jf,l]` apart from `u[j,l+1]`), this only counts
-# occurrences of that exact slot.
+# Symbol or a whole `:ref`) appear anywhere in expr? Unlike
+# snap_count_var_refs (bare variable name), this distinguishes
+# different indices of the same array.
 function snap_count_expr_occurrences(expr, target)
     total = expr == target ? 1 : 0
     if expr isa Expr
@@ -1565,37 +1504,24 @@ end
 
 # ==================== lin_* =====================================
 # Shared derivative-tree representation, swept differently by each
-# codegen direction (tgen_ contracts tangents bottom-up; agen_
-# distributes an adjoint seed top-down). lin_build itself does
-# neither sweep -- it only builds the structure, using der_partials
-# to attach each :op node's local partial-derivative exprs so both
-# directions can read them straight off the tree.
+# codegen direction. Builds structure only, using der_partials to
+# attach each :op node's local partials so both directions can read
+# them straight off the tree.
 #
 # lin_node -- one node of a statement's rhs, mirroring its primal
 #   expression tree one-for-one:
-#     kind = :leaf  -- expr::Symbol|Number|Expr(:ref,...), the exact
-#       primal leaf (a variable/array-element read or a literal);
+#     kind = :leaf -- a variable/array-element read or a literal;
 #       op = :leaf, args = [], children = [], partials = [].
-#     kind = :op    -- expr = Expr(:call, op, <children's exprs>...),
-#       rebuilt from the (already-processed) children rather than
-#       re-walked from source; op::Symbol is the whitelisted
-#       operator/intrinsic; children::Vector{NamedTuple}, one lin_node
-#       per call argument, in order; args == [c.expr for c in
-#       children] (kept alongside so a consumer doesn't have to
-#       re-project it out of children every time); partials =
-#       der_partials(op, args) -- partials[i] is d(expr)/d(args[i])
-#       as a primal-valued Expr|Symbol|Number, exactly what both
-#       codegen directions contract (tangent: sum partials[i]*dchild_i;
-#       adjoint: distribute partials[i]*seed into child i).
-#   Every node also carries active::Bool -- for :leaf, active_map's
-#   entry for the referenced variable (always false for a literal);
-#   for :op, `any(c.active for c in children)`. A false here is what
-#   lets tgen_/agen_ skip generating any code for a subtree that
-#   provably can't carry a derivative.
+#     kind = :op -- expr rebuilt from the processed children; op is
+#       the operator; children is one lin_node per call argument;
+#       args mirrors children's exprs; partials = der_partials(op,
+#       args) -- what both directions contract against a seed.
+#   Every node carries active::Bool (for :leaf, whether the
+#   referenced variable is active; for :op, any child active) --
+#   lets codegen skip subtrees that provably carry no derivative.
 # lin_stmt -- one processed statement, parallel to the frozen
-#   `statement` shape; lin_build augments only the :assign case with
-#   a built tree, and just threads :for/:if's own fields through
-#   (never differentiated) alongside a recursively-processed body:
+#   `statement` shape; only :assign gets a built tree, :for/:if just
+#   thread their own fields through with a recursively-built body:
 #     (kind=:assign, lhs, active::Bool, tree::lin_node)
 #     (kind=:for, var, lo, hi, step, sequential, body::lin_plan)
 #     (kind=:if, cond, then::lin_plan, els::lin_plan)
@@ -1659,15 +1585,12 @@ end
 
 # ==================== tgen_* =====================================
 # Forward-mode codegen: single sweep, original statement/loop order,
-# no snapshot stacks at all -- every active statement gets a shadow
-# ("d"-suffixed) derivative line emitted right before its own primal
-# line, computed from the CURRENT (pre-this-statement) primal+shadow
-# values. That's always safe: a statement's tangent never depends on
-# its own lhs's *new* value, only on its rhs's children, which are
-# unaffected by this statement's own primal update. The tangent line
-# is emitted even when its value collapses to a literal 0.0 -- a
-# later active use of the same shadow needs to see that reset, not a
-# stale nonzero value left over from an earlier point.
+# no snapshot stacks -- every active statement gets a shadow
+# ("d"-suffixed) line emitted right before its own primal line,
+# computed from current (pre-this-statement) values. Always safe: a
+# statement's tangent never depends on its own lhs's new value. The
+# tangent line is emitted even when it collapses to 0.0, so a later
+# active read sees the reset rather than a stale value.
 
 function tgen_emit(kernel, lin_plan)
     fname = tgen_fname(kernel.sig.name)
@@ -1690,9 +1613,8 @@ function tgen_shadow(expr)
     error("tgen_shadow: expected a Symbol or array-ref, got $expr")
 end
 
-# every float arg gets its shadow appended right after it (mirrors
-# the corpus's `loss, lossb, x, xb, ...` interleaving, "d" instead of
-# "b"); Int64 args appear once, exactly as in the primal
+# every float arg gets its shadow appended right after it;
+# Int64 args appear once, exactly as in the primal
 function tgen_signature_args(sig)
     fargs = Symbol[]
     for a in sig.args
@@ -1768,40 +1690,27 @@ end
 #
 # Forward sweep: replays the primal's own statements exactly, in
 # original order, unconditionally (never trying to prove a statement
-# is dead for gradient purposes -- simpler, and harmless: an unused
-# recomputation is wasted work, never a wrong answer), inserting a
-# push! right before any write that snap_plan-equivalent logic says
-# needs one. Every push targets the EXACT lhs reference being
-# overwritten (`u[i_seq_x]`, a scalar Float64) rather than a
-# whole-array `copy(...)` -- simpler and uniform, and correct
-# regardless of whether the real Tapenade ground truth happens to
-# batch a whole array at a time instead.
+# is dead for gradient purposes -- simpler, and harmless: unused
+# recomputation costs time, not correctness), inserting a push!
+# right before any write that needs one. Every push targets the
+# exact lhs reference being overwritten (a scalar), not a whole-array
+# copy -- simpler and uniform.
 #
 # Backward sweep: statement order reversed within every block; a
-# `sequential=true` loop's own iteration direction is ALSO reversed
-# (`hi:-1:lo`), but a non-sequential loop is left forward -- it has
-# no cross-iteration coupling at all (that's what non-sequential
-# means), so reversing it would be pointless, and the real corpus
-# ground truth leaves exactly these loops unreversed too. Each
-# statement's incoming adjoint seed is distributed down through its
-# lin_node tree via der_rule(op).adjoint, accumulating into
-# `argb = argb + ...` at every active leaf. Two cases per statement:
-#   - pure accumulation (`loss[1] = loss[1] + w`): the lhs's own
-#     occurrence in the rhs IS the same quantity as its own seed
-#     (d(new)/d(old) = 1), so it's skipped when distributing --
-#     giving it its own contribution would double it -- and the
-#     lhs's shadow is never reset, so whatever it holds keeps
-#     flowing to any earlier-order producer (matching lossb never
-#     getting zeroed anywhere in the corpus).
+# sequential loop's own iteration direction is also reversed, but a
+# non-sequential loop is left forward -- it has no cross-iteration
+# coupling, so reversing it would be pointless. Each statement's
+# incoming adjoint seed is distributed down through its lin_node tree
+# via der_rule(op).adjoint, accumulating into `argb = argb + ...` at
+# every active leaf. Two cases per statement:
+#   - pure accumulation: the lhs's own occurrence in the rhs is the
+#     same quantity as its own seed, so it's skipped when
+#     distributing, and the shadow is never reset.
 #   - anything else: the full seed is distributed to every active
-#     leaf normally (self-references included, e.g. geomrecur's
-#     `u[i-1]`), and then the lhs's own shadow IS reset to 0.0 --
-#     it's now fully spent, and for a loop-carried lhs (func's
-#     `dub[i_x]`) must start fresh for the next reverse lap.
-# A statement whose write has a snapshot site pops the old value
-# back into the exact lhs location as the very first thing its
-# backward code does (before any contribution is computed) --
-# mirrors geomrecur_b's own `u[i_seq_x] = pop!(u_stack)` placement.
+#     leaf normally, and the lhs's shadow is reset to 0.0 afterward.
+# A statement whose write has a snapshot site pops the old value back
+# into the exact lhs location as the very first thing its backward
+# code does, before any contribution is computed.
 
 function agen_emit(kernel, lin_plan, snapshot_plan)
     active_map = act_analyze(kernel)
@@ -1841,17 +1750,92 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites)
 
     read_anywhere = agen_collect_reads(kernel.body)
     reassigned = agen_collect_reassigned(kernel.body)
+    unsafe = agen_unsafe_int_vars(kernel)
 
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
     append!(body, agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks))
-    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, false, read_anywhere, reassigned, stacks))
+    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, unsafe, false, read_anywhere, reassigned, stacks))
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
     push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
 
     return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
+end
+
+# int-kinded variables reassigned at more than one distinct :assign
+# site anywhere in the kernel are evolving state whose correct value
+# at a given point depends on the full history of the primal's
+# control flow -- including a sibling block's own internal
+# reassignment persisting afterward, since in Julia a `for` loop
+# assigning to an already-outer variable modifies that outer
+# variable, so it leaks past the loop that set it. Recomputing such a
+# variable from a fixed starting point at the top of every block that
+# reads it is wrong -- it silently discards whatever an earlier
+# sibling block left it as. Anything transitively depending on such a
+# variable inherits the same problem and is excluded too. None of
+# this needs fixing by tracking history harder, though: the cases
+# that actually matter for correctness are for-loop bounds, and those
+# are already correctly restored via :tripcount regardless of what
+# these intermediate variables hold -- so the right fix is simply to
+# never hoist/recompute a variable in this set at all, only ones that
+# are genuinely self-contained.
+#
+# The set is seeded by genuine self-reference, not merely by having
+# more than one assignment site -- a variable computed fresh from a
+# loop's own iteration variable can legitimately appear at several
+# independent sites (different loops), none depending on its own
+# previous value, and must stay hoistable.
+function agen_unsafe_int_vars(kernel)
+    kinds = kernel.sig.kinds
+    unsafe = Set{Symbol}()
+    agen_seed_unsafe_self_ref!(kernel.body, kinds, unsafe)
+    changed = true
+    while changed
+        changed = agen_propagate_unsafe!(kernel.body, kinds, unsafe)
+    end
+    return unsafe
+end
+
+function agen_seed_unsafe_self_ref!(body, kinds, unsafe)
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            if kinds[var] in (:scalar_int, :array_int) && agen_count_var_refs(stmt.rhs, var) > 0
+                push!(unsafe, var)
+            end
+        elseif stmt.kind == :for
+            agen_seed_unsafe_self_ref!(stmt.body, kinds, unsafe)
+        elseif stmt.kind == :if
+            agen_seed_unsafe_self_ref!(stmt.then, kinds, unsafe)
+            agen_seed_unsafe_self_ref!(stmt.els, kinds, unsafe)
+        end
+    end
+    return nothing
+end
+
+function agen_propagate_unsafe!(body, kinds, unsafe)
+    changed = false
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            if kinds[var] in (:scalar_int, :array_int) && !(var in unsafe)
+                refs = Set{Symbol}()
+                agen_collect_expr_vars!(stmt.rhs, refs)
+                if any(r in unsafe for r in refs)
+                    push!(unsafe, var)
+                    changed = true
+                end
+            end
+        elseif stmt.kind == :for
+            changed = agen_propagate_unsafe!(stmt.body, kinds, unsafe) || changed
+        elseif stmt.kind == :if
+            changed = agen_propagate_unsafe!(stmt.then, kinds, unsafe) || changed
+            changed = agen_propagate_unsafe!(stmt.els, kinds, unsafe) || changed
+        end
+    end
+    return changed
 end
 
 # ---- stack bookkeeping (shared by the forward sweep, backward
@@ -1960,15 +1944,7 @@ end
 
 # see snap_is_pure_accumulation's comment -- identical logic,
 # duplicated here for the same purity-rule reason as every other
-# agen_-prefixed pair in this file. Two shapes are identity-
-# preserving (d(new)/d(old) = 1): lhs as any direct `+` operand
-# (`loss[1] = loss[1] + w`), or lhs as specifically the left/minuend
-# operand of a binary `-` (`u[i] = u[i] - X`) -- the right operand of
-# `-` does NOT qualify (d(a-b)/db = -1, not an identity). Uses exact-
-# slot counting (agen_count_expr_occurrences), not bare-variable-name
-# counting: `u[jf,l] = u[jf,l] + u[j,l+1]` must still qualify even
-# though the array name `u` appears twice -- `u[j,l+1]` is a
-# different slot, not another occurrence of the self-reference.
+# agen_-prefixed pair in this file.
 function agen_is_pure_accumulation(lhs, rhs, var)
     (rhs isa Expr && rhs.head == :call) || return false
     op = rhs.args[1]
@@ -2045,12 +2021,10 @@ function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, sta
             # gate on THIS statement's own rhs activity, not the whole
             # variable's -- a variable written by several statements
             # can be active overall via one of them while another
-            # write (e.g. clamped_sumsq's `w = 0.0` in the branch
-            # opposite an active `w = u[i]^2`) is a plain inactive
-            # literal; the backward sweep only ever pops for a write
-            # whose OWN rhs is active (agen_backward_assign gates on
-            # stmt.active from lin_plan), so pushing here on every
-            # write regardless would push more than gets popped
+            # write is a plain inactive literal; the backward sweep
+            # only ever pops for a write whose own rhs is active, so
+            # pushing here on every write regardless would push more
+            # than gets popped
             if agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, seq, read_anywhere)
                 push!(exprs, Expr(:call, :push!, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs))
             end
@@ -2095,27 +2069,27 @@ agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
-function agen_backward_body(plan, kinds, seq, read_anywhere, reassigned, stacks)
+function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
     exprs = Any[]
-    # int-kinded local assignments (index/bookkeeping helpers, e.g.
-    # mg_vcycle's `jf = j * 2`) never carry gradients, so
-    # agen_backward_assign emits nothing at all for them -- but the
-    # array indices they compute can still be needed by OTHER
-    # statements in this same block once everything else is
-    # reversed. A plain reversal would put the statement that NEEDS
-    # such an index before the statement that computes it (they're
-    # usually adjacent, index-computed-then-used, so reversing swaps
-    # their order); Julia's `for`/`if` bodies each have their own
-    # scope, so there's no other point at which this could get
-    # recomputed. Recompute them all up front instead, in their
-    # original (forward) relative order -- safe, since an int
-    # local's value only ever depends on the loop variable or other
-    # already-available ints, never on anything an adjoint statement
-    # computes.
+    # int-kinded local assignments (index/bookkeeping helpers) never
+    # carry gradients, so agen_backward_assign emits nothing at all
+    # for them -- but the array indices they compute can still be
+    # needed by OTHER statements in this same block once everything
+    # else is reversed. A plain reversal would put the statement that
+    # NEEDS such an index before the statement that computes it;
+    # Julia's `for`/`if` bodies each have their own scope, so there's
+    # no other point at which this could get recomputed. Recompute
+    # them all up front instead, in their original (forward) relative
+    # order -- but ONLY the ones not in `unsafe` (see
+    # agen_unsafe_int_vars): a var reassigned at more than one site
+    # elsewhere in the kernel can't be safely reconstructed this way,
+    # and doesn't need to be -- whatever actually matters about it
+    # downstream is a loop bound, already correctly restored via
+    # :tripcount regardless.
     for stmt in plan
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if kinds[var] in (:scalar_int, :array_int)
+            if kinds[var] in (:scalar_int, :array_int) && !(var in unsafe)
                 push!(exprs, Expr(:(=), stmt.lhs, stmt.tree.expr))
             end
         end
@@ -2123,11 +2097,11 @@ function agen_backward_body(plan, kinds, seq, read_anywhere, reassigned, stacks)
     for stmt in reverse(plan)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            kinds[var] in (:scalar_int, :array_int) && continue   # already hoisted above
+            kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
             append!(exprs, agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks))
         elseif stmt.kind == :for
             inner_seq = seq || stmt.sequential
-            inner = agen_backward_body(stmt.body, kinds, inner_seq, read_anywhere, reassigned, stacks)
+            inner = agen_backward_body(stmt.body, kinds, unsafe, inner_seq, read_anywhere, reassigned, stacks)
             reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, inner_seq, read_anywhere, reassigned)
             loop_expr = reverse_it ?
                 emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
@@ -2138,8 +2112,8 @@ function agen_backward_body(plan, kinds, seq, read_anywhere, reassigned, stacks)
             push!(exprs, loop_expr)
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
-            then_exprs = agen_backward_body(stmt.then, kinds, seq, read_anywhere, reassigned, stacks)
-            els_exprs = agen_backward_body(stmt.els, kinds, seq, read_anywhere, reassigned, stacks)
+            then_exprs = agen_backward_body(stmt.then, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
+            els_exprs = agen_backward_body(stmt.els, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
             push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
             push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
         end
@@ -2148,15 +2122,12 @@ function agen_backward_body(plan, kinds, seq, read_anywhere, reassigned, stacks)
 end
 
 # a loop must be reversed in the backward sweep whenever ANY push
-# happens inside it, at any nesting depth (not just its immediate
-# body, and not just when THIS loop is itself sequential=true) --
-# LIFO stack discipline requires every loop enclosing a push to run
-# in exact reverse, full stop. relu_field is the case that makes
-# this matter: its per-index `if` lives in a loop with no value
-# recurrence at all (sequential=false), yet it pushes a branch flag
-# every iteration and must be walked backward to pop them correctly
-# -- reversal here is about stack order, not about whether the loop
-# carries a genuine mathematical dependency across iterations.
+# happens inside it, at any nesting depth -- not just when THIS loop
+# is itself sequential=true. LIFO stack discipline requires every
+# loop enclosing a push to run in exact reverse, full stop: a loop
+# with no value recurrence at all can still push a branch flag every
+# iteration and must be walked backward to pop them correctly --
+# reversal here is about stack order, not mathematical dependency.
 function agen_body_has_snapshot(body, seq, read_anywhere, reassigned)
     for stmt in body
         if stmt.kind == :assign
@@ -2187,23 +2158,22 @@ function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stack
         if is_accum
             agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = stmt.lhs)
         else
-            # a leaf whose own slot exactly matches lhs (`hl = hl *
-            # 2.0`, `hl = hl / 2.0`) is a GENUINE, non-identity self-
-            # reference -- is_accum only catches the identity case
-            # (+/-, coefficient exactly 1), so this is different and
-            # needs different treatment. Such a leaf's "contribution"
-            # can't be accumulated into lhsb the normal way: lhsb is
-            # simultaneously the seed being read FROM and a target
-            # being written TO, so `lhsb = lhsb + contribution` reads
-            # its own not-yet-updated self mid-computation --
+            # a leaf whose own slot exactly matches lhs is a GENUINE,
+            # non-identity self-reference -- is_accum only catches the
+            # identity case (+/-, coefficient exactly 1), so this is
+            # different and needs different treatment. Such a leaf's
+            # contribution can't be accumulated into lhsb the normal
+            # way: lhsb is simultaneously the seed being read FROM and
+            # a target being written TO, so `lhsb = lhsb + contribution`
+            # reads its own not-yet-updated self mid-computation --
             # harmless in isolation, except the very next line
             # (unconditional reset) then throws that whole sum away,
             # silently dropping the contribution entirely. Collected
-            # separately and applied as a REPLACEMENT of lhsb
-            # instead: that replacement already reflects "lhsb now
-            # represents the OLD slot's adjoint", making a further
-            # reset both wrong (it would erase the very value just
-            # computed) and unnecessary.
+            # separately and applied as a REPLACEMENT of lhsb instead:
+            # that replacement already reflects "lhsb now represents
+            # the OLD slot's adjoint", making a further reset both
+            # wrong (it would erase the value just computed) and
+            # unnecessary.
             self_terms = Any[]
             agen_distribute!(stmt.tree, lhsb, exprs; self_expr = stmt.lhs, self_terms = self_terms)
             if isempty(self_terms)
@@ -2213,15 +2183,14 @@ function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stack
             end
         end
     elseif !is_accum && kinds[var] in (:scalar_float, :array_float)
-        # this specific write's rhs carries no active leaf at all
-        # (e.g. clamped_sumsq's `w = 0.0`, the branch opposite an
-        # active `w = u[i]^2`) -- there's nothing to distribute, but
-        # the shadow this write "produced" still needs resetting
-        # here. Skipping the reset because THIS write happens to be
-        # a constant would let whatever an earlier (already-
-        # processed-in-reverse) statement accumulated into the
-        # shadow leak into the next (chronologically earlier)
-        # iteration's contribution instead of starting fresh.
+        # this specific write's rhs carries no active leaf at all --
+        # there's nothing to distribute, but the shadow this write
+        # "produced" still needs resetting here. Skipping the reset
+        # because THIS write happens to be a constant would let
+        # whatever an earlier (already-processed-in-reverse) statement
+        # accumulated into the shadow leak into the next
+        # (chronologically earlier) iteration's contribution instead
+        # of starting fresh.
         push!(exprs, Expr(:(=), agen_shadow(stmt.lhs), 0.0))
     end
     return exprs
@@ -2266,12 +2235,11 @@ end
 # every local (non-argument) scalar variable needs to already exist
 # before the forward sweep runs -- normally its first primal
 # assignment would establish that, but a local flagged for
-# snapshotting (clamped_sumsq's `w`, self-referencing across loop
-# iterations) gets PUSHED (reading its pre-overwrite value) as early
-# as the very first loop iteration, before any primal assignment to
-# it has ever happened. Without this, that first push would be an
-# UndefVarError. Harmless for locals that don't need it -- their
-# real first assignment overwrites the 0.0 immediately.
+# snapshotting can get PUSHED (reading its pre-overwrite value) as
+# early as the very first loop iteration, before any primal
+# assignment to it has ever happened. Without this, that first push
+# would be an UndefVarError. Harmless for locals that don't need it
+# -- their real first assignment overwrites the 0.0 immediately.
 function agen_local_primal_inits(kernel, active_map)
     arg_set = Set(kernel.sig.args)
     exprs = Any[]
@@ -2302,7 +2270,7 @@ end
 
 # ==================== val_* =======================================
 # Correctness oracle: <y, J*x> == <J'*y, x>, checked against random
-# seed vectors. Deliberately not named "dotproduct" -- see skill.
+# seed vectors.
 
 function val_finite_diff_check(f_eval::Function, f_grad::Function, x0::Vector{Float64};
                                 epsilon::Float64 = 1e-6, trials::Int = 10, rtol::Float64 = 1e-3)
@@ -2349,8 +2317,7 @@ function io_expr_to_source(expr::Expr)
     return string(expr) * "\n"
 end
 
-# matches the corpus convention: foo_b.jl bundles initstacks_foo_b,
-# foo_b, and a copy of foo itself, in that order
+# bundles initstacks_foo_b, foo_b, and a copy of foo itself, in that order
 function io_write_kernel_file(path::String, primal_expr::Expr, generated::Vector{Expr})
     parts = [io_expr_to_source(e) for e in vcat(generated, [primal_expr])]
     open(path, "w") do f
