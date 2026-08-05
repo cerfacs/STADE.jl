@@ -52,7 +52,7 @@ generate_and_eval(:calc)
 
 let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
     max_n = nfine - 1
-    y_u = randn(max_n, num_levels); y_f = randn(max_n, num_levels)
+    y_u = randn(max_n, num_levels); y_f = randn(max_n, num_levels); y_r = randn(max_n, num_levels)
     x0 = vcat(randn(max_n), randn(max_n), [1.0 + 0.1randn()])
     unpack = xv -> (xv[1:max_n], xv[max_n+1:2max_n], xv[2max_n+1])
     build_arrays = function (u0, f0)
@@ -65,12 +65,12 @@ let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
         u0, f0, h1 = unpack(xv)
         u, f, r = build_arrays(u0, f0)
         calc(u, f, r, nfine, num_levels, h1, nu1, nu2, 0)
-        return sum(y_u .* u) + sum(y_f .* f)
+        return sum(y_u .* u) + sum(y_f .* f) + sum(y_r .* r)
     end
     f_grad = function (xv)
         u0, f0, h1 = unpack(xv)
         u, f, r = build_arrays(u0, f0)
-        ub = copy(y_u); fb = copy(y_f); rb = zeros(max_n, num_levels)
+        ub = copy(y_u); fb = copy(y_f); rb = copy(y_r)
         stacks = initstacks_calc_b()
         h1b, nu2b = calc_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, 0.0, nu1, nu2, 0.0, 0, stacks...)
         return vcat(ub[:, 1], fb[:, 1], [h1b])
