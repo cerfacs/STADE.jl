@@ -62,7 +62,7 @@ function tangent_check(name, f_eval, f_tangent, x0; epsilon = 1e-6, trials = 5)
 end
 
 generate_and_eval(:func)
-generate_and_eval(:mg_vcycle)
+generate_and_eval(:calc)
 
 let nnode = 5, nstep = 2
     y_u = randn(nnode); y_du = randn(nnode)
@@ -100,26 +100,18 @@ let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
     f_eval = function (xv)
         u0, f0, h1 = unpack(xv)
         u, f, r = build_arrays(u0, f0)
-        mg_vcycle(u, f, r, nfine, num_levels, h1, nu1, nu2, 0)
+        calc(u, f, r, nfine, num_levels, h1, nu1, nu2, 0)
         return sum(y_u .* u) + sum(y_f .* f)
     end
     f_grad = function (xv)
         u0, f0, h1 = unpack(xv)
         u, f, r = build_arrays(u0, f0)
         ub = copy(y_u); fb = copy(y_f); rb = zeros(max_n, num_levels)
-        # unlike the corpus's own initstacks_mg_vcycle_b(f, u), mine
-        # takes no arguments -- every stack here holds popped scalars,
-        # never a shape/eltype-derived whole-array copy. Splatting
-        # `stacks...` (not knowing the exact count/order by hand) is
-        # deliberate -- mirrors val_fixtures.jl's own pattern exactly,
-        # and sidesteps needing to have hand-verified how many
-        # distinct stacks this kernel's :array/:value/:branch/
-        # :tripcount sites collapse into
-        stacks = initstacks_mg_vcycle_b()
-        h1b = mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, 0.0, nu1, nu2, 0, stacks...)
+        stacks = initstacks_calc_b()
+        h1b = calc_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, 0.0, nu1, nu2, 0.0, 0, stacks...)
         return vcat(ub[:, 1], fb[:, 1], [h1b])
     end
-    report("mg_vcycle", (f_eval = f_eval, f_grad = f_grad, x0 = x0))
+    report("calc", (f_eval = f_eval, f_grad = f_grad, x0 = x0))
 end
 
 let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
@@ -136,7 +128,7 @@ let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
     f_eval = function (xv)
         u0, f0, h1 = unpack(xv)
         u, f, r = build_arrays(u0, f0)
-        mg_vcycle(u, f, r, nfine, num_levels, h1, nu1, nu2, 0)
+        calc(u, f, r, nfine, num_levels, h1, nu1, nu2, 0)
         return sum(y_u .* u) + sum(y_f .* f)
     end
     f_tangent = function (xv, d)
@@ -147,7 +139,7 @@ let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
         mg_vcycle_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, 0)
         return sum(y_u .* ud) + sum(y_f .* fd)
     end
-    tangent_check("mg_vcycle", f_eval, f_tangent, x0)
+    tangent_check("calc", f_eval, f_tangent, x0)
 end
 
 println()
