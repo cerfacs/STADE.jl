@@ -24,20 +24,15 @@
 #                         reverse sweep (the TBR-equivalent check).
 #   lin_    Linearize     builds each statement's derivative-tree,
 #                         shared input to both codegen directions.
-#   tgen_   Tangent gen   forward-mode codegen.
 #   agen_   Adjoint gen   reverse-mode codegen: forward sweep with
 #                         pushes, reversed backward sweep with pops,
 #                         plus the companion initstacks_* function.
-#   hvp_    Hessian-vec   forward-over-reverse: a second forward-mode
-#                         pass over agen_'s own generated code, for
-#                         Hessian-vector products.
 #   val_    Validate      correctness checking against ground truth
-#                         (finite differences; later the adjoint
-#                         identity once tangent codegen is real).
+#                         (finite differences).
 #   io_     File I/O      the ONLY stage touching the filesystem --
 #                         reads a kernel .jl file, writes a
 #                         generated .jl file.
-#   stade_  Public API    stade_tangent / stade_adjoint / stade_hvp
+#   stade_  Public API    stade_adjoint
 #                         (Expr in, Expr out) and stade_*_file
 #                         wrappers (path in, path out), wiring every
 #                         stage above together for an end user.
@@ -63,7 +58,6 @@
 # snapshot_plan :: Vector{snapshot_site}
 # lin_node/lin_plan :: internal-only shape, documented at the lin_*
 #     section header below.
-# der_rule_pair :: (tangent::Function, adjoint::Function)
 
 
 # ==================== parse_* ================================
@@ -694,9 +688,8 @@ end
 #
 # Every rule pair is built from a per-operator "local partials" list:
 # partials[i] is d(op(args...))/d(args[i]), symbolic in the primal
-# args. tangent/adjoint are the two standard contractions against a
-# seed: tangent sums partials[i]*dargs[i]; adjoint returns one
-# contribution per arg (partials[i]*out_adjoint), left for agen_ to
+# args. Adjoint contraction returns one contribution per arg 
+# (partials[i]*out_adjoint), left for agen_ to
 # turn into an accumulation statement. A few algebraic simplifications
 # (dropping *1, *0, +0 terms, folding literal arithmetic) keep the
 # generated Exprs simple.
@@ -709,45 +702,37 @@ end
 
 function der_table()
     return Dict{Symbol,NamedTuple}(
-        :+     => (tangent = der_tangent_add,     adjoint = der_adjoint_add),
-        :-     => (tangent = der_tangent_sub,     adjoint = der_adjoint_sub),
-        :*     => (tangent = der_tangent_mul,     adjoint = der_adjoint_mul),
-        :/     => (tangent = der_tangent_divide,  adjoint = der_adjoint_divide),
-        :^     => (tangent = der_tangent_pow,     adjoint = der_adjoint_pow),
-        :abs   => (tangent = der_tangent_abs,     adjoint = der_adjoint_abs),
-        :sqrt  => (tangent = der_tangent_sqrt,    adjoint = der_adjoint_sqrt),
-        :exp   => (tangent = der_tangent_exp,     adjoint = der_adjoint_exp),
-        :log   => (tangent = der_tangent_log,     adjoint = der_adjoint_log),
-        :log10 => (tangent = der_tangent_log10,   adjoint = der_adjoint_log10),
-        :sin   => (tangent = der_tangent_sin,     adjoint = der_adjoint_sin),
-        :cos   => (tangent = der_tangent_cos,     adjoint = der_adjoint_cos),
-        :tan   => (tangent = der_tangent_tan,     adjoint = der_adjoint_tan),
-        :asin  => (tangent = der_tangent_asin,    adjoint = der_adjoint_asin),
-        :acos  => (tangent = der_tangent_acos,    adjoint = der_adjoint_acos),
-        :atan  => (tangent = der_tangent_atan,    adjoint = der_adjoint_atan),
-        :sinh  => (tangent = der_tangent_sinh,    adjoint = der_adjoint_sinh),
-        :cosh  => (tangent = der_tangent_cosh,    adjoint = der_adjoint_cosh),
-        :tanh  => (tangent = der_tangent_tanh,    adjoint = der_adjoint_tanh),
-        :mod   => (tangent = der_tangent_mod,     adjoint = der_adjoint_mod),
-        :div   => (tangent = der_tangent_intdiv,  adjoint = der_adjoint_intdiv),
-        :max   => (tangent = der_tangent_max,     adjoint = der_adjoint_max),
-        :min   => (tangent = der_tangent_min,     adjoint = der_adjoint_min),
-        :sign  => (tangent = der_tangent_sign,    adjoint = der_adjoint_sign),
-        :floor => (tangent = der_tangent_floor,   adjoint = der_adjoint_floor),
-        :ceil  => (tangent = der_tangent_ceil,    adjoint = der_adjoint_ceil),
-        :trunc => (tangent = der_tangent_trunc,   adjoint = der_adjoint_trunc),
+        :+     => (adjoint = der_adjoint_add),
+        :-     => (adjoint = der_adjoint_sub),
+        :*     => (adjoint = der_adjoint_mul),
+        :/     => (adjoint = der_adjoint_divide),
+        :^     => (adjoint = der_adjoint_pow),
+        :abs   => (adjoint = der_adjoint_abs),
+        :sqrt  => (adjoint = der_adjoint_sqrt),
+        :exp   => (adjoint = der_adjoint_exp),
+        :log   => (adjoint = der_adjoint_log),
+        :log10 => (adjoint = der_adjoint_log10),
+        :sin   => (adjoint = der_adjoint_sin),
+        :cos   => (adjoint = der_adjoint_cos),
+        :tan   => (adjoint = der_adjoint_tan),
+        :asin  => (adjoint = der_adjoint_asin),
+        :acos  => (adjoint = der_adjoint_acos),
+        :atan  => (adjoint = der_adjoint_atan),
+        :sinh  => (adjoint = der_adjoint_sinh),
+        :cosh  => (adjoint = der_adjoint_cosh),
+        :tanh  => (adjoint = der_adjoint_tanh),
+        :mod   => (adjoint = der_adjoint_mod),
+        :div   => (adjoint = der_adjoint_intdiv),
+        :max   => (adjoint = der_adjoint_max),
+        :min   => (adjoint = der_adjoint_min),
+        :sign  => (adjoint = der_adjoint_sign),
+        :floor => (adjoint = der_adjoint_floor),
+        :ceil  => (adjoint = der_adjoint_ceil),
+        :trunc => (adjoint = der_adjoint_trunc),
     )
 end
 
-# ---- generic contraction: local partials -> tangent / adjoint --------
-
-# sum_i partials[i] * dargs[i], dropping zero terms
-function der_tangent_generic(op::Symbol, args, dargs)
-    partials = der_partials(op, args)
-    length(partials) == length(dargs) || error("der_tangent_generic: arity mismatch for $op")
-    terms = [der_mul(partials[i], dargs[i]) for i in 1:length(partials)]
-    return der_sum_terms(terms)
-end
+# ---- generic contraction: local partials -> adjoint --------
 
 # [partials[i] * out_adjoint for each arg] -- per-arg contribution, not
 # yet folded into an `argib = argib + ...` accumulation (agen_'s job)
@@ -979,87 +964,60 @@ function der_partials_trunc(args)
     return [0.0]
 end
 
-# ---- named tangent/adjoint entry points registered in der_table ------
+# ---- named adjoint entry points registered in der_table ------
 
-function der_tangent_add(args, dargs); return der_tangent_generic(:+, args, dargs); end
 function der_adjoint_add(args, out_adjoint); return der_adjoint_generic(:+, args, out_adjoint); end
 
-function der_tangent_sub(args, dargs); return der_tangent_generic(:-, args, dargs); end
 function der_adjoint_sub(args, out_adjoint); return der_adjoint_generic(:-, args, out_adjoint); end
 
-function der_tangent_mul(args, dargs); return der_tangent_generic(:*, args, dargs); end
 function der_adjoint_mul(args, out_adjoint); return der_adjoint_generic(:*, args, out_adjoint); end
 
-function der_tangent_divide(args, dargs); return der_tangent_generic(:/, args, dargs); end
 function der_adjoint_divide(args, out_adjoint); return der_adjoint_generic(:/, args, out_adjoint); end
 
-function der_tangent_pow(args, dargs); return der_tangent_generic(:^, args, dargs); end
 function der_adjoint_pow(args, out_adjoint); return der_adjoint_generic(:^, args, out_adjoint); end
 
-function der_tangent_abs(args, dargs); return der_tangent_generic(:abs, args, dargs); end
 function der_adjoint_abs(args, out_adjoint); return der_adjoint_generic(:abs, args, out_adjoint); end
 
-function der_tangent_sqrt(args, dargs); return der_tangent_generic(:sqrt, args, dargs); end
 function der_adjoint_sqrt(args, out_adjoint); return der_adjoint_generic(:sqrt, args, out_adjoint); end
 
-function der_tangent_exp(args, dargs); return der_tangent_generic(:exp, args, dargs); end
 function der_adjoint_exp(args, out_adjoint); return der_adjoint_generic(:exp, args, out_adjoint); end
 
-function der_tangent_log(args, dargs); return der_tangent_generic(:log, args, dargs); end
 function der_adjoint_log(args, out_adjoint); return der_adjoint_generic(:log, args, out_adjoint); end
 
-function der_tangent_log10(args, dargs); return der_tangent_generic(:log10, args, dargs); end
 function der_adjoint_log10(args, out_adjoint); return der_adjoint_generic(:log10, args, out_adjoint); end
 
-function der_tangent_sin(args, dargs); return der_tangent_generic(:sin, args, dargs); end
 function der_adjoint_sin(args, out_adjoint); return der_adjoint_generic(:sin, args, out_adjoint); end
 
-function der_tangent_cos(args, dargs); return der_tangent_generic(:cos, args, dargs); end
 function der_adjoint_cos(args, out_adjoint); return der_adjoint_generic(:cos, args, out_adjoint); end
 
-function der_tangent_tan(args, dargs); return der_tangent_generic(:tan, args, dargs); end
 function der_adjoint_tan(args, out_adjoint); return der_adjoint_generic(:tan, args, out_adjoint); end
 
-function der_tangent_asin(args, dargs); return der_tangent_generic(:asin, args, dargs); end
 function der_adjoint_asin(args, out_adjoint); return der_adjoint_generic(:asin, args, out_adjoint); end
 
-function der_tangent_acos(args, dargs); return der_tangent_generic(:acos, args, dargs); end
 function der_adjoint_acos(args, out_adjoint); return der_adjoint_generic(:acos, args, out_adjoint); end
 
-function der_tangent_atan(args, dargs); return der_tangent_generic(:atan, args, dargs); end
 function der_adjoint_atan(args, out_adjoint); return der_adjoint_generic(:atan, args, out_adjoint); end
 
-function der_tangent_sinh(args, dargs); return der_tangent_generic(:sinh, args, dargs); end
 function der_adjoint_sinh(args, out_adjoint); return der_adjoint_generic(:sinh, args, out_adjoint); end
 
-function der_tangent_cosh(args, dargs); return der_tangent_generic(:cosh, args, dargs); end
 function der_adjoint_cosh(args, out_adjoint); return der_adjoint_generic(:cosh, args, out_adjoint); end
 
-function der_tangent_tanh(args, dargs); return der_tangent_generic(:tanh, args, dargs); end
 function der_adjoint_tanh(args, out_adjoint); return der_adjoint_generic(:tanh, args, out_adjoint); end
 
-function der_tangent_mod(args, dargs); return der_tangent_generic(:mod, args, dargs); end
 function der_adjoint_mod(args, out_adjoint); return der_adjoint_generic(:mod, args, out_adjoint); end
 
-function der_tangent_intdiv(args, dargs); return der_tangent_generic(:div, args, dargs); end
 function der_adjoint_intdiv(args, out_adjoint); return der_adjoint_generic(:div, args, out_adjoint); end
 
-function der_tangent_max(args, dargs); return der_tangent_generic(:max, args, dargs); end
 function der_adjoint_max(args, out_adjoint); return der_adjoint_generic(:max, args, out_adjoint); end
 
-function der_tangent_min(args, dargs); return der_tangent_generic(:min, args, dargs); end
 function der_adjoint_min(args, out_adjoint); return der_adjoint_generic(:min, args, out_adjoint); end
 
-function der_tangent_sign(args, dargs); return der_tangent_generic(:sign, args, dargs); end
 function der_adjoint_sign(args, out_adjoint); return der_adjoint_generic(:sign, args, out_adjoint); end
 
-function der_tangent_floor(args, dargs); return der_tangent_generic(:floor, args, dargs); end
 function der_adjoint_floor(args, out_adjoint); return der_adjoint_generic(:floor, args, out_adjoint); end
 
-function der_tangent_ceil(args, dargs); return der_tangent_generic(:ceil, args, dargs); end
 function der_adjoint_ceil(args, out_adjoint); return der_adjoint_generic(:ceil, args, out_adjoint); end
 
-function der_tangent_trunc(args, dargs); return der_tangent_generic(:trunc, args, dargs); end
 function der_adjoint_trunc(args, out_adjoint); return der_adjoint_generic(:trunc, args, out_adjoint); end
 
 # ---- small Expr-building helpers shared by every rule above -----------
@@ -1581,107 +1539,6 @@ function lin_build_expr(expr, active_map)
                 partials = partials, active = active)
     end
     error("lin_build_expr: unsupported primal sub-expression $expr")
-end
-
-
-# ==================== tgen_* =====================================
-# Forward-mode codegen: single sweep, original statement/loop order,
-# no snapshot stacks -- every active statement gets a shadow
-# ("d"-suffixed) line emitted right before its own primal line,
-# computed from current (pre-this-statement) values. Always safe: a
-# statement's tangent never depends on its own lhs's new value. The
-# tangent line is emitted even when it collapses to 0.0, so a later
-# active read sees the reset rather than a stale value.
-
-function tgen_emit(kernel, lin_plan)
-    fname = tgen_fname(kernel.sig.name)
-    fargs = tgen_signature_args(kernel.sig)
-    body_exprs = tgen_body(lin_plan)
-    reassigned = tgen_reassigned_scalar_args(kernel)
-    push!(body_exprs, emit_return_scalars([tgen_shadow(v) for v in reassigned]))
-    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body_exprs...))
-end
-
-tgen_fname(name::Symbol) = Symbol(string(name) * "_d")
-
-# a Symbol becomes `<name>d`; an array-ref `v[i,...]` becomes
-# `vd[i,...]` -- same indices, shadowed array name
-function tgen_shadow(expr)
-    expr isa Symbol && return Symbol(string(expr) * "d")
-    if expr isa Expr && expr.head == :ref
-        return Expr(:ref, Symbol(string(expr.args[1]) * "d"), expr.args[2:end]...)
-    end
-    error("tgen_shadow: expected a Symbol or array-ref, got $expr")
-end
-
-# every float arg gets its shadow appended right after it;
-# Int64 args appear once, exactly as in the primal
-function tgen_signature_args(sig)
-    fargs = Symbol[]
-    for a in sig.args
-        push!(fargs, a)
-        if sig.kinds[a] in (:scalar_float, :array_float)
-            push!(fargs, tgen_shadow(a))
-        end
-    end
-    return fargs
-end
-
-function tgen_body(plan)
-    exprs = Any[]
-    for stmt in plan
-        if stmt.kind == :assign
-            push!(exprs, Expr(:(=), tgen_shadow(stmt.lhs), tgen_tangent_expr(stmt.tree)))
-            push!(exprs, Expr(:(=), stmt.lhs, stmt.tree.expr))
-        elseif stmt.kind == :for
-            inner = tgen_body(stmt.body)
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
-        elseif stmt.kind == :if
-            then_exprs = tgen_body(stmt.then)
-            els_exprs = tgen_body(stmt.els)
-            push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
-        end
-    end
-    return exprs
-end
-
-# bottom-up: sum_i partials[i]*tangent(child_i), via der_tangent_generic
-# (which itself re-derives partials from node.op/node.args -- cheap,
-# and keeps this function from needing to know der_mul/der_sum_terms).
-# An entirely-inactive subtree collapses straight to the literal 0.0
-# rather than trusting the generic contraction to fold it down itself.
-function tgen_tangent_expr(node)
-    node.active || return 0.0
-    node.kind == :leaf && return tgen_shadow(node.expr)
-    dargs = [tgen_tangent_expr(c) for c in node.children]
-    return der_tangent_generic(node.op, node.args, dargs)
-end
-
-# scalar-float function args reassigned somewhere in the primal body
-# -- the only shadows that can't just be read straight off the
-# argument binding, since nothing else in the tangent function would
-# otherwise expose their new value to the caller
-function tgen_reassigned_scalar_args(kernel)
-    arg_set = Set(kernel.sig.args)
-    out = Symbol[]
-    tgen_collect_reassigned_scalar_args!(kernel.body, arg_set, kernel.sig.kinds, out)
-    return out
-end
-
-function tgen_collect_reassigned_scalar_args!(body, arg_set, kinds, out)
-    for stmt in body
-        if stmt.kind == :assign
-            if stmt.lhs isa Symbol && stmt.lhs in arg_set && kinds[stmt.lhs] == :scalar_float && !(stmt.lhs in out)
-                push!(out, stmt.lhs)
-            end
-        elseif stmt.kind == :for
-            tgen_collect_reassigned_scalar_args!(stmt.body, arg_set, kinds, out)
-        elseif stmt.kind == :if
-            tgen_collect_reassigned_scalar_args!(stmt.then, arg_set, kinds, out)
-            tgen_collect_reassigned_scalar_args!(stmt.els, arg_set, kinds, out)
-        end
-    end
-    return nothing
 end
 
 
@@ -2269,235 +2126,6 @@ function agen_local_shadow_inits(kernel, active_map)
 end
 
 
-# ==================== hvp_* =======================================
-# Forward-over-reverse Hessian-vector products: a SECOND, independent
-# application of forward-mode differentiation, this time to the
-# ALREADY-GENERATED adjoint kernel's own statement list rather than
-# to a hand-written primal. Computes Hv = d(grad f)/dv by seeding a
-# tangent on the kernel's own inputs and propagating it straight
-# through agen_'s forward sweep (which recomputes the primal) and
-# backward sweep (which computes the gradient) -- exactly tgen_'s own
-# "shadow line right before primal line" strategy, applied to a
-# second piece of code instead of to the original primal.
-#
-# This works as a genuinely general "one more forward layer" pass
-# because reverse-mode differentiation, once carried out, leaves
-# behind straight-line, order-preserving code: no further reversal,
-# only replay. agen_'s output is exactly the kind of code forward-
-# mode differentiation already knows how to handle. The only new
-# mechanics are for push!/pop!, which never arise in a hand-written
-# primal: a push of an active value gets a paired push onto a shadow
-# stack; a pop gets a paired pop, in the same position, so LIFO order
-# is inherited automatically rather than re-derived.
-#
-# There is no lin_plan for generated code (agen_ emits Expr directly,
-# not a statement/lin_node tree), so this differentiates by walking
-# the concrete Expr the earlier stage produced, rather than a
-# separately-built tree -- the "IR" this stage adds a layer to is
-# just agen_forward_body/agen_backward_body's own output, taken as
-# input. No new derivative rules are needed either: an accumulation
-# statement's rhs is built entirely from the same whitelisted
-# intrinsics as the primal, so differentiating it a second time via
-# der_tangent_generic already gives the correct second-order term.
-#
-# Every float arg's own tangent (xd, the seed direction v the caller
-# picks) AND its adjoint-shadow's tangent (xbd) are both function
-# parameters -- for an array-kinded arg this is unavoidable (nothing
-# in this design ever allocates an array locally), and doing the same
-# for scalars keeps the convention uniform: xbd represents "does the
-# OUTER seed itself vary with v", which is 0.0 for a standard HVP,
-# but making the caller pass that explicitly is clearer than hard-
-# coding it, and costs nothing. Every local (non-argument) scalar
-# gets its own shadow AND its adjoint-shadow's shadow declared and
-# zeroed, exactly one layer past what agen_local_primal_inits /
-# agen_local_shadow_inits already do. Shadow stacks are declared
-# locally (never returned or inspected afterward) -- the original
-# stacks still come from the primal's own initstacks_foo_b, reused
-# unchanged; only the NEW shadow stacks are this stage's concern, and
-# they never need to outlive one call.
-
-function hvp_emit(kernel, active_map, lin_plan, sites)
-    sig = kernel.sig
-    stacks = agen_stack_map(sites)
-    read_anywhere = agen_collect_reads(kernel.body)
-    reassigned = agen_collect_reassigned(kernel.body)
-    unsafe = agen_unsafe_int_vars(kernel)
-
-    fwd = agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks)
-    bwd = agen_backward_body(lin_plan, sig.kinds, unsafe, false, read_anywhere, reassigned, stacks)
-
-    shadow_of = hvp_shadow_map(kernel, sites)
-
-    fname = hvp_fname(sig.name)
-    seed_args = Symbol[]
-    for a in sig.args
-        sig.kinds[a] in (:scalar_float, :array_float) || continue
-        push!(seed_args, tgen_shadow(a))
-        push!(seed_args, tgen_shadow(agen_shadow(a)))
-    end
-    fargs = vcat(agen_signature_args(sig), seed_args, agen_stack_names(sites))
-
-    body = Any[]
-    append!(body, hvp_shadow_stack_inits(sites, shadow_of))
-    append!(body, agen_local_primal_inits(kernel, active_map))
-    append!(body, agen_local_shadow_inits(kernel, active_map))
-    append!(body, hvp_local_second_inits(kernel, shadow_of))
-    append!(body, hvp_double_body(fwd, shadow_of))
-    append!(body, hvp_double_body(bwd, shadow_of))
-
-    scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
-    ret = Symbol[]
-    for a in scalar_args
-        ab = agen_shadow(a)
-        push!(ret, ab)
-        push!(ret, tgen_shadow(ab))
-    end
-    push!(body, emit_return_scalars(ret))
-
-    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
-end
-
-hvp_fname(name::Symbol) = Symbol(string(name) * "_hv")
-hvp_stack_shadow(stack::Symbol) = Symbol(string(stack) * "_d")
-
-# every float variable this stage will encounter: primal args/locals
-# (shadow = tgen_shadow, the same "d" convention tgen_ already uses)
-# and agen_'s own adjoint shadows (shadow = tgen_shadow of THOSE --
-# e.g. xb's own second-layer shadow is xbd, via the same function,
-# unchanged, since it only ever appends "d"); plus every Float64-
-# holding stack (a paired shadow stack). Int64 stacks -- branch/
-# tripcount bookkeeping -- get none; they're never differentiated.
-function hvp_shadow_map(kernel, sites)
-    kinds = kernel.sig.kinds
-    m = Dict{Symbol,Symbol}()
-    for (v, k) in kinds
-        if k in (:scalar_float, :array_float)
-            m[v] = tgen_shadow(v)
-            m[agen_shadow(v)] = tgen_shadow(agen_shadow(v))
-        end
-    end
-    for s in sites
-        s.kind in (:array, :value) || continue
-        nm = agen_site_stack_name(s)
-        haskey(m, nm) || (m[nm] = hvp_stack_shadow(nm))
-    end
-    return m
-end
-
-function hvp_shadow_stack_inits(sites, shadow_of)
-    exprs = Any[]
-    seen = Set{Symbol}()
-    for s in sites
-        s.kind in (:array, :value) || continue
-        nm = agen_site_stack_name(s)
-        nm in seen && continue
-        push!(seen, nm)
-        push!(exprs, Expr(:(=), shadow_of[nm], Expr(:call, Expr(:curly, :Vector, :Float64))))
-    end
-    return exprs
-end
-
-# zero-initialize every local (non-argument) scalar's own second-
-# layer shadow AND its adjoint-shadow's shadow -- exactly
-# agen_local_primal_inits/agen_local_shadow_inits's job, one layer
-# further out. Arrays can never be local (skill-jade rule 8), so
-# there's never an array case to handle here; every float arg's own
-# xd/xbd, by contrast, is a function parameter (see hvp_emit), never
-# locally initialized. Unlike agen_'s own local-init functions, this
-# does NOT gate on active_map: the forward sweep always replays every
-# primal statement regardless of activity, so this stage's shadow of
-# an "inactive" local can still be written to, and needs to exist.
-function hvp_local_second_inits(kernel, shadow_of)
-    sig = kernel.sig
-    arg_set = Set(sig.args)
-    kinds = sig.kinds
-    exprs = Any[]
-    for v in sort(collect(keys(kinds)))
-        kinds[v] == :scalar_float || continue
-        v in arg_set && continue
-        push!(exprs, Expr(:(=), shadow_of[v], 0.0))
-        push!(exprs, Expr(:(=), shadow_of[agen_shadow(v)], 0.0))
-    end
-    return exprs
-end
-
-# the general "add one forward layer" transform: differentiate a
-# statement list agen_ already produced, emitting each shadow line
-# immediately before its primal line -- tgen_'s own strategy, applied
-# to Expr agen_ built rather than to a lin_node tree, and extended to
-# recognize push!/pop! alongside assignment/for/if.
-function hvp_double_body(exprs, shadow_of)
-    out = Any[]
-    for e in exprs
-        append!(out, hvp_double_stmt(e, shadow_of))
-    end
-    return out
-end
-
-function hvp_double_stmt(e::Expr, shadow_of)
-    if e.head == :call && e.args[1] == :push!
-        stack, val = e.args[2], e.args[3]
-        out = Any[]
-        haskey(shadow_of, stack) && push!(out, Expr(:call, :push!, shadow_of[stack], hvp_tangent_expr(val, shadow_of)))
-        push!(out, e)
-        return out
-    elseif e.head == :(=)
-        lhs = e.args[1]
-        var = lhs isa Symbol ? lhs : lhs.args[1]
-        out = Any[]
-        haskey(shadow_of, var) && push!(out, Expr(:(=), hvp_shadow_lvalue(lhs, shadow_of), hvp_tangent_expr(e.args[2], shadow_of)))
-        push!(out, e)
-        return out
-    elseif e.head == :for
-        inner = hvp_double_body(e.args[2].args, shadow_of)
-        return Any[Expr(:for, e.args[1], Expr(:block, inner...))]
-    elseif e.head == :if
-        then_inner = hvp_double_body(e.args[2].args, shadow_of)
-        if length(e.args) == 3
-            els_inner = hvp_double_body(e.args[3].args, shadow_of)
-            return Any[Expr(:if, e.args[1], Expr(:block, then_inner...), Expr(:block, els_inner...))]
-        end
-        return Any[Expr(:if, e.args[1], Expr(:block, then_inner...))]
-    end
-    return Any[e]
-end
-
-# lhs of the shadow assignment -- a bare Symbol shadows to a bare
-# Symbol; an array-ref shadows to the same indices on the shadow array
-function hvp_shadow_lvalue(lhs, shadow_of)
-    lhs isa Symbol && return shadow_of[lhs]
-    return Expr(:ref, shadow_of[lhs.args[1]], lhs.args[2:end]...)
-end
-
-# recursively differentiate an arbitrary primal-valued Expr -- fuses
-# what lin_build_expr + tgen_tangent_expr do in two phases into one,
-# since there is no retained tree for generated code to sweep a
-# second time. A pop! differentiates to a pop from the paired shadow
-# stack; everything else is the same chain-rule contraction tgen_
-# already performs, via der_tangent_generic -- no new derivative
-# rules, since agen_'s own accumulation statements are built entirely
-# from the same whitelisted intrinsics as the primal.
-function hvp_tangent_expr(expr, shadow_of)
-    if expr isa Symbol
-        return get(shadow_of, expr, 0.0)
-    elseif expr isa Number
-        return 0.0
-    elseif expr isa Expr && expr.head == :ref
-        haskey(shadow_of, expr.args[1]) || return 0.0
-        return Expr(:ref, shadow_of[expr.args[1]], expr.args[2:end]...)
-    elseif expr isa Expr && expr.head == :call && expr.args[1] == :pop!
-        stack = expr.args[2]
-        haskey(shadow_of, stack) || return 0.0
-        return Expr(:call, :pop!, shadow_of[stack])
-    elseif expr isa Expr && expr.head == :call
-        args = expr.args[2:end]
-        dargs = [hvp_tangent_expr(a, shadow_of) for a in args]
-        return der_tangent_generic(expr.args[1], args, dargs)
-    end
-    error("hvp_tangent_expr: unsupported expression $expr")
-end
-
-
 # ==================== val_* =======================================
 # Correctness oracle: <y, J*x> == <J'*y, x>, checked against random
 # seed vectors.
@@ -2561,14 +2189,6 @@ end
 # independents/dependents auto-derived -- see parse_infer_indep_dep.
 # Override kwargs exist only for the rare exclusion case.
 
-function stade_tangent(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
-                        dependents::Union{Vector{Symbol},Nothing}=nothing)
-    kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
-    active_map = act_analyze(kernel)
-    lin_plan = lin_build(kernel, active_map)
-    return tgen_emit(kernel, lin_plan)
-end
-
 function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
@@ -2578,35 +2198,10 @@ function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     return agen_emit(kernel, lin_plan, snapshot_plan)
 end
 
-function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
-                    dependents::Union{Vector{Symbol},Nothing}=nothing)
-    kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
-    active_map = act_analyze(kernel)
-    snapshot_plan = snap_plan(kernel, active_map)
-    lin_plan = lin_build(kernel, active_map)
-    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan)
-    initstacks_expr = agen_init_emit(kernel, snapshot_plan)
-    return (hvp = hvp_expr, initstacks = initstacks_expr)
-end
-
-function stade_tangent_file(in_path::String, out_path::String)
-    primal_expr = io_read_kernel(in_path)
-    tangent_expr = stade_tangent(primal_expr)
-    io_write_kernel_file(out_path, primal_expr, [tangent_expr])
-    return out_path
-end
-
 function stade_adjoint_file(in_path::String, out_path::String)
     primal_expr = io_read_kernel(in_path)
     adjoint_out = stade_adjoint(primal_expr)
     io_write_kernel_file(out_path, primal_expr, [adjoint_out.initstacks, adjoint_out.adjoint])
-    return out_path
-end
-
-function stade_hvp_file(in_path::String, out_path::String)
-    primal_expr = io_read_kernel(in_path)
-    hvp_out = stade_hvp(primal_expr)
-    io_write_kernel_file(out_path, primal_expr, [hvp_out.initstacks, hvp_out.hvp])
     return out_path
 end
 
@@ -2620,9 +2215,7 @@ let
     trivial = :(function stub(x, n, y)
         return nothing
     end)
-    tangent_out = stade_tangent(trivial)
     adjoint_out = stade_adjoint(trivial)
-    @assert tangent_out isa Expr
     @assert adjoint_out.adjoint isa Expr && adjoint_out.initstacks isa Expr
     println("STADE.jl Phase 0 skeleton loaded and round-tripped a stub kernel OK")
 end
