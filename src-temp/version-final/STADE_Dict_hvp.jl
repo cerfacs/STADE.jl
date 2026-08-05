@@ -2602,6 +2602,13 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     return Dict{Symbol,Any}(:hvp => hvp_expr, :initstacks => initstacks_expr)
 end
 
+function stade_hvp_file(in_path::String, out_path::String)
+    primal_expr = io_read_kernel(in_path)
+    hvp_out = stade_hvp(primal_expr)
+    io_write_kernel_file(out_path, primal_expr, [hvp_out[:initstacks], hvp_out[:hvp]])
+    return out_path
+end
+
 function stade_tangent_file(in_path::String, out_path::String)
     primal_expr = io_read_kernel(in_path)
     tangent_expr = stade_tangent(primal_expr)
