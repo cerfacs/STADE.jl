@@ -28,11 +28,15 @@ const ALL_B_PATH = joinpath(@__DIR__, "all_b.jl")
 
 # generate tangent + adjoint + initstacks for `name`, eval them into
 # Main alongside the primal itself, and return the generated Exprs
-# (handy for eyeballing on failure)
+# (handy for eyeballing on failure);
+# also write them as files on disk.
 function generate_and_eval(name::Symbol)
     primal_expr = grab_kernel_expr(ALL_B_PATH, name)
     tangent_expr = stade_tangent(primal_expr)
     adjoint_out = stade_adjoint(primal_expr)
+    name_str    = String(name)
+    io_write_kernel_file(name_str * "_d.jl", primal_expr, [tangent_expr])
+    io_write_kernel_file(name_str * "_b.jl", primal_expr, [adjoint_out.initstacks, adjoint_out.adjoint])
     Base.eval(Main, primal_expr)
     Base.eval(Main, tangent_expr)
     Base.eval(Main, adjoint_out.initstacks)
@@ -83,7 +87,7 @@ let nnode = 5, nstep = 2
         cb, dxb, dtb = func_b(u, ub, du, dub, c, 0.0, dx, 0.0, dt, 0.0, nstep, nnode, du_stack)
         return vcat(ub, dub, [cb, dxb, dtb])
     end
-    report("advection (func)", (f_eval = f_eval, f_grad = f_grad, x0 = x0))
+    report("func", (f_eval = f_eval, f_grad = f_grad, x0 = x0))
 end
 
 let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2

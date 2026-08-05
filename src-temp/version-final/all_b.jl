@@ -1,4 +1,4 @@
-# --- from advection_b.jl ---
+# --- from func_b.jl ---
 function initstacks_func_b(du)
     du_stack = Vector{typeof(du)}()
     sizehint!(du_stack, 100)
