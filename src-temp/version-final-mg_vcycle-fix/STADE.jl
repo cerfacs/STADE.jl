@@ -621,9 +621,10 @@ function shape_mark_int_from_comparisons!(expr, is_int::Dict{Symbol,Bool})
     return nothing
 end
 
-# ---- int evidence, pass 2: propagate through plain assignments ----
-# A bare copy `lhs = rhs` forces lhs and rhs to share one kind, since
-# assignment can't change it -- evidence has to flow both ways.
+# ---- int evidence, pass 2: propagate through assignments ---------
+# An assignment can't change kind, so evidence flows both ways: rhs
+# int-ness forces lhs int (forward), and lhs int-ness forces whatever
+# rhs operands it depends on int too (backward).
 
 function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool})
     changed = false
@@ -633,13 +634,12 @@ function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool
                 is_int[stmt.lhs] = true
                 changed = true
             end
-            # backward: a bare copy forces the rhs variable to match
-            # a lhs kind discovered from evidence elsewhere (the
-            # forward direction is already covered by the check above)
-            if stmt.rhs isa Symbol && haskey(is_int, stmt.rhs) &&
-               is_int[stmt.lhs] && !is_int[stmt.rhs]
-                is_int[stmt.rhs] = true
-                changed = true
+            # backward: an lhs kind discovered from evidence elsewhere
+            # forces every rhs operand that shape_expr_int_status
+            # would need int to reach that same verdict (the forward
+            # direction is already covered by the check above)
+            if is_int[stmt.lhs]
+                changed = shape_force_int_expr!(stmt.rhs, is_int) || changed
             end
         elseif stmt.kind == :for
             changed = shape_propagate_int!(stmt.body, is_int) || changed
@@ -649,6 +649,32 @@ function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool
         end
     end
     return changed
+end
+
+# operators whose result is Int64 exactly when every operand is --
+# shared with shape_expr_int_status's forward reasoning so the two
+# directions can't drift apart
+function shape_int_preserving_ops()
+    return Set{Symbol}([:+, :-, :*, :^, :abs, :sign, :max, :min, :mod, :floor, :ceil, :trunc])
+end
+
+# given expr is already known to evaluate to Int64, force every
+# operand that fact depends on to Int64 too -- recurses through
+# int-preserving ops (mirrors shape_expr_int_status in reverse);
+# a bare copy is just the single-leaf case of this same rule
+function shape_force_int_expr!(expr, is_int::Dict{Symbol,Bool})
+    if expr isa Symbol
+        (haskey(is_int, expr) && !is_int[expr]) || return false
+        is_int[expr] = true
+        return true
+    elseif expr isa Expr && expr.head == :call && expr.args[1] in shape_int_preserving_ops()
+        changed = false
+        for a in expr.args[2:end]
+            changed = shape_force_int_expr!(a, is_int) || changed
+        end
+        return changed
+    end
+    return false
 end
 
 # tri-state: :int (provably integer), :float (provably float), or
@@ -670,7 +696,7 @@ function shape_expr_int_status(expr, is_int::Dict{Symbol,Bool})
         elseif op in (:sqrt, :exp, :log, :log10, :sin, :cos, :tan,
                       :asin, :acos, :atan, :sinh, :cosh, :tanh)
             return :float
-        elseif op in (:+, :-, :*, :^, :abs, :sign, :max, :min, :mod, :floor, :ceil, :trunc)
+        elseif op in shape_int_preserving_ops()
             any(==(:float), arg_status) && return :float
             all(==(:int), arg_status) && return :int
             return :unknown
@@ -1613,7 +1639,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites)
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
-    append!(body, agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks))
+    append!(body, agen_forward_body(kernel.body, kernel.sig.kinds, active_map, false, read_anywhere, reassigned, stacks))
     append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, unsafe, false, read_anywhere, reassigned, stacks))
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
@@ -1871,7 +1897,7 @@ end
 
 # ---- forward sweep (walks the raw primal `statement_list`) ---------
 
-function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, stacks)
+function agen_forward_body(body, kinds, active_map, seq, read_anywhere, reassigned, stacks)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
@@ -1882,8 +1908,11 @@ function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, sta
             # write is a plain inactive literal; the backward sweep
             # only ever pops for a write whose own rhs is active, so
             # pushing here on every write regardless would push more
-            # than gets popped
-            if agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, seq, read_anywhere)
+            # than gets popped. An int-kinded lhs never owns a
+            # :value/:array site regardless of what rhs activity says
+            # -- only :tripcount covers int reassignment -- matching
+            # snap_plan's own gate on the write's target, not its rhs.
+            if kinds[var] in (:scalar_float, :array_float) && agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, seq, read_anywhere)
                 push!(exprs, Expr(:call, :push!, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs))
             end
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
@@ -1891,12 +1920,12 @@ function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, sta
             for bv in agen_tripcount_bound_vars(stmt, reassigned)
                 push!(exprs, Expr(:call, :push!, stacks[(:tripcount, bv)], bv))
             end
-            inner = agen_forward_body(stmt.body, active_map, seq || stmt.sequential, read_anywhere, reassigned, stacks)
+            inner = agen_forward_body(stmt.body, kinds, active_map, seq || stmt.sequential, read_anywhere, reassigned, stacks)
             push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
-            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, active_map, seq, read_anywhere, reassigned, stacks))
-            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, active_map, seq, read_anywhere, reassigned, stacks))
+            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, kinds, active_map, seq, read_anywhere, reassigned, stacks))
+            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, kinds, active_map, seq, read_anywhere, reassigned, stacks))
             push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
         end
     end
@@ -2007,7 +2036,10 @@ function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stack
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     is_accum = agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
     exprs = Any[]
-    if stmt.active
+    # int-kinded lhs can't own a shadow at all, regardless of what
+    # stmt.active (this write's rhs) says -- same reasoning as the
+    # forward sweep's push gate
+    if kinds[var] in (:scalar_float, :array_float) && stmt.active
         if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, Expr(:call, :pop!, nm)))
