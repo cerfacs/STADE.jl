@@ -28,19 +28,20 @@
 #   agen_   Adjoint gen   reverse-mode codegen: forward sweep with
 #                         pushes, reversed backward sweep with pops,
 #                         plus the companion initstacks_* function.
+#   hvp_    Hessian-vec   forward-over-reverse: a second forward-mode
+#                         pass over agen_'s own generated code, for
+#                         Hessian-vector products.
 #   val_    Validate      correctness checking against ground truth
 #                         (finite differences; later the adjoint
 #                         identity once tangent codegen is real).
 #   io_     File I/O      the ONLY stage touching the filesystem --
 #                         reads a kernel .jl file, writes a
 #                         generated .jl file.
-#   stade_  Public API    stade_tangent / stade_adjoint (Expr in,
-#                         Expr out) and stade_*_file wrappers
-#                         (path in, path out), wiring every stage
-#                         above together for an end user.
+#   stade_  Public API    stade_tangent / stade_adjoint / stade_hvp
+#                         (Expr in, Expr out) and stade_*_file
+#                         wrappers (path in, path out), wiring every
+#                         stage above together for an end user.
 #
-# Phase 0: frozen contracts + stub bodies. Real implementations land
-# stage by stage, each checked against the val_* corpus fixtures.
 # ============================================================
 
 # kernel        :: (sig=kernel_sig, body=statement_list)
