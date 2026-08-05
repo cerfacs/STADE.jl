@@ -2268,6 +2268,235 @@ function agen_local_shadow_inits(kernel, active_map)
 end
 
 
+# ==================== hvp_* =======================================
+# Forward-over-reverse Hessian-vector products: a SECOND, independent
+# application of forward-mode differentiation, this time to the
+# ALREADY-GENERATED adjoint kernel's own statement list rather than
+# to a hand-written primal. Computes Hv = d(grad f)/dv by seeding a
+# tangent on the kernel's own inputs and propagating it straight
+# through agen_'s forward sweep (which recomputes the primal) and
+# backward sweep (which computes the gradient) -- exactly tgen_'s own
+# "shadow line right before primal line" strategy, applied to a
+# second piece of code instead of to the original primal.
+#
+# This works as a genuinely general "one more forward layer" pass
+# because reverse-mode differentiation, once carried out, leaves
+# behind straight-line, order-preserving code: no further reversal,
+# only replay. agen_'s output is exactly the kind of code forward-
+# mode differentiation already knows how to handle. The only new
+# mechanics are for push!/pop!, which never arise in a hand-written
+# primal: a push of an active value gets a paired push onto a shadow
+# stack; a pop gets a paired pop, in the same position, so LIFO order
+# is inherited automatically rather than re-derived.
+#
+# There is no lin_plan for generated code (agen_ emits Expr directly,
+# not a statement/lin_node tree), so this differentiates by walking
+# the concrete Expr the earlier stage produced, rather than a
+# separately-built tree -- the "IR" this stage adds a layer to is
+# just agen_forward_body/agen_backward_body's own output, taken as
+# input. No new derivative rules are needed either: an accumulation
+# statement's rhs is built entirely from the same whitelisted
+# intrinsics as the primal, so differentiating it a second time via
+# der_tangent_generic already gives the correct second-order term.
+#
+# Every float arg's own tangent (xd, the seed direction v the caller
+# picks) AND its adjoint-shadow's tangent (xbd) are both function
+# parameters -- for an array-kinded arg this is unavoidable (nothing
+# in this design ever allocates an array locally), and doing the same
+# for scalars keeps the convention uniform: xbd represents "does the
+# OUTER seed itself vary with v", which is 0.0 for a standard HVP,
+# but making the caller pass that explicitly is clearer than hard-
+# coding it, and costs nothing. Every local (non-argument) scalar
+# gets its own shadow AND its adjoint-shadow's shadow declared and
+# zeroed, exactly one layer past what agen_local_primal_inits /
+# agen_local_shadow_inits already do. Shadow stacks are declared
+# locally (never returned or inspected afterward) -- the original
+# stacks still come from the primal's own initstacks_foo_b, reused
+# unchanged; only the NEW shadow stacks are this stage's concern, and
+# they never need to outlive one call.
+
+function hvp_emit(kernel, active_map, lin_plan, sites)
+    sig = kernel.sig
+    stacks = agen_stack_map(sites)
+    read_anywhere = agen_collect_reads(kernel.body)
+    reassigned = agen_collect_reassigned(kernel.body)
+    unsafe = agen_unsafe_int_vars(kernel)
+
+    fwd = agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks)
+    bwd = agen_backward_body(lin_plan, sig.kinds, unsafe, false, read_anywhere, reassigned, stacks)
+
+    shadow_of = hvp_shadow_map(kernel, sites)
+
+    fname = hvp_fname(sig.name)
+    seed_args = Symbol[]
+    for a in sig.args
+        sig.kinds[a] in (:scalar_float, :array_float) || continue
+        push!(seed_args, tgen_shadow(a))
+        push!(seed_args, tgen_shadow(agen_shadow(a)))
+    end
+    fargs = vcat(agen_signature_args(sig), seed_args, agen_stack_names(sites))
+
+    body = Any[]
+    append!(body, hvp_shadow_stack_inits(sites, shadow_of))
+    append!(body, agen_local_primal_inits(kernel, active_map))
+    append!(body, agen_local_shadow_inits(kernel, active_map))
+    append!(body, hvp_local_second_inits(kernel, shadow_of))
+    append!(body, hvp_double_body(fwd, shadow_of))
+    append!(body, hvp_double_body(bwd, shadow_of))
+
+    scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
+    ret = Symbol[]
+    for a in scalar_args
+        ab = agen_shadow(a)
+        push!(ret, ab)
+        push!(ret, tgen_shadow(ab))
+    end
+    push!(body, emit_return_scalars(ret))
+
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
+end
+
+hvp_fname(name::Symbol) = Symbol(string(name) * "_hv")
+hvp_stack_shadow(stack::Symbol) = Symbol(string(stack) * "_d")
+
+# every float variable this stage will encounter: primal args/locals
+# (shadow = tgen_shadow, the same "d" convention tgen_ already uses)
+# and agen_'s own adjoint shadows (shadow = tgen_shadow of THOSE --
+# e.g. xb's own second-layer shadow is xbd, via the same function,
+# unchanged, since it only ever appends "d"); plus every Float64-
+# holding stack (a paired shadow stack). Int64 stacks -- branch/
+# tripcount bookkeeping -- get none; they're never differentiated.
+function hvp_shadow_map(kernel, sites)
+    kinds = kernel.sig.kinds
+    m = Dict{Symbol,Symbol}()
+    for (v, k) in kinds
+        if k in (:scalar_float, :array_float)
+            m[v] = tgen_shadow(v)
+            m[agen_shadow(v)] = tgen_shadow(agen_shadow(v))
+        end
+    end
+    for s in sites
+        s.kind in (:array, :value) || continue
+        nm = agen_site_stack_name(s)
+        haskey(m, nm) || (m[nm] = hvp_stack_shadow(nm))
+    end
+    return m
+end
+
+function hvp_shadow_stack_inits(sites, shadow_of)
+    exprs = Any[]
+    seen = Set{Symbol}()
+    for s in sites
+        s.kind in (:array, :value) || continue
+        nm = agen_site_stack_name(s)
+        nm in seen && continue
+        push!(seen, nm)
+        push!(exprs, Expr(:(=), shadow_of[nm], Expr(:call, Expr(:curly, :Vector, :Float64))))
+    end
+    return exprs
+end
+
+# zero-initialize every local (non-argument) scalar's own second-
+# layer shadow AND its adjoint-shadow's shadow -- exactly
+# agen_local_primal_inits/agen_local_shadow_inits's job, one layer
+# further out. Arrays can never be local (skill-jade rule 8), so
+# there's never an array case to handle here; every float arg's own
+# xd/xbd, by contrast, is a function parameter (see hvp_emit), never
+# locally initialized. Unlike agen_'s own local-init functions, this
+# does NOT gate on active_map: the forward sweep always replays every
+# primal statement regardless of activity, so this stage's shadow of
+# an "inactive" local can still be written to, and needs to exist.
+function hvp_local_second_inits(kernel, shadow_of)
+    sig = kernel.sig
+    arg_set = Set(sig.args)
+    kinds = sig.kinds
+    exprs = Any[]
+    for v in sort(collect(keys(kinds)))
+        kinds[v] == :scalar_float || continue
+        v in arg_set && continue
+        push!(exprs, Expr(:(=), shadow_of[v], 0.0))
+        push!(exprs, Expr(:(=), shadow_of[agen_shadow(v)], 0.0))
+    end
+    return exprs
+end
+
+# the general "add one forward layer" transform: differentiate a
+# statement list agen_ already produced, emitting each shadow line
+# immediately before its primal line -- tgen_'s own strategy, applied
+# to Expr agen_ built rather than to a lin_node tree, and extended to
+# recognize push!/pop! alongside assignment/for/if.
+function hvp_double_body(exprs, shadow_of)
+    out = Any[]
+    for e in exprs
+        append!(out, hvp_double_stmt(e, shadow_of))
+    end
+    return out
+end
+
+function hvp_double_stmt(e::Expr, shadow_of)
+    if e.head == :call && e.args[1] == :push!
+        stack, val = e.args[2], e.args[3]
+        out = Any[]
+        haskey(shadow_of, stack) && push!(out, Expr(:call, :push!, shadow_of[stack], hvp_tangent_expr(val, shadow_of)))
+        push!(out, e)
+        return out
+    elseif e.head == :(=)
+        lhs = e.args[1]
+        var = lhs isa Symbol ? lhs : lhs.args[1]
+        out = Any[]
+        haskey(shadow_of, var) && push!(out, Expr(:(=), hvp_shadow_lvalue(lhs, shadow_of), hvp_tangent_expr(e.args[2], shadow_of)))
+        push!(out, e)
+        return out
+    elseif e.head == :for
+        inner = hvp_double_body(e.args[2].args, shadow_of)
+        return Any[Expr(:for, e.args[1], Expr(:block, inner...))]
+    elseif e.head == :if
+        then_inner = hvp_double_body(e.args[2].args, shadow_of)
+        if length(e.args) == 3
+            els_inner = hvp_double_body(e.args[3].args, shadow_of)
+            return Any[Expr(:if, e.args[1], Expr(:block, then_inner...), Expr(:block, els_inner...))]
+        end
+        return Any[Expr(:if, e.args[1], Expr(:block, then_inner...))]
+    end
+    return Any[e]
+end
+
+# lhs of the shadow assignment -- a bare Symbol shadows to a bare
+# Symbol; an array-ref shadows to the same indices on the shadow array
+function hvp_shadow_lvalue(lhs, shadow_of)
+    lhs isa Symbol && return shadow_of[lhs]
+    return Expr(:ref, shadow_of[lhs.args[1]], lhs.args[2:end]...)
+end
+
+# recursively differentiate an arbitrary primal-valued Expr -- fuses
+# what lin_build_expr + tgen_tangent_expr do in two phases into one,
+# since there is no retained tree for generated code to sweep a
+# second time. A pop! differentiates to a pop from the paired shadow
+# stack; everything else is the same chain-rule contraction tgen_
+# already performs, via der_tangent_generic -- no new derivative
+# rules, since agen_'s own accumulation statements are built entirely
+# from the same whitelisted intrinsics as the primal.
+function hvp_tangent_expr(expr, shadow_of)
+    if expr isa Symbol
+        return get(shadow_of, expr, 0.0)
+    elseif expr isa Number
+        return 0.0
+    elseif expr isa Expr && expr.head == :ref
+        haskey(shadow_of, expr.args[1]) || return 0.0
+        return Expr(:ref, shadow_of[expr.args[1]], expr.args[2:end]...)
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :pop!
+        stack = expr.args[2]
+        haskey(shadow_of, stack) || return 0.0
+        return Expr(:call, :pop!, shadow_of[stack])
+    elseif expr isa Expr && expr.head == :call
+        args = expr.args[2:end]
+        dargs = [hvp_tangent_expr(a, shadow_of) for a in args]
+        return der_tangent_generic(expr.args[1], args, dargs)
+    end
+    error("hvp_tangent_expr: unsupported expression $expr")
+end
+
+
 # ==================== val_* =======================================
 # Correctness oracle: <y, J*x> == <J'*y, x>, checked against random
 # seed vectors.
@@ -2348,6 +2577,17 @@ function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     return agen_emit(kernel, lin_plan, snapshot_plan)
 end
 
+function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
+                    dependents::Union{Vector{Symbol},Nothing}=nothing)
+    kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
+    active_map = act_analyze(kernel)
+    snapshot_plan = snap_plan(kernel, active_map)
+    lin_plan = lin_build(kernel, active_map)
+    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan)
+    initstacks_expr = agen_init_emit(kernel, snapshot_plan)
+    return (hvp = hvp_expr, initstacks = initstacks_expr)
+end
+
 function stade_tangent_file(in_path::String, out_path::String)
     primal_expr = io_read_kernel(in_path)
     tangent_expr = stade_tangent(primal_expr)
@@ -2359,6 +2599,13 @@ function stade_adjoint_file(in_path::String, out_path::String)
     primal_expr = io_read_kernel(in_path)
     adjoint_out = stade_adjoint(primal_expr)
     io_write_kernel_file(out_path, primal_expr, [adjoint_out.initstacks, adjoint_out.adjoint])
+    return out_path
+end
+
+function stade_hvp_file(in_path::String, out_path::String)
+    primal_expr = io_read_kernel(in_path)
+    hvp_out = stade_hvp(primal_expr)
+    io_write_kernel_file(out_path, primal_expr, [hvp_out.initstacks, hvp_out.hvp])
     return out_path
 end
 
