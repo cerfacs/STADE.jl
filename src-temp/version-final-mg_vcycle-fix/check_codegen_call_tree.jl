@@ -26,7 +26,7 @@ function call_tree(f, argtypes::Tuple; seen=Dict{Tuple{Symbol,Module,Tuple},Bool
     )
 
     cis = try
-        code_typed(f, argtypes; optimize=true)   # optimize=true is required for :invoke
+        code_typed(f, argtypes; optimize=true)
     catch
         return node
     end
@@ -60,7 +60,7 @@ function call_tree(f, argtypes::Tuple; seen=Dict{Tuple{Symbol,Module,Tuple},Bool
 end
 
 function print_tree(io, node, depth=0)
-    println(io, "  "^depth, node["name"], "(", get(node, "argtypes", ""), ")",
+    println(io, "  "^depth, node["name"], "()",
                  haskey(node, "note") ? "  # $(node["note"])" : "")
     for child in get(node, "children", [])
         print_tree(io, child, depth + 1)
