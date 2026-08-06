@@ -2554,7 +2554,54 @@ end
 # ---- host-side body walk: splits off one device kernel per eligible
 #      iteration-independent loop, leaves everything else untouched --
 
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol)
+# ---- GPU backend descriptor ----------------------------------------
+# gpu_backend :: (suffix, kernel_tag, launch_macro::Symbol,
+#                 threads_kw::Symbol, blocks_kw::Symbol, tid_rhs::Expr,
+#                 atomic_macro::Expr, preamble::String)
+#
+# Everything above this point (parsing, free-var collection, stack-op
+# detection, loop-splitting decision, +/- flattening for atomic
+# detection) is genuinely backend-agnostic -- it never mentions CUDA.
+# Only five things differ between CUDA.jl and AMDGPU.jl, and they're
+# all syntactic, not semantic: the launch macro name, the two launch
+# keyword names (`threads`/`blocks` vs `groupsize`/`gridsize` -- both
+# resolve to the exact same `cld(n_iter, blocksize)` formula; AMDGPU's
+# `gridsize` is a work-group count, not a total thread count, so nothing
+# about the arithmetic below differs), the thread-index intrinsic
+# names, the atomic macro's owning module, and the `using` preamble.
+# Adding a third backend (oneAPI.jl, Metal.jl, ...) should only ever
+# mean adding one more of these constructors -- if it turns out to
+# need a change anywhere else in this section, that's a sign the new
+# backend isn't actually the same programming model and deserves its
+# own prefix instead of being forced in here.
+
+function cgen_backend_cuda()
+    return (
+        suffix = "_cuda",
+        kernel_tag = "cuda",
+        launch_macro = Symbol("@cuda"),
+        threads_kw = :threads,
+        blocks_kw = :blocks,
+        tid_rhs = :((blockIdx().x - 1) * blockDim().x + threadIdx().x),
+        atomic_macro = Expr(:., :CUDA, QuoteNode(Symbol("@atomic"))),
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"CUDA\") || Pkg.add(\"CUDA\")\nusing CUDA\nCUDA.allowscalar(false)\n",
+    )
+end
+
+function cgen_backend_amdgpu()
+    return (
+        suffix = "_amdgpu",
+        kernel_tag = "amdgpu",
+        launch_macro = Symbol("@roc"),
+        threads_kw = :groupsize,
+        blocks_kw = :gridsize,
+        tid_rhs = :(workitemIdx().x + (workgroupIdx().x - 1) * workgroupDim().x),
+        atomic_macro = Expr(:., :AMDGPU, QuoteNode(Symbol("@atomic"))),
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"AMDGPU\") || Pkg.add(\"AMDGPU\")\nusing AMDGPU\nAMDGPU.allowscalar(false)\n",
+    )
+end
+
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :stackpush
@@ -2562,15 +2609,15 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :assign
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner), cgen_body(stmt.els, kernels, owner)))
+            push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend), cgen_body(stmt.els, kernels, owner, backend)))
         elseif stmt.kind == :for
             if !stmt.sequential && !cgen_contains_stackop(stmt.body)
                 idx = length(kernels) + 1
                 fargs = cgen_free_vars(stmt, stmt.var)
-                push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs))
-                push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs))
+                push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend))
+                push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend)))
             end
         end
     end
@@ -2579,12 +2626,12 @@ end
 
 # ---- device kernel + launch construction --------------------------
 
-# prefixed with the owning function's name -- stade_cuda_file bundles
-# kernels from every function in an input file into one output file,
-# so a bare running index alone (reset per function) would collide
-# across functions; this keeps every kernel name unique per file and
-# traceable back to what generated it
-cgen_kernel_fname(owner::Symbol, idx::Int) = Symbol("cuda_kernel_" * string(owner) * "_" * string(idx) * "!")
+# prefixed with both the backend and the owning function's name --
+# stade_gpu_file bundles kernels from every function in an input file
+# (potentially processed for more than one backend over time) into
+# one output file, so a bare running index alone would collide
+cgen_kernel_fname(owner::Symbol, idx::Int, backend) =
+    Symbol(backend.kernel_tag * "_kernel_" * string(owner) * "_" * string(idx) * "!")
 
 cgen_trip_count(lo, step, hi) = Expr(:call, :+, Expr(:call, :div, Expr(:call, :-, hi, lo), step), 1)
 
@@ -2592,41 +2639,41 @@ cgen_loopvar_from_tid(lo, step, tid) =
     step == 1 ? Expr(:call, :+, lo, Expr(:call, :-, tid, 1)) :
                 Expr(:call, :+, lo, Expr(:call, :*, Expr(:call, :-, tid, 1), step))
 
-function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
+function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
     tid = :__tid
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
     body = Any[
-        Expr(:(=), tid, :((blockIdx().x - 1) * blockDim().x + threadIdx().x)),
+        Expr(:(=), tid, backend.tid_rhs),
         Expr(:if, Expr(:call, :>, tid, n_iter), Expr(:block, emit_return_nothing())),
         Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, tid)),
     ]
-    append!(body, cgen_device_body(stmt.body, stmt.var))
+    append!(body, cgen_device_body(stmt.body, stmt.var, backend))
     push!(body, emit_return_nothing())
-    return Expr(:function, Expr(:call, cgen_kernel_fname(owner, idx), fargs...), Expr(:block, body...))
+    return Expr(:function, Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...), Expr(:block, body...))
 end
 
-function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
+function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
     nblocks = Expr(:call, :cld, n_iter, :nthread_per_block)
-    call = Expr(:call, cgen_kernel_fname(owner, idx), fargs...)
-    return Expr(:macrocall, Symbol("@cuda"), nothing,
-                Expr(:(=), :threads, :nthread_per_block),
-                Expr(:(=), :blocks, nblocks),
+    call = Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...)
+    return Expr(:macrocall, backend.launch_macro, nothing,
+                Expr(:(=), backend.threads_kw, :nthread_per_block),
+                Expr(:(=), backend.blocks_kw, nblocks),
                 call)
 end
 
 # device-side body walk -- never sees :stackpush or a pop!-rhs assign,
 # since cgen_body only reaches here for a loop cgen_contains_stackop
 # already confirmed is clean at every depth
-function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol)
+function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
-            push!(exprs, cgen_device_assign(stmt, thread_var))
+            push!(exprs, cgen_device_assign(stmt, thread_var, backend))
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var), cgen_device_body(stmt.els, thread_var)))
+            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend), cgen_device_body(stmt.els, thread_var, backend)))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var)))
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend)))
         end
     end
     return exprs
@@ -2635,13 +2682,13 @@ end
 # a write races across threads unless the enclosing device loop's own
 # thread-mapped variable occurs (at any depth) in the write's index --
 # a real occurs-check, not shallow top-level membership
-function cgen_device_assign(stmt, thread_var::Symbol)
+function cgen_device_assign(stmt, thread_var::Symbol, backend)
     if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains(stmt.lhs.args[2:end], thread_var)
         terms = cgen_flatten_sum(stmt.rhs)
         self_idx = findfirst(t -> t == stmt.lhs, terms)
         if self_idx !== nothing
             other = cgen_sum_excluding(terms, self_idx)
-            return Expr(:macrocall, Expr(:., :CUDA, QuoteNode(Symbol("@atomic"))), nothing,
+            return Expr(:macrocall, backend.atomic_macro, nothing,
                         Expr(:(+=), stmt.lhs, other))
         end
     end
@@ -2683,16 +2730,16 @@ function cgen_sum_excluding(terms, skip_idx::Int)
     return Expr(:call, :+, rest...)
 end
 
-# ---- top-level emit: unifies both ingestion paths ------------------
+# ---- top-level emit: unifies both ingestion paths, any backend -----
 
-cgen_host_fname(name::Symbol) = Symbol(string(name) * "_cuda")
+cgen_host_fname(name::Symbol, backend) = Symbol(string(name) * backend.suffix)
 
-function cgen_emit(gk)
+function cgen_emit(gk, backend)
     kernels = Expr[]
-    host_body = cgen_body(gk.body, kernels, gk.name)
+    host_body = cgen_body(gk.body, kernels, gk.name, backend)
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     push!(host_body, emit_return_scalars(gk.ret))
-    host = Expr(:function, Expr(:call, cgen_host_fname(gk.name), gk.args...), Expr(:block, host_body...))
+    host = Expr(:function, Expr(:call, cgen_host_fname(gk.name, backend), gk.args...), Expr(:block, host_body...))
     return (host = host, kernels = kernels)
 end
 
@@ -2776,11 +2823,11 @@ function io_write_kernel_file(path::String, primal_expr::Expr, generated::Vector
     return nothing
 end
 
-# flat writer for stade_cuda_file -- unlike io_write_kernel_file there
+# flat writer for stade_gpu_file -- unlike io_write_kernel_file there
 # is no single designated "primal" to append last: a multi-function
 # input may hand back several independent host functions (one per
 # input def), so the caller decides the full ordered list itself
-function io_write_cuda_file(path::String, exprs::Vector{Expr}; preamble::String = "")
+function io_write_gpu_file(path::String, exprs::Vector{Expr}; preamble::String = "")
     parts = [io_expr_to_source(e) for e in exprs]
     open(path, "w") do f
         isempty(preamble) || write(f, preamble * "\n")
@@ -2826,31 +2873,34 @@ function stade_adjoint_file(in_path::String, out_path::String)
 end
 
 # Expr in, cuda_plan out -- accepts either a plain skill-jade kernel
-# or one of STADE's own generated functions (see cgen_ingest)
-function stade_cuda(expr::Expr)
-    return cgen_emit(cgen_ingest(expr))
+# or one of STADE's own generated functions (see cgen_ingest), for
+# whichever GPU backend descriptor is passed in
+function stade_gpu(expr::Expr, backend)
+    return cgen_emit(cgen_ingest(expr), backend)
 end
 
-function cgen_preamble()
-    return "import Pkg\nhaskey(Pkg.project().dependencies, \"CUDA\") || Pkg.add(\"CUDA\")\nusing CUDA\nCUDA.allowscalar(false)\n"
-end
+stade_cuda(expr::Expr) = stade_gpu(expr, cgen_backend_cuda())
+stade_amdgpu(expr::Expr) = stade_gpu(expr, cgen_backend_amdgpu())
 
 # path in, path out. Reads every function def in in_path (a plain
 # kernel file, or a stade_tangent_file/stade_adjoint_file output) and
 # writes one file: every device kernel first, then every host
 # function in original file order.
-function stade_cuda_file(in_path::String, out_path::String)
+function stade_gpu_file(in_path::String, out_path::String, backend)
     defs = io_read_kernels(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_cuda(expr)
+        plan = stade_gpu(expr, backend)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
-    io_write_cuda_file(out_path, vcat(kernels, hosts); preamble = cgen_preamble())
+    io_write_gpu_file(out_path, vcat(kernels, hosts); preamble = backend.preamble)
     return out_path
 end
+
+stade_cuda_file(in_path::String, out_path::String) = stade_gpu_file(in_path, out_path, cgen_backend_cuda())
+stade_amdgpu_file(in_path::String, out_path::String) = stade_gpu_file(in_path, out_path, cgen_backend_amdgpu())
 
 
 # ==================== smoke test ===================================
@@ -2874,5 +2924,10 @@ let
     cuda_initstacks = stade_cuda(adjoint_out.initstacks)
     @assert cuda_primal.host isa Expr && cuda_tangent.host isa Expr
     @assert cuda_adjoint.host isa Expr && cuda_initstacks.host isa Expr
-    println("cgen_* round-tripped the stub kernel's primal/tangent/adjoint/initstacks forms OK")
+    println("cgen_* round-tripped the stub kernel's primal/tangent/adjoint/initstacks forms OK (CUDA backend)")
+
+    rocm_primal = stade_amdgpu(trivial)
+    @assert rocm_primal.host isa Expr
+    @assert String(rocm_primal.host.args[1].args[1]) == "stub_amdgpu"
+    println("cgen_* round-tripped the stub kernel's primal form OK (AMDGPU backend)")
 end
