@@ -2086,13 +2086,19 @@ function agen_backward_body(plan, kinds, unsafe, in_loop, read_anywhere, reassig
         for (var, then_expr, els_expr, then_pushed, els_pushed) in resolved
             snm = stacks[(:value, var)]
             if then_pushed && els_pushed
-                push!(exprs, Expr(:call, :pop!, snm))
+                push!(exprs, Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm)))
             elseif then_pushed
-                push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:call, :pop!, snm)], Any[]))
+                push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm))], Any[]))
             elseif els_pushed
-                push!(exprs, emit_if(Expr(:call, :(==), flag, 0), Any[Expr(:call, :pop!, snm)], Any[]))
+                push!(exprs, emit_if(Expr(:call, :(==), flag, 0), Any[Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm))], Any[]))
             end
-            push!(exprs, Expr(:(=), var, Expr(:if, Expr(:call, :(==), flag, 1), then_expr, els_expr)))
+            # declared with a dummy numeric value first, then assigned
+            # in each branch, rather than `var = if cond; a; else; b;
+            # end` -- both forms are equivalent here (both branches of
+            # a plain if/else always assign var exactly once), this
+            # form is just easier to scan in the generated file
+            push!(exprs, Expr(:(=), var, 0.0))
+            push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), var, then_expr)], Any[Expr(:(=), var, els_expr)]))
         end
     end
     for idx in length(plan):-1:1
