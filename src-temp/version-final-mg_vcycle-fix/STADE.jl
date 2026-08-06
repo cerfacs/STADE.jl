@@ -1313,10 +1313,14 @@ end
 #          direct `+`/`-` operand -- see snap_is_pure_accumulation),
 #          which never needs the old value since old and new are the
 #          same quantity for adjoint purposes.
-#       2. cross-statement: written inside a sequential loop and read
-#          by some other statement anywhere in the kernel -- a write
-#          in a non-sequential loop never triggers this, even if read
-#          again later, since nothing overwrites it before that read.
+#       2. cross-statement: written inside a loop (any loop -- even a
+#          non-sequential one still runs its backward code once per
+#          iteration, and a plain reversal only reorders whole
+#          *statements*, not the separate temporal copies of a scalar
+#          across iterations) and read by some other statement
+#          anywhere in the kernel. A write outside any loop entirely
+#          never triggers this: with only one iteration ever, nothing
+#          can overwrite it before that read's backward code runs.
 #   :branch -- one per `if`, unconditionally: the reverse sweep must
 #     replay whichever arm the forward sweep actually took.
 #   :tripcount -- a loop's bounds reference a variable reassigned
@@ -1384,31 +1388,34 @@ function snap_collect_expr_vars!(expr, vars)
     return nothing
 end
 
-# one forward-order pass, emitting sites as they're found; `seq` is
-# whether the walk is currently nested inside at least one
-# sequential loop
-function snap_walk!(body, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
+# one forward-order pass, emitting sites as they're found; `in_loop`
+# is whether the walk is currently nested inside at least one `:for`
+# loop of any kind -- `.sequential` (the i_seq_ naming convention)
+# governs iteration *direction* at codegen time, a separate concern;
+# every loop, sequential or not, still runs its body -- and hence any
+# conditional write inside it -- once per iteration
+function snap_walk!(body, active_map, kinds, in_loop, reassigned, read_anywhere, sites, counter)
     for stmt in body
         if stmt.kind == :assign
-            snap_check_assign!(stmt, active_map, kinds, seq, read_anywhere, sites, counter)
+            snap_check_assign!(stmt, active_map, kinds, in_loop, read_anywhere, sites, counter)
         elseif stmt.kind == :for
             snap_check_tripcount!(stmt, reassigned, sites, counter)
-            snap_walk!(stmt.body, active_map, kinds, seq || stmt.sequential, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.body, active_map, kinds, true, reassigned, read_anywhere, sites, counter)
         elseif stmt.kind == :if
             counter[] = counter[] + 1
             push!(sites, (kind = :branch, array = :cond, at = counter[]))
-            snap_walk!(stmt.then, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
-            snap_walk!(stmt.els, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.then, active_map, kinds, in_loop, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.els, active_map, kinds, in_loop, reassigned, read_anywhere, sites, counter)
         end
     end
     return nothing
 end
 
-function snap_check_assign!(stmt, active_map, kinds, seq, read_anywhere, sites, counter)
+function snap_check_assign!(stmt, active_map, kinds, in_loop, read_anywhere, sites, counter)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     active_map[var] || return nothing
     snap_is_pure_accumulation(stmt.lhs, stmt.rhs, var) && return nothing
-    needs_site = snap_count_var_refs(stmt.rhs, var) > 0 || (seq && var in read_anywhere)
+    needs_site = snap_count_var_refs(stmt.rhs, var) > 0 || (in_loop && var in read_anywhere)
     needs_site || return nothing
     kind = kinds[var] == :array_float ? :array : :value
     counter[] = counter[] + 1
@@ -1873,10 +1880,10 @@ function agen_count_expr_occurrences(expr, target)
     return total
 end
 
-function agen_needs_snapshot(lhs, rhs, var, seq, read_anywhere)
+function agen_needs_snapshot(lhs, rhs, var, in_loop, read_anywhere)
     agen_is_pure_accumulation(lhs, rhs, var) && return false
     agen_count_var_refs(rhs, var) > 0 && return true
-    return seq && (var in read_anywhere)
+    return in_loop && (var in read_anywhere)
 end
 
 # bound-variables of a :for statement that are reassigned somewhere
@@ -1897,7 +1904,7 @@ end
 
 # ---- forward sweep (walks the raw primal `statement_list`) ---------
 
-function agen_forward_body(body, kinds, active_map, seq, read_anywhere, reassigned, stacks)
+function agen_forward_body(body, kinds, active_map, in_loop, read_anywhere, reassigned, stacks)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
@@ -1912,7 +1919,7 @@ function agen_forward_body(body, kinds, active_map, seq, read_anywhere, reassign
             # :value/:array site regardless of what rhs activity says
             # -- only :tripcount covers int reassignment -- matching
             # snap_plan's own gate on the write's target, not its rhs.
-            if kinds[var] in (:scalar_float, :array_float) && agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, seq, read_anywhere)
+            if kinds[var] in (:scalar_float, :array_float) && agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, in_loop, read_anywhere)
                 push!(exprs, Expr(:call, :push!, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs))
             end
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
@@ -1920,12 +1927,12 @@ function agen_forward_body(body, kinds, active_map, seq, read_anywhere, reassign
             for bv in agen_tripcount_bound_vars(stmt, reassigned)
                 push!(exprs, Expr(:call, :push!, stacks[(:tripcount, bv)], bv))
             end
-            inner = agen_forward_body(stmt.body, kinds, active_map, seq || stmt.sequential, read_anywhere, reassigned, stacks)
+            inner = agen_forward_body(stmt.body, kinds, active_map, true, read_anywhere, reassigned, stacks)
             push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
-            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, kinds, active_map, seq, read_anywhere, reassigned, stacks))
-            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, kinds, active_map, seq, read_anywhere, reassigned, stacks))
+            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, kinds, active_map, in_loop, read_anywhere, reassigned, stacks))
+            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, kinds, active_map, in_loop, read_anywhere, reassigned, stacks))
             push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
         end
     end
@@ -1953,10 +1960,62 @@ end
 # (:value), matching how snap_plan classified the same write
 agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
 
+# find the top-level :assign to `var` in a lin_plan body, if any --
+# only looks at direct children, matching how the :if handling below
+# only ever needs a branch's OWN immediate write, not one buried
+# inside a further-nested :for/:if
+function agen_find_assign(body, var)
+    for s in body
+        s.kind == :assign || continue
+        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
+        v == var && return s
+    end
+    return nothing
+end
+
+# the constant a branch-snapshotted scalar falls back to on whichever
+# side of the :if doesn't assign it -- the nearest preceding sibling
+# assign to the same var in this exact block. Only a literal-Number
+# rhs is trusted here (not merely "inactive"): recompute must not
+# depend on any other variable's current value, which the reverse
+# sweep could already have disturbed by this point.
+function agen_branch_scalar_fallback(plan, idx, var)
+    for k in (idx - 1):-1:1
+        s = plan[k]
+        s.kind == :assign || continue
+        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
+        v == var || continue
+        return s.tree.expr isa Number ? s.tree.expr : nothing
+    end
+    return nothing
+end
+
+# scalar_float vars this :if assigns (on either branch) purely
+# because they're read elsewhere -- NOT because the write is a
+# self-recurrence, which the normal pre-write restore already handles
+# correctly (it needs the OLD value at exactly this write's own
+# reverse position, unlike the read-elsewhere case below).
+function agen_if_branch_scalar_vars(stmt, kinds, in_loop, read_anywhere)
+    vars = Symbol[]
+    for sub in vcat(stmt.then, stmt.els)
+        sub.kind == :assign || continue
+        var = sub.lhs isa Symbol ? sub.lhs : sub.lhs.args[1]
+        (sub.lhs isa Symbol && kinds[var] == :scalar_float) || continue
+        agen_count_var_refs(sub.tree.expr, var) == 0 || continue
+        agen_needs_snapshot(sub.lhs, sub.tree.expr, var, in_loop, read_anywhere) || continue
+        var in vars || push!(vars, var)
+    end
+    return vars
+end
+
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
-function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
+# `skip_restore`: vars whose pre-write restore has already been done
+# by an enclosing :if's hoist (see below) -- popping again here would
+# consume the wrong stack entry. Only ever non-empty for the direct
+# then/els body of a hoisted :if; every other call uses the default.
+function agen_backward_body(plan, kinds, unsafe, in_loop, read_anywhere, reassigned, stacks, skip_restore = Set{Symbol}())
     exprs = Any[]
     # int-kinded local assignments (index/bookkeeping helpers) never
     # carry gradients, so agen_backward_assign emits nothing at all
@@ -1981,15 +2040,70 @@ function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned,
             end
         end
     end
-    for stmt in reverse(plan)
+    # Branch-snapshotted scalars (x = 0.0; if cond: x = expr end)
+    # whose own primal VALUE -- not just their shadow -- is read by a
+    # DIFFERENT statement later in this same block, for a nonlinear
+    # term's own partial (e.g. a divisor whose adjoint needs the
+    # literal numerator it divides). A plain reverse walk restores
+    # such a scalar only once it reaches the :if itself, which comes
+    # AFTER that read in the reverse walk (the :if precedes the read
+    # in forward order) -- one iteration too late, so the read picks
+    # up whatever the deeper, already-processed iteration left
+    # behind. Recomputed here instead, forward-style, from the
+    # freshly popped branch flag: safe because a snapshot site's rhs
+    # (an array read, or the literal-constant sibling it falls back
+    # to) never itself depends on anything the reverse sweep has
+    # touched yet at this point. Walked in reverse-plan order so
+    # multiple qualifying :if's in this block still pop branch_stack
+    # in the same relative LIFO order a plain reversal would.
+    branch_flags = Dict{Int,Symbol}()
+    hoisted_vars = Dict{Int,Set{Symbol}}()
+    for idx in length(plan):-1:1
+        stmt = plan[idx]
+        stmt.kind == :if || continue
+        vars = agen_if_branch_scalar_vars(stmt, kinds, in_loop, read_anywhere)
+        isempty(vars) && continue
+        resolved = Any[]
+        for var in vars
+            then_stmt = agen_find_assign(stmt.then, var)
+            els_stmt = agen_find_assign(stmt.els, var)
+            then_expr = then_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : then_stmt.tree.expr
+            els_expr = els_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : els_stmt.tree.expr
+            (then_expr === nothing || els_expr === nothing) && continue   # can't safely recompute -- leave to the normal (imperfectly-timed) restore
+            # a branch only pushed onto the value stack (forward sweep)
+            # if its own rhs was active -- a literal-constant branch
+            # (like the `then_expr`/`els_expr` fallback case) never
+            # does, matching agen_forward_body's own push gate exactly
+            then_pushed = then_stmt !== nothing && then_stmt.active
+            els_pushed = els_stmt !== nothing && els_stmt.active
+            push!(resolved, (var, then_expr, els_expr, then_pushed, els_pushed))
+        end
+        isempty(resolved) && continue
+        flag = Symbol("__branch_pre_", idx)
+        push!(exprs, Expr(:(=), flag, Expr(:call, :pop!, stacks[(:branch, :cond)])))
+        branch_flags[idx] = flag
+        hoisted_vars[idx] = Set(v for (v, _, _, _, _) in resolved)
+        for (var, then_expr, els_expr, then_pushed, els_pushed) in resolved
+            snm = stacks[(:value, var)]
+            if then_pushed && els_pushed
+                push!(exprs, Expr(:call, :pop!, snm))
+            elseif then_pushed
+                push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:call, :pop!, snm)], Any[]))
+            elseif els_pushed
+                push!(exprs, emit_if(Expr(:call, :(==), flag, 0), Any[Expr(:call, :pop!, snm)], Any[]))
+            end
+            push!(exprs, Expr(:(=), var, Expr(:if, Expr(:call, :(==), flag, 1), then_expr, els_expr)))
+        end
+    end
+    for idx in length(plan):-1:1
+        stmt = plan[idx]
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
-            append!(exprs, agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks))
+            append!(exprs, agen_backward_assign(stmt, kinds, in_loop, read_anywhere, reassigned, stacks, skip_restore))
         elseif stmt.kind == :for
-            inner_seq = seq || stmt.sequential
-            inner = agen_backward_body(stmt.body, kinds, unsafe, inner_seq, read_anywhere, reassigned, stacks)
-            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, inner_seq, read_anywhere, reassigned)
+            inner = agen_backward_body(stmt.body, kinds, unsafe, true, read_anywhere, reassigned, stacks)
+            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, true, read_anywhere, reassigned)
             loop_expr = reverse_it ?
                 emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
                 emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
@@ -1998,11 +2112,16 @@ function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned,
             end
             push!(exprs, loop_expr)
         elseif stmt.kind == :if
-            nm = stacks[(:branch, :cond)]
-            then_exprs = agen_backward_body(stmt.then, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
-            els_exprs = agen_backward_body(stmt.els, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
-            push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
-            push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
+            skip = get(hoisted_vars, idx, Set{Symbol}())
+            then_exprs = agen_backward_body(stmt.then, kinds, unsafe, in_loop, read_anywhere, reassigned, stacks, skip)
+            els_exprs = agen_backward_body(stmt.els, kinds, unsafe, in_loop, read_anywhere, reassigned, stacks, skip)
+            if haskey(branch_flags, idx)
+                push!(exprs, emit_if(Expr(:call, :(==), branch_flags[idx], 1), then_exprs, els_exprs))
+            else
+                nm = stacks[(:branch, :cond)]
+                push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
+                push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
+            end
         end
     end
     return exprs
@@ -2015,16 +2134,16 @@ end
 # with no value recurrence at all can still push a branch flag every
 # iteration and must be walked backward to pop them correctly --
 # reversal here is about stack order, not mathematical dependency.
-function agen_body_has_snapshot(body, seq, read_anywhere, reassigned)
+function agen_body_has_snapshot(body, in_loop, read_anywhere, reassigned)
     for stmt in body
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if stmt.active && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
+            if stmt.active && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, in_loop, read_anywhere)
                 return true
             end
         elseif stmt.kind == :for
             !isempty(agen_tripcount_bound_vars(stmt, reassigned)) && return true
-            agen_body_has_snapshot(stmt.body, seq || stmt.sequential, read_anywhere, reassigned) && return true
+            agen_body_has_snapshot(stmt.body, true, read_anywhere, reassigned) && return true
         elseif stmt.kind == :if
             return true   # every `if` pushes a branch flag, unconditionally
         end
@@ -2032,7 +2151,7 @@ function agen_body_has_snapshot(body, seq, read_anywhere, reassigned)
     return false
 end
 
-function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks)
+function agen_backward_assign(stmt, kinds, in_loop, read_anywhere, reassigned, stacks, skip_restore = Set{Symbol}())
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     is_accum = agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
     exprs = Any[]
@@ -2040,7 +2159,7 @@ function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stack
     # stmt.active (this write's rhs) says -- same reasoning as the
     # forward sweep's push gate
     if kinds[var] in (:scalar_float, :array_float) && stmt.active
-        if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
+        if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, in_loop, read_anywhere) && !(var in skip_restore)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, Expr(:call, :pop!, nm)))
         end
