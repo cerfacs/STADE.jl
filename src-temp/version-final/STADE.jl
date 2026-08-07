@@ -2622,7 +2622,9 @@ let
     end)
     tangent_out = stade_tangent(trivial)
     adjoint_out = stade_adjoint(trivial)
+    hvp_out     = stade_hvp(trivial)
     @assert tangent_out isa Expr
     @assert adjoint_out.adjoint isa Expr && adjoint_out.initstacks isa Expr
+    @assert hvp_out.hvp isa Expr && hvp_out.initstacks isa Expr
     println("STADE.jl Phase 0 skeleton loaded and round-tripped a stub kernel OK")
 end
