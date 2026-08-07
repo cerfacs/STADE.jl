@@ -2531,6 +2531,506 @@ function val_run_corpus(tier::Symbol)
 end
 
 
+# ==================== val_* (baseline-driven FD/JVP/VJP validation) =
+# Extends the val_ oracle above to work generically on any
+# skill-jade kernel's generated _d/_b/_hv code, not just a hand-built
+# fixture closure. Three identities, each reusing the same two
+# oracles (val_finite_diff_check / val_finite_diff_check_jvp):
+#   tangent (_d): direct JVP check -- f_d(x0,d) vs central FD of the
+#                 primal itself, for random directions d.
+#   adjoint (_b): dot-product identity <y,Jx> == <J'y,x> -- reuses
+#                 val_finite_diff_check on the scalar closure
+#                 f_eval(x) = y.primal(x), f_grad(x) = adjoint(x;seed=y).
+#   hvp (_hv):    JVP check one layer out -- f_hv(x0,v) vs central FD
+#                 of "gradient(x) at fixed seed y", the exact same
+#                 val_finite_diff_check_jvp oracle applied to the
+#                 adjoint instead of the primal.
+# independents/dependents are always every float arg (parse_kernel's
+# own rule), so "x" and "y" share one flattened space of dimension n;
+# a single random baseline vector serves as both the input point and
+# (separately drawn) the seed.
+
+# ---- direct JVP oracle (new; val_finite_diff_check above already
+#      covers the dot-product/gradient oracle unmodified) -----------
+
+# unlike val_finite_diff_check (one x0-only gradient reused across
+# many directions), the analytic side here is direction-dependent --
+# f_jvp(x0,d) is called fresh each trial -- so it can't reuse that
+# function's structure.
+function val_finite_diff_check_jvp(f_eval_vec::Function, f_jvp::Function, x0::Vector{Float64};
+                                    epsilon::Float64 = 1e-6, trials::Int = 10, rtol::Float64 = 1e-3)
+    n = length(x0)
+    results = NamedTuple[]
+    worst_rel_err = 0.0
+    for t in 1:trials
+        d = randn(n)
+        d = d ./ sqrt(sum(d .^ 2))
+        fd = (f_eval_vec(x0 .+ epsilon .* d) .- f_eval_vec(x0 .- epsilon .* d)) ./ (2 * epsilon)
+        jv = f_jvp(x0, d)
+        denom = max(maximum(abs.(fd)), maximum(abs.(jv)), 1e-12)
+        rel_err = maximum(abs.(fd .- jv)) / denom
+        worst_rel_err = max(worst_rel_err, rel_err)
+        push!(results, (direction = d, finite_diff = fd, jvp = jv, rel_err = rel_err))
+    end
+    return (ok = worst_rel_err <= rtol, max_rel_err = worst_rel_err, trials = results)
+end
+
+# ---- static helpers over a parsed kernel (no execution) ------------
+
+# static scan: the largest number of :ref indices used anywhere for
+# `arr` -- its dimensionality, never hardcoded to a fixed count.
+function val_arg_ndims(kernel, arr::Symbol)
+    found = Ref(1)
+    val_scan_ndims!(kernel.body, arr, found)
+    return found[]
+end
+
+function val_scan_ndims!(body, arr::Symbol, found::Ref{Int})
+    for stmt in body
+        if stmt.kind == :assign
+            val_scan_expr_ndims!(stmt.lhs, arr, found)
+            val_scan_expr_ndims!(stmt.rhs, arr, found)
+        elseif stmt.kind == :for
+            val_scan_expr_ndims!(stmt.lo, arr, found)
+            val_scan_expr_ndims!(stmt.hi, arr, found)
+            val_scan_ndims!(stmt.body, arr, found)
+        elseif stmt.kind == :if
+            val_scan_expr_ndims!(stmt.cond, arr, found)
+            val_scan_ndims!(stmt.then, arr, found)
+            val_scan_ndims!(stmt.els, arr, found)
+        end
+    end
+    return nothing
+end
+
+function val_scan_expr_ndims!(expr, arr::Symbol, found::Ref{Int})
+    if expr isa Expr && expr.head == :ref && expr.args[1] == arr
+        found[] = max(found[], length(expr.args) - 1)
+    end
+    if expr isa Expr
+        for a in expr.args
+            val_scan_expr_ndims!(a, arr, found)
+        end
+    end
+    return nothing
+end
+
+# duplicated from tgen_reassigned_scalar_args's logic rather than
+# calling it directly (skill-stade purity rule: rely on another
+# stage's documented shapes, not its private helpers) -- val_ needs
+# to know exactly which scalar_float args a generated tangent file
+# returns, to correctly capture its output.
+function val_reassigned_scalar_float_args(kernel)
+    arg_set = Set(kernel.sig.args)
+    out = Symbol[]
+    val_collect_reassigned_scalar_float!(kernel.body, arg_set, kernel.sig.kinds, out)
+    return out
+end
+
+function val_collect_reassigned_scalar_float!(body, arg_set, kinds, out)
+    for stmt in body
+        if stmt.kind == :assign
+            if stmt.lhs isa Symbol && stmt.lhs in arg_set && kinds[stmt.lhs] == :scalar_float && !(stmt.lhs in out)
+                push!(out, stmt.lhs)
+            end
+        elseif stmt.kind == :for
+            val_collect_reassigned_scalar_float!(stmt.body, arg_set, kinds, out)
+        elseif stmt.kind == :if
+            val_collect_reassigned_scalar_float!(stmt.then, arg_set, kinds, out)
+            val_collect_reassigned_scalar_float!(stmt.els, arg_set, kinds, out)
+        end
+    end
+    return nothing
+end
+
+# rebuilds the primal with an appended `return` of every scalar_float
+# arg's final value -- skill-jade kernels never contain their own
+# `return` statement (only :assign/:for/:if are recognized statement
+# kinds), so appending one at the very end is always safe, and it's
+# the only way a caller can observe a reassigned scalar argument the
+# same way it already observes array arguments (in-place mutation).
+function val_primal_observing_expr(kernel, primal_expr::Expr)
+    sig = kernel.sig
+    fname = Symbol(string(sig.name) * "_valobs")
+    scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
+    body = Expr(:block, primal_expr.args[2].args..., emit_return_scalars(scalar_args))
+    return Expr(:function, Expr(:call, fname, sig.args...), body)
+end
+
+# ---- execution helpers (the one place val_ steps outside pure Expr
+#      manipulation: running dynamically generated code requires
+#      evaluating it. Not filesystem access -- still permitted outside
+#      io_ -- but it does define a transient global method; an
+#      accepted, narrowly scoped exception, since there is no other
+#      way to numerically execute generated Julia code.) --------------
+
+function val_compile(expr::Expr)
+    fname = expr.args[1].args[1]
+    Base.eval(Main, expr)
+    return getfield(Main, fname)
+end
+
+function val_init_stacks(initstacks_fn::Function)
+    r = Base.invokelatest(initstacks_fn)
+    r === nothing && return ()
+    r isa Tuple && return r
+    return (r,)
+end
+
+# ---- random baseline generation -------------------------------------
+
+function val_random_int_args(sig; lo::Int = 2, hi::Int = 5)
+    return Dict{Symbol,Int}(a => rand(lo:hi) for a in sig.args if sig.kinds[a] == :scalar_int)
+end
+
+function val_random_values(kernel, shapes::Dict, int_args::Dict{Symbol,Int}; scale::Float64 = 1.0)
+    sig = kernel.sig
+    values = Dict{Symbol,Any}()
+    for a in sig.args
+        k = sig.kinds[a]
+        if k == :scalar_float
+            values[a] = scale * randn()
+        elseif k == :array_float
+            values[a] = scale .* randn(shapes[a]...)
+        elseif k == :array_int
+            values[a] = rand(1:3, shapes[a]...)
+        end
+    end
+    return values
+end
+
+# grows one trial size N (same N along every dimension, for every
+# array_float/array_int arg) until the primal runs without a
+# BoundsError. Oversized dimensions are harmless -- only undersized
+# ones are wrong -- so this always converges on a *safe* (if not
+# minimal) size without any static index-range analysis, and stays
+# fully general across arbitrarily shaped index expressions.
+function val_grow_shapes(kernel, primal_fn::Function, int_args::Dict{Symbol,Int};
+                          start::Int = 4, growth::Int = 2, max_size::Int = 512)
+    sig = kernel.sig
+    ndims_of = Dict(a => val_arg_ndims(kernel, a) for a in sig.args
+                     if sig.kinds[a] in (:array_float, :array_int))
+    N = start
+    while N <= max_size
+        shapes = Dict(a => ntuple(_ -> N, ndims_of[a]) for a in keys(ndims_of))
+        trial = val_random_values(kernel, shapes, int_args; scale = 1.0)
+        ok = try
+            call_args = Any[sig.kinds[a] == :scalar_int ? int_args[a] : deepcopy(trial[a]) for a in sig.args]
+            Base.invokelatest(primal_fn, call_args...)
+            true
+        catch e
+            e isa BoundsError || rethrow(e)
+            false
+        end
+        ok && return shapes
+        N *= growth
+    end
+    error("val_grow_shapes: could not find a working array size up to $max_size for $(sig.name)")
+end
+
+# orchestrates a full random baseline: random ints, a compiled primal
+# probed to find safe array sizes, then final random Float64/Int
+# content at those sizes. A few retries with fresh int draws guard
+# against a rare unlucky combination (e.g. a degenerate range) tripping
+# an error unrelated to array sizing.
+function val_generate_baseline(kernel, primal_expr::Expr;
+                                scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 5)
+    primal_fn = val_compile(primal_expr)
+    last_err = nothing
+    for attempt in 1:attempts
+        int_args = val_random_int_args(kernel.sig; lo = int_lo, hi = int_hi)
+        try
+            shapes = val_grow_shapes(kernel, primal_fn, int_args; start = grow_start, max_size = grow_max)
+            values = val_random_values(kernel, shapes, int_args; scale = scale)
+            return (int_args = int_args, values = values)
+        catch e
+            last_err = e
+            continue
+        end
+    end
+    error("val_generate_baseline: failed after $attempts attempts for $(kernel.sig.name): $last_err")
+end
+
+# ---- flatten/unflatten over the shared x/y space (all float args,
+#      in signature order; arrays row-major via Julia's own `vec`) ---
+
+val_float_arg_order(sig) = [a for a in sig.args if sig.kinds[a] in (:scalar_float, :array_float)]
+
+function val_flatten(kernel, values::Dict)
+    x = Float64[]
+    for a in val_float_arg_order(kernel.sig)
+        v = values[a]
+        v isa Number ? push!(x, v) : append!(x, vec(v))
+    end
+    return x
+end
+
+# rebuilds a values Dict (fresh array copies, never aliasing the
+# template) with every float arg replaced by x's content, in the same
+# order val_flatten used; non-float entries are copied through from
+# `template` unchanged (needed for array_int workspace args).
+function val_unflatten(kernel, int_args::Dict, template::Dict, x::Vector{Float64})
+    sig = kernel.sig
+    out = Dict{Symbol,Any}()
+    for a in sig.args
+        sig.kinds[a] == :array_int && (out[a] = template[a])
+    end
+    i = 1
+    for a in val_float_arg_order(sig)
+        v = template[a]
+        if v isa Number
+            out[a] = x[i]; i += 1
+        else
+            n = length(v)
+            out[a] = reshape(x[i:i+n-1], size(v))
+            i += n
+        end
+    end
+    return out
+end
+
+function val_zeros_like(kernel, values::Dict)
+    out = Dict{Symbol,Any}()
+    for a in val_float_arg_order(kernel.sig)
+        v = values[a]
+        out[a] = v isa Number ? 0.0 : zeros(size(v))
+    end
+    return out
+end
+
+function val_random_values_like(kernel, values::Dict; scale::Float64 = 1.0)
+    out = Dict{Symbol,Any}()
+    for a in val_float_arg_order(kernel.sig)
+        v = values[a]
+        out[a] = v isa Number ? scale * randn() : scale .* randn(size(v)...)
+    end
+    return out
+end
+
+# ---- positional call-argument builders -- duplicate
+#      tgen_signature_args/agen_signature_args's documented convention
+#      (float arg immediately followed by its shadow; int args
+#      unchanged) rather than reaching into those stages' private
+#      helpers, per the same purity rule agen_ itself follows when
+#      duplicating snap_'s TBR predicate. --------------------------
+
+function val_primal_call_args(sig, int_args::Dict, values::Dict)
+    return Any[sig.kinds[a] == :scalar_int ? int_args[a] : deepcopy(values[a]) for a in sig.args]
+end
+
+function val_tangent_call_args(sig, int_args::Dict, values::Dict, dvalues::Dict)
+    call = Any[]
+    for a in sig.args
+        k = sig.kinds[a]
+        if k == :scalar_int
+            push!(call, int_args[a])
+        elseif k in (:scalar_float, :array_float)
+            push!(call, deepcopy(values[a]))
+            push!(call, deepcopy(dvalues[a]))
+        else
+            push!(call, deepcopy(values[a]))
+        end
+    end
+    return call
+end
+
+function val_adjoint_call_args(sig, int_args::Dict, values::Dict, seed::Dict, stacks)
+    call = Any[]
+    for a in sig.args
+        k = sig.kinds[a]
+        if k == :scalar_int
+            push!(call, int_args[a])
+        elseif k in (:scalar_float, :array_float)
+            push!(call, deepcopy(values[a]))
+            push!(call, deepcopy(seed[a]))
+        else
+            push!(call, deepcopy(values[a]))
+        end
+    end
+    append!(call, stacks)
+    return call
+end
+
+function val_hvp_call_args(sig, int_args::Dict, values::Dict, seed::Dict, dvalues::Dict, dseed::Dict, stacks)
+    call = Any[]
+    for a in sig.args
+        k = sig.kinds[a]
+        if k == :scalar_int
+            push!(call, int_args[a])
+        elseif k in (:scalar_float, :array_float)
+            push!(call, deepcopy(values[a]))
+            push!(call, deepcopy(seed[a]))
+        else
+            push!(call, deepcopy(values[a]))
+        end
+    end
+    for a in sig.args
+        sig.kinds[a] in (:scalar_float, :array_float) || continue
+        push!(call, deepcopy(dvalues[a]))
+        push!(call, deepcopy(dseed[a]))
+    end
+    append!(call, stacks)
+    return call
+end
+
+# ---- call + extract-output helpers, one per generated file kind ----
+
+function val_call_primal_observed(primal_obs_fn::Function, kernel, int_args::Dict, values::Dict)
+    sig = kernel.sig
+    call_args = val_primal_call_args(sig, int_args, values)
+    ret = Base.invokelatest(primal_obs_fn, call_args...)
+    scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
+    ret_tuple = isempty(scalar_args) ? () : (length(scalar_args) == 1 ? (ret,) : ret)
+    scalar_of = Dict(zip(scalar_args, ret_tuple))
+    out = Dict{Symbol,Any}()
+    for (a, v) in zip(sig.args, call_args)
+        k = sig.kinds[a]
+        k == :scalar_float && (out[a] = scalar_of[a])
+        k == :array_float && (out[a] = v)
+    end
+    return val_flatten(kernel, out)
+end
+
+function val_call_tangent(tangent_fn::Function, kernel, int_args::Dict, values::Dict, dvalues::Dict)
+    sig = kernel.sig
+    call_args = val_tangent_call_args(sig, int_args, values, dvalues)
+    ret = Base.invokelatest(tangent_fn, call_args...)
+    reassigned = val_reassigned_scalar_float_args(kernel)
+    ret_tuple = isempty(reassigned) ? () : (length(reassigned) == 1 ? (ret,) : ret)
+    ret_of = Dict(zip(reassigned, ret_tuple))
+    out = Dict{Symbol,Any}()
+    pos = 1
+    for a in sig.args
+        k = sig.kinds[a]
+        if k == :scalar_int
+            pos += 1
+        elseif k in (:scalar_float, :array_float)
+            shadow = call_args[pos + 1]
+            out[a] = k == :scalar_float ? get(ret_of, a, dvalues[a]) : shadow
+            pos += 2
+        else
+            pos += 1
+        end
+    end
+    return val_flatten(kernel, out)
+end
+
+function val_call_adjoint(adjoint_fn::Function, initstacks_fn::Function, kernel,
+                           int_args::Dict, values::Dict, seed::Dict)
+    sig = kernel.sig
+    stacks = val_init_stacks(initstacks_fn)
+    call_args = val_adjoint_call_args(sig, int_args, values, seed, stacks)
+    ret = Base.invokelatest(adjoint_fn, call_args...)
+    scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
+    ret_tuple = isempty(scalar_args) ? () : (length(scalar_args) == 1 ? (ret,) : ret)
+    ret_of = Dict(zip(scalar_args, ret_tuple))
+    out = Dict{Symbol,Any}()
+    pos = 1
+    for a in sig.args
+        k = sig.kinds[a]
+        if k == :scalar_int
+            pos += 1
+        elseif k in (:scalar_float, :array_float)
+            shadow = call_args[pos + 1]
+            out[a] = k == :scalar_float ? ret_of[a] : shadow
+            pos += 2
+        else
+            pos += 1
+        end
+    end
+    return val_flatten(kernel, out)
+end
+
+function val_call_hv(hv_fn::Function, initstacks_fn::Function, kernel, int_args::Dict,
+                      values::Dict, seed::Dict, dvalues::Dict, dseed::Dict)
+    sig = kernel.sig
+    stacks = val_init_stacks(initstacks_fn)
+    call_args = val_hvp_call_args(sig, int_args, values, seed, dvalues, dseed, stacks)
+    ret = Base.invokelatest(hv_fn, call_args...)
+    scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
+    # each scalar arg contributes TWO return values (ab, abd), so the
+    # generated function's own bare-value-vs-tuple rule (emit_return_scalars)
+    # only ever produces a bare (non-tuple) value in the impossible case of
+    # a single combined return -- with 0 scalar args there are no returns
+    # at all (nothing), otherwise it's always a genuine tuple of length 2*n.
+    ret_tuple = isempty(scalar_args) ? () : ret
+    hv_of = Dict{Symbol,Any}(a => ret_tuple[2i] for (i, a) in enumerate(scalar_args))
+    n_lead = count(a -> sig.kinds[a] == :scalar_int, sig.args) +
+             count(a -> sig.kinds[a] == :array_int, sig.args) +
+             2 * count(a -> sig.kinds[a] in (:scalar_float, :array_float), sig.args)
+    out = Dict{Symbol,Any}()
+    i = 0
+    for a in sig.args
+        sig.kinds[a] in (:scalar_float, :array_float) || continue
+        xbd_pos = n_lead + 2 * i + 2
+        out[a] = sig.kinds[a] == :scalar_float ? hv_of[a] : call_args[xbd_pos]
+        i += 1
+    end
+    return val_flatten(kernel, out)
+end
+
+# ---- top-level orchestration: one function per generated file kind -
+
+function val_validate_tangent(kernel, primal_expr::Expr, tangent_expr::Expr, baseline;
+                               trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+    obs_fn = val_compile(val_primal_observing_expr(kernel, primal_expr))
+    tangent_fn = val_compile(tangent_expr)
+    int_args = baseline.int_args
+    x0 = val_flatten(kernel, baseline.values)
+    f_eval_vec = x -> val_call_primal_observed(obs_fn, kernel, int_args,
+                                                val_unflatten(kernel, int_args, baseline.values, x))
+    f_jvp = (x, d) -> begin
+        vals = val_unflatten(kernel, int_args, baseline.values, x)
+        dvals = val_unflatten(kernel, int_args, val_zeros_like(kernel, baseline.values), d)
+        val_call_tangent(tangent_fn, kernel, int_args, vals, dvals)
+    end
+    return val_finite_diff_check_jvp(f_eval_vec, f_jvp, x0; epsilon = epsilon, trials = trials, rtol = rtol)
+end
+
+function val_validate_adjoint(kernel, primal_expr::Expr, adjoint_out, baseline;
+                               trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+    obs_fn = val_compile(val_primal_observing_expr(kernel, primal_expr))
+    adjoint_fn = val_compile(adjoint_out.adjoint)
+    initstacks_fn = val_compile(adjoint_out.initstacks)
+    int_args = baseline.int_args
+    x0 = val_flatten(kernel, baseline.values)
+    seed = val_random_values_like(kernel, baseline.values)
+    seed_flat = val_flatten(kernel, seed)
+    f_eval = x -> begin
+        vals = val_unflatten(kernel, int_args, baseline.values, x)
+        y = val_call_primal_observed(obs_fn, kernel, int_args, vals)
+        sum(y .* seed_flat)
+    end
+    f_grad = x0_ -> begin
+        vals = val_unflatten(kernel, int_args, baseline.values, x0_)
+        val_call_adjoint(adjoint_fn, initstacks_fn, kernel, int_args, vals, seed)
+    end
+    return val_finite_diff_check(f_eval, f_grad, x0; epsilon = epsilon, trials = trials, rtol = rtol)
+end
+
+function val_validate_hvp(kernel, primal_expr::Expr, adjoint_out, hvp_out, baseline;
+                           trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+    adjoint_fn = val_compile(adjoint_out.adjoint)
+    initstacks_fn = val_compile(adjoint_out.initstacks)
+    hv_fn = val_compile(hvp_out.hvp)
+    int_args = baseline.int_args
+    x0 = val_flatten(kernel, baseline.values)
+    seed = val_random_values_like(kernel, baseline.values)
+    g_of = x -> begin
+        vals = val_unflatten(kernel, int_args, baseline.values, x)
+        val_call_adjoint(adjoint_fn, initstacks_fn, kernel, int_args, vals, seed)
+    end
+    hv_of = (x, v) -> begin
+        vals = val_unflatten(kernel, int_args, baseline.values, x)
+        dvals = val_unflatten(kernel, int_args, val_zeros_like(kernel, baseline.values), v)
+        dseed = val_zeros_like(kernel, baseline.values)
+        val_call_hv(hv_fn, initstacks_fn, kernel, int_args, vals, seed, dvals, dseed)
+    end
+    return val_finite_diff_check_jvp(g_of, hv_of, x0; epsilon = epsilon, trials = trials, rtol = rtol)
+end
+
+
 # ==================== io_* ====================================
 # File-level entry points. The only stage permitted to touch the
 # filesystem -- everything above operates purely on Expr in memory.
@@ -2554,6 +3054,93 @@ function io_write_kernel_file(path::String, primal_expr::Expr, generated::Vector
         write(f, join(parts, "\n"))
     end
     return nothing
+end
+
+io_path_exists(path::String) = isfile(path)
+io_default_yaml_path(in_path::String) = splitext(in_path)[1] * ".yaml"
+
+# a minimal, hand-written YAML subset -- no external dependency. Two
+# top-level mappings: `int_args:` (bare integers) and `values:` (a
+# scalar is a bare float, a 1-D array is a flow list `[a, b, c]`, a
+# 2-D array is a block sequence of flow-list rows). Simple enough for
+# a user to hand-edit their own baseline file in the same shape.
+function io_write_baseline_yaml(path::String, kernel_name::Symbol, int_args::Dict, values::Dict)
+    lines = String["# baseline values for kernel: $(kernel_name)", "int_args:"]
+    for k in sort(collect(keys(int_args)); by = string)
+        push!(lines, "  $(k): $(int_args[k])")
+    end
+    push!(lines, "values:")
+    for k in sort(collect(keys(values)); by = string)
+        v = values[k]
+        if v isa Number
+            push!(lines, "  $(k): $(v)")
+        elseif ndims(v) == 1
+            push!(lines, "  $(k): [" * join(v, ", ") * "]")
+        elseif ndims(v) == 2
+            push!(lines, "  $(k):")
+            for i in 1:size(v, 1)
+                push!(lines, "    - [" * join(v[i, :], ", ") * "]")
+            end
+        else
+            error("io_write_baseline_yaml: unsupported array rank for $(k)")
+        end
+    end
+    open(path, "w") do f
+        write(f, join(lines, "\n") * "\n")
+    end
+    return path
+end
+
+function io_read_baseline_yaml(path::String)
+    int_args = Dict{Symbol,Int}()
+    values = Dict{Symbol,Any}()
+    section = :none
+    pending_key = nothing
+    pending_rows = Vector{Float64}[]
+    function flush_pending!()
+        if pending_key !== nothing
+            values[pending_key] = reduce(vcat, [permutedims(r) for r in pending_rows])
+            pending_key = nothing
+            pending_rows = Vector{Float64}[]
+        end
+    end
+    for raw in readlines(path)
+        line = rstrip(raw)
+        (isempty(line) || startswith(strip(line), "#")) && continue
+        if line == "int_args:"
+            flush_pending!(); section = :int_args; continue
+        elseif line == "values:"
+            flush_pending!(); section = :values; continue
+        end
+        if section == :int_args
+            m = match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(-?\d+)\s*$", line)
+            m === nothing && error("io_read_baseline_yaml: malformed int_args line: $line")
+            int_args[Symbol(m.captures[1])] = parse(Int, m.captures[2])
+        elseif section == :values
+            mrow = match(r"^\s*-\s*\[(.*)\]\s*$", line)
+            if mrow !== nothing
+                pending_key === nothing && error("io_read_baseline_yaml: matrix row with no preceding key: $line")
+                push!(pending_rows, [parse(Float64, strip(t)) for t in split(mrow.captures[1], ",")])
+                continue
+            end
+            flush_pending!()
+            mkeyonly = match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$", line)
+            if mkeyonly !== nothing
+                pending_key = Symbol(mkeyonly.captures[1])
+                continue
+            end
+            mlist = match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\[(.*)\]\s*$", line)
+            if mlist !== nothing
+                values[Symbol(mlist.captures[1])] = [parse(Float64, strip(t)) for t in split(mlist.captures[2], ",")]
+                continue
+            end
+            mscalar = match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(-?[0-9.eE+\-]+)\s*$", line)
+            mscalar === nothing && error("io_read_baseline_yaml: malformed values line: $line")
+            values[Symbol(mscalar.captures[1])] = parse(Float64, mscalar.captures[2])
+        end
+    end
+    flush_pending!()
+    return (int_args = int_args, values = values)
 end
 
 
@@ -2608,6 +3195,77 @@ function stade_hvp_file(in_path::String, out_path::String)
     hvp_out = stade_hvp(primal_expr)
     io_write_kernel_file(out_path, primal_expr, [hvp_out.initstacks, hvp_out.hvp])
     return out_path
+end
+
+
+# ==================== stade_* baseline validation (public API) =====
+# Numerically validates a generated tangent/adjoint/hvp file against
+# central finite differences of the primal, using a baseline that is
+# auto-generated once and cached to a YAML file next to the kernel (or
+# a user-supplied one, read via the same public entry point). See the
+# val_* banner above for what each mode actually checks.
+
+# the function that reads a baseline YAML and performs the check --
+# usable directly by a caller pointing at their own hand-written file.
+function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::String;
+                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+    mode in (:tangent, :adjoint, :hvp) ||
+        error("stade_validate_from_baseline: mode must be :tangent, :adjoint, or :hvp, got $mode")
+    primal_expr = io_read_kernel(in_path)
+    kernel = parse_kernel(primal_expr)
+    baseline = io_read_baseline_yaml(yaml_path)
+    if mode == :tangent
+        tangent_expr = stade_tangent(primal_expr)
+        return val_validate_tangent(kernel, primal_expr, tangent_expr, baseline;
+                                     trials = trials, epsilon = epsilon, rtol = rtol)
+    elseif mode == :adjoint
+        adjoint_out = stade_adjoint(primal_expr)
+        return val_validate_adjoint(kernel, primal_expr, adjoint_out, baseline;
+                                     trials = trials, epsilon = epsilon, rtol = rtol)
+    else
+        adjoint_out = stade_adjoint(primal_expr)
+        hvp_out = stade_hvp(primal_expr)
+        return val_validate_hvp(kernel, primal_expr, adjoint_out, hvp_out, baseline;
+                                 trials = trials, epsilon = epsilon, rtol = rtol)
+    end
+end
+
+# generates a random baseline for `in_path` and writes it to a YAML
+# file sharing its basename (`foo.jl` -> `foo.yaml`), or to
+# `yaml_path` if given. Exposed standalone so a caller can generate
+# once, hand-edit the result, then validate repeatedly against it.
+function stade_generate_baseline_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
+                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5)
+    primal_expr = io_read_kernel(in_path)
+    kernel = parse_kernel(primal_expr)
+    baseline = val_generate_baseline(kernel, primal_expr; scale = scale, int_lo = int_lo, int_hi = int_hi)
+    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    io_write_baseline_yaml(yp, kernel.sig.name, baseline.int_args, baseline.values)
+    return yp
+end
+
+function stade_validate_tangent_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
+                                      scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                      trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi)
+    return stade_validate_from_baseline(:tangent, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+end
+
+function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
+                                      scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                      trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi)
+    return stade_validate_from_baseline(:adjoint, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+end
+
+function stade_validate_hvp_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
+                                  scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                  trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi)
+    return stade_validate_from_baseline(:hvp, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
 end
 
 
