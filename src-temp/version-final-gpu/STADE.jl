@@ -2557,23 +2557,39 @@ end
 # ---- GPU backend descriptor ----------------------------------------
 # gpu_backend :: (suffix, kernel_tag, launch_macro::Symbol,
 #                 threads_kw::Symbol, blocks_kw::Symbol, tid_rhs::Expr,
-#                 atomic_macro::Expr, preamble::String)
+#                 atomic_macro::Expr, preamble::String,
+#                 default_precision::Type{<:AbstractFloat},
+#                 precision_locked::Bool, precision_lock_reason::String)
 #
 # Everything above this point (parsing, free-var collection, stack-op
 # detection, loop-splitting decision, +/- flattening for atomic
 # detection) is genuinely backend-agnostic -- it never mentions CUDA.
-# Only five things differ between CUDA.jl and AMDGPU.jl, and they're
-# all syntactic, not semantic: the launch macro name, the two launch
-# keyword names (`threads`/`blocks` vs `groupsize`/`gridsize` -- both
-# resolve to the exact same `cld(n_iter, blocksize)` formula; AMDGPU's
-# `gridsize` is a work-group count, not a total thread count, so nothing
-# about the arithmetic below differs), the thread-index intrinsic
-# names, the atomic macro's owning module, and the `using` preamble.
-# Adding a third backend (oneAPI.jl, Metal.jl, ...) should only ever
-# mean adding one more of these constructors -- if it turns out to
-# need a change anywhere else in this section, that's a sign the new
-# backend isn't actually the same programming model and deserves its
-# own prefix instead of being forced in here.
+# What differs between CUDA.jl, AMDGPU.jl, and Metal.jl is all
+# syntactic, not semantic: the launch macro name, the two launch
+# keyword names (`threads`/`blocks`, `groupsize`/`gridsize`,
+# `threads`/`groups` -- all three resolve to the exact same
+# `cld(n_iter, blocksize)` formula for the second one, so nothing about
+# the arithmetic below differs), the thread-index intrinsic (Metal's
+# `thread_position_in_grid().x` is already the global index -- simpler
+# than CUDA/AMDGPU's two-intrinsic affine combination, but still just
+# an Expr for the same tid_rhs slot), the atomic macro's owning module,
+# and the `using` preamble. Adding a further backend (oneAPI.jl, ...)
+# should only ever mean adding one more of these constructors -- if it
+# turns out to need a change anywhere else in this section, that's a
+# sign the new backend isn't actually the same programming model and
+# deserves its own prefix instead of being forced in here.
+#
+# default_precision/precision_locked/precision_lock_reason exist
+# because Metal is not just "Float64 works but is slower" the way
+# switching precision is for CUDA/AMDGPU: Apple GPUs have no FP64
+# hardware at all, and Metal.jl enforces this in software too --
+# MtlArray flatly refuses to be constructed with Float64 elements, and
+# any kernel whose arithmetic touches a Float64 fails to *compile*.
+# precision_locked=true makes stade_gpu refuse an explicit request for
+# anything but default_precision outright, at code-generation time,
+# rather than silently emitting Julia source that's guaranteed to fail
+# once the caller actually tries to build their input arrays or run
+# the kernel on real Metal hardware.
 
 function cgen_backend_cuda()
     return (
@@ -2585,6 +2601,9 @@ function cgen_backend_cuda()
         tid_rhs = :((blockIdx().x - 1) * blockDim().x + threadIdx().x),
         atomic_macro = Expr(:., :CUDA, QuoteNode(Symbol("@atomic"))),
         preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"CUDA\") || Pkg.add(\"CUDA\")\nusing CUDA\nCUDA.allowscalar(false)\n",
+        default_precision = Float64,
+        precision_locked = false,
+        precision_lock_reason = "",
     )
 end
 
@@ -2598,6 +2617,44 @@ function cgen_backend_amdgpu()
         tid_rhs = :(workitemIdx().x + (workgroupIdx().x - 1) * workgroupDim().x),
         atomic_macro = Expr(:., :AMDGPU, QuoteNode(Symbol("@atomic"))),
         preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"AMDGPU\") || Pkg.add(\"AMDGPU\")\nusing AMDGPU\nAMDGPU.allowscalar(false)\n",
+        default_precision = Float64,
+        precision_locked = false,
+        precision_lock_reason = "",
+    )
+end
+
+# thread_position_in_grid().x is already a global 1-based index (no
+# manual block/thread affine combination needed, unlike CUDA/AMDGPU);
+# `groups=` (not the older, pre-v1.9-preview `grid=`) is the current
+# launch keyword for the group count, verified against Metal.jl's
+# current stable docs/README/source examples, all of which
+# consistently use threads=/groups= and the unsuffixed
+# thread_position_in_grid().x form (the _1d/_2d/_3d-suffixed
+# intrinsics are deprecated as of Metal.jl v1.9). Metal.@atomic exists
+# and is documented as working the same way CUDA.jl's @atomic does.
+#
+# `^` is not accounted for here even though Metal has had a real,
+# separate compiler bug where `Float32 ^ Integer` is computed in
+# double precision internally regardless of what Julia's own types say
+# (JuliaGPU/Metal.jl#552) -- that's a backend compiler bug, not an
+# Expr-level promotion issue cgen_convert_precision's operand-casting
+# rewrite could fix, so it's recorded here as a caveat rather than
+# "handled": avoid `^` in the innermost loops of a kernel bound for
+# Metal until you've confirmed the fix status against your Metal.jl
+# version.
+function cgen_backend_metal()
+    return (
+        suffix = "_metal",
+        kernel_tag = "metal",
+        launch_macro = Symbol("@metal"),
+        threads_kw = :threads,
+        blocks_kw = :groups,
+        tid_rhs = :(thread_position_in_grid().x),
+        atomic_macro = Expr(:., :Metal, QuoteNode(Symbol("@atomic"))),
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"Metal\") || Pkg.add(\"Metal\")\nusing Metal\nMetal.allowscalar(false)\n",
+        default_precision = Float32,
+        precision_locked = true,
+        precision_lock_reason = "Apple GPUs have no FP64 hardware -- Metal.jl disallows constructing Float64 arrays at all, and any kernel whose arithmetic touches a Float64 fails to compile",
     )
 end
 
@@ -2920,24 +2977,30 @@ end
 
 # Expr in, cuda_plan out -- accepts either a plain skill-jade kernel
 # or one of STADE's own generated functions (see cgen_ingest), for
-# whichever GPU backend descriptor is passed in
-# Expr in, cuda_plan out -- accepts either a plain skill-jade kernel
-# or one of STADE's own generated functions (see cgen_ingest), for
-# whichever GPU backend descriptor is passed in. precision=Float64
-# (the default) leaves the kernel's own literal precision untouched;
-# precision=Float32 runs cgen_convert_precision over the freshly-built
-# host+kernels before returning them.
-function stade_gpu(expr::Expr, backend; precision::Type{<:AbstractFloat} = Float64)
+# whichever GPU backend descriptor is passed in. precision=nothing
+# (the default) means "use this backend's own default_precision" --
+# Float64 (a no-op) for CUDA/AMDGPU, Float32 for Metal. Passing an
+# explicit precision overrides that, except for a precision_locked
+# backend, where anything but its own default_precision is a hard
+# error at generation time rather than a silent guarantee that'll only
+# surface as a failure once the caller tries to compile/run the result.
+function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+    p = precision === nothing ? backend.default_precision : precision
+    if backend.precision_locked && p !== backend.default_precision
+        error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
+    end
     plan = cgen_emit(cgen_ingest(expr), backend)
-    precision === Float64 && return plan
-    return (host = cgen_convert_precision(plan.host, precision),
-            kernels = Expr[cgen_convert_precision(k, precision) for k in plan.kernels])
+    p === Float64 && return plan
+    return (host = cgen_convert_precision(plan.host, p),
+            kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-stade_cuda(expr::Expr; precision::Type{<:AbstractFloat} = Float64) =
+stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
     stade_gpu(expr, cgen_backend_cuda(); precision = precision)
-stade_amdgpu(expr::Expr; precision::Type{<:AbstractFloat} = Float64) =
+stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision = precision)
+stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
+    stade_gpu(expr, cgen_backend_metal(); precision = precision)
 
 # path in, path out. Reads every function def in in_path (a plain
 # kernel file, or a stade_tangent_file/stade_adjoint_file output) and
@@ -2946,9 +3009,9 @@ stade_amdgpu(expr::Expr; precision::Type{<:AbstractFloat} = Float64) =
 # every function converted in this call (initstacks_/adjoint/primal
 # alike, for a stade_adjoint_file output) -- for per-function control,
 # call stade_gpu directly on each def instead. The input file on disk
-# is only ever read, never rewritten, so precision=Float64 is always
+# is only ever read, never rewritten, so precision=nothing is always
 # available again on the next call with nothing to reset.
-function stade_gpu_file(in_path::String, out_path::String, backend; precision::Type{<:AbstractFloat} = Float64)
+function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
     defs = io_read_kernels(in_path)
     kernels = Expr[]
     hosts = Expr[]
@@ -2961,10 +3024,12 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::T
     return out_path
 end
 
-stade_cuda_file(in_path::String, out_path::String; precision::Type{<:AbstractFloat} = Float64) =
+stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
     stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision = precision)
-stade_amdgpu_file(in_path::String, out_path::String; precision::Type{<:AbstractFloat} = Float64) =
+stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision = precision)
+stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
+    stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision = precision)
 
 
 # ==================== smoke test ===================================
@@ -3011,4 +3076,23 @@ let
     end))
     @assert occursin("2.5", string(f64_plan.kernels[1])) && !occursin("2.5f0", string(f64_plan.kernels[1]))
     println("precision=Float32 downcasts generated code OK; default stays Float64 OK")
+
+    metal_plan = stade_metal(:(function stub3(u, v, n)
+        for i_x = 1:n
+            v[i_x] = u[i_x] / 2 + sqrt(n) * 1.5
+        end
+        return nothing
+    end))
+    @assert String(metal_plan.host.args[1].args[1]) == "stub3_metal"
+    ksrc = string(metal_plan.kernels[1])
+    @assert occursin("thread_position_in_grid", ksrc) && occursin("1.5f0", ksrc) && occursin("Float32(n)", ksrc)
+    @assert occursin("@metal", string(:(@metal threads = 1 groups = 1 f()))) # sanity on macro name only
+    threw = false
+    try
+        stade_metal(:(function stub3(u, v, n) return nothing end); precision = Float64)
+    catch
+        threw = true
+    end
+    @assert threw
+    println("cgen_* round-tripped a kernel through the Metal backend OK; precision_locked correctly rejected Float64")
 end
