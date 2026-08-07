@@ -2496,7 +2496,11 @@ end
 
 # collects from the loop's bounds as well as its body -- a device
 # kernel's bounds check needs whatever variables lo/hi/step reference
-# (e.g. an array-length argument), not just what the body touches
+# (e.g. an array-length argument), not just what the body touches --
+# then subtracts every scalar the body assigns locally (see
+# cgen_locally_assigned_scalars), since those are per-iteration
+# temporaries, not caller-supplied arguments, even though they're
+# "used" in the body-wide sense cgen_collect_vars! collects
 function cgen_free_vars(stmt, exclude::Symbol)
     vars = Set{Symbol}()
     cgen_collect_expr_vars!(stmt.lo, vars)
@@ -2504,7 +2508,40 @@ function cgen_free_vars(stmt, exclude::Symbol)
     cgen_collect_expr_vars!(stmt.step, vars)
     cgen_collect_vars!(stmt.body, vars)
     delete!(vars, exclude)
+    setdiff!(vars, cgen_locally_assigned_scalars(stmt.body))
     return sort(collect(vars); by = string)
+end
+
+# a scalar assigned anywhere inside a loop's own body (at any nesting
+# depth, including a nested loop's own loop variable) is always a
+# local temporary, never a caller-supplied argument. This holds
+# specifically *because* the enclosing loop is iteration-independent:
+# a genuine cross-iteration read of a not-yet-assigned scalar would be
+# exactly the loop-carried dependency that classification already
+# rules out, so anything assigned as a bare Symbol lhs is guaranteed
+# to be initialized fresh within the same iteration before any read.
+# Array names never qualify (skill-jade forbids in-kernel allocation,
+# so an array symbol is always caller-supplied) -- only a bare-Symbol
+# assignment target counts, never an array-ref lhs.
+function cgen_locally_assigned_scalars(body::Vector{NamedTuple})
+    names = Set{Symbol}()
+    cgen_collect_locally_assigned!(body, names)
+    return names
+end
+
+function cgen_collect_locally_assigned!(body::Vector{NamedTuple}, names::Set{Symbol})
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(names, stmt.lhs)
+        elseif stmt.kind == :for
+            push!(names, stmt.var)
+            cgen_collect_locally_assigned!(stmt.body, names)
+        elseif stmt.kind == :if
+            cgen_collect_locally_assigned!(stmt.then, names)
+            cgen_collect_locally_assigned!(stmt.els, names)
+        end
+    end
+    return nothing
 end
 
 function cgen_collect_vars!(body::Vector{NamedTuple}, vars::Set{Symbol})
