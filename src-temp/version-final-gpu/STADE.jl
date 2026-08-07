@@ -2743,13 +2743,59 @@ function cgen_emit(gk, backend)
     return (host = host, kernels = kernels)
 end
 
-# opt-in, applied only if the caller wants single precision on the
-# generated device/host code -- never applied to a primal copy, since
-# a blanket downcast of the reference kernel would silently change
-# what it's meant to validate against
-function cgen_to_f32(expr)
-    expr isa AbstractFloat && return Float32(expr)
-    expr isa Expr && return Expr(expr.head, [cgen_to_f32(a) for a in expr.args]...)
+# opt-in, applied only when the caller passes precision=T (T != Float64)
+# to stade_gpu/stade_cuda/stade_amdgpu/stade_gpu_file -- converts every
+# Float64 literal it finds to T, leaving Int-typed loop/index arithmetic
+# (trip counts, thread-index offsets, nthread_per_block) untouched since
+# a bare literal walk only ever matches AbstractFloat leaves. Applied
+# only to the freshly-generated host/kernel Exprs cgen_emit just built --
+# it never touches the input file on disk, so re-running at Float64
+# always reproduces the exact double-precision behavior of the source
+# kernel with nothing to undo.
+#
+# A literal walk alone isn't enough, though: some operators return
+# Float64 unconditionally regardless of their operand types, with no
+# Float64 *literal* anywhere in the source for a tree walk to find --
+# true division of two Integer operands (`2/2 -> Float64`), and every
+# whitelisted transcendental intrinsic applied to an Integer argument
+# (`sqrt(2) -> Float64`, but `sqrt(2.0f0) -> Float32`), both fall back
+# to Base's generic `f(x::Real) = f(float(x))`, and `float(::Integer)`
+# always means Float64 specifically, never T. So both are rewritten to
+# force their operands to T *before* the call, which is safe even when
+# an operand is already T (T(x::T) is the identity) and guarantees a
+# T-typed result regardless of what the operand actually was:
+#   a / b                 ->  T(a) / T(b)
+#   sqrt(x), sin(x), ...  ->  sqrt(T(x)), sin(T(x)), ...
+# `^` is deliberately left alone: Julia's own type tracking already
+# keeps `Float32 ^ Integer` as Float32 (verified), so there's no Expr-
+# level promotion bug to rewrite around -- but Metal.jl has had a real,
+# separate bug where its *compiler* computes `Float32 ^ Integer` in
+# double precision internally regardless of what Julia's type system
+# says (JuliaGPU/Metal.jl#552). No Julia-side Expr rewrite can fix a
+# backend compiler bug, so this is documented as a known Metal.jl
+# caveat (see cgen_backend_metal) rather than "fixed" by a rewrite that
+# might not even address it and could go stale as Metal.jl changes.
+function cgen_precision_unstable_unary()
+    return Set{Symbol}([
+        :sqrt, :exp, :log, :log10, :sin, :cos, :tan,
+        :asin, :acos, :atan, :sinh, :cosh, :tanh,
+    ])
+end
+
+function cgen_convert_precision(expr, ::Type{T}) where {T<:AbstractFloat}
+    tname = Symbol(string(T))
+    if expr isa AbstractFloat
+        return T(expr)
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :/ && length(expr.args) == 3
+        a = cgen_convert_precision(expr.args[2], T)
+        b = cgen_convert_precision(expr.args[3], T)
+        return Expr(:call, :/, Expr(:call, tname, a), Expr(:call, tname, b))
+    elseif expr isa Expr && expr.head == :call && length(expr.args) == 2 && expr.args[1] in cgen_precision_unstable_unary()
+        arg = cgen_convert_precision(expr.args[2], T)
+        return Expr(:call, expr.args[1], Expr(:call, tname, arg))
+    elseif expr isa Expr
+        return Expr(expr.head, [cgen_convert_precision(a, T) for a in expr.args]...)
+    end
     return expr
 end
 
@@ -2875,23 +2921,39 @@ end
 # Expr in, cuda_plan out -- accepts either a plain skill-jade kernel
 # or one of STADE's own generated functions (see cgen_ingest), for
 # whichever GPU backend descriptor is passed in
-function stade_gpu(expr::Expr, backend)
-    return cgen_emit(cgen_ingest(expr), backend)
+# Expr in, cuda_plan out -- accepts either a plain skill-jade kernel
+# or one of STADE's own generated functions (see cgen_ingest), for
+# whichever GPU backend descriptor is passed in. precision=Float64
+# (the default) leaves the kernel's own literal precision untouched;
+# precision=Float32 runs cgen_convert_precision over the freshly-built
+# host+kernels before returning them.
+function stade_gpu(expr::Expr, backend; precision::Type{<:AbstractFloat} = Float64)
+    plan = cgen_emit(cgen_ingest(expr), backend)
+    precision === Float64 && return plan
+    return (host = cgen_convert_precision(plan.host, precision),
+            kernels = Expr[cgen_convert_precision(k, precision) for k in plan.kernels])
 end
 
-stade_cuda(expr::Expr) = stade_gpu(expr, cgen_backend_cuda())
-stade_amdgpu(expr::Expr) = stade_gpu(expr, cgen_backend_amdgpu())
+stade_cuda(expr::Expr; precision::Type{<:AbstractFloat} = Float64) =
+    stade_gpu(expr, cgen_backend_cuda(); precision = precision)
+stade_amdgpu(expr::Expr; precision::Type{<:AbstractFloat} = Float64) =
+    stade_gpu(expr, cgen_backend_amdgpu(); precision = precision)
 
 # path in, path out. Reads every function def in in_path (a plain
 # kernel file, or a stade_tangent_file/stade_adjoint_file output) and
 # writes one file: every device kernel first, then every host
-# function in original file order.
-function stade_gpu_file(in_path::String, out_path::String, backend)
+# function in original file order. `precision` applies uniformly to
+# every function converted in this call (initstacks_/adjoint/primal
+# alike, for a stade_adjoint_file output) -- for per-function control,
+# call stade_gpu directly on each def instead. The input file on disk
+# is only ever read, never rewritten, so precision=Float64 is always
+# available again on the next call with nothing to reset.
+function stade_gpu_file(in_path::String, out_path::String, backend; precision::Type{<:AbstractFloat} = Float64)
     defs = io_read_kernels(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend)
+        plan = stade_gpu(expr, backend; precision = precision)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
@@ -2899,8 +2961,10 @@ function stade_gpu_file(in_path::String, out_path::String, backend)
     return out_path
 end
 
-stade_cuda_file(in_path::String, out_path::String) = stade_gpu_file(in_path, out_path, cgen_backend_cuda())
-stade_amdgpu_file(in_path::String, out_path::String) = stade_gpu_file(in_path, out_path, cgen_backend_amdgpu())
+stade_cuda_file(in_path::String, out_path::String; precision::Type{<:AbstractFloat} = Float64) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision = precision)
+stade_amdgpu_file(in_path::String, out_path::String; precision::Type{<:AbstractFloat} = Float64) =
+    stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision = precision)
 
 
 # ==================== smoke test ===================================
@@ -2930,4 +2994,21 @@ let
     @assert rocm_primal.host isa Expr
     @assert String(rocm_primal.host.args[1].args[1]) == "stub_amdgpu"
     println("cgen_* round-tripped the stub kernel's primal form OK (AMDGPU backend)")
+
+    f32_plan = stade_cuda(:(function stub2(u, v, n)
+        for i_x = 1:n
+            v[i_x] = 2.5 * u[i_x]
+        end
+        return nothing
+    end); precision = Float32)
+    @assert any(l -> l isa Float32, f32_plan.kernels[1].args[2].args) ||
+            occursin("2.5f0", string(f32_plan.kernels[1]))
+    f64_plan = stade_cuda(:(function stub2(u, v, n)
+        for i_x = 1:n
+            v[i_x] = 2.5 * u[i_x]
+        end
+        return nothing
+    end))
+    @assert occursin("2.5", string(f64_plan.kernels[1])) && !occursin("2.5f0", string(f64_plan.kernels[1]))
+    println("precision=Float32 downcasts generated code OK; default stays Float64 OK")
 end
