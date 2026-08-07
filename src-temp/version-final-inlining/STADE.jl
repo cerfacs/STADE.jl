@@ -10,6 +10,12 @@
 #
 # Pipeline stages, in the order data flows through them:
 #
+#   inl_    Inline       multi-kernel-only: splices callee bodies into
+#                         caller bodies (raw Expr, before parse_kernel
+#                         ever runs) so nested call graphs reduce to
+#                         the same single-function shape every stage
+#                         below already understands. No-op for a
+#                         single kernel with no calls.
 #   parse_  Parse        raw Expr -> validated (sig, body) kernel;
 #                         rejects anything violating skill-jade.
 #   shape_  Shape infer   each variable's kind: scalar_float,
@@ -32,10 +38,11 @@
 #   io_     File I/O      the ONLY stage touching the filesystem --
 #                         reads a kernel .jl file, writes a
 #                         generated .jl file.
-#   stade_  Public API    stade_adjoint
-#                         (Expr in, Expr out) and stade_*_file
-#                         wrappers (path in, path out), wiring every
-#                         stage above together for an end user.
+#   stade_  Public API    stade_adjoint (Expr in, Expr out),
+#                         stade_adjoint_corpus (multi-kernel, runs
+#                         inl_ first), and stade_*_file wrappers
+#                         (path in, path out), wiring every stage
+#                         above together for an end user.
 #
 # ============================================================
 
@@ -58,6 +65,319 @@
 # snapshot_plan :: Vector{snapshot_site}
 # lin_node/lin_plan :: internal-only shape, documented at the lin_*
 #     section header below.
+# inl_*'s call graph / finalized-callee bookkeeping is internal-only
+#     too (built and discarded inside inl_inline_calls) -- not part of
+#     the frozen shape list. inl_* is the one stage that runs before
+#     parse_kernel and therefore operates on raw Expr, not on the
+#     kernel/statement shapes above.
+
+
+# ==================== inl_* ====================================
+# Multi-kernel nested call graphs, via source-level inlining -- runs
+# before parse_kernel ever sees anything. A nested call is always a
+# bare statement `callee_name(arg1, arg2, ...)` on its own line
+# (matches how skill-jade kernels return results: mutated array
+# args, not values), with bare-symbol-only arguments. Splicing a
+# callee's body into every one of its call sites removes the call
+# boundary entirely, so parse_/shape_/act_/snap_/lin_/agen_ never
+# see a multi-kernel graph at all -- only ever a single flat body.
+# Recursion in the call graph is out of scope (hard error).
+
+# inl_inline_calls(kernels) -> Dict{Symbol,Expr}
+#   kernels :: Dict{Symbol,Expr}, one `function ... end` Expr per
+#   kernel name, resolved from a corpus supplied up front (never
+#   auto-discovered). Pure function of its input (rule 7) -- no
+#   `rand`-based naming anywhere in this stage, see inl_rename_map.
+#   Returns one fully-inlined Expr per kernel name (every kernel in
+#   the input, not just call-graph roots), with every user-kernel
+#   call anywhere in that kernel's call graph expanded away.
+function inl_inline_calls(kernels::Dict{Symbol,Expr})
+    graph, parsed = inl_build_call_graph(kernels)
+    order = inl_topo_sort(graph)
+    finalized = Dict{Symbol,Any}()
+    result = Dict{Symbol,Expr}()
+    for name in order
+        args, body_block = parsed[name]
+        confirmed = inl_confirmed_kinds(name, args, body_block)
+        final_stmts = inl_inline_body(name, args, confirmed, body_block.args, finalized, Ref(0))
+        final_body = Expr(:block, final_stmts...)
+        final_expr = Expr(:function, Expr(:call, name, args...), final_body)
+        final_kernel = parse_kernel(final_expr)
+        finalized[name] = (kernel = final_kernel, body_block = final_body)
+        result[name] = final_expr
+    end
+    return result
+end
+
+# ---- call graph + cycle/unknown-callee detection ----
+
+# name -> (args, flattened-and-delined body :: Expr(:block, ...))
+function inl_kernel_parts(kernel_expr::Expr)
+    kernel_expr.head == :function ||
+        error("inl_inline_calls: expected a `function ... end` definition for a kernel, got Expr(:$(kernel_expr.head), ...)")
+    name, args = parse_signature(kernel_expr.args[1])
+    body_block = Expr(:block, inl_flatten_block(kernel_expr.args[2])...)
+    return name, args, body_block
+end
+
+# same as parse_strip_lines, but recurses into nested :for/:if bodies
+# too (staying in raw Expr the whole way, per rule 3.5) so every
+# block at every nesting depth, all the way down, is LineNumberNode-
+# free and directly splice-able.
+function inl_flatten_block(block_expr)
+    return Any[inl_flatten_stmt(s) for s in parse_strip_lines(block_expr)]
+end
+
+function inl_flatten_stmt(stmt::Expr)
+    if stmt.head == :for
+        return Expr(:for, stmt.args[1], Expr(:block, inl_flatten_block(stmt.args[2])...))
+    elseif stmt.head == :if
+        if length(stmt.args) == 3
+            return Expr(:if, stmt.args[1],
+                        Expr(:block, inl_flatten_block(stmt.args[2])...),
+                        Expr(:block, inl_flatten_block(stmt.args[3])...))
+        else
+            return Expr(:if, stmt.args[1], Expr(:block, inl_flatten_block(stmt.args[2])...))
+        end
+    else
+        return stmt   # :(=) or a bare :call statement -- left as-is
+    end
+end
+
+function inl_build_call_graph(kernels::Dict{Symbol,Expr})
+    parsed = Dict{Symbol,Tuple{Vector{Symbol},Expr}}()
+    graph = Dict{Symbol,Set{Symbol}}()
+    for name in sort(collect(keys(kernels)))
+        kname, kargs, body_block = inl_kernel_parts(kernels[name])
+        kname == name ||
+            error("inl_inline_calls: kernel dict key :$(name) doesn't match its own function name :$(kname)")
+        callees = Set{Symbol}()
+        inl_collect_calls!(body_block, name, callees, kernels)
+        parsed[name] = (kargs, body_block)
+        graph[name] = callees
+    end
+    return graph, parsed
+end
+
+# every bare-statement call anywhere in body_block (recursing through
+# :for/:if), naming caller+callee on an unresolved reference -- a
+# bare :call statement is never legal skill-jade input on its own, so
+# by construction the only thing it can be is a call to another
+# kernel in the corpus
+function inl_collect_calls!(body_block::Expr, caller_name::Symbol, callees::Set{Symbol}, kernels::Dict{Symbol,Expr})
+    for stmt in body_block.args
+        if stmt isa Expr && stmt.head == :call
+            callee = stmt.args[1]
+            haskey(kernels, callee) ||
+                error("inl_inline_calls: kernel :$(caller_name) calls unresolved callee :$(callee) (not a kernel in the supplied corpus)")
+            push!(callees, callee)
+        elseif stmt isa Expr && stmt.head == :for
+            inl_collect_calls!(stmt.args[2], caller_name, callees, kernels)
+        elseif stmt isa Expr && stmt.head == :if
+            inl_collect_calls!(stmt.args[2], caller_name, callees, kernels)
+            length(stmt.args) == 3 && inl_collect_calls!(stmt.args[3], caller_name, callees, kernels)
+        end
+    end
+    return nothing
+end
+
+# postorder DFS: a kernel is only appended to `order` after every
+# kernel it calls has been -- so processing `order` in sequence
+# always has each callee already finalized before its caller needs
+# it. Hard-errors with the full cycle trace, never an iteration cap.
+function inl_topo_sort(graph::Dict{Symbol,Set{Symbol}})
+    order = Symbol[]
+    state = Dict{Symbol,Symbol}(k => :unvisited for k in keys(graph))
+    stack = Symbol[]
+    function inl_visit!(n::Symbol)
+        state[n] == :done && return nothing
+        if state[n] == :visiting
+            idx = findfirst(==(n), stack)
+            error("inl_inline_calls: cycle detected in kernel call graph: " * join(vcat(stack[idx:end], n), " -> "))
+        end
+        state[n] = :visiting
+        push!(stack, n)
+        for callee in sort(collect(graph[n]))
+            inl_visit!(callee)
+        end
+        pop!(stack)
+        state[n] = :done
+        push!(order, n)
+        return nothing
+    end
+    for n in sort(collect(keys(graph)))
+        inl_visit!(n)
+    end
+    return order
+end
+
+# ---- per-caller inlining: scan, kind-check, rename, substitute, splice ----
+
+# a caller's own confirmed kind map, computed ONCE up front from its
+# *original* (pre-inlining) body with every bare-call statement
+# simply dropped (recursively, at any nesting depth) -- a call site
+# contributes no syntactic evidence of its own either way, so
+# dropping it is exactly the same as never having seen it, and
+# doesn't depend on inlining order or which call site is being
+# checked. Reused for every call-site check in this caller.
+function inl_confirmed_kinds(caller_name::Symbol, caller_args::Vector{Symbol}, body_block::Expr)
+    pruned = inl_strip_calls(body_block)
+    kernel_expr = Expr(:function, Expr(:call, caller_name, caller_args...), Expr(:block, pruned...))
+    return parse_kernel(kernel_expr).sig.kinds
+end
+
+function inl_strip_calls(body_block::Expr)
+    result = Any[]
+    for stmt in body_block.args
+        if stmt isa Expr && stmt.head == :call
+            continue
+        elseif stmt isa Expr && stmt.head == :for
+            push!(result, Expr(:for, stmt.args[1], Expr(:block, inl_strip_calls(stmt.args[2])...)))
+        elseif stmt isa Expr && stmt.head == :if
+            if length(stmt.args) == 3
+                push!(result, Expr(:if, stmt.args[1],
+                                    Expr(:block, inl_strip_calls(stmt.args[2])...),
+                                    Expr(:block, inl_strip_calls(stmt.args[3])...)))
+            else
+                push!(result, Expr(:if, stmt.args[1], Expr(:block, inl_strip_calls(stmt.args[2])...)))
+            end
+        else
+            push!(result, stmt)
+        end
+    end
+    return result
+end
+
+# processes one (possibly nested) statement_list of `caller_name`,
+# expanding every bare-call statement in it against `finalized`
+# callees and returning the replacement statement vector.
+# `confirmed` is caller_name's own confirmed kind map (see
+# inl_confirmed_kinds), static for the whole caller; `counter` is the
+# per-caller call-site counter shared across the whole recursive
+# descent.
+function inl_inline_body(caller_name::Symbol, caller_args::Vector{Symbol}, confirmed::Dict{Symbol,Symbol},
+                          stmts::Vector{Any}, finalized::Dict{Symbol,Any}, counter::Ref{Int})
+    result = Any[]
+    for stmt in stmts
+        if stmt isa Expr && stmt.head == :call
+            callee_name = stmt.args[1]
+            haskey(finalized, callee_name) ||
+                error("inl_inline_calls: kernel :$(caller_name) calls :$(callee_name) before it has been inlined -- not reachable in topological order")
+            callee_kernel = finalized[callee_name].kernel
+            callee_body = finalized[callee_name].body_block
+            call_args = inl_check_call_kinds(caller_name, confirmed, stmt, callee_kernel)
+            counter[] += 1
+            rename_subst = inl_rename_map(callee_kernel, callee_body, counter[])
+            renamed_body = inl_substitute_expr(callee_body, rename_subst)
+            params_subst = Dict{Symbol,Symbol}(zip(callee_kernel.sig.args, call_args))
+            substituted_body = inl_substitute_expr(renamed_body, params_subst)
+            append!(result, substituted_body.args)
+        elseif stmt isa Expr && stmt.head == :for
+            inner = inl_inline_body(caller_name, caller_args, confirmed, stmt.args[2].args, finalized, counter)
+            push!(result, Expr(:for, stmt.args[1], Expr(:block, inner...)))
+        elseif stmt isa Expr && stmt.head == :if
+            then_inner = inl_inline_body(caller_name, caller_args, confirmed, stmt.args[2].args, finalized, counter)
+            if length(stmt.args) == 3
+                els_inner = inl_inline_body(caller_name, caller_args, confirmed, stmt.args[3].args, finalized, counter)
+                push!(result, Expr(:if, stmt.args[1], Expr(:block, then_inner...), Expr(:block, els_inner...)))
+            else
+                push!(result, Expr(:if, stmt.args[1], Expr(:block, then_inner...)))
+            end
+        else
+            push!(result, stmt)
+        end
+    end
+    return result
+end
+
+# kind-checks one call site against the callee's own declared
+# signature before any substitution happens -- the one thing pure
+# inlining would otherwise silently lose (a caller passing a
+# scalar_int where the callee's signature says scalar_float would
+# just get quietly merged in and reinterpreted). A `:scalar_float`
+# confirmed kind is skipped: it's shape_infer's default for "no
+# evidence found", which is exactly what a pure pass-through argument
+# looks like (its only evidence lives in the callee, not yet
+# inlined) -- flagging that as a mismatch would reject the single
+# most common multi-level call-chain shape. `:array_float`/
+# `:array_int`/`:scalar_int` are never defaults (shape_infer only
+# ever reaches them from real local syntactic evidence), so those are
+# always enforced.
+function inl_check_call_kinds(caller_name::Symbol, confirmed::Dict{Symbol,Symbol},
+                               call_stmt::Expr, callee_kernel)
+    call_args = call_stmt.args[2:end]
+    all(a -> a isa Symbol, call_args) ||
+        error("inl_inline_calls: call to :$(callee_kernel.sig.name) inside :$(caller_name) must pass bare symbol arguments only, got `$(call_stmt)`")
+    length(call_args) == length(callee_kernel.sig.args) ||
+        error("inl_inline_calls: call to :$(callee_kernel.sig.name) inside :$(caller_name) passes $(length(call_args)) argument(s), expected $(length(callee_kernel.sig.args))")
+    for (i, a) in enumerate(call_args)
+        haskey(confirmed, a) ||
+            error("inl_inline_calls: call to :$(callee_kernel.sig.name) inside :$(caller_name) passes undefined variable :$(a)")
+        caller_kind = confirmed[a]
+        caller_kind == :scalar_float && continue   # no confirmed local evidence -- can't be a caught conflict
+        callee_param = callee_kernel.sig.args[i]
+        callee_kind = callee_kernel.sig.kinds[callee_param]
+        caller_kind == callee_kind ||
+            error("inl_inline_calls: call to :$(callee_kernel.sig.name) inside :$(caller_name): argument $(i) (:$(a)) has kind $(caller_kind), but parameter :$(callee_param) declares $(callee_kind)")
+    end
+    return call_args
+end
+
+# ---- deterministic rename (no `rand`) + pure symbol substitution ----
+
+# every genuine local of the callee -- assigned-to scalars and
+# for-loop variables that aren't one of the callee's own params --
+# gets a deterministic `_<callee_name>_c<call_site_id>` suffix so
+# repeated inlining of the same callee can never collide.
+function inl_rename_map(callee_kernel, callee_body::Expr, call_site_id::Int)
+    params = Set(callee_kernel.sig.args)
+    locals = Set{Symbol}()
+    inl_collect_locals!(callee_body, params, locals)
+    subst = Dict{Symbol,Symbol}()
+    for v in locals
+        new_name = Symbol(String(v) * "_" * String(callee_kernel.sig.name) * "_c" * string(call_site_id))
+        parse_check_snake_case(new_name) ||
+            error("inl_inline_calls: generated local name :$(new_name) is not snake_case")
+        subst[v] = new_name
+    end
+    return subst
+end
+
+function inl_collect_locals!(body_block::Expr, params::Set{Symbol}, locals::Set{Symbol})
+    for stmt in body_block.args
+        if stmt.head == :(=)
+            lhs = stmt.args[1]
+            v = lhs isa Symbol ? lhs : lhs.args[1]
+            v isa Symbol && !(v in params) && push!(locals, v)
+        elseif stmt.head == :for
+            var = stmt.args[1].args[1]
+            var isa Symbol && !(var in params) && push!(locals, var)
+            inl_collect_locals!(stmt.args[2], params, locals)
+        elseif stmt.head == :if
+            inl_collect_locals!(stmt.args[2], params, locals)
+            length(stmt.args) == 3 && inl_collect_locals!(stmt.args[3], params, locals)
+        end
+    end
+    return nothing
+end
+
+# pure Symbol->Symbol substitution over a raw Expr tree, used both
+# for local renaming and for param->call-arg substitution -- a
+# :call's own operator/function name (args[1]) is always left alone,
+# every other position (including a :ref's array name) is fair game
+function inl_substitute_expr(expr, subst::Dict{Symbol,Symbol})
+    if expr isa Symbol
+        return get(subst, expr, expr)
+    elseif expr isa Expr
+        if expr.head == :call
+            return Expr(:call, expr.args[1], (inl_substitute_expr(a, subst) for a in expr.args[2:end])...)
+        else
+            return Expr(expr.head, (inl_substitute_expr(a, subst) for a in expr.args)...)
+        end
+    else
+        return expr
+    end
+end
 
 
 # ==================== parse_* ================================
@@ -2371,6 +2691,16 @@ function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     return agen_emit(kernel, lin_plan, snapshot_plan)
 end
 
+# multi-kernel entry point: inline the whole corpus's call graph away
+# (inl_inline_calls), then defer to the existing single-kernel
+# pipeline, unchanged, per kernel. Independents/dependents overrides
+# still don't belong here -- a caller who needs them can run
+# inl_inline_calls directly and call stade_adjoint per kernel.
+function stade_adjoint_corpus(kernels::Dict{Symbol,Expr})
+    inlined = inl_inline_calls(kernels)
+    return Dict(name => stade_adjoint(expr) for (name, expr) in inlined)
+end
+
 function stade_adjoint_file(in_path::String, out_path::String)
     primal_expr = io_read_kernel(in_path)
     adjoint_out = stade_adjoint(primal_expr)
@@ -2391,4 +2721,24 @@ let
     adjoint_out = stade_adjoint(trivial)
     @assert adjoint_out.adjoint isa Expr && adjoint_out.initstacks isa Expr
     println("STADE.jl Phase 0 skeleton loaded and round-tripped a stub kernel OK")
+end
+
+let
+    helper = :(function stub_scale(a, b)
+        tmp = a * b
+        a = tmp
+        return nothing
+    end)
+    caller = :(function stub_caller(x, y, n)
+        stub_scale(x, y)
+        return nothing
+    end)
+    kernels = Dict{Symbol,Expr}(:stub_scale => helper, :stub_caller => caller)
+    inlined = inl_inline_calls(kernels)
+    caller_src = string(inlined[:stub_caller])
+    @assert occursin("tmp_stub_scale_c1", caller_src)   # renamed local spliced in
+    @assert !occursin("stub_scale(x, y)", caller_src)   # call statement gone
+    out = stade_adjoint_corpus(kernels)
+    @assert out[:stub_caller].adjoint isa Expr && out[:stub_caller].initstacks isa Expr
+    println("STADE.jl inl_* stage round-tripped a two-kernel stub call graph OK")
 end
