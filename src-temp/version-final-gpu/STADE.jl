@@ -2857,6 +2857,151 @@ function cgen_convert_precision(expr, ::Type{T}) where {T<:AbstractFloat}
 end
 
 
+# ==================== jgen_* =======================================
+# JACC.jl codegen. JACC replaces CUDA.jl/AMDGPU.jl/Metal.jl's "write a
+# kernel + a vendor launch macro + vendor thread-index intrinsics"
+# model with a single plain function taking the loop index as its
+# first argument, dispatched via `JACC.parallel_for(N, f, args...)` --
+# which vendor backend actually executes it is chosen once per Julia
+# *project*, outside any code jgen_ generates, via Preferences.jl. That
+# is a different enough model from cgen_'s gpu_backend (no launch
+# macro, no thread-index intrinsic to synthesize, and no way to know
+# the eventual backend at generation time at all) that it gets its own
+# prefix rather than being forced into gpu_backend, per the rule
+# skill-stade.md already states for cgen_ itself: if a new target
+# needs a change outside the shared machinery, it isn't the same
+# programming model and doesn't belong under the same prefix.
+#
+# jgen_ reuses cgen_'s already backend-agnostic front end directly
+# rather than duplicating it: cgen_ingest, cgen_free_vars,
+# cgen_contains_stackop, cgen_trip_count, cgen_loopvar_from_tid,
+# cgen_flatten_sum, cgen_expr_contains, cgen_sum_excluding, and
+# cgen_convert_precision all operate purely on the parsed cgen_kernel/
+# statement shape with a documented, frozen contract -- none of them
+# know what a gpu_backend even is, so calling them isn't reaching into
+# cgen_'s private internals the way skill-stade.md's purity rule warns
+# against; it's using the shared utility layer cgen_ and jgen_ both
+# sit on. Only the emit step below differs.
+#
+# Atomics: JACC adopted Atomix.@atomic as its own cross-backend atomic
+# primitive (JACC's changelog: "Add support for Atomix.@atomic"), so
+# the atomic-vs-plain-write decision is identical to cgen_'s -- only
+# the macro target is fixed to Atomix instead of varying by backend.
+#
+# Precision is deliberately NOT locked or defaulted the way Metal's
+# gpu_backend is: STADE cannot know, at generation time, which of
+# JACC's five backends a given output file will eventually run under
+# -- that choice is deferred to runtime, on a machine STADE never
+# sees, which is the entire point of JACC. Pretending to guarantee
+# precision safety the way cgen_backend_metal does would be actively
+# misleading here. stade_jacc defaults to Float64 (a no-op, same as
+# cgen_'s unlocked backends) and leaves it to the caller to pass
+# precision=Float32 if a Metal-configured JACC deployment is a real
+# possibility for the output.
+#
+# Bounds checking inside a split-off loop is deliberately omitted:
+# JACC.parallel_for(N, f, args...) is documented and exemplified
+# (JuliaGPU/JACC.jl's own current README) without an internal `i <=
+# length(...)` guard inside the kernel function, unlike a raw @cuda/
+# @roc/@metal launch which can overshoot to block granularity. This is
+# taken on documentation/example evidence, not verified against a
+# running JACC install -- no GPU hardware, of any vendor, has been
+# available to actually run anything cgen_/jgen_ produce, on any
+# backend, at any point. If a real run shows a guard is needed for
+# some backend/version, add it the same way cgen_kernel_def does.
+
+jgen_kernel_fname(owner::Symbol, idx::Int) = Symbol("jacc_kernel_" * string(owner) * "_" * string(idx) * "!")
+
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol)
+    exprs = Any[]
+    for stmt in body
+        if stmt.kind == :stackpush
+            push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
+        elseif stmt.kind == :assign
+            push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+        elseif stmt.kind == :if
+            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner), jgen_body(stmt.els, kernels, owner)))
+        elseif stmt.kind == :for
+            if !stmt.sequential && !cgen_contains_stackop(stmt.body)
+                idx = length(kernels) + 1
+                fargs = cgen_free_vars(stmt, stmt.var)
+                push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs))
+                push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
+            else
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner)))
+            end
+        end
+    end
+    return exprs
+end
+
+# JACC hands the loop index in directly as the split-off function's
+# first parameter -- no thread-index intrinsic to bind, unlike
+# cgen_kernel_def, since JACC.parallel_for(N, f, args...) already
+# guarantees the index range. cgen_loopvar_from_tid still does the
+# affine lo/step remapping (JACC's own 1:N index space vs. the
+# original loop's actual lo/step/hi), same as it does for cgen_.
+function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
+    jidx = :__jacc_i
+    body = Any[Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, jidx))]
+    append!(body, jgen_device_body(stmt.body, stmt.var))
+    push!(body, emit_return_nothing())
+    return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
+end
+
+# a plain function call, not a macrocall -- JACC.parallel_for is an
+# ordinary function, with no thread/block sizing to compute at this
+# level (that's internal to JACC, unlike cgen_launch_expr's cld(...))
+function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
+    n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+    return Expr(:call, Expr(:., :JACC, QuoteNode(:parallel_for)), n_iter, jgen_kernel_fname(owner, idx), fargs...)
+end
+
+function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol)
+    exprs = Any[]
+    for stmt in body
+        if stmt.kind == :assign
+            push!(exprs, jgen_device_assign(stmt, thread_var))
+        elseif stmt.kind == :if
+            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var), jgen_device_body(stmt.els, thread_var)))
+        elseif stmt.kind == :for
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var)))
+        end
+    end
+    return exprs
+end
+
+# identical decision to cgen_device_assign, reusing cgen_'s own
+# occurs-check and sum-flattening helpers -- only the atomic macro's
+# target module is fixed rather than coming from a backend descriptor
+function jgen_device_assign(stmt, thread_var::Symbol)
+    if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains(stmt.lhs.args[2:end], thread_var)
+        terms = cgen_flatten_sum(stmt.rhs)
+        self_idx = findfirst(t -> t == stmt.lhs, terms)
+        if self_idx !== nothing
+            other = cgen_sum_excluding(terms, self_idx)
+            return Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
+                        Expr(:(+=), stmt.lhs, other))
+        end
+    end
+    return Expr(:(=), stmt.lhs, stmt.rhs)
+end
+
+jgen_host_fname(name::Symbol) = Symbol(string(name) * "_jacc")
+
+function jgen_emit(gk)
+    kernels = Expr[]
+    host_body = jgen_body(gk.body, kernels, gk.name)
+    push!(host_body, emit_return_scalars(gk.ret))
+    host = Expr(:function, Expr(:call, jgen_host_fname(gk.name), gk.args...), Expr(:block, host_body...))
+    return (host = host, kernels = kernels)
+end
+
+function jgen_preamble()
+    return "import Pkg\nhaskey(Pkg.project().dependencies, \"JACC\") || Pkg.add(\"JACC\")\nhaskey(Pkg.project().dependencies, \"Atomix\") || Pkg.add(\"Atomix\")\nimport JACC\nimport Atomix\nJACC.@init_backend\n"
+end
+
+
 # ==================== val_* =======================================
 # Correctness oracle: <y, J*x> == <J'*y, x>, checked against random
 # seed vectors.
@@ -3031,6 +3176,32 @@ stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, T
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
     stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision = precision)
 
+# JACC has no gpu_backend value at all -- there's only one JACC target
+# from cgen_/jgen_'s point of view, since which vendor it actually
+# runs on is chosen later, outside this call entirely. precision has
+# no locked default here for the same reason (see jgen_* section
+# comment): Float64 unless the caller explicitly asks otherwise.
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+    plan = jgen_emit(cgen_ingest(expr))
+    p = precision === nothing ? Float64 : precision
+    p === Float64 && return plan
+    return (host = cgen_convert_precision(plan.host, p),
+            kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
+end
+
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+    defs = io_read_kernels(in_path)
+    kernels = Expr[]
+    hosts = Expr[]
+    for expr in defs
+        plan = stade_jacc(expr; precision = precision)
+        append!(kernels, plan.kernels)
+        push!(hosts, plan.host)
+    end
+    io_write_gpu_file(out_path, vcat(kernels, hosts); preamble = jgen_preamble())
+    return out_path
+end
+
 
 # ==================== smoke test ===================================
 # Confirms the file loads and the call chain executes end-to-end.
@@ -3095,4 +3266,23 @@ let
     end
     @assert threw
     println("cgen_* round-tripped a kernel through the Metal backend OK; precision_locked correctly rejected Float64")
+
+    jacc_plan = stade_jacc(:(function stub4(u, v, n)
+        for i_x = 1:n
+            v[i_x] = v[i_x] + 2.0 * u[i_x]
+            v[1] = v[1] + u[i_x]
+        end
+        acc = 0.0
+        for i_seq_t = 1:n
+            acc = acc + u[i_seq_t]
+        end
+        v[2] = acc
+        return nothing
+    end))
+    @assert String(jacc_plan.host.args[1].args[1]) == "stub4_jacc"
+    hsrc = string(jacc_plan.host)
+    @assert occursin("JACC.parallel_for", hsrc) && occursin("for i_seq_t", hsrc)
+    ksrc = string(jacc_plan.kernels[1])
+    @assert occursin("Atomix.@atomic", ksrc) && !occursin("threadIdx", ksrc) && !occursin("blockIdx", ksrc)
+    println("jgen_* round-tripped a kernel through the JACC target OK (split loop -> parallel_for + kernel, atomic write via Atomix, sequential loop left on host)")
 end
