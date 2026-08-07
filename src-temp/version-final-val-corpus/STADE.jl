@@ -24,15 +24,20 @@
 #                         reverse sweep (the TBR-equivalent check).
 #   lin_    Linearize     builds each statement's derivative-tree,
 #                         shared input to both codegen directions.
+#   tgen_   Tangent gen   forward-mode codegen.
 #   agen_   Adjoint gen   reverse-mode codegen: forward sweep with
 #                         pushes, reversed backward sweep with pops,
 #                         plus the companion initstacks_* function.
+#   hvp_    Hessian-vec   forward-over-reverse: a second forward-mode
+#                         pass over agen_'s own generated code, for
+#                         Hessian-vector products.
 #   val_    Validate      correctness checking against ground truth
-#                         (finite differences).
+#                         (finite differences; later the adjoint
+#                         identity once tangent codegen is real).
 #   io_     File I/O      the ONLY stage touching the filesystem --
 #                         reads a kernel .jl file, writes a
 #                         generated .jl file.
-#   stade_  Public API    stade_adjoint
+#   stade_  Public API    stade_tangent / stade_adjoint / stade_hvp
 #                         (Expr in, Expr out) and stade_*_file
 #                         wrappers (path in, path out), wiring every
 #                         stage above together for an end user.
@@ -58,6 +63,7 @@
 # snapshot_plan :: Vector{snapshot_site}
 # lin_node/lin_plan :: internal-only shape, documented at the lin_*
 #     section header below.
+# der_rule_pair :: (tangent::Function, adjoint::Function)
 
 
 # ==================== parse_* ================================
@@ -621,10 +627,9 @@ function shape_mark_int_from_comparisons!(expr, is_int::Dict{Symbol,Bool})
     return nothing
 end
 
-# ---- int evidence, pass 2: propagate through assignments ---------
-# An assignment can't change kind, so evidence flows both ways: rhs
-# int-ness forces lhs int (forward), and lhs int-ness forces whatever
-# rhs operands it depends on int too (backward).
+# ---- int evidence, pass 2: propagate through plain assignments ----
+# A bare copy `lhs = rhs` forces lhs and rhs to share one kind, since
+# assignment can't change it -- evidence has to flow both ways.
 
 function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool})
     changed = false
@@ -634,12 +639,13 @@ function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool
                 is_int[stmt.lhs] = true
                 changed = true
             end
-            # backward: an lhs kind discovered from evidence elsewhere
-            # forces every rhs operand that shape_expr_int_status
-            # would need int to reach that same verdict (the forward
-            # direction is already covered by the check above)
-            if is_int[stmt.lhs]
-                changed = shape_force_int_expr!(stmt.rhs, is_int) || changed
+            # backward: a bare copy forces the rhs variable to match
+            # a lhs kind discovered from evidence elsewhere (the
+            # forward direction is already covered by the check above)
+            if stmt.rhs isa Symbol && haskey(is_int, stmt.rhs) &&
+               is_int[stmt.lhs] && !is_int[stmt.rhs]
+                is_int[stmt.rhs] = true
+                changed = true
             end
         elseif stmt.kind == :for
             changed = shape_propagate_int!(stmt.body, is_int) || changed
@@ -649,32 +655,6 @@ function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool
         end
     end
     return changed
-end
-
-# operators whose result is Int64 exactly when every operand is --
-# shared with shape_expr_int_status's forward reasoning so the two
-# directions can't drift apart
-function shape_int_preserving_ops()
-    return Set{Symbol}([:+, :-, :*, :^, :abs, :sign, :max, :min, :mod, :floor, :ceil, :trunc])
-end
-
-# given expr is already known to evaluate to Int64, force every
-# operand that fact depends on to Int64 too -- recurses through
-# int-preserving ops (mirrors shape_expr_int_status in reverse);
-# a bare copy is just the single-leaf case of this same rule
-function shape_force_int_expr!(expr, is_int::Dict{Symbol,Bool})
-    if expr isa Symbol
-        (haskey(is_int, expr) && !is_int[expr]) || return false
-        is_int[expr] = true
-        return true
-    elseif expr isa Expr && expr.head == :call && expr.args[1] in shape_int_preserving_ops()
-        changed = false
-        for a in expr.args[2:end]
-            changed = shape_force_int_expr!(a, is_int) || changed
-        end
-        return changed
-    end
-    return false
 end
 
 # tri-state: :int (provably integer), :float (provably float), or
@@ -696,7 +676,7 @@ function shape_expr_int_status(expr, is_int::Dict{Symbol,Bool})
         elseif op in (:sqrt, :exp, :log, :log10, :sin, :cos, :tan,
                       :asin, :acos, :atan, :sinh, :cosh, :tanh)
             return :float
-        elseif op in shape_int_preserving_ops()
+        elseif op in (:+, :-, :*, :^, :abs, :sign, :max, :min, :mod, :floor, :ceil, :trunc)
             any(==(:float), arg_status) && return :float
             all(==(:int), arg_status) && return :int
             return :unknown
@@ -714,8 +694,9 @@ end
 #
 # Every rule pair is built from a per-operator "local partials" list:
 # partials[i] is d(op(args...))/d(args[i]), symbolic in the primal
-# args. Adjoint contraction returns one contribution per arg 
-# (partials[i]*out_adjoint), left for agen_ to
+# args. tangent/adjoint are the two standard contractions against a
+# seed: tangent sums partials[i]*dargs[i]; adjoint returns one
+# contribution per arg (partials[i]*out_adjoint), left for agen_ to
 # turn into an accumulation statement. A few algebraic simplifications
 # (dropping *1, *0, +0 terms, folding literal arithmetic) keep the
 # generated Exprs simple.
@@ -728,37 +709,45 @@ end
 
 function der_table()
     return Dict{Symbol,NamedTuple}(
-        :+     => (adjoint = der_adjoint_add),
-        :-     => (adjoint = der_adjoint_sub),
-        :*     => (adjoint = der_adjoint_mul),
-        :/     => (adjoint = der_adjoint_divide),
-        :^     => (adjoint = der_adjoint_pow),
-        :abs   => (adjoint = der_adjoint_abs),
-        :sqrt  => (adjoint = der_adjoint_sqrt),
-        :exp   => (adjoint = der_adjoint_exp),
-        :log   => (adjoint = der_adjoint_log),
-        :log10 => (adjoint = der_adjoint_log10),
-        :sin   => (adjoint = der_adjoint_sin),
-        :cos   => (adjoint = der_adjoint_cos),
-        :tan   => (adjoint = der_adjoint_tan),
-        :asin  => (adjoint = der_adjoint_asin),
-        :acos  => (adjoint = der_adjoint_acos),
-        :atan  => (adjoint = der_adjoint_atan),
-        :sinh  => (adjoint = der_adjoint_sinh),
-        :cosh  => (adjoint = der_adjoint_cosh),
-        :tanh  => (adjoint = der_adjoint_tanh),
-        :mod   => (adjoint = der_adjoint_mod),
-        :div   => (adjoint = der_adjoint_intdiv),
-        :max   => (adjoint = der_adjoint_max),
-        :min   => (adjoint = der_adjoint_min),
-        :sign  => (adjoint = der_adjoint_sign),
-        :floor => (adjoint = der_adjoint_floor),
-        :ceil  => (adjoint = der_adjoint_ceil),
-        :trunc => (adjoint = der_adjoint_trunc),
+        :+     => (tangent = der_tangent_add,     adjoint = der_adjoint_add),
+        :-     => (tangent = der_tangent_sub,     adjoint = der_adjoint_sub),
+        :*     => (tangent = der_tangent_mul,     adjoint = der_adjoint_mul),
+        :/     => (tangent = der_tangent_divide,  adjoint = der_adjoint_divide),
+        :^     => (tangent = der_tangent_pow,     adjoint = der_adjoint_pow),
+        :abs   => (tangent = der_tangent_abs,     adjoint = der_adjoint_abs),
+        :sqrt  => (tangent = der_tangent_sqrt,    adjoint = der_adjoint_sqrt),
+        :exp   => (tangent = der_tangent_exp,     adjoint = der_adjoint_exp),
+        :log   => (tangent = der_tangent_log,     adjoint = der_adjoint_log),
+        :log10 => (tangent = der_tangent_log10,   adjoint = der_adjoint_log10),
+        :sin   => (tangent = der_tangent_sin,     adjoint = der_adjoint_sin),
+        :cos   => (tangent = der_tangent_cos,     adjoint = der_adjoint_cos),
+        :tan   => (tangent = der_tangent_tan,     adjoint = der_adjoint_tan),
+        :asin  => (tangent = der_tangent_asin,    adjoint = der_adjoint_asin),
+        :acos  => (tangent = der_tangent_acos,    adjoint = der_adjoint_acos),
+        :atan  => (tangent = der_tangent_atan,    adjoint = der_adjoint_atan),
+        :sinh  => (tangent = der_tangent_sinh,    adjoint = der_adjoint_sinh),
+        :cosh  => (tangent = der_tangent_cosh,    adjoint = der_adjoint_cosh),
+        :tanh  => (tangent = der_tangent_tanh,    adjoint = der_adjoint_tanh),
+        :mod   => (tangent = der_tangent_mod,     adjoint = der_adjoint_mod),
+        :div   => (tangent = der_tangent_intdiv,  adjoint = der_adjoint_intdiv),
+        :max   => (tangent = der_tangent_max,     adjoint = der_adjoint_max),
+        :min   => (tangent = der_tangent_min,     adjoint = der_adjoint_min),
+        :sign  => (tangent = der_tangent_sign,    adjoint = der_adjoint_sign),
+        :floor => (tangent = der_tangent_floor,   adjoint = der_adjoint_floor),
+        :ceil  => (tangent = der_tangent_ceil,    adjoint = der_adjoint_ceil),
+        :trunc => (tangent = der_tangent_trunc,   adjoint = der_adjoint_trunc),
     )
 end
 
-# ---- generic contraction: local partials -> adjoint --------
+# ---- generic contraction: local partials -> tangent / adjoint --------
+
+# sum_i partials[i] * dargs[i], dropping zero terms
+function der_tangent_generic(op::Symbol, args, dargs)
+    partials = der_partials(op, args)
+    length(partials) == length(dargs) || error("der_tangent_generic: arity mismatch for $op")
+    terms = [der_mul(partials[i], dargs[i]) for i in 1:length(partials)]
+    return der_sum_terms(terms)
+end
 
 # [partials[i] * out_adjoint for each arg] -- per-arg contribution, not
 # yet folded into an `argib = argib + ...` accumulation (agen_'s job)
@@ -990,60 +979,87 @@ function der_partials_trunc(args)
     return [0.0]
 end
 
-# ---- named adjoint entry points registered in der_table ------
+# ---- named tangent/adjoint entry points registered in der_table ------
 
+function der_tangent_add(args, dargs); return der_tangent_generic(:+, args, dargs); end
 function der_adjoint_add(args, out_adjoint); return der_adjoint_generic(:+, args, out_adjoint); end
 
+function der_tangent_sub(args, dargs); return der_tangent_generic(:-, args, dargs); end
 function der_adjoint_sub(args, out_adjoint); return der_adjoint_generic(:-, args, out_adjoint); end
 
+function der_tangent_mul(args, dargs); return der_tangent_generic(:*, args, dargs); end
 function der_adjoint_mul(args, out_adjoint); return der_adjoint_generic(:*, args, out_adjoint); end
 
+function der_tangent_divide(args, dargs); return der_tangent_generic(:/, args, dargs); end
 function der_adjoint_divide(args, out_adjoint); return der_adjoint_generic(:/, args, out_adjoint); end
 
+function der_tangent_pow(args, dargs); return der_tangent_generic(:^, args, dargs); end
 function der_adjoint_pow(args, out_adjoint); return der_adjoint_generic(:^, args, out_adjoint); end
 
+function der_tangent_abs(args, dargs); return der_tangent_generic(:abs, args, dargs); end
 function der_adjoint_abs(args, out_adjoint); return der_adjoint_generic(:abs, args, out_adjoint); end
 
+function der_tangent_sqrt(args, dargs); return der_tangent_generic(:sqrt, args, dargs); end
 function der_adjoint_sqrt(args, out_adjoint); return der_adjoint_generic(:sqrt, args, out_adjoint); end
 
+function der_tangent_exp(args, dargs); return der_tangent_generic(:exp, args, dargs); end
 function der_adjoint_exp(args, out_adjoint); return der_adjoint_generic(:exp, args, out_adjoint); end
 
+function der_tangent_log(args, dargs); return der_tangent_generic(:log, args, dargs); end
 function der_adjoint_log(args, out_adjoint); return der_adjoint_generic(:log, args, out_adjoint); end
 
+function der_tangent_log10(args, dargs); return der_tangent_generic(:log10, args, dargs); end
 function der_adjoint_log10(args, out_adjoint); return der_adjoint_generic(:log10, args, out_adjoint); end
 
+function der_tangent_sin(args, dargs); return der_tangent_generic(:sin, args, dargs); end
 function der_adjoint_sin(args, out_adjoint); return der_adjoint_generic(:sin, args, out_adjoint); end
 
+function der_tangent_cos(args, dargs); return der_tangent_generic(:cos, args, dargs); end
 function der_adjoint_cos(args, out_adjoint); return der_adjoint_generic(:cos, args, out_adjoint); end
 
+function der_tangent_tan(args, dargs); return der_tangent_generic(:tan, args, dargs); end
 function der_adjoint_tan(args, out_adjoint); return der_adjoint_generic(:tan, args, out_adjoint); end
 
+function der_tangent_asin(args, dargs); return der_tangent_generic(:asin, args, dargs); end
 function der_adjoint_asin(args, out_adjoint); return der_adjoint_generic(:asin, args, out_adjoint); end
 
+function der_tangent_acos(args, dargs); return der_tangent_generic(:acos, args, dargs); end
 function der_adjoint_acos(args, out_adjoint); return der_adjoint_generic(:acos, args, out_adjoint); end
 
+function der_tangent_atan(args, dargs); return der_tangent_generic(:atan, args, dargs); end
 function der_adjoint_atan(args, out_adjoint); return der_adjoint_generic(:atan, args, out_adjoint); end
 
+function der_tangent_sinh(args, dargs); return der_tangent_generic(:sinh, args, dargs); end
 function der_adjoint_sinh(args, out_adjoint); return der_adjoint_generic(:sinh, args, out_adjoint); end
 
+function der_tangent_cosh(args, dargs); return der_tangent_generic(:cosh, args, dargs); end
 function der_adjoint_cosh(args, out_adjoint); return der_adjoint_generic(:cosh, args, out_adjoint); end
 
+function der_tangent_tanh(args, dargs); return der_tangent_generic(:tanh, args, dargs); end
 function der_adjoint_tanh(args, out_adjoint); return der_adjoint_generic(:tanh, args, out_adjoint); end
 
+function der_tangent_mod(args, dargs); return der_tangent_generic(:mod, args, dargs); end
 function der_adjoint_mod(args, out_adjoint); return der_adjoint_generic(:mod, args, out_adjoint); end
 
+function der_tangent_intdiv(args, dargs); return der_tangent_generic(:div, args, dargs); end
 function der_adjoint_intdiv(args, out_adjoint); return der_adjoint_generic(:div, args, out_adjoint); end
 
+function der_tangent_max(args, dargs); return der_tangent_generic(:max, args, dargs); end
 function der_adjoint_max(args, out_adjoint); return der_adjoint_generic(:max, args, out_adjoint); end
 
+function der_tangent_min(args, dargs); return der_tangent_generic(:min, args, dargs); end
 function der_adjoint_min(args, out_adjoint); return der_adjoint_generic(:min, args, out_adjoint); end
 
+function der_tangent_sign(args, dargs); return der_tangent_generic(:sign, args, dargs); end
 function der_adjoint_sign(args, out_adjoint); return der_adjoint_generic(:sign, args, out_adjoint); end
 
+function der_tangent_floor(args, dargs); return der_tangent_generic(:floor, args, dargs); end
 function der_adjoint_floor(args, out_adjoint); return der_adjoint_generic(:floor, args, out_adjoint); end
 
+function der_tangent_ceil(args, dargs); return der_tangent_generic(:ceil, args, dargs); end
 function der_adjoint_ceil(args, out_adjoint); return der_adjoint_generic(:ceil, args, out_adjoint); end
 
+function der_tangent_trunc(args, dargs); return der_tangent_generic(:trunc, args, dargs); end
 function der_adjoint_trunc(args, out_adjoint); return der_adjoint_generic(:trunc, args, out_adjoint); end
 
 # ---- small Expr-building helpers shared by every rule above -----------
@@ -1313,14 +1329,10 @@ end
 #          direct `+`/`-` operand -- see snap_is_pure_accumulation),
 #          which never needs the old value since old and new are the
 #          same quantity for adjoint purposes.
-#       2. cross-statement: written inside a loop (any loop -- even a
-#          non-sequential one still runs its backward code once per
-#          iteration, and a plain reversal only reorders whole
-#          *statements*, not the separate temporal copies of a scalar
-#          across iterations) and read by some other statement
-#          anywhere in the kernel. A write outside any loop entirely
-#          never triggers this: with only one iteration ever, nothing
-#          can overwrite it before that read's backward code runs.
+#       2. cross-statement: written inside a sequential loop and read
+#          by some other statement anywhere in the kernel -- a write
+#          in a non-sequential loop never triggers this, even if read
+#          again later, since nothing overwrites it before that read.
 #   :branch -- one per `if`, unconditionally: the reverse sweep must
 #     replay whichever arm the forward sweep actually took.
 #   :tripcount -- a loop's bounds reference a variable reassigned
@@ -1334,7 +1346,7 @@ function snap_plan(kernel, active_map)
     read_anywhere = snap_collect_reads(kernel.body)
     sites = NamedTuple[]
     counter = Ref(0)
-    snap_walk!(kernel.body, active_map, kernel.sig.kinds, reassigned, read_anywhere, sites, counter)
+    snap_walk!(kernel.body, active_map, kernel.sig.kinds, false, reassigned, read_anywhere, sites, counter)
     return sites
 end
 
@@ -1388,42 +1400,31 @@ function snap_collect_expr_vars!(expr, vars)
     return nothing
 end
 
-# one forward-order pass, emitting sites as they're found. A write
-# needs a site whenever `var` is read anywhere else in the kernel --
-# regardless of whether this particular write sits inside a loop,
-# outside one, or which loop: what matters is only whether some OTHER
-# statement's read of `var` could see a different value once forward
-# and backward walk it in opposite orders, and that risk exists
-# equally for a write inside a loop restoring a read inside a
-# DIFFERENT (sibling or enclosing) block, a write outside a loop
-# restoring a read inside one, or a write and read both at the top
-# level. Over-snapshotting a var that turns out not to have needed it
-# costs a harmless extra push/pop pair, never a correctness bug --
-# every snapshot's push and pop occupy the mirrored position in the
-# forward/backward walk, so nesting is always self-consistent
-# regardless of which subset of writes get one.
-function snap_walk!(body, active_map, kinds, reassigned, read_anywhere, sites, counter)
+# one forward-order pass, emitting sites as they're found; `seq` is
+# whether the walk is currently nested inside at least one
+# sequential loop
+function snap_walk!(body, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
     for stmt in body
         if stmt.kind == :assign
-            snap_check_assign!(stmt, active_map, kinds, read_anywhere, sites, counter)
+            snap_check_assign!(stmt, active_map, kinds, seq, read_anywhere, sites, counter)
         elseif stmt.kind == :for
             snap_check_tripcount!(stmt, reassigned, sites, counter)
-            snap_walk!(stmt.body, active_map, kinds, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.body, active_map, kinds, seq || stmt.sequential, reassigned, read_anywhere, sites, counter)
         elseif stmt.kind == :if
             counter[] = counter[] + 1
             push!(sites, (kind = :branch, array = :cond, at = counter[]))
-            snap_walk!(stmt.then, active_map, kinds, reassigned, read_anywhere, sites, counter)
-            snap_walk!(stmt.els, active_map, kinds, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.then, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.els, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
         end
     end
     return nothing
 end
 
-function snap_check_assign!(stmt, active_map, kinds, read_anywhere, sites, counter)
+function snap_check_assign!(stmt, active_map, kinds, seq, read_anywhere, sites, counter)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     active_map[var] || return nothing
     snap_is_pure_accumulation(stmt.lhs, stmt.rhs, var) && return nothing
-    needs_site = snap_count_var_refs(stmt.rhs, var) > 0 || var in read_anywhere
+    needs_site = snap_count_var_refs(stmt.rhs, var) > 0 || (seq && var in read_anywhere)
     needs_site || return nothing
     kind = kinds[var] == :array_float ? :array : :value
     counter[] = counter[] + 1
@@ -1583,6 +1584,107 @@ function lin_build_expr(expr, active_map)
 end
 
 
+# ==================== tgen_* =====================================
+# Forward-mode codegen: single sweep, original statement/loop order,
+# no snapshot stacks -- every active statement gets a shadow
+# ("d"-suffixed) line emitted right before its own primal line,
+# computed from current (pre-this-statement) values. Always safe: a
+# statement's tangent never depends on its own lhs's new value. The
+# tangent line is emitted even when it collapses to 0.0, so a later
+# active read sees the reset rather than a stale value.
+
+function tgen_emit(kernel, lin_plan)
+    fname = tgen_fname(kernel.sig.name)
+    fargs = tgen_signature_args(kernel.sig)
+    body_exprs = tgen_body(lin_plan)
+    reassigned = tgen_reassigned_scalar_args(kernel)
+    push!(body_exprs, emit_return_scalars([tgen_shadow(v) for v in reassigned]))
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body_exprs...))
+end
+
+tgen_fname(name::Symbol) = Symbol(string(name) * "_d")
+
+# a Symbol becomes `<name>d`; an array-ref `v[i,...]` becomes
+# `vd[i,...]` -- same indices, shadowed array name
+function tgen_shadow(expr)
+    expr isa Symbol && return Symbol(string(expr) * "d")
+    if expr isa Expr && expr.head == :ref
+        return Expr(:ref, Symbol(string(expr.args[1]) * "d"), expr.args[2:end]...)
+    end
+    error("tgen_shadow: expected a Symbol or array-ref, got $expr")
+end
+
+# every float arg gets its shadow appended right after it;
+# Int64 args appear once, exactly as in the primal
+function tgen_signature_args(sig)
+    fargs = Symbol[]
+    for a in sig.args
+        push!(fargs, a)
+        if sig.kinds[a] in (:scalar_float, :array_float)
+            push!(fargs, tgen_shadow(a))
+        end
+    end
+    return fargs
+end
+
+function tgen_body(plan)
+    exprs = Any[]
+    for stmt in plan
+        if stmt.kind == :assign
+            push!(exprs, Expr(:(=), tgen_shadow(stmt.lhs), tgen_tangent_expr(stmt.tree)))
+            push!(exprs, Expr(:(=), stmt.lhs, stmt.tree.expr))
+        elseif stmt.kind == :for
+            inner = tgen_body(stmt.body)
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
+        elseif stmt.kind == :if
+            then_exprs = tgen_body(stmt.then)
+            els_exprs = tgen_body(stmt.els)
+            push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
+        end
+    end
+    return exprs
+end
+
+# bottom-up: sum_i partials[i]*tangent(child_i), via der_tangent_generic
+# (which itself re-derives partials from node.op/node.args -- cheap,
+# and keeps this function from needing to know der_mul/der_sum_terms).
+# An entirely-inactive subtree collapses straight to the literal 0.0
+# rather than trusting the generic contraction to fold it down itself.
+function tgen_tangent_expr(node)
+    node.active || return 0.0
+    node.kind == :leaf && return tgen_shadow(node.expr)
+    dargs = [tgen_tangent_expr(c) for c in node.children]
+    return der_tangent_generic(node.op, node.args, dargs)
+end
+
+# scalar-float function args reassigned somewhere in the primal body
+# -- the only shadows that can't just be read straight off the
+# argument binding, since nothing else in the tangent function would
+# otherwise expose their new value to the caller
+function tgen_reassigned_scalar_args(kernel)
+    arg_set = Set(kernel.sig.args)
+    out = Symbol[]
+    tgen_collect_reassigned_scalar_args!(kernel.body, arg_set, kernel.sig.kinds, out)
+    return out
+end
+
+function tgen_collect_reassigned_scalar_args!(body, arg_set, kinds, out)
+    for stmt in body
+        if stmt.kind == :assign
+            if stmt.lhs isa Symbol && stmt.lhs in arg_set && kinds[stmt.lhs] == :scalar_float && !(stmt.lhs in out)
+                push!(out, stmt.lhs)
+            end
+        elseif stmt.kind == :for
+            tgen_collect_reassigned_scalar_args!(stmt.body, arg_set, kinds, out)
+        elseif stmt.kind == :if
+            tgen_collect_reassigned_scalar_args!(stmt.then, arg_set, kinds, out)
+            tgen_collect_reassigned_scalar_args!(stmt.els, arg_set, kinds, out)
+        end
+    end
+    return nothing
+end
+
+
 # ==================== agen_* =====================================
 # Reverse-mode codegen: forward sweep w/ pushes, reversed backward
 # sweep w/ pops, plus the companion initstacks_* generator.
@@ -1654,8 +1756,8 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites)
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
-    append!(body, agen_forward_body(kernel.body, kernel.sig.kinds, active_map, read_anywhere, reassigned, stacks))
-    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, unsafe, read_anywhere, reassigned, stacks))
+    append!(body, agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks))
+    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, unsafe, false, read_anywhere, reassigned, stacks))
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
     push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
@@ -1888,18 +1990,10 @@ function agen_count_expr_occurrences(expr, target)
     return total
 end
 
-# a write to `var` needs a push (forward) / pop-restore (backward)
-# whenever some other statement anywhere in the kernel reads `var` --
-# no loop-nesting condition narrows this: a write's own backward code
-# runs at that write's mirrored position in the reverse walk, and any
-# OTHER read of `var` could be processed either earlier or later in
-# that walk than this write's own restore, in either direction,
-# regardless of what loop (if any) either one sits in. Being
-# conservative here only ever costs an unnecessary push/pop pair.
-function agen_needs_snapshot(lhs, rhs, var, read_anywhere)
+function agen_needs_snapshot(lhs, rhs, var, seq, read_anywhere)
     agen_is_pure_accumulation(lhs, rhs, var) && return false
     agen_count_var_refs(rhs, var) > 0 && return true
-    return var in read_anywhere
+    return seq && (var in read_anywhere)
 end
 
 # bound-variables of a :for statement that are reassigned somewhere
@@ -1920,7 +2014,7 @@ end
 
 # ---- forward sweep (walks the raw primal `statement_list`) ---------
 
-function agen_forward_body(body, kinds, active_map, read_anywhere, reassigned, stacks)
+function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, stacks)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
@@ -1931,11 +2025,8 @@ function agen_forward_body(body, kinds, active_map, read_anywhere, reassigned, s
             # write is a plain inactive literal; the backward sweep
             # only ever pops for a write whose own rhs is active, so
             # pushing here on every write regardless would push more
-            # than gets popped. An int-kinded lhs never owns a
-            # :value/:array site regardless of what rhs activity says
-            # -- only :tripcount covers int reassignment -- matching
-            # snap_plan's own gate on the write's target, not its rhs.
-            if kinds[var] in (:scalar_float, :array_float) && agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, read_anywhere)
+            # than gets popped
+            if agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, seq, read_anywhere)
                 push!(exprs, Expr(:call, :push!, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs))
             end
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
@@ -1943,12 +2034,12 @@ function agen_forward_body(body, kinds, active_map, read_anywhere, reassigned, s
             for bv in agen_tripcount_bound_vars(stmt, reassigned)
                 push!(exprs, Expr(:call, :push!, stacks[(:tripcount, bv)], bv))
             end
-            inner = agen_forward_body(stmt.body, kinds, active_map, read_anywhere, reassigned, stacks)
+            inner = agen_forward_body(stmt.body, active_map, seq || stmt.sequential, read_anywhere, reassigned, stacks)
             push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
-            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, kinds, active_map, read_anywhere, reassigned, stacks))
-            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, kinds, active_map, read_anywhere, reassigned, stacks))
+            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, active_map, seq, read_anywhere, reassigned, stacks))
+            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, active_map, seq, read_anywhere, reassigned, stacks))
             push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
         end
     end
@@ -1976,62 +2067,10 @@ end
 # (:value), matching how snap_plan classified the same write
 agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
 
-# find the top-level :assign to `var` in a lin_plan body, if any --
-# only looks at direct children, matching how the :if handling below
-# only ever needs a branch's OWN immediate write, not one buried
-# inside a further-nested :for/:if
-function agen_find_assign(body, var)
-    for s in body
-        s.kind == :assign || continue
-        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
-        v == var && return s
-    end
-    return nothing
-end
-
-# the constant a branch-snapshotted scalar falls back to on whichever
-# side of the :if doesn't assign it -- the nearest preceding sibling
-# assign to the same var in this exact block. Only a literal-Number
-# rhs is trusted here (not merely "inactive"): recompute must not
-# depend on any other variable's current value, which the reverse
-# sweep could already have disturbed by this point.
-function agen_branch_scalar_fallback(plan, idx, var)
-    for k in (idx - 1):-1:1
-        s = plan[k]
-        s.kind == :assign || continue
-        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
-        v == var || continue
-        return s.tree.expr isa Number ? s.tree.expr : nothing
-    end
-    return nothing
-end
-
-# scalar_float vars this :if assigns (on either branch) purely
-# because they're read elsewhere -- NOT because the write is a
-# self-recurrence, which the normal pre-write restore already handles
-# correctly (it needs the OLD value at exactly this write's own
-# reverse position, unlike the read-elsewhere case below).
-function agen_if_branch_scalar_vars(stmt, kinds, read_anywhere)
-    vars = Symbol[]
-    for sub in vcat(stmt.then, stmt.els)
-        sub.kind == :assign || continue
-        var = sub.lhs isa Symbol ? sub.lhs : sub.lhs.args[1]
-        (sub.lhs isa Symbol && kinds[var] == :scalar_float) || continue
-        agen_count_var_refs(sub.tree.expr, var) == 0 || continue
-        agen_needs_snapshot(sub.lhs, sub.tree.expr, var, read_anywhere) || continue
-        var in vars || push!(vars, var)
-    end
-    return vars
-end
-
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
-# `skip_restore`: vars whose pre-write restore has already been done
-# by an enclosing :if's hoist (see below) -- popping again here would
-# consume the wrong stack entry. Only ever non-empty for the direct
-# then/els body of a hoisted :if; every other call uses the default.
-function agen_backward_body(plan, kinds, unsafe, read_anywhere, reassigned, stacks, skip_restore = Set{Symbol}())
+function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
     exprs = Any[]
     # int-kinded local assignments (index/bookkeeping helpers) never
     # carry gradients, so agen_backward_assign emits nothing at all
@@ -2056,76 +2095,15 @@ function agen_backward_body(plan, kinds, unsafe, read_anywhere, reassigned, stac
             end
         end
     end
-    # Branch-snapshotted scalars (x = 0.0; if cond: x = expr end)
-    # whose own primal VALUE -- not just their shadow -- is read by a
-    # DIFFERENT statement later in this same block, for a nonlinear
-    # term's own partial (e.g. a divisor whose adjoint needs the
-    # literal numerator it divides). A plain reverse walk restores
-    # such a scalar only once it reaches the :if itself, which comes
-    # AFTER that read in the reverse walk (the :if precedes the read
-    # in forward order) -- one iteration too late, so the read picks
-    # up whatever the deeper, already-processed iteration left
-    # behind. Recomputed here instead, forward-style, from the
-    # freshly popped branch flag: safe because a snapshot site's rhs
-    # (an array read, or the literal-constant sibling it falls back
-    # to) never itself depends on anything the reverse sweep has
-    # touched yet at this point. Walked in reverse-plan order so
-    # multiple qualifying :if's in this block still pop branch_stack
-    # in the same relative LIFO order a plain reversal would.
-    branch_flags = Dict{Int,Symbol}()
-    hoisted_vars = Dict{Int,Set{Symbol}}()
-    for idx in length(plan):-1:1
-        stmt = plan[idx]
-        stmt.kind == :if || continue
-        vars = agen_if_branch_scalar_vars(stmt, kinds, read_anywhere)
-        isempty(vars) && continue
-        resolved = Any[]
-        for var in vars
-            then_stmt = agen_find_assign(stmt.then, var)
-            els_stmt = agen_find_assign(stmt.els, var)
-            then_expr = then_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : then_stmt.tree.expr
-            els_expr = els_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : els_stmt.tree.expr
-            (then_expr === nothing || els_expr === nothing) && continue   # can't safely recompute -- leave to the normal (imperfectly-timed) restore
-            # a branch only pushed onto the value stack (forward sweep)
-            # if its own rhs was active -- a literal-constant branch
-            # (like the `then_expr`/`els_expr` fallback case) never
-            # does, matching agen_forward_body's own push gate exactly
-            then_pushed = then_stmt !== nothing && then_stmt.active
-            els_pushed = els_stmt !== nothing && els_stmt.active
-            push!(resolved, (var, then_expr, els_expr, then_pushed, els_pushed))
-        end
-        isempty(resolved) && continue
-        flag = Symbol("__branch_pre_", idx)
-        push!(exprs, Expr(:(=), flag, Expr(:call, :pop!, stacks[(:branch, :cond)])))
-        branch_flags[idx] = flag
-        hoisted_vars[idx] = Set(v for (v, _, _, _, _) in resolved)
-        for (var, then_expr, els_expr, then_pushed, els_pushed) in resolved
-            snm = stacks[(:value, var)]
-            if then_pushed && els_pushed
-                push!(exprs, Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm)))
-            elseif then_pushed
-                push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm))], Any[]))
-            elseif els_pushed
-                push!(exprs, emit_if(Expr(:call, :(==), flag, 0), Any[Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm))], Any[]))
-            end
-            # declared with a dummy numeric value first, then assigned
-            # in each branch, rather than `var = if cond; a; else; b;
-            # end` -- both forms are equivalent here (both branches of
-            # a plain if/else always assign var exactly once), this
-            # form is just easier to scan in the generated file
-            push!(exprs, Expr(:(=), var, 0.0))
-            push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), var, then_expr)], Any[Expr(:(=), var, els_expr)]))
-        end
-    end
-    for idx in length(plan):-1:1
-        stmt = plan[idx]
+    for stmt in reverse(plan)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
-            append!(exprs, agen_backward_assign(stmt, kinds, read_anywhere, reassigned, stacks, skip_restore))
+            append!(exprs, agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks))
         elseif stmt.kind == :for
-            inner = agen_backward_body(stmt.body, kinds, unsafe, read_anywhere, reassigned, stacks)
-            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, read_anywhere, reassigned)
+            inner_seq = seq || stmt.sequential
+            inner = agen_backward_body(stmt.body, kinds, unsafe, inner_seq, read_anywhere, reassigned, stacks)
+            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, inner_seq, read_anywhere, reassigned)
             loop_expr = reverse_it ?
                 emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
                 emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
@@ -2134,16 +2112,11 @@ function agen_backward_body(plan, kinds, unsafe, read_anywhere, reassigned, stac
             end
             push!(exprs, loop_expr)
         elseif stmt.kind == :if
-            skip = get(hoisted_vars, idx, Set{Symbol}())
-            then_exprs = agen_backward_body(stmt.then, kinds, unsafe, read_anywhere, reassigned, stacks, skip)
-            els_exprs = agen_backward_body(stmt.els, kinds, unsafe, read_anywhere, reassigned, stacks, skip)
-            if haskey(branch_flags, idx)
-                push!(exprs, emit_if(Expr(:call, :(==), branch_flags[idx], 1), then_exprs, els_exprs))
-            else
-                nm = stacks[(:branch, :cond)]
-                push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
-                push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
-            end
+            nm = stacks[(:branch, :cond)]
+            then_exprs = agen_backward_body(stmt.then, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
+            els_exprs = agen_backward_body(stmt.els, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
+            push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
+            push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
         end
     end
     return exprs
@@ -2156,16 +2129,16 @@ end
 # with no value recurrence at all can still push a branch flag every
 # iteration and must be walked backward to pop them correctly --
 # reversal here is about stack order, not mathematical dependency.
-function agen_body_has_snapshot(body, read_anywhere, reassigned)
+function agen_body_has_snapshot(body, seq, read_anywhere, reassigned)
     for stmt in body
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if stmt.active && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, read_anywhere)
+            if stmt.active && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
                 return true
             end
         elseif stmt.kind == :for
             !isempty(agen_tripcount_bound_vars(stmt, reassigned)) && return true
-            agen_body_has_snapshot(stmt.body, read_anywhere, reassigned) && return true
+            agen_body_has_snapshot(stmt.body, seq || stmt.sequential, read_anywhere, reassigned) && return true
         elseif stmt.kind == :if
             return true   # every `if` pushes a branch flag, unconditionally
         end
@@ -2173,15 +2146,12 @@ function agen_body_has_snapshot(body, read_anywhere, reassigned)
     return false
 end
 
-function agen_backward_assign(stmt, kinds, read_anywhere, reassigned, stacks, skip_restore = Set{Symbol}())
+function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     is_accum = agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
     exprs = Any[]
-    # int-kinded lhs can't own a shadow at all, regardless of what
-    # stmt.active (this write's rhs) says -- same reasoning as the
-    # forward sweep's push gate
-    if kinds[var] in (:scalar_float, :array_float) && stmt.active
-        if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, read_anywhere) && !(var in skip_restore)
+    if stmt.active
+        if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, Expr(:call, :pop!, nm)))
         end
@@ -2299,6 +2269,235 @@ function agen_local_shadow_inits(kernel, active_map)
 end
 
 
+# ==================== hvp_* =======================================
+# Forward-over-reverse Hessian-vector products: a SECOND, independent
+# application of forward-mode differentiation, this time to the
+# ALREADY-GENERATED adjoint kernel's own statement list rather than
+# to a hand-written primal. Computes Hv = d(grad f)/dv by seeding a
+# tangent on the kernel's own inputs and propagating it straight
+# through agen_'s forward sweep (which recomputes the primal) and
+# backward sweep (which computes the gradient) -- exactly tgen_'s own
+# "shadow line right before primal line" strategy, applied to a
+# second piece of code instead of to the original primal.
+#
+# This works as a genuinely general "one more forward layer" pass
+# because reverse-mode differentiation, once carried out, leaves
+# behind straight-line, order-preserving code: no further reversal,
+# only replay. agen_'s output is exactly the kind of code forward-
+# mode differentiation already knows how to handle. The only new
+# mechanics are for push!/pop!, which never arise in a hand-written
+# primal: a push of an active value gets a paired push onto a shadow
+# stack; a pop gets a paired pop, in the same position, so LIFO order
+# is inherited automatically rather than re-derived.
+#
+# There is no lin_plan for generated code (agen_ emits Expr directly,
+# not a statement/lin_node tree), so this differentiates by walking
+# the concrete Expr the earlier stage produced, rather than a
+# separately-built tree -- the "IR" this stage adds a layer to is
+# just agen_forward_body/agen_backward_body's own output, taken as
+# input. No new derivative rules are needed either: an accumulation
+# statement's rhs is built entirely from the same whitelisted
+# intrinsics as the primal, so differentiating it a second time via
+# der_tangent_generic already gives the correct second-order term.
+#
+# Every float arg's own tangent (xd, the seed direction v the caller
+# picks) AND its adjoint-shadow's tangent (xbd) are both function
+# parameters -- for an array-kinded arg this is unavoidable (nothing
+# in this design ever allocates an array locally), and doing the same
+# for scalars keeps the convention uniform: xbd represents "does the
+# OUTER seed itself vary with v", which is 0.0 for a standard HVP,
+# but making the caller pass that explicitly is clearer than hard-
+# coding it, and costs nothing. Every local (non-argument) scalar
+# gets its own shadow AND its adjoint-shadow's shadow declared and
+# zeroed, exactly one layer past what agen_local_primal_inits /
+# agen_local_shadow_inits already do. Shadow stacks are declared
+# locally (never returned or inspected afterward) -- the original
+# stacks still come from the primal's own initstacks_foo_b, reused
+# unchanged; only the NEW shadow stacks are this stage's concern, and
+# they never need to outlive one call.
+
+function hvp_emit(kernel, active_map, lin_plan, sites)
+    sig = kernel.sig
+    stacks = agen_stack_map(sites)
+    read_anywhere = agen_collect_reads(kernel.body)
+    reassigned = agen_collect_reassigned(kernel.body)
+    unsafe = agen_unsafe_int_vars(kernel)
+
+    fwd = agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks)
+    bwd = agen_backward_body(lin_plan, sig.kinds, unsafe, false, read_anywhere, reassigned, stacks)
+
+    shadow_of = hvp_shadow_map(kernel, sites)
+
+    fname = hvp_fname(sig.name)
+    seed_args = Symbol[]
+    for a in sig.args
+        sig.kinds[a] in (:scalar_float, :array_float) || continue
+        push!(seed_args, tgen_shadow(a))
+        push!(seed_args, tgen_shadow(agen_shadow(a)))
+    end
+    fargs = vcat(agen_signature_args(sig), seed_args, agen_stack_names(sites))
+
+    body = Any[]
+    append!(body, hvp_shadow_stack_inits(sites, shadow_of))
+    append!(body, agen_local_primal_inits(kernel, active_map))
+    append!(body, agen_local_shadow_inits(kernel, active_map))
+    append!(body, hvp_local_second_inits(kernel, shadow_of))
+    append!(body, hvp_double_body(fwd, shadow_of))
+    append!(body, hvp_double_body(bwd, shadow_of))
+
+    scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
+    ret = Symbol[]
+    for a in scalar_args
+        ab = agen_shadow(a)
+        push!(ret, ab)
+        push!(ret, tgen_shadow(ab))
+    end
+    push!(body, emit_return_scalars(ret))
+
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
+end
+
+hvp_fname(name::Symbol) = Symbol(string(name) * "_hv")
+hvp_stack_shadow(stack::Symbol) = Symbol(string(stack) * "_d")
+
+# every float variable this stage will encounter: primal args/locals
+# (shadow = tgen_shadow, the same "d" convention tgen_ already uses)
+# and agen_'s own adjoint shadows (shadow = tgen_shadow of THOSE --
+# e.g. xb's own second-layer shadow is xbd, via the same function,
+# unchanged, since it only ever appends "d"); plus every Float64-
+# holding stack (a paired shadow stack). Int64 stacks -- branch/
+# tripcount bookkeeping -- get none; they're never differentiated.
+function hvp_shadow_map(kernel, sites)
+    kinds = kernel.sig.kinds
+    m = Dict{Symbol,Symbol}()
+    for (v, k) in kinds
+        if k in (:scalar_float, :array_float)
+            m[v] = tgen_shadow(v)
+            m[agen_shadow(v)] = tgen_shadow(agen_shadow(v))
+        end
+    end
+    for s in sites
+        s.kind in (:array, :value) || continue
+        nm = agen_site_stack_name(s)
+        haskey(m, nm) || (m[nm] = hvp_stack_shadow(nm))
+    end
+    return m
+end
+
+function hvp_shadow_stack_inits(sites, shadow_of)
+    exprs = Any[]
+    seen = Set{Symbol}()
+    for s in sites
+        s.kind in (:array, :value) || continue
+        nm = agen_site_stack_name(s)
+        nm in seen && continue
+        push!(seen, nm)
+        push!(exprs, Expr(:(=), shadow_of[nm], Expr(:call, Expr(:curly, :Vector, :Float64))))
+    end
+    return exprs
+end
+
+# zero-initialize every local (non-argument) scalar's own second-
+# layer shadow AND its adjoint-shadow's shadow -- exactly
+# agen_local_primal_inits/agen_local_shadow_inits's job, one layer
+# further out. Arrays can never be local (skill-jade rule 8), so
+# there's never an array case to handle here; every float arg's own
+# xd/xbd, by contrast, is a function parameter (see hvp_emit), never
+# locally initialized. Unlike agen_'s own local-init functions, this
+# does NOT gate on active_map: the forward sweep always replays every
+# primal statement regardless of activity, so this stage's shadow of
+# an "inactive" local can still be written to, and needs to exist.
+function hvp_local_second_inits(kernel, shadow_of)
+    sig = kernel.sig
+    arg_set = Set(sig.args)
+    kinds = sig.kinds
+    exprs = Any[]
+    for v in sort(collect(keys(kinds)))
+        kinds[v] == :scalar_float || continue
+        v in arg_set && continue
+        push!(exprs, Expr(:(=), shadow_of[v], 0.0))
+        push!(exprs, Expr(:(=), shadow_of[agen_shadow(v)], 0.0))
+    end
+    return exprs
+end
+
+# the general "add one forward layer" transform: differentiate a
+# statement list agen_ already produced, emitting each shadow line
+# immediately before its primal line -- tgen_'s own strategy, applied
+# to Expr agen_ built rather than to a lin_node tree, and extended to
+# recognize push!/pop! alongside assignment/for/if.
+function hvp_double_body(exprs, shadow_of)
+    out = Any[]
+    for e in exprs
+        append!(out, hvp_double_stmt(e, shadow_of))
+    end
+    return out
+end
+
+function hvp_double_stmt(e::Expr, shadow_of)
+    if e.head == :call && e.args[1] == :push!
+        stack, val = e.args[2], e.args[3]
+        out = Any[]
+        haskey(shadow_of, stack) && push!(out, Expr(:call, :push!, shadow_of[stack], hvp_tangent_expr(val, shadow_of)))
+        push!(out, e)
+        return out
+    elseif e.head == :(=)
+        lhs = e.args[1]
+        var = lhs isa Symbol ? lhs : lhs.args[1]
+        out = Any[]
+        haskey(shadow_of, var) && push!(out, Expr(:(=), hvp_shadow_lvalue(lhs, shadow_of), hvp_tangent_expr(e.args[2], shadow_of)))
+        push!(out, e)
+        return out
+    elseif e.head == :for
+        inner = hvp_double_body(e.args[2].args, shadow_of)
+        return Any[Expr(:for, e.args[1], Expr(:block, inner...))]
+    elseif e.head == :if
+        then_inner = hvp_double_body(e.args[2].args, shadow_of)
+        if length(e.args) == 3
+            els_inner = hvp_double_body(e.args[3].args, shadow_of)
+            return Any[Expr(:if, e.args[1], Expr(:block, then_inner...), Expr(:block, els_inner...))]
+        end
+        return Any[Expr(:if, e.args[1], Expr(:block, then_inner...))]
+    end
+    return Any[e]
+end
+
+# lhs of the shadow assignment -- a bare Symbol shadows to a bare
+# Symbol; an array-ref shadows to the same indices on the shadow array
+function hvp_shadow_lvalue(lhs, shadow_of)
+    lhs isa Symbol && return shadow_of[lhs]
+    return Expr(:ref, shadow_of[lhs.args[1]], lhs.args[2:end]...)
+end
+
+# recursively differentiate an arbitrary primal-valued Expr -- fuses
+# what lin_build_expr + tgen_tangent_expr do in two phases into one,
+# since there is no retained tree for generated code to sweep a
+# second time. A pop! differentiates to a pop from the paired shadow
+# stack; everything else is the same chain-rule contraction tgen_
+# already performs, via der_tangent_generic -- no new derivative
+# rules, since agen_'s own accumulation statements are built entirely
+# from the same whitelisted intrinsics as the primal.
+function hvp_tangent_expr(expr, shadow_of)
+    if expr isa Symbol
+        return get(shadow_of, expr, 0.0)
+    elseif expr isa Number
+        return 0.0
+    elseif expr isa Expr && expr.head == :ref
+        haskey(shadow_of, expr.args[1]) || return 0.0
+        return Expr(:ref, shadow_of[expr.args[1]], expr.args[2:end]...)
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :pop!
+        stack = expr.args[2]
+        haskey(shadow_of, stack) || return 0.0
+        return Expr(:call, :pop!, shadow_of[stack])
+    elseif expr isa Expr && expr.head == :call
+        args = expr.args[2:end]
+        dargs = [hvp_tangent_expr(a, shadow_of) for a in args]
+        return der_tangent_generic(expr.args[1], args, dargs)
+    end
+    error("hvp_tangent_expr: unsupported expression $expr")
+end
+
+
 # ==================== val_* =======================================
 # Correctness oracle: <y, J*x> == <J'*y, x>, checked against random
 # seed vectors.
@@ -2362,6 +2561,14 @@ end
 # independents/dependents auto-derived -- see parse_infer_indep_dep.
 # Override kwargs exist only for the rare exclusion case.
 
+function stade_tangent(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
+                        dependents::Union{Vector{Symbol},Nothing}=nothing)
+    kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
+    active_map = act_analyze(kernel)
+    lin_plan = lin_build(kernel, active_map)
+    return tgen_emit(kernel, lin_plan)
+end
+
 function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
@@ -2371,10 +2578,35 @@ function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     return agen_emit(kernel, lin_plan, snapshot_plan)
 end
 
+function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
+                    dependents::Union{Vector{Symbol},Nothing}=nothing)
+    kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
+    active_map = act_analyze(kernel)
+    snapshot_plan = snap_plan(kernel, active_map)
+    lin_plan = lin_build(kernel, active_map)
+    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan)
+    initstacks_expr = agen_init_emit(kernel, snapshot_plan)
+    return (hvp = hvp_expr, initstacks = initstacks_expr)
+end
+
+function stade_tangent_file(in_path::String, out_path::String)
+    primal_expr = io_read_kernel(in_path)
+    tangent_expr = stade_tangent(primal_expr)
+    io_write_kernel_file(out_path, primal_expr, [tangent_expr])
+    return out_path
+end
+
 function stade_adjoint_file(in_path::String, out_path::String)
     primal_expr = io_read_kernel(in_path)
     adjoint_out = stade_adjoint(primal_expr)
     io_write_kernel_file(out_path, primal_expr, [adjoint_out.initstacks, adjoint_out.adjoint])
+    return out_path
+end
+
+function stade_hvp_file(in_path::String, out_path::String)
+    primal_expr = io_read_kernel(in_path)
+    hvp_out = stade_hvp(primal_expr)
+    io_write_kernel_file(out_path, primal_expr, [hvp_out.initstacks, hvp_out.hvp])
     return out_path
 end
 
@@ -2388,7 +2620,11 @@ let
     trivial = :(function stub(x, n, y)
         return nothing
     end)
+    tangent_out = stade_tangent(trivial)
     adjoint_out = stade_adjoint(trivial)
+    hvp_out     = stade_hvp(trivial)
+    @assert tangent_out isa Expr
     @assert adjoint_out.adjoint isa Expr && adjoint_out.initstacks isa Expr
+    @assert hvp_out.hvp isa Expr && hvp_out.initstacks isa Expr
     println("STADE.jl Phase 0 skeleton loaded and round-tripped a stub kernel OK")
 end
