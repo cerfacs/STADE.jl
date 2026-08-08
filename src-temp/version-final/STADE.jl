@@ -2862,8 +2862,43 @@ function val_compile(expr::Expr)
     return getfield(Main, fname)
 end
 
-function val_init_stacks(initstacks_fn::Function)
-    r = Base.invokelatest(initstacks_fn)
+# replicates stade_tangent's own three-call pipeline (act_analyze ->
+# lin_build -> tgen_emit) directly, rather than calling stade_tangent
+# itself -- val_generate_baseline needs a tangent to self-check a
+# candidate baseline, and calling into stade_ (the layer that itself
+# composes val_'s baseline/validation machinery) would make the two
+# layers mutually dependent. Calling the same underlying pipeline
+# stages stade_tangent wraps keeps val_ resting only on the codegen
+# pipeline, never on the top-level orchestration layer built on it.
+function val_build_tangent(kernel)
+    active_map = act_analyze(kernel)
+    lin_plan = lin_build(kernel, active_map)
+    return tgen_emit(kernel, lin_plan)
+end
+
+# finds the definition named `name` within a bundle read by
+# io_read_kernel_bundle (e.g. picking out `foo_b` and `initstacks_foo_b`
+# from a third-party file that also carries a trailing copy of `foo`).
+function val_find_def(defs::Vector{Expr}, name::Symbol)
+    for e in defs
+        e.args[1].args[1] == name && return e
+    end
+    error("val_find_def: no function named $name found among $(length(defs)) definitions")
+end
+
+# the positional argument names of a raw function-definition Expr, as
+# parsed straight from source (not a skill-jade sig) -- used to learn
+# what a third-party initstacks function expects (STADE's own always
+# takes zero args; other tools' may take one or more primal arrays).
+val_def_arg_names(expr::Expr) = Symbol[a for a in expr.args[1].args[2:end]]
+
+# `extra_args` supports initstacks functions that need one or more
+# primal arrays to size/type their stacks (e.g. Tapenade's own
+# `initstacks_foo_b(du) = Vector{typeof(du)}()` convention) -- STADE's
+# own agen_init_emit always takes zero args, so existing call sites
+# are unaffected by the default.
+function val_init_stacks(initstacks_fn::Function, extra_args::Vector = [])
+    r = Base.invokelatest(initstacks_fn, extra_args...)
     r === nothing && return ()
     r isa Tuple && return r
     return (r,)
@@ -2923,18 +2958,46 @@ end
 # orchestrates a full random baseline: random ints, a compiled primal
 # probed to find safe array sizes, then final random Float64/Int
 # content at those sizes. A few retries with fresh int draws guard
-# against a rare unlucky combination (e.g. a degenerate range) tripping
-# an error unrelated to array sizing.
+# against a rare unlucky combination tripping an error unrelated to
+# array sizing -- and, when self_check is on, against a combination
+# that runs cleanly but is nonetheless *semantically* degenerate for
+# this particular kernel (e.g. integer control args whose implicit
+# relationship the kernel never validates, like a multigrid depth
+# that doesn't fit the requested fine-grid size). There is no general,
+# kernel-agnostic way to detect that up front; instead, a quick
+# tangent-vs-finite-difference check is run against the candidate
+# baseline itself, and the whole (int_args, shapes, values) triple is
+# discarded and redrawn if it fails -- using the tangent oracle as a
+# cheap, generic "is this input point even sane" filter, rather than
+# encoding any kernel-specific domain knowledge.
 function val_generate_baseline(kernel, primal_expr::Expr;
                                 scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
-                                grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 5)
+                                grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 5,
+                                self_check::Bool = true, self_check_trials::Int = 2,
+                                self_check_epsilon::Float64 = 1e-6, self_check_rtol::Float64 = 1e-3)
     primal_fn = val_compile(primal_expr)
+    obs_fn = self_check ? val_compile(val_primal_observing_expr(kernel, primal_expr)) : nothing
+    tangent_fn = self_check ? val_compile(val_build_tangent(kernel)) : nothing
     last_err = nothing
     for attempt in 1:attempts
         int_args = val_random_int_args(kernel.sig; lo = int_lo, hi = int_hi)
         try
             shapes = val_grow_shapes(kernel, primal_fn, int_args; start = grow_start, max_size = grow_max)
             values = val_random_values(kernel, shapes, int_args; scale = scale)
+            if self_check
+                x0 = val_flatten(kernel, values)
+                f_eval_vec = x -> val_call_primal_observed(obs_fn, kernel, int_args,
+                                                            val_unflatten(kernel, int_args, values, x))
+                f_jvp = (x, d) -> begin
+                    vals = val_unflatten(kernel, int_args, values, x)
+                    dvals = val_unflatten(kernel, int_args, val_zeros_like(kernel, values), d)
+                    val_call_tangent(tangent_fn, kernel, int_args, vals, dvals)
+                end
+                check = val_finite_diff_check_jvp(f_eval_vec, f_jvp, x0;
+                                                   epsilon = self_check_epsilon, trials = self_check_trials,
+                                                   rtol = self_check_rtol)
+                check.ok || error("candidate baseline failed tangent self-check (max_rel_err=$(check.max_rel_err))")
+            end
             return (int_args = int_args, values = values)
         catch e
             last_err = e
@@ -3109,9 +3172,10 @@ function val_call_tangent(tangent_fn::Function, kernel, int_args::Dict, values::
 end
 
 function val_call_adjoint(adjoint_fn::Function, initstacks_fn::Function, kernel,
-                           int_args::Dict, values::Dict, seed::Dict)
+                           int_args::Dict, values::Dict, seed::Dict;
+                           stack_arg_names::Vector{Symbol} = Symbol[])
     sig = kernel.sig
-    stacks = val_init_stacks(initstacks_fn)
+    stacks = val_init_stacks(initstacks_fn, [deepcopy(values[n]) for n in stack_arg_names])
     call_args = val_adjoint_call_args(sig, int_args, values, seed, stacks)
     ret = Base.invokelatest(adjoint_fn, call_args...)
     scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
@@ -3181,7 +3245,8 @@ function val_validate_tangent(kernel, primal_expr::Expr, tangent_expr::Expr, bas
 end
 
 function val_validate_adjoint(kernel, primal_expr::Expr, adjoint_out, baseline;
-                               trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+                               trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
+                               stack_arg_names::Vector{Symbol} = Symbol[])
     obs_fn = val_compile(val_primal_observing_expr(kernel, primal_expr))
     adjoint_fn = val_compile(adjoint_out.adjoint)
     initstacks_fn = val_compile(adjoint_out.initstacks)
@@ -3196,7 +3261,8 @@ function val_validate_adjoint(kernel, primal_expr::Expr, adjoint_out, baseline;
     end
     f_grad = x0_ -> begin
         vals = val_unflatten(kernel, int_args, baseline.values, x0_)
-        val_call_adjoint(adjoint_fn, initstacks_fn, kernel, int_args, vals, seed)
+        val_call_adjoint(adjoint_fn, initstacks_fn, kernel, int_args, vals, seed;
+                          stack_arg_names = stack_arg_names)
     end
     return val_finite_diff_check(f_eval, f_grad, x0; epsilon = epsilon, trials = trials, rtol = rtol)
 end
@@ -3237,6 +3303,16 @@ end
 
 function io_expr_to_source(expr::Expr)
     return string(expr) * "\n"
+end
+
+# like io_read_kernel, but for files bundling more than one top-level
+# function definition (e.g. a third-party `initstacks_foo_b`/`foo_b`
+# pair alongside a trailing copy of the primal) -- returns every
+# definition found, in file order, with no uniqueness check.
+function io_read_kernel_bundle(path::String)
+    src = read(path, String)
+    parsed = Meta.parseall(src)
+    return Expr[e for e in parsed.args if e isa Expr && e.head == :function]
 end
 
 # bundles initstacks_foo_b, foo_b, and a copy of foo itself, in that order
@@ -3427,10 +3503,12 @@ end
 # `yaml_path` if given. Exposed standalone so a caller can generate
 # once, hand-edit the result, then validate repeatedly against it.
 function stade_generate_baseline_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
-                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5)
+                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                       self_check::Bool = true)
     primal_expr = io_read_kernel(in_path)
     kernel = parse_kernel(primal_expr)
-    baseline = val_generate_baseline(kernel, primal_expr; scale = scale, int_lo = int_lo, int_hi = int_hi)
+    baseline = val_generate_baseline(kernel, primal_expr; scale = scale, int_lo = int_lo, int_hi = int_hi,
+                                      self_check = self_check)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_write_baseline_yaml(yp, kernel.sig.name, baseline.int_args, baseline.values)
     return yp
@@ -3438,26 +3516,65 @@ end
 
 function stade_validate_tangent_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
-                                      trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+                                      trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
+                                      self_check::Bool = true)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
-    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi)
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:tangent, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
 end
 
 function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
-                                      trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+                                      trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
+                                      self_check::Bool = true)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
-    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi)
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:adjoint, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
 end
 
 function stade_validate_hvp_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                   scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
-                                  trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+                                  trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
+                                  self_check::Bool = true)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
-    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi)
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:hvp, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+end
+
+# Sibling to stade_validate_adjoint_file for a third-party (not
+# STADE-generated) adjoint, e.g. one produced by Tapenade: same
+# baseline machinery and the same val_validate_adjoint oracle,
+# but the adjoint/initstacks come from `adjoint_path` instead of
+# from calling stade_adjoint on the primal. stade_validate_adjoint_file
+# itself can't be reused as-is for this -- it always regenerates
+# STADE's own adjoint internally and has no way to take an adjoint
+# file as input -- so this reuses everything beneath it instead:
+# io_read_baseline_yaml/stade_generate_baseline_file for the baseline,
+# and val_validate_adjoint (with its stack_arg_names hook, added for
+# exactly this case) for the numerical check itself.
+# Expects `adjoint_path` to bundle a `<name>_b` function and an
+# `initstacks_<name>_b` function (any argument list), matching
+# Tapenade's own naming convention.
+function stade_validate_adjoint_against_file(primal_path::String, adjoint_path::String;
+                                              yaml_path::Union{String,Nothing} = nothing,
+                                              scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                              trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+    primal_expr = io_read_kernel(primal_path)
+    kernel = parse_kernel(primal_expr)
+    bname = string(kernel.sig.name)
+    defs = io_read_kernel_bundle(adjoint_path)
+    adjoint_expr = val_find_def(defs, Symbol(bname * "_b"))
+    initstacks_expr = val_find_def(defs, Symbol("initstacks_" * bname * "_b"))
+    adjoint_out = (adjoint = adjoint_expr, initstacks = initstacks_expr)
+    stack_arg_names = val_def_arg_names(initstacks_expr)
+
+    yp = yaml_path === nothing ? io_default_yaml_path(primal_path) : yaml_path
+    io_path_exists(yp) || stade_generate_baseline_file(primal_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi)
+    baseline = io_read_baseline_yaml(yp)
+
+    return val_validate_adjoint(kernel, primal_expr, adjoint_out, baseline;
+                                 trials = trials, epsilon = epsilon, rtol = rtol,
+                                 stack_arg_names = stack_arg_names)
 end
 
 
