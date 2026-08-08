@@ -1,10 +1,33 @@
 # ============================================================
 # val_fixtures.jl -- finite-difference oracle fixtures for the
-# full M1-M4 corpus. Requires STADE.jl (val_finite_diff_check,
-# val_check_fixture) and all_b.jl (the corpus functions) loaded
-# first.
+# full M1-M4 corpus. 
 # ============================================================
 
+include("all_b.jl")
+
+function val_finite_diff_check(f_eval::Function, f_grad::Function, x0::Vector{Float64};
+                                epsilon::Float64 = 1e-6, trials::Int = 10, rtol::Float64 = 1e-3)
+    n = length(x0)
+    g = f_grad(x0)   # gradient at x0 is independent of direction -- compute once
+    results = NamedTuple[]
+    worst_rel_err = 0.0
+    for t in 1:trials
+        d = randn(n)
+        d = d ./ sqrt(sum(d .^ 2))
+        fd = (f_eval(x0 .+ epsilon .* d) - f_eval(x0 .- epsilon .* d)) / (2 * epsilon)
+        ad = sum(g .* d)
+        denom = max(abs(fd), abs(ad), 1e-12)
+        rel_err = abs(fd - ad) / denom
+        worst_rel_err = max(worst_rel_err, rel_err)
+        push!(results, (direction = d, finite_diff = fd, adjoint_derivative = ad, rel_err = rel_err))
+    end
+    return (ok = worst_rel_err <= rtol, max_rel_err = worst_rel_err, trials = results)
+end
+
+function val_check_fixture(fixture; epsilon::Float64 = 1e-6, trials::Int = 10, rtol::Float64 = 1e-3)
+    return val_finite_diff_check(fixture.f_eval, fixture.f_grad, fixture.x0;
+                                  epsilon = epsilon, trials = trials, rtol = rtol)
+end
 
 # ==================== M1: straight-line ============================
 
@@ -458,3 +481,5 @@ function val_run_all_tiers()
         println(tier_name, " worst max_rel_err=", round(worst, sigdigits = 3))
     end
 end
+
+val_run_all_tiers()
