@@ -1,0 +1,43 @@
+function initstacks_bilinear_b()
+    loss_stack = Vector{Float64}()
+    return loss_stack
+end
+
+function bilinear_hv(loss, lossb, x, xb, a, ab, y, yb, i_m, i_n, lossd, lossbd, xd, xbd, ad, abd, yd, ybd, loss_stack)
+    loss_stack_d = Vector{Float64}()
+    for i_seq_i = 1:i_m
+        for i_seq_j = 1:i_n
+            push!(loss_stack_d, lossd[1])
+            push!(loss_stack, loss[1])
+            lossd[1] = lossd[1] + (((a[i_seq_i, i_seq_j] * y[i_seq_j]) * xd[i_seq_i] + (x[i_seq_i] * y[i_seq_j]) * ad[i_seq_i, i_seq_j]) + (x[i_seq_i] * a[i_seq_i, i_seq_j]) * yd[i_seq_j])
+            loss[1] = loss[1] + x[i_seq_i] * a[i_seq_i, i_seq_j] * y[i_seq_j]
+        end
+    end
+    for i_seq_i = i_m:-1:1
+        for i_seq_j = i_n:-1:1
+            lossd[1] = pop!(loss_stack_d)
+            loss[1] = pop!(loss_stack)
+            xbd[i_seq_i] = xbd[i_seq_i] + (lossb[1] * (y[i_seq_j] * ad[i_seq_i, i_seq_j] + a[i_seq_i, i_seq_j] * yd[i_seq_j]) + (a[i_seq_i, i_seq_j] * y[i_seq_j]) * lossbd[1])
+            xb[i_seq_i] = xb[i_seq_i] + (a[i_seq_i, i_seq_j] * y[i_seq_j]) * lossb[1]
+            abd[i_seq_i, i_seq_j] = abd[i_seq_i, i_seq_j] + (lossb[1] * (y[i_seq_j] * xd[i_seq_i] + x[i_seq_i] * yd[i_seq_j]) + (x[i_seq_i] * y[i_seq_j]) * lossbd[1])
+            ab[i_seq_i, i_seq_j] = ab[i_seq_i, i_seq_j] + (x[i_seq_i] * y[i_seq_j]) * lossb[1]
+            ybd[i_seq_j] = ybd[i_seq_j] + (lossb[1] * (a[i_seq_i, i_seq_j] * xd[i_seq_i] + x[i_seq_i] * ad[i_seq_i, i_seq_j]) + (x[i_seq_i] * a[i_seq_i, i_seq_j]) * lossbd[1])
+            yb[i_seq_j] = yb[i_seq_j] + (x[i_seq_i] * a[i_seq_i, i_seq_j]) * lossb[1]
+        end
+    end
+    return nothing
+end
+
+function bilinear(loss, x, a, y, i_m, i_n)
+    #= none:1 =#
+    #= none:2 =#
+    for i_seq_i = 1:i_m
+        #= none:3 =#
+        for i_seq_j = 1:i_n
+            #= none:4 =#
+            loss[1] = loss[1] + x[i_seq_i] * a[i_seq_i, i_seq_j] * y[i_seq_j]
+            #= none:5 =#
+        end
+        #= none:6 =#
+    end
+end

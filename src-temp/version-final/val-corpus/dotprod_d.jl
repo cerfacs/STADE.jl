@@ -1,0 +1,17 @@
+function dotprod_d(loss, lossd, u, ud, v, vd, i_n)
+    for i_seq_x = 1:i_n
+        lossd[1] = lossd[1] + (v[i_seq_x] * ud[i_seq_x] + u[i_seq_x] * vd[i_seq_x])
+        loss[1] = loss[1] + u[i_seq_x] * v[i_seq_x]
+    end
+    return nothing
+end
+
+function dotprod(loss, u, v, i_n)
+    #= none:1 =#
+    #= none:2 =#
+    for i_seq_x = 1:i_n
+        #= none:3 =#
+        loss[1] = loss[1] + u[i_seq_x] * v[i_seq_x]
+        #= none:4 =#
+    end
+end
