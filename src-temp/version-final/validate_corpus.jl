@@ -2,17 +2,13 @@ include("STADE.jl")
 using Random
 
 """
-    validate_corpus(dir="val-corpus"; trials=8, skip=Dict("mg_vcycle"=>[:adjoint]))
+    validate_corpus(dir="val-corpus"; trials=8)
 
 For every `.jl` kernel in `dir`: generates its tangent (`_d.jl`), adjoint
 (`_b.jl`), and hvp (`_hv.jl`) files alongside it, then runs finite-difference
-/ JVP / VJP validation on each against a random baseline. `skip` lets you
-exclude known-failing (kernel, mode) pairs -- defaults to `mg_vcycle`'s
-adjoint, a known STADE codegen bug being tracked separately (generation
-still happens for skipped pairs; only the numerical check is skipped).
+/ JVP / VJP validation on each against a random baseline.
 """
-function validate_corpus(dir::String = "val-corpus"; trials::Int = 8,
-                          skip::Dict{String,Vector{Symbol}} = Dict("mg_vcycle" => [:adjoint]))
+function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
     generators = Dict(:tangent => (stade_tangent_file, "_d.jl"),
                        :adjoint => (stade_adjoint_file, "_b.jl"),
                        :hvp     => (stade_hvp_file, "_hv.jl"))
@@ -36,15 +32,11 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8,
                 continue
             end
 
-            if mode in get(skip, name, Symbol[])
-                push!(results, (kernel = name, mode = mode, status = :skipped, max_rel_err = NaN))
-                continue
-            end
             fn = mode == :tangent ? stade_validate_tangent_file :
                  mode == :adjoint ? stade_validate_adjoint_file : stade_validate_hvp_file
             try
                 r = fn(path; trials = trials)
-                push!(results, (kernel = name, mode = mode, status = r.ok ? :ok : :fail, max_rel_err = r.max_rel_err))
+                push!(results, (kernel = name, mode = mode, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
             catch e
                 push!(results, (kernel = name, mode = mode, status = :error, max_rel_err = NaN))
             end
