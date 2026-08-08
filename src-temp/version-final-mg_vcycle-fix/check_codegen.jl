@@ -72,7 +72,7 @@ let num_levels = 2, nfine = 5, nu1 = 2, nu2 = 2
         u, f, r = build_arrays(u0, f0)
         ub = copy(y_u); fb = copy(y_f); rb = copy(y_r)
         stacks = initstacks_calc_b()
-        h1b, nu2b = calc_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, 0.0, nu1, nu2, 0.0, 0, stacks...)
+        h1b = calc_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, 0.0, nu1, nu2, 0, stacks...)
         return vcat(ub[:, 1], fb[:, 1], [h1b])
     end
     report("calc", (f_eval = f_eval, f_grad = f_grad, x0 = x0))
