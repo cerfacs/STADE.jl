@@ -627,9 +627,10 @@ function shape_mark_int_from_comparisons!(expr, is_int::Dict{Symbol,Bool})
     return nothing
 end
 
-# ---- int evidence, pass 2: propagate through plain assignments ----
-# A bare copy `lhs = rhs` forces lhs and rhs to share one kind, since
-# assignment can't change it -- evidence has to flow both ways.
+# ---- int evidence, pass 2: propagate through assignments ---------
+# An assignment can't change kind, so evidence flows both ways: rhs
+# int-ness forces lhs int (forward), and lhs int-ness forces whatever
+# rhs operands it depends on int too (backward).
 
 function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool})
     changed = false
@@ -639,13 +640,12 @@ function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool
                 is_int[stmt.lhs] = true
                 changed = true
             end
-            # backward: a bare copy forces the rhs variable to match
-            # a lhs kind discovered from evidence elsewhere (the
-            # forward direction is already covered by the check above)
-            if stmt.rhs isa Symbol && haskey(is_int, stmt.rhs) &&
-               is_int[stmt.lhs] && !is_int[stmt.rhs]
-                is_int[stmt.rhs] = true
-                changed = true
+            # backward: an lhs kind discovered from evidence elsewhere
+            # forces every rhs operand that shape_expr_int_status
+            # would need int to reach that same verdict (the forward
+            # direction is already covered by the check above)
+            if is_int[stmt.lhs]
+                changed = shape_force_int_expr!(stmt.rhs, is_int) || changed
             end
         elseif stmt.kind == :for
             changed = shape_propagate_int!(stmt.body, is_int) || changed
@@ -655,6 +655,32 @@ function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool
         end
     end
     return changed
+end
+
+# operators whose result is Int64 exactly when every operand is --
+# shared with shape_expr_int_status's forward reasoning so the two
+# directions can't drift apart
+function shape_int_preserving_ops()
+    return Set{Symbol}([:+, :-, :*, :^, :abs, :sign, :max, :min, :mod, :floor, :ceil, :trunc])
+end
+
+# given expr is already known to evaluate to Int64, force every
+# operand that fact depends on to Int64 too -- recurses through
+# int-preserving ops (mirrors shape_expr_int_status in reverse);
+# a bare copy is just the single-leaf case of this same rule
+function shape_force_int_expr!(expr, is_int::Dict{Symbol,Bool})
+    if expr isa Symbol
+        (haskey(is_int, expr) && !is_int[expr]) || return false
+        is_int[expr] = true
+        return true
+    elseif expr isa Expr && expr.head == :call && expr.args[1] in shape_int_preserving_ops()
+        changed = false
+        for a in expr.args[2:end]
+            changed = shape_force_int_expr!(a, is_int) || changed
+        end
+        return changed
+    end
+    return false
 end
 
 # tri-state: :int (provably integer), :float (provably float), or
@@ -676,7 +702,7 @@ function shape_expr_int_status(expr, is_int::Dict{Symbol,Bool})
         elseif op in (:sqrt, :exp, :log, :log10, :sin, :cos, :tan,
                       :asin, :acos, :atan, :sinh, :cosh, :tanh)
             return :float
-        elseif op in (:+, :-, :*, :^, :abs, :sign, :max, :min, :mod, :floor, :ceil, :trunc)
+        elseif op in shape_int_preserving_ops()
             any(==(:float), arg_status) && return :float
             all(==(:int), arg_status) && return :int
             return :unknown
@@ -1323,16 +1349,26 @@ end
 # forward-sweep order -- the reverse sweep pops in exact reverse.
 #
 #   :array / :value -- an active write whose old value is genuinely
-#     needed later. Flagged per :assign by two rules:
+#     needed later. Flagged per :assign by two rules, EITHER of which
+#     is sufficient on its own:
 #       1. self-reference: the written variable also appears on its
-#          own rhs, except a pure accumulation (same exact slot, one
-#          direct `+`/`-` operand -- see snap_is_pure_accumulation),
-#          which never needs the old value since old and new are the
-#          same quantity for adjoint purposes.
-#       2. cross-statement: written inside a sequential loop and read
-#          by some other statement anywhere in the kernel -- a write
-#          in a non-sequential loop never triggers this, even if read
-#          again later, since nothing overwrites it before that read.
+#          own rhs (includes pure accumulation, `X = X + Y` -- even
+#          though its SHADOW never needs resetting during distribute,
+#          because old-X and new-X are the same quantity for THAT
+#          purpose, X's own PRIMAL value is still a genuine overwrite:
+#          some other, unrelated statement reading X later in the
+#          reverse walk needs X as it stood before this write, same as
+#          any other self-reference. Do not special-case accumulation
+#          out of this rule -- see agen_is_pure_accumulation's own
+#          comment for the one place accumulation DOES matter).
+#       2. cross-statement: read by some other statement anywhere in
+#          the kernel. No loop-nesting condition narrows this: a
+#          write's own backward code runs at that write's mirrored
+#          position in the reverse walk, and any OTHER read of the
+#          same variable could be processed earlier or later in that
+#          walk than this write's own restore, regardless of what loop
+#          (if any) either one sits in. Being conservative here only
+#          ever costs an unnecessary push/pop pair.
 #   :branch -- one per `if`, unconditionally: the reverse sweep must
 #     replay whichever arm the forward sweep actually took.
 #   :tripcount -- a loop's bounds reference a variable reassigned
@@ -1346,7 +1382,7 @@ function snap_plan(kernel, active_map)
     read_anywhere = snap_collect_reads(kernel.body)
     sites = NamedTuple[]
     counter = Ref(0)
-    snap_walk!(kernel.body, active_map, kernel.sig.kinds, false, reassigned, read_anywhere, sites, counter)
+    snap_walk!(kernel.body, active_map, kernel.sig.kinds, reassigned, read_anywhere, sites, counter)
     return sites
 end
 
@@ -1400,31 +1436,41 @@ function snap_collect_expr_vars!(expr, vars)
     return nothing
 end
 
-# one forward-order pass, emitting sites as they're found; `seq` is
-# whether the walk is currently nested inside at least one
-# sequential loop
-function snap_walk!(body, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
+# one forward-order pass, emitting sites as they're found. A write
+# needs a site whenever `var` is read anywhere else in the kernel --
+# regardless of whether this particular write sits inside a loop,
+# outside one, or which loop: what matters is only whether some OTHER
+# statement's read of `var` could see a different value once forward
+# and backward walk it in opposite orders, and that risk exists
+# equally for a write inside a loop restoring a read inside a
+# DIFFERENT (sibling or enclosing) block, a write outside a loop
+# restoring a read inside one, or a write and read both at the top
+# level. Over-snapshotting a var that turns out not to have needed it
+# costs a harmless extra push/pop pair, never a correctness bug --
+# every snapshot's push and pop occupy the mirrored position in the
+# forward/backward walk, so nesting is always self-consistent
+# regardless of which subset of writes get one.
+function snap_walk!(body, active_map, kinds, reassigned, read_anywhere, sites, counter)
     for stmt in body
         if stmt.kind == :assign
-            snap_check_assign!(stmt, active_map, kinds, seq, read_anywhere, sites, counter)
+            snap_check_assign!(stmt, active_map, kinds, read_anywhere, sites, counter)
         elseif stmt.kind == :for
             snap_check_tripcount!(stmt, reassigned, sites, counter)
-            snap_walk!(stmt.body, active_map, kinds, seq || stmt.sequential, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.body, active_map, kinds, reassigned, read_anywhere, sites, counter)
         elseif stmt.kind == :if
             counter[] = counter[] + 1
             push!(sites, (kind = :branch, array = :cond, at = counter[]))
-            snap_walk!(stmt.then, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
-            snap_walk!(stmt.els, active_map, kinds, seq, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.then, active_map, kinds, reassigned, read_anywhere, sites, counter)
+            snap_walk!(stmt.els, active_map, kinds, reassigned, read_anywhere, sites, counter)
         end
     end
     return nothing
 end
 
-function snap_check_assign!(stmt, active_map, kinds, seq, read_anywhere, sites, counter)
+function snap_check_assign!(stmt, active_map, kinds, read_anywhere, sites, counter)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     active_map[var] || return nothing
-    snap_is_pure_accumulation(stmt.lhs, stmt.rhs, var) && return nothing
-    needs_site = snap_count_var_refs(stmt.rhs, var) > 0 || (seq && var in read_anywhere)
+    needs_site = snap_count_var_refs(stmt.rhs, var) > 0 || var in read_anywhere
     needs_site || return nothing
     kind = kinds[var] == :array_float ? :array : :value
     counter[] = counter[] + 1
@@ -1447,13 +1493,19 @@ function snap_check_tripcount!(stmt, reassigned, sites, counter)
 end
 
 # is `lhs = rhs` an identity-preserving self-update -- one where
-# d(new)/d(old) = 1, so old and new are the same quantity for adjoint
-# purposes and nothing needs recording? Two shapes qualify: lhs as
-# any direct top-level `+` operand, or lhs as specifically the
-# left/minuend operand of a binary `-` (the right operand does not
-# qualify -- d(a-b)/db = -1, not an identity). Either way, lhs's
-# exact slot must not appear anywhere else in rhs (a different index
-# of the same array is a different slot and doesn't disqualify it).
+# d(new)/d(old) = 1, so old-lhs and new-lhs are the SAME QUANTITY FOR
+# THE SHADOW's PURPOSES (agen_backward_assign's distribute step can
+# skip resetting the shadow to 0, since accumulating into it further
+# is exactly right). This says nothing about the PRIMAL value: lhs
+# still gets overwritten here, and if it's read elsewhere, snap_plan's
+# rule 1 (self-reference) still requires a snapshot for that -- this
+# function is deliberately NOT part of that decision. Two shapes
+# qualify: lhs as any direct top-level `+` operand, or lhs as
+# specifically the left/minuend operand of a binary `-` (the right
+# operand does not qualify -- d(a-b)/db = -1, not an identity). Either
+# way, lhs's exact slot must not appear anywhere else in rhs (a
+# different index of the same array is a different slot and doesn't
+# disqualify it).
 function snap_is_pure_accumulation(lhs, rhs, var)
     (rhs isa Expr && rhs.head == :call) || return false
     op = rhs.args[1]
@@ -1756,8 +1808,8 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites)
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
-    append!(body, agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks))
-    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, unsafe, false, read_anywhere, reassigned, stacks))
+    append!(body, agen_forward_body(kernel.body, kernel.sig.kinds, active_map, read_anywhere, reassigned, stacks))
+    append!(body, agen_backward_body(lin_plan, kernel.sig.kinds, unsafe, read_anywhere, reassigned, stacks))
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
     push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
@@ -1990,10 +2042,32 @@ function agen_count_expr_occurrences(expr, target)
     return total
 end
 
-function agen_needs_snapshot(lhs, rhs, var, seq, read_anywhere)
-    agen_is_pure_accumulation(lhs, rhs, var) && return false
+# a write to `var` needs a push (forward) / pop-restore (backward)
+# whenever some other statement anywhere in the kernel reads `var` --
+# no loop-nesting condition narrows this: a write's own backward code
+# runs at that write's mirrored position in the reverse walk, and any
+# OTHER read of `var` could be processed either earlier or later in
+# that walk than this write's own restore, in either direction,
+# regardless of what loop (if any) either one sits in. Being
+# conservative here only ever costs an unnecessary push/pop pair.
+#
+# Pure accumulation (`X = X + Y`) is NOT exempted here, even though
+# its shadow doesn't need resetting (agen_backward_assign's `is_accum`
+# branch already handles that, separately). Those are two different
+# questions: whether ub[X] needs to reset to 0 after distributing
+# (no, for accumulation) versus whether X's own PRIMAL value needs
+# restoring to what it was before this write, for the benefit of some
+# OTHER, later-in-reverse-walk statement's nonlinear partial (yes,
+# whenever X is read elsewhere -- an accumulation is still a genuine
+# overwrite of X's value, e.g. a prolongation step folding a coarser
+# correction into an array element that a restrict-phase residual
+# computation, reversed later, still needs the pre-correction value
+# of). agen_count_var_refs below already recognizes X=X+Y as
+# self-referencing and would request a snapshot for exactly this
+# reason -- accumulation must not short-circuit past it.
+function agen_needs_snapshot(lhs, rhs, var, read_anywhere)
     agen_count_var_refs(rhs, var) > 0 && return true
-    return seq && (var in read_anywhere)
+    return var in read_anywhere
 end
 
 # bound-variables of a :for statement that are reassigned somewhere
@@ -2014,7 +2088,7 @@ end
 
 # ---- forward sweep (walks the raw primal `statement_list`) ---------
 
-function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, stacks)
+function agen_forward_body(body, kinds, active_map, read_anywhere, reassigned, stacks)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
@@ -2025,8 +2099,11 @@ function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, sta
             # write is a plain inactive literal; the backward sweep
             # only ever pops for a write whose own rhs is active, so
             # pushing here on every write regardless would push more
-            # than gets popped
-            if agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, seq, read_anywhere)
+            # than gets popped. An int-kinded lhs never owns a
+            # :value/:array site regardless of what rhs activity says
+            # -- only :tripcount covers int reassignment -- matching
+            # snap_plan's own gate on the write's target, not its rhs.
+            if kinds[var] in (:scalar_float, :array_float) && agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, read_anywhere)
                 push!(exprs, Expr(:call, :push!, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs))
             end
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
@@ -2034,12 +2111,12 @@ function agen_forward_body(body, active_map, seq, read_anywhere, reassigned, sta
             for bv in agen_tripcount_bound_vars(stmt, reassigned)
                 push!(exprs, Expr(:call, :push!, stacks[(:tripcount, bv)], bv))
             end
-            inner = agen_forward_body(stmt.body, active_map, seq || stmt.sequential, read_anywhere, reassigned, stacks)
+            inner = agen_forward_body(stmt.body, kinds, active_map, read_anywhere, reassigned, stacks)
             push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
-            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, active_map, seq, read_anywhere, reassigned, stacks))
-            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, active_map, seq, read_anywhere, reassigned, stacks))
+            then_exprs = vcat(Any[Expr(:call, :push!, nm, 1)], agen_forward_body(stmt.then, kinds, active_map, read_anywhere, reassigned, stacks))
+            els_exprs = vcat(Any[Expr(:call, :push!, nm, 0)], agen_forward_body(stmt.els, kinds, active_map, read_anywhere, reassigned, stacks))
             push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
         end
     end
@@ -2067,10 +2144,62 @@ end
 # (:value), matching how snap_plan classified the same write
 agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
 
+# find the top-level :assign to `var` in a lin_plan body, if any --
+# only looks at direct children, matching how the :if handling below
+# only ever needs a branch's OWN immediate write, not one buried
+# inside a further-nested :for/:if
+function agen_find_assign(body, var)
+    for s in body
+        s.kind == :assign || continue
+        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
+        v == var && return s
+    end
+    return nothing
+end
+
+# the constant a branch-snapshotted scalar falls back to on whichever
+# side of the :if doesn't assign it -- the nearest preceding sibling
+# assign to the same var in this exact block. Only a literal-Number
+# rhs is trusted here (not merely "inactive"): recompute must not
+# depend on any other variable's current value, which the reverse
+# sweep could already have disturbed by this point.
+function agen_branch_scalar_fallback(plan, idx, var)
+    for k in (idx - 1):-1:1
+        s = plan[k]
+        s.kind == :assign || continue
+        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
+        v == var || continue
+        return s.tree.expr isa Number ? s.tree.expr : nothing
+    end
+    return nothing
+end
+
+# scalar_float vars this :if assigns (on either branch) purely
+# because they're read elsewhere -- NOT because the write is a
+# self-recurrence, which the normal pre-write restore already handles
+# correctly (it needs the OLD value at exactly this write's own
+# reverse position, unlike the read-elsewhere case below).
+function agen_if_branch_scalar_vars(stmt, kinds, read_anywhere)
+    vars = Symbol[]
+    for sub in vcat(stmt.then, stmt.els)
+        sub.kind == :assign || continue
+        var = sub.lhs isa Symbol ? sub.lhs : sub.lhs.args[1]
+        (sub.lhs isa Symbol && kinds[var] == :scalar_float) || continue
+        agen_count_var_refs(sub.tree.expr, var) == 0 || continue
+        agen_needs_snapshot(sub.lhs, sub.tree.expr, var, read_anywhere) || continue
+        var in vars || push!(vars, var)
+    end
+    return vars
+end
+
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
-function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
+# `skip_restore`: vars whose pre-write restore has already been done
+# by an enclosing :if's hoist (see below) -- popping again here would
+# consume the wrong stack entry. Only ever non-empty for the direct
+# then/els body of a hoisted :if; every other call uses the default.
+function agen_backward_body(plan, kinds, unsafe, read_anywhere, reassigned, stacks, skip_restore = Set{Symbol}())
     exprs = Any[]
     # int-kinded local assignments (index/bookkeeping helpers) never
     # carry gradients, so agen_backward_assign emits nothing at all
@@ -2095,15 +2224,76 @@ function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned,
             end
         end
     end
-    for stmt in reverse(plan)
+    # Branch-snapshotted scalars (x = 0.0; if cond: x = expr end)
+    # whose own primal VALUE -- not just their shadow -- is read by a
+    # DIFFERENT statement later in this same block, for a nonlinear
+    # term's own partial (e.g. a divisor whose adjoint needs the
+    # literal numerator it divides). A plain reverse walk restores
+    # such a scalar only once it reaches the :if itself, which comes
+    # AFTER that read in the reverse walk (the :if precedes the read
+    # in forward order) -- one iteration too late, so the read picks
+    # up whatever the deeper, already-processed iteration left
+    # behind. Recomputed here instead, forward-style, from the
+    # freshly popped branch flag: safe because a snapshot site's rhs
+    # (an array read, or the literal-constant sibling it falls back
+    # to) never itself depends on anything the reverse sweep has
+    # touched yet at this point. Walked in reverse-plan order so
+    # multiple qualifying :if's in this block still pop branch_stack
+    # in the same relative LIFO order a plain reversal would.
+    branch_flags = Dict{Int,Symbol}()
+    hoisted_vars = Dict{Int,Set{Symbol}}()
+    for idx in length(plan):-1:1
+        stmt = plan[idx]
+        stmt.kind == :if || continue
+        vars = agen_if_branch_scalar_vars(stmt, kinds, read_anywhere)
+        isempty(vars) && continue
+        resolved = Any[]
+        for var in vars
+            then_stmt = agen_find_assign(stmt.then, var)
+            els_stmt = agen_find_assign(stmt.els, var)
+            then_expr = then_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : then_stmt.tree.expr
+            els_expr = els_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : els_stmt.tree.expr
+            (then_expr === nothing || els_expr === nothing) && continue   # can't safely recompute -- leave to the normal (imperfectly-timed) restore
+            # a branch only pushed onto the value stack (forward sweep)
+            # if its own rhs was active -- a literal-constant branch
+            # (like the `then_expr`/`els_expr` fallback case) never
+            # does, matching agen_forward_body's own push gate exactly
+            then_pushed = then_stmt !== nothing && then_stmt.active
+            els_pushed = els_stmt !== nothing && els_stmt.active
+            push!(resolved, (var, then_expr, els_expr, then_pushed, els_pushed))
+        end
+        isempty(resolved) && continue
+        flag = Symbol("__branch_pre_", idx)
+        push!(exprs, Expr(:(=), flag, Expr(:call, :pop!, stacks[(:branch, :cond)])))
+        branch_flags[idx] = flag
+        hoisted_vars[idx] = Set(v for (v, _, _, _, _) in resolved)
+        for (var, then_expr, els_expr, then_pushed, els_pushed) in resolved
+            snm = stacks[(:value, var)]
+            if then_pushed && els_pushed
+                push!(exprs, Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm)))
+            elseif then_pushed
+                push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm))], Any[]))
+            elseif els_pushed
+                push!(exprs, emit_if(Expr(:call, :(==), flag, 0), Any[Expr(:(=), :__snap_discard, Expr(:call, :pop!, snm))], Any[]))
+            end
+            # declared with a dummy numeric value first, then assigned
+            # in each branch, rather than `var = if cond; a; else; b;
+            # end` -- both forms are equivalent here (both branches of
+            # a plain if/else always assign var exactly once), this
+            # form is just easier to scan in the generated file
+            push!(exprs, Expr(:(=), var, 0.0))
+            push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), var, then_expr)], Any[Expr(:(=), var, els_expr)]))
+        end
+    end
+    for idx in length(plan):-1:1
+        stmt = plan[idx]
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
-            append!(exprs, agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks))
+            append!(exprs, agen_backward_assign(stmt, kinds, read_anywhere, reassigned, stacks, skip_restore))
         elseif stmt.kind == :for
-            inner_seq = seq || stmt.sequential
-            inner = agen_backward_body(stmt.body, kinds, unsafe, inner_seq, read_anywhere, reassigned, stacks)
-            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, inner_seq, read_anywhere, reassigned)
+            inner = agen_backward_body(stmt.body, kinds, unsafe, read_anywhere, reassigned, stacks)
+            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, read_anywhere, reassigned)
             loop_expr = reverse_it ?
                 emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
                 emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
@@ -2112,11 +2302,16 @@ function agen_backward_body(plan, kinds, unsafe, seq, read_anywhere, reassigned,
             end
             push!(exprs, loop_expr)
         elseif stmt.kind == :if
-            nm = stacks[(:branch, :cond)]
-            then_exprs = agen_backward_body(stmt.then, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
-            els_exprs = agen_backward_body(stmt.els, kinds, unsafe, seq, read_anywhere, reassigned, stacks)
-            push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
-            push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
+            skip = get(hoisted_vars, idx, Set{Symbol}())
+            then_exprs = agen_backward_body(stmt.then, kinds, unsafe, read_anywhere, reassigned, stacks, skip)
+            els_exprs = agen_backward_body(stmt.els, kinds, unsafe, read_anywhere, reassigned, stacks, skip)
+            if haskey(branch_flags, idx)
+                push!(exprs, emit_if(Expr(:call, :(==), branch_flags[idx], 1), then_exprs, els_exprs))
+            else
+                nm = stacks[(:branch, :cond)]
+                push!(exprs, Expr(:(=), :__branch, Expr(:call, :pop!, nm)))
+                push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
+            end
         end
     end
     return exprs
@@ -2129,16 +2324,16 @@ end
 # with no value recurrence at all can still push a branch flag every
 # iteration and must be walked backward to pop them correctly --
 # reversal here is about stack order, not mathematical dependency.
-function agen_body_has_snapshot(body, seq, read_anywhere, reassigned)
+function agen_body_has_snapshot(body, read_anywhere, reassigned)
     for stmt in body
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if stmt.active && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
+            if stmt.active && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, read_anywhere)
                 return true
             end
         elseif stmt.kind == :for
             !isempty(agen_tripcount_bound_vars(stmt, reassigned)) && return true
-            agen_body_has_snapshot(stmt.body, seq || stmt.sequential, read_anywhere, reassigned) && return true
+            agen_body_has_snapshot(stmt.body, read_anywhere, reassigned) && return true
         elseif stmt.kind == :if
             return true   # every `if` pushes a branch flag, unconditionally
         end
@@ -2146,12 +2341,15 @@ function agen_body_has_snapshot(body, seq, read_anywhere, reassigned)
     return false
 end
 
-function agen_backward_assign(stmt, kinds, seq, read_anywhere, reassigned, stacks)
+function agen_backward_assign(stmt, kinds, read_anywhere, reassigned, stacks, skip_restore = Set{Symbol}())
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     is_accum = agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
     exprs = Any[]
-    if stmt.active
-        if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, seq, read_anywhere)
+    # int-kinded lhs can't own a shadow at all, regardless of what
+    # stmt.active (this write's rhs) says -- same reasoning as the
+    # forward sweep's push gate
+    if kinds[var] in (:scalar_float, :array_float) && stmt.active
+        if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, read_anywhere) && !(var in skip_restore)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, Expr(:call, :pop!, nm)))
         end
@@ -2323,8 +2521,8 @@ function hvp_emit(kernel, active_map, lin_plan, sites)
     reassigned = agen_collect_reassigned(kernel.body)
     unsafe = agen_unsafe_int_vars(kernel)
 
-    fwd = agen_forward_body(kernel.body, active_map, false, read_anywhere, reassigned, stacks)
-    bwd = agen_backward_body(lin_plan, sig.kinds, unsafe, false, read_anywhere, reassigned, stacks)
+    fwd = agen_forward_body(kernel.body, sig.kinds, active_map, read_anywhere, reassigned, stacks)
+    bwd = agen_backward_body(lin_plan, sig.kinds, unsafe, read_anywhere, reassigned, stacks)
 
     shadow_of = hvp_shadow_map(kernel, sites)
 
