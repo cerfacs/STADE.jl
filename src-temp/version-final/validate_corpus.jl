@@ -17,7 +17,12 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8,
                        :adjoint => (stade_adjoint_file, "_b.jl"),
                        :hvp     => (stade_hvp_file, "_hv.jl"))
     results = NamedTuple[]
-    for f in sort(filter(f -> endswith(f, ".jl"), readdir(dir)))
+    for f in sort(
+        filter(
+            f -> endswith(f, ".jl") && !(endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl")),
+            readdir(dir)
+        )
+    )
         name = splitext(f)[1]
         path = joinpath(dir, f)
         Random.seed!(hash(name))   # reproducible baseline per kernel across runs
