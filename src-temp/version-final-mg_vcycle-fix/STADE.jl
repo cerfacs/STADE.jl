@@ -1307,20 +1307,26 @@ end
 # forward-sweep order -- the reverse sweep pops in exact reverse.
 #
 #   :array / :value -- an active write whose old value is genuinely
-#     needed later. Flagged per :assign by two rules:
+#     needed later. Flagged per :assign by two rules, EITHER of which
+#     is sufficient on its own:
 #       1. self-reference: the written variable also appears on its
-#          own rhs, except a pure accumulation (same exact slot, one
-#          direct `+`/`-` operand -- see snap_is_pure_accumulation),
-#          which never needs the old value since old and new are the
-#          same quantity for adjoint purposes.
-#       2. cross-statement: written inside a loop (any loop -- even a
-#          non-sequential one still runs its backward code once per
-#          iteration, and a plain reversal only reorders whole
-#          *statements*, not the separate temporal copies of a scalar
-#          across iterations) and read by some other statement
-#          anywhere in the kernel. A write outside any loop entirely
-#          never triggers this: with only one iteration ever, nothing
-#          can overwrite it before that read's backward code runs.
+#          own rhs (includes pure accumulation, `X = X + Y` -- even
+#          though its SHADOW never needs resetting during distribute,
+#          because old-X and new-X are the same quantity for THAT
+#          purpose, X's own PRIMAL value is still a genuine overwrite:
+#          some other, unrelated statement reading X later in the
+#          reverse walk needs X as it stood before this write, same as
+#          any other self-reference. Do not special-case accumulation
+#          out of this rule -- see agen_is_pure_accumulation's own
+#          comment for the one place accumulation DOES matter).
+#       2. cross-statement: read by some other statement anywhere in
+#          the kernel. No loop-nesting condition narrows this: a
+#          write's own backward code runs at that write's mirrored
+#          position in the reverse walk, and any OTHER read of the
+#          same variable could be processed earlier or later in that
+#          walk than this write's own restore, regardless of what loop
+#          (if any) either one sits in. Being conservative here only
+#          ever costs an unnecessary push/pop pair.
 #   :branch -- one per `if`, unconditionally: the reverse sweep must
 #     replay whichever arm the forward sweep actually took.
 #   :tripcount -- a loop's bounds reference a variable reassigned
@@ -1422,7 +1428,6 @@ end
 function snap_check_assign!(stmt, active_map, kinds, read_anywhere, sites, counter)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     active_map[var] || return nothing
-    snap_is_pure_accumulation(stmt.lhs, stmt.rhs, var) && return nothing
     needs_site = snap_count_var_refs(stmt.rhs, var) > 0 || var in read_anywhere
     needs_site || return nothing
     kind = kinds[var] == :array_float ? :array : :value
@@ -1446,13 +1451,19 @@ function snap_check_tripcount!(stmt, reassigned, sites, counter)
 end
 
 # is `lhs = rhs` an identity-preserving self-update -- one where
-# d(new)/d(old) = 1, so old and new are the same quantity for adjoint
-# purposes and nothing needs recording? Two shapes qualify: lhs as
-# any direct top-level `+` operand, or lhs as specifically the
-# left/minuend operand of a binary `-` (the right operand does not
-# qualify -- d(a-b)/db = -1, not an identity). Either way, lhs's
-# exact slot must not appear anywhere else in rhs (a different index
-# of the same array is a different slot and doesn't disqualify it).
+# d(new)/d(old) = 1, so old-lhs and new-lhs are the SAME QUANTITY FOR
+# THE SHADOW's PURPOSES (agen_backward_assign's distribute step can
+# skip resetting the shadow to 0, since accumulating into it further
+# is exactly right). This says nothing about the PRIMAL value: lhs
+# still gets overwritten here, and if it's read elsewhere, snap_plan's
+# rule 1 (self-reference) still requires a snapshot for that -- this
+# function is deliberately NOT part of that decision. Two shapes
+# qualify: lhs as any direct top-level `+` operand, or lhs as
+# specifically the left/minuend operand of a binary `-` (the right
+# operand does not qualify -- d(a-b)/db = -1, not an identity). Either
+# way, lhs's exact slot must not appear anywhere else in rhs (a
+# different index of the same array is a different slot and doesn't
+# disqualify it).
 function snap_is_pure_accumulation(lhs, rhs, var)
     (rhs isa Expr && rhs.head == :call) || return false
     op = rhs.args[1]
@@ -1896,8 +1907,22 @@ end
 # that walk than this write's own restore, in either direction,
 # regardless of what loop (if any) either one sits in. Being
 # conservative here only ever costs an unnecessary push/pop pair.
+#
+# Pure accumulation (`X = X + Y`) is NOT exempted here, even though
+# its shadow doesn't need resetting (agen_backward_assign's `is_accum`
+# branch already handles that, separately). Those are two different
+# questions: whether ub[X] needs to reset to 0 after distributing
+# (no, for accumulation) versus whether X's own PRIMAL value needs
+# restoring to what it was before this write, for the benefit of some
+# OTHER, later-in-reverse-walk statement's nonlinear partial (yes,
+# whenever X is read elsewhere -- an accumulation is still a genuine
+# overwrite of X's value, e.g. a prolongation step folding a coarser
+# correction into an array element that a restrict-phase residual
+# computation, reversed later, still needs the pre-correction value
+# of). agen_count_var_refs below already recognizes X=X+Y as
+# self-referencing and would request a snapshot for exactly this
+# reason -- accumulation must not short-circuit past it.
 function agen_needs_snapshot(lhs, rhs, var, read_anywhere)
-    agen_is_pure_accumulation(lhs, rhs, var) && return false
     agen_count_var_refs(rhs, var) > 0 && return true
     return var in read_anywhere
 end
