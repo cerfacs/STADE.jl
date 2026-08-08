@@ -1,23 +1,15 @@
 function initstacks_pipeline_b()
-    v_stack = Vector{Float64}()
-    w_stack = Vector{Float64}()
     loss_stack = Vector{Float64}()
-    return (v_stack, w_stack, loss_stack)
+    return loss_stack
 end
 
-function pipeline_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, ubd, vd, vbd, wd, wbd, v_stack, w_stack, loss_stack)
-    v_stack_d = Vector{Float64}()
-    w_stack_d = Vector{Float64}()
+function pipeline_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, ubd, vd, vbd, wd, wbd, loss_stack)
     loss_stack_d = Vector{Float64}()
     for i_x = 1:i_n
-        push!(v_stack_d, vd[i_x])
-        push!(v_stack, v[i_x])
         vd[i_x] = (2 * u[i_x]) * ud[i_x]
         v[i_x] = u[i_x] ^ 2 + 1.0
     end
     for i_x = 1:i_n
-        push!(w_stack_d, wd[i_x])
-        push!(w_stack, w[i_x])
         wd[i_x] = u[i_x] * vd[i_x] + v[i_x] * ud[i_x]
         w[i_x] = v[i_x] * u[i_x]
     end
@@ -33,9 +25,7 @@ function pipeline_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, u
         wbd[i_seq_x] = wbd[i_seq_x] + lossbd[1]
         wb[i_seq_x] = wb[i_seq_x] + lossb[1]
     end
-    for i_x = i_n:-1:1
-        wd[i_x] = pop!(w_stack_d)
-        w[i_x] = pop!(w_stack)
+    for i_x = 1:i_n
         vbd[i_x] = vbd[i_x] + (wb[i_x] * ud[i_x] + u[i_x] * wbd[i_x])
         vb[i_x] = vb[i_x] + u[i_x] * wb[i_x]
         ubd[i_x] = ubd[i_x] + (wb[i_x] * vd[i_x] + v[i_x] * wbd[i_x])
@@ -43,9 +33,7 @@ function pipeline_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, u
         wbd[i_x] = 0.0
         wb[i_x] = 0.0
     end
-    for i_x = i_n:-1:1
-        vd[i_x] = pop!(v_stack_d)
-        v[i_x] = pop!(v_stack)
+    for i_x = 1:i_n
         ubd[i_x] = ubd[i_x] + (vb[i_x] * (2 * ud[i_x]) + (2 * u[i_x]) * vbd[i_x])
         ub[i_x] = ub[i_x] + (2 * u[i_x]) * vb[i_x]
         vbd[i_x] = 0.0
