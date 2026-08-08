@@ -1,2 +1,20 @@
 # DS_Store
 .DS_Store
+
+# ZIP files
+*.zip
+
+# Some folders
+version-final-*/
+val-corpus-tapenade-adjoint-full/
+
+# STADE-generated files
+# *_b.jl
+# *_d.jl
+# *_hv.jl
+*.yaml
+
+# Coverage and Profile files
+*.cov
+*.log
+*.txt
