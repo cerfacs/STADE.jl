@@ -1,12 +1,6 @@
 # ============================================================
 # STADE.jl -- source-to-source AD for skill-jade-compliant Julia
-# kernels. No modules, structs, @enum, or top-level const --
-# see skill-stade.md for the full house-style contract.
-#
-# Note: this file contains no corpus-specific code. all_b.jl (the
-# Tapenade ground-truth corpus) is never referenced here -- it's
-# loaded only by the separate val_fixtures.jl, which builds test
-# closures around specific corpus functions to validate this engine.
+# kernels. See skill-stade.md for the full house-style contract.
 #
 # Pipeline stages, in the order data flows through them:
 #
