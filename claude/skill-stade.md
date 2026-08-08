@@ -59,7 +59,7 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    never registered into module-level state.
 4. **Every function name starts with its stage's prefix**:
    `parse_`, `shape_`, `der_`, `emit_`, `act_`, `snap_`, `lin_`,
-   `tgen_`, `agen_`, `val_`, `io_`, `stade_`. `io_` is the only
+   `tgen_`, `agen_`, `hvp_`, `val_`, `io_`, `stade_`. `io_` is the only
    prefix permitted to touch the filesystem (open/read/write) —
    every other stage, including `stade_` itself, operates purely on
    in-memory `Expr`/`NamedTuple` values. This prefix rule is the
@@ -93,25 +93,15 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    already says. Longer design rationale belongs in the conversation
    / spec doc, not inline in STADE.jl.
 9. **STADE.jl contains no corpus-specific code.** Nothing in it may
-   reference `all_b.jl` or any particular kernel by name. Corpus
-   fixtures live only in `val_fixtures.jl`.
+   reference any particular kernel inside `val-corpus-*` by name.
 
 ## Testing convention
 
-Every change is checked against the shared golden corpus (19 kernels,
-tiered M1–M4 by complexity: straight-line → conditionals → loop-carried
-recurrence → `mg_vcycle`'s full nested-stack complexity), using
-`val_finite_diff_check` (central finite differences against the
-Tapenade-generated ground truth in `all_b.jl`, via `val_fixtures.jl`)
+Every change is checked against the shared golden corpus (19 kernels), 
+using `validate_corpus.jl` (central finite differences)
 as the primary correctness oracle, checked against random seed vectors.
-All four tiers currently pass against the hand-written ground-truth
-fixtures (worst observed max_rel_err ~4.7e-8 across M1–M4). Note: avoid
-"dotproduct"/"dotprod" in any STADE-internal name — the corpus already
-has a kernel called `dotprod`, and reusing that word for the test
-infrastructure itself invites exactly the kind of confusable naming
-this skill's prefix rule is meant to prevent. A structural diff against
-the corpus's existing Tapenade-generated `_b.jl` files is a secondary
-style check only, never a correctness requirement.
+A structural diff against existing Tapenade-generated `_b.jl` files 
+inside `val-corpus-tapenade-adjoint` is a secondary style check, not a correctness requirement.
 
 ## Self-check before returning STADE code
 
