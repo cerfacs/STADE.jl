@@ -1,23 +1,20 @@
 function initstacks_advection_b()
     du_stack = Vector{Float64}()
-    u_stack = Vector{Float64}()
-    return (du_stack, u_stack)
+    return du_stack
 end
 
-function advection_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode, du_stack, u_stack)
+function advection_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode, du_stack)
     for i_seq_ = 1:i_nstep
         for i_x = 2:i_nnode
             push!(du_stack, du[i_x])
             du[i_x] = u[i_x] - u[i_x - 1]
         end
         for i_x = 2:i_nnode
-            push!(u_stack, u[i_x])
             u[i_x] = u[i_x] - (c * dt * du[i_x]) / dx
         end
     end
     for i_seq_ = i_nstep:-1:1
-        for i_x = i_nnode:-1:2
-            u[i_x] = pop!(u_stack)
+        for i_x = 2:i_nnode
             cb = cb + (dt * du[i_x]) * ((1.0 / dx) * -(ub[i_x]))
             dtb = dtb + (c * du[i_x]) * ((1.0 / dx) * -(ub[i_x]))
             dub[i_x] = dub[i_x] + (c * dt) * ((1.0 / dx) * -(ub[i_x]))
