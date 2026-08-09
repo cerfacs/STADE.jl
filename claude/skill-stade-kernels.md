@@ -8,11 +8,7 @@ description: >
   computing code. Trigger any time the user asks for a Julia kernel that
   STADE will differentiate, mentions the validation corpus, or asks to
   add/modify a kernel alongside STADE.jl itself, even without naming this
-  skill. This is a *lighter* house style than the original one STADE grew
-  out of: several syntax restrictions that STADE's parser and shape
-  inference never actually needed have been dropped, so don't reapply them
-  from habit -- check the rules below rather than assuming the old, more
-  restrictive style.
+  skill.
 ---
 
 # skill-stade-kernels: house style for kernels STADE differentiates
@@ -23,10 +19,7 @@ used, traces which variables are reachable from an independent input, and
 then generates tangent/adjoint/HVP code from that analysis. Every rule
 below is either something STADE's pipeline actually depends on to get
 that analysis right, or a genuine mathematical constraint of the kernel
-style (allocation-free, single-processor, Fortran-portable). Rules that
-turned out to be pure syntax preferences STADE never consumed have been
-dropped -- see "What's no longer required" if you're used to a stricter
-style and want to know what changed.
+style (allocation-free, single-processor, Fortran-portable).
 
 Apply every rule below to any kernel code you write in this conversation,
 even if the user's prompt doesn't repeat the rules. When revising existing
@@ -203,29 +196,6 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
     say so explicitly. The last line of every function body must be
     `return nothing`, spelled out in full; don't leave it implicit, and
     don't shorten it to a bare `nothing`.
-
-## What's no longer required
-
-If you've written kernels under a stricter version of this style before,
-here's what changed and why it's safe:
-
-- **General `snake_case` on ordinary names is gone.** STADE identifies
-  every variable and function purely by symbol identity -- nothing in its
-  parsing, shape inference, activity analysis, or code generation reads
-  case at all. The one exception is the `i_seq_` prefix in rule 1, which
-  survived because it's genuinely load-bearing, not because of casing
-  habits.
-- **`for i = ...` vs. `for i in ...`** were never actually different to
-  STADE -- Julia's own parser produces an identical `Expr` for both, so
-  there was nothing to relax here in the first place.
-- **A loop's counter no longer has to be a real name when it's unused.**
-  `for _ = 1:n` is fine now.
-- **Type annotations on arguments are allowed.** They're inert -- STADE
-  infers shapes from usage, never from a declared type -- so annotate if
-  it helps you or your editor, or don't.
-- **Compound assignment is allowed.** `x += 3.0`, `n *= 2`, and friends
-  desugar to the same thing as writing them out in full, so there's no
-  reason to forbid them anymore.
 
 ## Worked example
 
