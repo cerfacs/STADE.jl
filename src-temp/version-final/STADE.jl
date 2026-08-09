@@ -33,6 +33,23 @@
 #   hvp_    Hessian-vec   forward-over-reverse: a second forward-mode
 #                         pass over agen_'s own generated code, for
 #                         Hessian-vector products.
+#   cgen_   GPU codegen   loop-nest transform (not a derivative): splits
+#                         each iteration-independent (non-i_seq_) loop
+#                         into a device kernel + launch call, for
+#                         whichever GPU vendor a `gpu_backend` describes
+#                         (CUDA/AMDGPU/Metal). Consumes a plain
+#                         skill-jade kernel OR one of tgen_/agen_'s own
+#                         generated functions (see cgen_ingest) -- never
+#                         a multi-kernel corpus with un-inlined calls,
+#                         see the cgen_* section header for that gap.
+#   jgen_   JACC codegen  sibling to cgen_, not a gpu_backend value:
+#                         JACC.jl's dispatch-deferred-to-runtime model
+#                         (JACC.parallel_for + a plain indexed function,
+#                         vendor chosen later via Preferences.jl) isn't
+#                         the same programming model as a launch-macro
+#                         backend, so it gets its own prefix, reusing
+#                         cgen_'s shared parsing/free-var/atomic-
+#                         detection helpers directly.
 #   val_    Validate      correctness checking against ground truth
 #                         (finite differences; later the adjoint
 #                         identity once tangent codegen is real).
@@ -42,8 +59,10 @@
 #   stade_  Public API    stade_tangent / stade_adjoint / stade_hvp
 #                         (Expr in, Expr out), their _corpus siblings
 #                         (multi-kernel Dict in/out, run inl_ first),
-#                         and stade_*_file wrappers (path in, path
-#                         out, single- or multi-kernel), wiring every
+#                         stade_*_file wrappers (path in, path out,
+#                         single- or multi-kernel), and the GPU-porting
+#                         siblings stade_cuda/stade_amdgpu/stade_metal/
+#                         stade_jacc (+ their _file forms), wiring every
 #                         stage above together for an end user.
 #
 # ============================================================
@@ -73,6 +92,21 @@
 #     parse_kernel and therefore operates on raw Expr, not on the
 #     kernel/statement shapes above.
 # der_rule_pair :: (tangent::Function, adjoint::Function)
+# cuda_plan     :: (host::Expr, kernels::Vector{Expr}) -- cgen_emit's
+#     output, for any gpu_backend (the name predates Metal/AMDGPU
+#     support but the shape is vendor-neutral).
+# gpu_backend   :: (suffix, kernel_tag, launch_macro::Symbol,
+#     threads_kw::Symbol, blocks_kw::Symbol, tid_rhs::Expr,
+#     atomic_macro::Expr, preamble::String,
+#     default_precision::Type{<:AbstractFloat}, precision_locked::Bool,
+#     precision_lock_reason::String) -- see cgen_backend_cuda/
+#     cgen_backend_amdgpu/cgen_backend_metal.
+# cgen_kernel   :: (name::Symbol, args::Vector{Symbol}, body::statement_list,
+#     ret::Vector{Symbol}) -- cgen_-local, not the frozen `kernel` shape
+#     above (a generated function has no kinds/independents/dependents
+#     to carry). Built by cgen_from_kernel or cgen_parse_generated;
+#     empty ret means `return nothing`. jgen_emit consumes the same shape.
+
 
 
 # ==================== inl_* ====================================
@@ -3221,6 +3255,777 @@ function hvp_tangent_expr(expr, shadow_of)
 end
 
 
+# ==================== cgen_* =====================================
+# CUDA codegen: turns a validated kernel -- or one of STADE's own
+# tgen_/agen_-generated functions -- into a host launcher Expr plus a
+# Vector of `@cuda`-callable device kernel Exprs, one per
+# iteration-independent (sequential=false) loop that's actually safe
+# to run data-parallel. Structurally independent of act_/snap_/lin_:
+# this is a loop-nest transform, not a derivative, so it never touches
+# activity/snapshot/linearization machinery.
+#
+# cuda_plan :: (host::Expr, kernels::Vector{Expr})   -- frozen shape,
+# see skill-stade.md.
+#
+# Two ingestion paths feed the same cgen_kernel shape:
+#   - a plain skill-jade kernel, via parse_kernel (unchanged) wrapped
+#     by cgen_from_kernel
+#   - one of STADE's own generated functions (tangent, adjoint, or
+#     initstacks_), via cgen_parse_generated below. Needed because a
+#     generated function's trailing `return` carries values (never
+#     just `return nothing`), and an adjoint's forward/backward sweep
+#     contains push!/pop! stack statements that skill-jade source can
+#     never contain. cgen_parse_generated recognizes only the fixed,
+#     small vocabulary tgen_body/agen_forward_body/agen_backward_body/
+#     agen_init_emit themselves emit -- it is NOT a general Julia
+#     parser and must never be pointed at arbitrary user source.
+#
+# cgen_kernel :: (name::Symbol, args::Vector{Symbol}, body::statement_list,
+#                 ret::Vector{Symbol})   -- cgen-local, not the frozen
+#     `kernel` shape (a generated function has no kinds/independents/
+#     dependents to carry). empty ret => `return nothing`.
+#
+# cgen also recognizes two statement forms of its own, produced only
+# by cgen_parse_generated and consumed only within this section --
+# deliberately NOT added to the frozen `statement` shape in
+# skill-stade.md, since no other stage ever needs to see them:
+#   (kind=:stackpush, stack::Symbol, value)        -- a bare push! call
+#   (kind=:assign, lhs, rhs)  where rhs is a bare `pop!(stack)` call
+#     (kept under the ordinary :assign kind since structurally it is
+#     one; cgen_is_pop_call recognizes it)
+#
+# Stack safety rule: a loop containing a push!/pop! anywhere in its
+# body (at any depth) is NEVER split into a device kernel, regardless
+# of its own sequential flag. A snapshot stack's LIFO order is a
+# global, history-order-dependent invariant across every push/pop
+# touching it; preserving that order across thousands of concurrently-
+# scheduled GPU threads isn't possible without replacing the stack
+# mechanism itself with pre-sized, positionally-indexed buffers (an
+# agen_ change, not a cgen_ one -- see skill-stade.md's cgen_ note for
+# the follow-up this opens). Such a loop is always emitted as ordinary
+# host-side Julia via emit_forloop, exactly as it was parsed. This
+# still parallelizes any part of a generated adjoint that doesn't
+# touch a snapshot stack.
+#
+# Race-safety rule for a write inside a kernel that *is* split: a
+# write to array[idx...] is atomic-free only if the enclosing device
+# loop's own thread-mapped variable occurs, at any depth, in idx --
+# i.e. a real occurs-check (cgen_expr_contains), not shallow top-level
+# membership. Anything else assumed unsafe and wrapped in
+# CUDA.@atomic, after flattening the rhs's +/- spine
+# (cgen_flatten_sum) to find and drop the write's own prior value as a
+# term, however many terms the sum has and wherever it appears in the
+# sum (not just literally the second operand of a 2-ary +).
+#
+# skill-jade rule 8 (no in-kernel array allocation -- every array is a
+# caller-supplied argument) means no kernel or generated function this
+# section ever processes can contain a `zeros(...)`-style local
+# allocation, so there is deliberately no CUDA.zeros conversion step
+# here: the caller is responsible for passing CuArrays to any `_cuda`
+# function.
+
+function cgen_from_kernel(kernel)
+    return (name = kernel.sig.name, args = kernel.sig.args, body = kernel.body, ret = Symbol[])
+end
+
+# ---- relaxed ingestion for STADE's own generated code -------------
+
+function cgen_parse_generated(expr::Expr)
+    expr.head == :function ||
+        error("cgen_parse_generated: expected a `function ... end` definition")
+    length(expr.args) == 2 ||
+        error("cgen_parse_generated: malformed function Expr (expected signature + body)")
+    name, args = cgen_parse_generated_signature(expr.args[1])
+    stmts = [s for s in expr.args[2].args if !(s isa LineNumberNode)]
+    isempty(stmts) && error("cgen_parse_generated: empty function body")
+    last_stmt = stmts[end]
+    last_stmt isa Expr && last_stmt.head == :return ||
+        error("cgen_parse_generated: expected a trailing `return` statement")
+    for s in stmts[1:end-1]
+        s isa Expr && s.head == :return &&
+            error("cgen_parse_generated: `return` may only appear once, at the end")
+    end
+    ret = cgen_parse_return_values(last_stmt)
+    body = cgen_parse_generated_statements(stmts[1:end-1])
+    return (name = name, args = args, body = body, ret = ret)
+end
+
+function cgen_parse_generated_signature(sig_expr)
+    sig_expr isa Expr && sig_expr.head == :call ||
+        error("cgen_parse_generated: unsupported signature form")
+    name = sig_expr.args[1]
+    name isa Symbol || error("cgen_parse_generated: function name must be a plain identifier")
+    args = Symbol[a for a in sig_expr.args[2:end]]
+    all(a -> a isa Symbol, args) ||
+        error("cgen_parse_generated: only plain positional argument names are supported")
+    return name, args
+end
+
+function cgen_parse_return_values(ret_stmt::Expr)
+    length(ret_stmt.args) == 1 || error("cgen_parse_generated: malformed return `$(ret_stmt)`")
+    v = ret_stmt.args[1]
+    parse_is_nothing_literal(v) && return Symbol[]
+    v isa Symbol && return Symbol[v]
+    v isa Expr && v.head == :tuple && all(a -> a isa Symbol, v.args) && return Symbol[v.args...]
+    error("cgen_parse_generated: unsupported return form `$(ret_stmt)` -- expected `return nothing`, a bare variable, or a tuple of variables")
+end
+
+function cgen_parse_generated_statements(stmts::Vector)
+    return NamedTuple[cgen_parse_generated_statement(s) for s in stmts]
+end
+
+function cgen_parse_generated_statement(stmt)
+    stmt isa Expr || error("cgen_parse_generated: unsupported statement `$(stmt)`")
+    if stmt.head == :(=)
+        return cgen_parse_generated_assign(stmt)
+    elseif stmt.head == :for
+        return cgen_parse_generated_for(stmt)
+    elseif stmt.head == :if
+        return cgen_parse_generated_if(stmt)
+    elseif stmt.head == :call && stmt.args[1] == :push!
+        length(stmt.args) == 3 || error("cgen_parse_generated: malformed push! `$(stmt)`")
+        return (kind = :stackpush, stack = stmt.args[2], value = stmt.args[3])
+    else
+        error("cgen_parse_generated: unrecognized statement form `Expr(:$(stmt.head), ...)` -- this parser only understands STADE's own tgen_/agen_ output, never arbitrary user source")
+    end
+end
+
+# lhs shape (plain var or array-ref) never differs from a plain
+# kernel's, so parse_lvalue/parse_check_expr are reused verbatim --
+# only the two relaxations below (pop!, stack allocation) are new
+function cgen_parse_generated_assign(stmt::Expr)
+    lhs = parse_lvalue(stmt.args[1])
+    rhs = stmt.args[2]
+    if cgen_is_pop_call(rhs) || cgen_is_stack_alloc(rhs)
+        return (kind = :assign, lhs = lhs, rhs = rhs)
+    end
+    parse_check_expr(rhs, false)
+    return (kind = :assign, lhs = lhs, rhs = rhs)
+end
+
+cgen_is_pop_call(rhs) = rhs isa Expr && rhs.head == :call && length(rhs.args) == 2 && rhs.args[1] == :pop!
+
+# matches agen_stack_alloc_expr's own output: Vector{Float64}() / Vector{Int64}()
+cgen_is_stack_alloc(rhs) = rhs isa Expr && rhs.head == :call && length(rhs.args) == 1 &&
+    rhs.args[1] isa Expr && rhs.args[1].head == :curly && rhs.args[1].args[1] == :Vector
+
+function cgen_parse_generated_for(stmt::Expr)
+    header = stmt.args[1]
+    header isa Expr && header.head == :(=) ||
+        error("cgen_parse_generated: unsupported `for` header `$(header)`")
+    var = header.args[1]
+    var isa Symbol || error("cgen_parse_generated: `for` loop variable must be a plain identifier")
+    range_expr = header.args[2]
+    range_expr isa Expr && range_expr.head == :call && range_expr.args[1] == :(:) ||
+        error("cgen_parse_generated: `for` loop range must be written `lo:hi` or `lo:step:hi`")
+    range_args = range_expr.args[2:end]
+    lo, step, hi = length(range_args) == 2 ? (range_args[1], 1, range_args[2]) :
+                   length(range_args) == 3 ? (range_args[1], range_args[2], range_args[3]) :
+                   error("cgen_parse_generated: unsupported range arity in `$(range_expr)`")
+    sequential = startswith(String(var), "i_seq_")
+    body_stmts = [s for s in stmt.args[2].args if !(s isa LineNumberNode)]
+    body = cgen_parse_generated_statements(body_stmts)
+    return (kind = :for, var = var, lo = lo, hi = hi, step = step, sequential = sequential, body = body)
+end
+
+function cgen_parse_generated_if(stmt::Expr)
+    length(stmt.args) in (2, 3) || error("cgen_parse_generated: unsupported `if` form")
+    cond = stmt.args[1]
+    parse_check_expr(cond, true)
+    then_block = stmt.args[2]
+    then_stmts = cgen_parse_generated_statements([s for s in then_block.args if !(s isa LineNumberNode)])
+    els_stmts = NamedTuple[]
+    if length(stmt.args) == 3
+        els_block = stmt.args[3]
+        els_stmts = cgen_parse_generated_statements([s for s in els_block.args if !(s isa LineNumberNode)])
+    end
+    return (kind = :if, cond = cond, then = then_stmts, els = els_stmts)
+end
+
+# ---- single entry point: try the strict parser, fall back to the
+#      relaxed one, and surface both failure reasons if neither fits
+#      -- never a silent guess about which kind of input this is ----
+
+function cgen_ingest(expr::Expr)
+    kernel_err = nothing
+    try
+        return cgen_from_kernel(parse_kernel(expr))
+    catch e
+        kernel_err = e
+    end
+    try
+        return cgen_parse_generated(expr)
+    catch generated_err
+        error("cgen_ingest: `$(expr.args[1])` is neither a valid skill-jade kernel ($(kernel_err)) nor recognizable STADE-generated code ($(generated_err))")
+    end
+end
+
+# ---- stack-op detection (blocks kernel-splitting for a loop) -------
+
+cgen_is_stackop_assign(stmt) = stmt.kind == :assign && cgen_is_pop_call(stmt.rhs)
+
+function cgen_contains_stackop(body::Vector{NamedTuple})
+    for stmt in body
+        if stmt.kind == :stackpush || cgen_is_stackop_assign(stmt)
+            return true
+        elseif stmt.kind == :for
+            cgen_contains_stackop(stmt.body) && return true
+        elseif stmt.kind == :if
+            (cgen_contains_stackop(stmt.then) || cgen_contains_stackop(stmt.els)) && return true
+        end
+    end
+    return false
+end
+
+# ---- free-variable collection (duplicated from shape_/snap_/agen_'s
+#      own copies rather than calling them -- see skill-stade.md rule
+#      7 and agen_collect_expr_vars!'s own comment for precedent) ----
+
+# collects from the loop's bounds as well as its body -- a device
+# kernel's bounds check needs whatever variables lo/hi/step reference
+# (e.g. an array-length argument), not just what the body touches --
+# then subtracts every scalar the body assigns locally (see
+# cgen_locally_assigned_scalars), since those are per-iteration
+# temporaries, not caller-supplied arguments, even though they're
+# "used" in the body-wide sense cgen_collect_vars! collects
+function cgen_free_vars(stmt, exclude::Symbol)
+    vars = Set{Symbol}()
+    cgen_collect_expr_vars!(stmt.lo, vars)
+    cgen_collect_expr_vars!(stmt.hi, vars)
+    cgen_collect_expr_vars!(stmt.step, vars)
+    cgen_collect_vars!(stmt.body, vars)
+    delete!(vars, exclude)
+    setdiff!(vars, cgen_locally_assigned_scalars(stmt.body))
+    return sort(collect(vars); by = string)
+end
+
+# a scalar assigned anywhere inside a loop's own body (at any nesting
+# depth, including a nested loop's own loop variable) is always a
+# local temporary, never a caller-supplied argument. This holds
+# specifically *because* the enclosing loop is iteration-independent:
+# a genuine cross-iteration read of a not-yet-assigned scalar would be
+# exactly the loop-carried dependency that classification already
+# rules out, so anything assigned as a bare Symbol lhs is guaranteed
+# to be initialized fresh within the same iteration before any read.
+# Array names never qualify (skill-jade forbids in-kernel allocation,
+# so an array symbol is always caller-supplied) -- only a bare-Symbol
+# assignment target counts, never an array-ref lhs.
+function cgen_locally_assigned_scalars(body::Vector{NamedTuple})
+    names = Set{Symbol}()
+    cgen_collect_locally_assigned!(body, names)
+    return names
+end
+
+function cgen_collect_locally_assigned!(body::Vector{NamedTuple}, names::Set{Symbol})
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(names, stmt.lhs)
+        elseif stmt.kind == :for
+            push!(names, stmt.var)
+            cgen_collect_locally_assigned!(stmt.body, names)
+        elseif stmt.kind == :if
+            cgen_collect_locally_assigned!(stmt.then, names)
+            cgen_collect_locally_assigned!(stmt.els, names)
+        end
+    end
+    return nothing
+end
+
+function cgen_collect_vars!(body::Vector{NamedTuple}, vars::Set{Symbol})
+    for stmt in body
+        if stmt.kind == :stackpush
+            push!(vars, stmt.stack)
+            cgen_collect_expr_vars!(stmt.value, vars)
+        elseif stmt.kind == :assign
+            cgen_collect_expr_vars!(stmt.lhs, vars)
+            cgen_collect_expr_vars!(stmt.rhs, vars)
+        elseif stmt.kind == :for
+            cgen_collect_expr_vars!(stmt.lo, vars)
+            cgen_collect_expr_vars!(stmt.hi, vars)
+            cgen_collect_expr_vars!(stmt.step, vars)
+            cgen_collect_vars!(stmt.body, vars)
+            push!(vars, stmt.var)
+        elseif stmt.kind == :if
+            cgen_collect_expr_vars!(stmt.cond, vars)
+            cgen_collect_vars!(stmt.then, vars)
+            cgen_collect_vars!(stmt.els, vars)
+        end
+    end
+    return nothing
+end
+
+function cgen_collect_expr_vars!(expr, vars::Set{Symbol})
+    expr isa Symbol && (push!(vars, expr); return nothing)
+    expr isa Expr || return nothing
+    if expr.head == :ref
+        push!(vars, expr.args[1])
+        for idx in expr.args[2:end]
+            cgen_collect_expr_vars!(idx, vars)
+        end
+    elseif expr.head == :call
+        # args[1] is the operator/function name, not a variable
+        for a in expr.args[2:end]
+            cgen_collect_expr_vars!(a, vars)
+        end
+    else
+        for a in expr.args
+            cgen_collect_expr_vars!(a, vars)
+        end
+    end
+    return nothing
+end
+
+# ---- host-side body walk: splits off one device kernel per eligible
+#      iteration-independent loop, leaves everything else untouched --
+
+# ---- GPU backend descriptor ----------------------------------------
+# gpu_backend :: (suffix, kernel_tag, launch_macro::Symbol,
+#                 threads_kw::Symbol, blocks_kw::Symbol, tid_rhs::Expr,
+#                 atomic_macro::Expr, preamble::String,
+#                 default_precision::Type{<:AbstractFloat},
+#                 precision_locked::Bool, precision_lock_reason::String)
+#
+# Everything above this point (parsing, free-var collection, stack-op
+# detection, loop-splitting decision, +/- flattening for atomic
+# detection) is genuinely backend-agnostic -- it never mentions CUDA.
+# What differs between CUDA.jl, AMDGPU.jl, and Metal.jl is all
+# syntactic, not semantic: the launch macro name, the two launch
+# keyword names (`threads`/`blocks`, `groupsize`/`gridsize`,
+# `threads`/`groups` -- all three resolve to the exact same
+# `cld(n_iter, blocksize)` formula for the second one, so nothing about
+# the arithmetic below differs), the thread-index intrinsic (Metal's
+# `thread_position_in_grid().x` is already the global index -- simpler
+# than CUDA/AMDGPU's two-intrinsic affine combination, but still just
+# an Expr for the same tid_rhs slot), the atomic macro's owning module,
+# and the `using` preamble. Adding a further backend (oneAPI.jl, ...)
+# should only ever mean adding one more of these constructors -- if it
+# turns out to need a change anywhere else in this section, that's a
+# sign the new backend isn't actually the same programming model and
+# deserves its own prefix instead of being forced in here.
+#
+# default_precision/precision_locked/precision_lock_reason exist
+# because Metal is not just "Float64 works but is slower" the way
+# switching precision is for CUDA/AMDGPU: Apple GPUs have no FP64
+# hardware at all, and Metal.jl enforces this in software too --
+# MtlArray flatly refuses to be constructed with Float64 elements, and
+# any kernel whose arithmetic touches a Float64 fails to *compile*.
+# precision_locked=true makes stade_gpu refuse an explicit request for
+# anything but default_precision outright, at code-generation time,
+# rather than silently emitting Julia source that's guaranteed to fail
+# once the caller actually tries to build their input arrays or run
+# the kernel on real Metal hardware.
+
+function cgen_backend_cuda()
+    return (
+        suffix = "_cuda",
+        kernel_tag = "cuda",
+        launch_macro = Symbol("@cuda"),
+        threads_kw = :threads,
+        blocks_kw = :blocks,
+        tid_rhs = :((blockIdx().x - 1) * blockDim().x + threadIdx().x),
+        atomic_macro = Expr(:., :CUDA, QuoteNode(Symbol("@atomic"))),
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"CUDA\") || Pkg.add(\"CUDA\")\nusing CUDA\nCUDA.allowscalar(false)\n",
+        default_precision = Float64,
+        precision_locked = false,
+        precision_lock_reason = "",
+    )
+end
+
+function cgen_backend_amdgpu()
+    return (
+        suffix = "_amdgpu",
+        kernel_tag = "amdgpu",
+        launch_macro = Symbol("@roc"),
+        threads_kw = :groupsize,
+        blocks_kw = :gridsize,
+        tid_rhs = :(workitemIdx().x + (workgroupIdx().x - 1) * workgroupDim().x),
+        atomic_macro = Expr(:., :AMDGPU, QuoteNode(Symbol("@atomic"))),
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"AMDGPU\") || Pkg.add(\"AMDGPU\")\nusing AMDGPU\nAMDGPU.allowscalar(false)\n",
+        default_precision = Float64,
+        precision_locked = false,
+        precision_lock_reason = "",
+    )
+end
+
+# thread_position_in_grid().x is already a global 1-based index (no
+# manual block/thread affine combination needed, unlike CUDA/AMDGPU);
+# `groups=` (not the older, pre-v1.9-preview `grid=`) is the current
+# launch keyword for the group count, verified against Metal.jl's
+# current stable docs/README/source examples, all of which
+# consistently use threads=/groups= and the unsuffixed
+# thread_position_in_grid().x form (the _1d/_2d/_3d-suffixed
+# intrinsics are deprecated as of Metal.jl v1.9). Metal.@atomic exists
+# and is documented as working the same way CUDA.jl's @atomic does.
+#
+# `^` is not accounted for here even though Metal has had a real,
+# separate compiler bug where `Float32 ^ Integer` is computed in
+# double precision internally regardless of what Julia's own types say
+# (JuliaGPU/Metal.jl#552) -- that's a backend compiler bug, not an
+# Expr-level promotion issue cgen_convert_precision's operand-casting
+# rewrite could fix, so it's recorded here as a caveat rather than
+# "handled": avoid `^` in the innermost loops of a kernel bound for
+# Metal until you've confirmed the fix status against your Metal.jl
+# version.
+function cgen_backend_metal()
+    return (
+        suffix = "_metal",
+        kernel_tag = "metal",
+        launch_macro = Symbol("@metal"),
+        threads_kw = :threads,
+        blocks_kw = :groups,
+        tid_rhs = :(thread_position_in_grid().x),
+        atomic_macro = Expr(:., :Metal, QuoteNode(Symbol("@atomic"))),
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"Metal\") || Pkg.add(\"Metal\")\nusing Metal\nMetal.allowscalar(false)\n",
+        default_precision = Float32,
+        precision_locked = true,
+        precision_lock_reason = "Apple GPUs have no FP64 hardware -- Metal.jl disallows constructing Float64 arrays at all, and any kernel whose arithmetic touches a Float64 fails to compile",
+    )
+end
+
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend)
+    exprs = Any[]
+    for stmt in body
+        if stmt.kind == :stackpush
+            push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
+        elseif stmt.kind == :assign
+            push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+        elseif stmt.kind == :if
+            push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend), cgen_body(stmt.els, kernels, owner, backend)))
+        elseif stmt.kind == :for
+            if !stmt.sequential && !cgen_contains_stackop(stmt.body)
+                idx = length(kernels) + 1
+                fargs = cgen_free_vars(stmt, stmt.var)
+                push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend))
+                push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
+            else
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend)))
+            end
+        end
+    end
+    return exprs
+end
+
+# ---- device kernel + launch construction --------------------------
+
+# prefixed with both the backend and the owning function's name --
+# stade_gpu_file bundles kernels from every function in an input file
+# (potentially processed for more than one backend over time) into
+# one output file, so a bare running index alone would collide
+cgen_kernel_fname(owner::Symbol, idx::Int, backend) =
+    Symbol(backend.kernel_tag * "_kernel_" * string(owner) * "_" * string(idx) * "!")
+
+cgen_trip_count(lo, step, hi) = Expr(:call, :+, Expr(:call, :div, Expr(:call, :-, hi, lo), step), 1)
+
+cgen_loopvar_from_tid(lo, step, tid) =
+    step == 1 ? Expr(:call, :+, lo, Expr(:call, :-, tid, 1)) :
+                Expr(:call, :+, lo, Expr(:call, :*, Expr(:call, :-, tid, 1), step))
+
+function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
+    tid = :__tid
+    n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+    body = Any[
+        Expr(:(=), tid, backend.tid_rhs),
+        Expr(:if, Expr(:call, :>, tid, n_iter), Expr(:block, emit_return_nothing())),
+        Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, tid)),
+    ]
+    append!(body, cgen_device_body(stmt.body, stmt.var, backend))
+    push!(body, emit_return_nothing())
+    return Expr(:function, Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...), Expr(:block, body...))
+end
+
+function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
+    n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+    nblocks = Expr(:call, :cld, n_iter, :nthread_per_block)
+    call = Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...)
+    return Expr(:macrocall, backend.launch_macro, nothing,
+                Expr(:(=), backend.threads_kw, :nthread_per_block),
+                Expr(:(=), backend.blocks_kw, nblocks),
+                call)
+end
+
+# device-side body walk -- never sees :stackpush or a pop!-rhs assign,
+# since cgen_body only reaches here for a loop cgen_contains_stackop
+# already confirmed is clean at every depth
+function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend)
+    exprs = Any[]
+    for stmt in body
+        if stmt.kind == :assign
+            push!(exprs, cgen_device_assign(stmt, thread_var, backend))
+        elseif stmt.kind == :if
+            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend), cgen_device_body(stmt.els, thread_var, backend)))
+        elseif stmt.kind == :for
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend)))
+        end
+    end
+    return exprs
+end
+
+# a write races across threads unless the enclosing device loop's own
+# thread-mapped variable occurs (at any depth) in the write's index --
+# a real occurs-check, not shallow top-level membership
+function cgen_device_assign(stmt, thread_var::Symbol, backend)
+    if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains(stmt.lhs.args[2:end], thread_var)
+        terms = cgen_flatten_sum(stmt.rhs)
+        self_idx = findfirst(t -> t == stmt.lhs, terms)
+        if self_idx !== nothing
+            other = cgen_sum_excluding(terms, self_idx)
+            return Expr(:macrocall, backend.atomic_macro, nothing,
+                        Expr(:(+=), stmt.lhs, other))
+        end
+    end
+    return Expr(:(=), stmt.lhs, stmt.rhs)
+end
+
+function cgen_expr_contains(x, sym::Symbol)
+    x isa Symbol && return x == sym
+    x isa Expr && return any(a -> cgen_expr_contains(a, sym), x.args)
+    return false
+end
+cgen_expr_contains(xs::Vector, sym::Symbol) = any(x -> cgen_expr_contains(x, sym), xs)
+
+# flattens a +/- spine into signed terms -- e.g. `x + a - b` -> [x, a, -b] --
+# so the self-reference check below works regardless of how many terms
+# there are or where the write's own prior value falls among them
+function cgen_flatten_sum(expr)
+    if expr isa Expr && expr.head == :call && expr.args[1] == :+ && length(expr.args) >= 2
+        terms = Any[]
+        for a in expr.args[2:end]
+            append!(terms, cgen_flatten_sum(a))
+        end
+        return terms
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :- && length(expr.args) == 3
+        return vcat(cgen_flatten_sum(expr.args[2]), cgen_negate_terms(cgen_flatten_sum(expr.args[3])))
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :- && length(expr.args) == 2
+        return cgen_negate_terms(cgen_flatten_sum(expr.args[2]))
+    else
+        return Any[expr]
+    end
+end
+
+cgen_negate_terms(terms) = Any[Expr(:call, :-, t) for t in terms]
+
+function cgen_sum_excluding(terms, skip_idx::Int)
+    rest = [terms[i] for i in eachindex(terms) if i != skip_idx]
+    isempty(rest) && return 0.0
+    length(rest) == 1 && return rest[1]
+    return Expr(:call, :+, rest...)
+end
+
+# ---- top-level emit: unifies both ingestion paths, any backend -----
+
+cgen_host_fname(name::Symbol, backend) = Symbol(string(name) * backend.suffix)
+
+function cgen_emit(gk, backend)
+    kernels = Expr[]
+    host_body = cgen_body(gk.body, kernels, gk.name, backend)
+    isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
+    push!(host_body, emit_return_scalars(gk.ret))
+    host = Expr(:function, Expr(:call, cgen_host_fname(gk.name, backend), gk.args...), Expr(:block, host_body...))
+    return (host = host, kernels = kernels)
+end
+
+# opt-in, applied only when the caller passes precision=T (T != Float64)
+# to stade_gpu/stade_cuda/stade_amdgpu/stade_gpu_file -- converts every
+# Float64 literal it finds to T, leaving Int-typed loop/index arithmetic
+# (trip counts, thread-index offsets, nthread_per_block) untouched since
+# a bare literal walk only ever matches AbstractFloat leaves. Applied
+# only to the freshly-generated host/kernel Exprs cgen_emit just built --
+# it never touches the input file on disk, so re-running at Float64
+# always reproduces the exact double-precision behavior of the source
+# kernel with nothing to undo.
+#
+# A literal walk alone isn't enough, though: some operators return
+# Float64 unconditionally regardless of their operand types, with no
+# Float64 *literal* anywhere in the source for a tree walk to find --
+# true division of two Integer operands (`2/2 -> Float64`), and every
+# whitelisted transcendental intrinsic applied to an Integer argument
+# (`sqrt(2) -> Float64`, but `sqrt(2.0f0) -> Float32`), both fall back
+# to Base's generic `f(x::Real) = f(float(x))`, and `float(::Integer)`
+# always means Float64 specifically, never T. So both are rewritten to
+# force their operands to T *before* the call, which is safe even when
+# an operand is already T (T(x::T) is the identity) and guarantees a
+# T-typed result regardless of what the operand actually was:
+#   a / b                 ->  T(a) / T(b)
+#   sqrt(x), sin(x), ...  ->  sqrt(T(x)), sin(T(x)), ...
+# `^` is deliberately left alone: Julia's own type tracking already
+# keeps `Float32 ^ Integer` as Float32 (verified), so there's no Expr-
+# level promotion bug to rewrite around -- but Metal.jl has had a real,
+# separate bug where its *compiler* computes `Float32 ^ Integer` in
+# double precision internally regardless of what Julia's type system
+# says (JuliaGPU/Metal.jl#552). No Julia-side Expr rewrite can fix a
+# backend compiler bug, so this is documented as a known Metal.jl
+# caveat (see cgen_backend_metal) rather than "fixed" by a rewrite that
+# might not even address it and could go stale as Metal.jl changes.
+function cgen_precision_unstable_unary()
+    return Set{Symbol}([
+        :sqrt, :exp, :log, :log10, :sin, :cos, :tan,
+        :asin, :acos, :atan, :sinh, :cosh, :tanh,
+    ])
+end
+
+function cgen_convert_precision(expr, ::Type{T}) where {T<:AbstractFloat}
+    tname = Symbol(string(T))
+    if expr isa AbstractFloat
+        return T(expr)
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :/ && length(expr.args) == 3
+        a = cgen_convert_precision(expr.args[2], T)
+        b = cgen_convert_precision(expr.args[3], T)
+        return Expr(:call, :/, Expr(:call, tname, a), Expr(:call, tname, b))
+    elseif expr isa Expr && expr.head == :call && length(expr.args) == 2 && expr.args[1] in cgen_precision_unstable_unary()
+        arg = cgen_convert_precision(expr.args[2], T)
+        return Expr(:call, expr.args[1], Expr(:call, tname, arg))
+    elseif expr isa Expr
+        return Expr(expr.head, [cgen_convert_precision(a, T) for a in expr.args]...)
+    end
+    return expr
+end
+
+
+# ==================== jgen_* =======================================
+# JACC.jl codegen. JACC replaces CUDA.jl/AMDGPU.jl/Metal.jl's "write a
+# kernel + a vendor launch macro + vendor thread-index intrinsics"
+# model with a single plain function taking the loop index as its
+# first argument, dispatched via `JACC.parallel_for(N, f, args...)` --
+# which vendor backend actually executes it is chosen once per Julia
+# *project*, outside any code jgen_ generates, via Preferences.jl. That
+# is a different enough model from cgen_'s gpu_backend (no launch
+# macro, no thread-index intrinsic to synthesize, and no way to know
+# the eventual backend at generation time at all) that it gets its own
+# prefix rather than being forced into gpu_backend, per the rule
+# skill-stade.md already states for cgen_ itself: if a new target
+# needs a change outside the shared machinery, it isn't the same
+# programming model and doesn't belong under the same prefix.
+#
+# jgen_ reuses cgen_'s already backend-agnostic front end directly
+# rather than duplicating it: cgen_ingest, cgen_free_vars,
+# cgen_contains_stackop, cgen_trip_count, cgen_loopvar_from_tid,
+# cgen_flatten_sum, cgen_expr_contains, cgen_sum_excluding, and
+# cgen_convert_precision all operate purely on the parsed cgen_kernel/
+# statement shape with a documented, frozen contract -- none of them
+# know what a gpu_backend even is, so calling them isn't reaching into
+# cgen_'s private internals the way skill-stade.md's purity rule warns
+# against; it's using the shared utility layer cgen_ and jgen_ both
+# sit on. Only the emit step below differs.
+#
+# Atomics: JACC adopted Atomix.@atomic as its own cross-backend atomic
+# primitive (JACC's changelog: "Add support for Atomix.@atomic"), so
+# the atomic-vs-plain-write decision is identical to cgen_'s -- only
+# the macro target is fixed to Atomix instead of varying by backend.
+#
+# Precision is deliberately NOT locked or defaulted the way Metal's
+# gpu_backend is: STADE cannot know, at generation time, which of
+# JACC's five backends a given output file will eventually run under
+# -- that choice is deferred to runtime, on a machine STADE never
+# sees, which is the entire point of JACC. Pretending to guarantee
+# precision safety the way cgen_backend_metal does would be actively
+# misleading here. stade_jacc defaults to Float64 (a no-op, same as
+# cgen_'s unlocked backends) and leaves it to the caller to pass
+# precision=Float32 if a Metal-configured JACC deployment is a real
+# possibility for the output.
+#
+# Bounds checking inside a split-off loop is deliberately omitted:
+# JACC.parallel_for(N, f, args...) is documented and exemplified
+# (JuliaGPU/JACC.jl's own current README) without an internal `i <=
+# length(...)` guard inside the kernel function, unlike a raw @cuda/
+# @roc/@metal launch which can overshoot to block granularity. This is
+# taken on documentation/example evidence, not verified against a
+# running JACC install -- no GPU hardware, of any vendor, has been
+# available to actually run anything cgen_/jgen_ produce, on any
+# backend, at any point. If a real run shows a guard is needed for
+# some backend/version, add it the same way cgen_kernel_def does.
+
+jgen_kernel_fname(owner::Symbol, idx::Int) = Symbol("jacc_kernel_" * string(owner) * "_" * string(idx) * "!")
+
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol)
+    exprs = Any[]
+    for stmt in body
+        if stmt.kind == :stackpush
+            push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
+        elseif stmt.kind == :assign
+            push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+        elseif stmt.kind == :if
+            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner), jgen_body(stmt.els, kernels, owner)))
+        elseif stmt.kind == :for
+            if !stmt.sequential && !cgen_contains_stackop(stmt.body)
+                idx = length(kernels) + 1
+                fargs = cgen_free_vars(stmt, stmt.var)
+                push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs))
+                push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
+            else
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner)))
+            end
+        end
+    end
+    return exprs
+end
+
+# JACC hands the loop index in directly as the split-off function's
+# first parameter -- no thread-index intrinsic to bind, unlike
+# cgen_kernel_def, since JACC.parallel_for(N, f, args...) already
+# guarantees the index range. cgen_loopvar_from_tid still does the
+# affine lo/step remapping (JACC's own 1:N index space vs. the
+# original loop's actual lo/step/hi), same as it does for cgen_.
+function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
+    jidx = :__jacc_i
+    body = Any[Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, jidx))]
+    append!(body, jgen_device_body(stmt.body, stmt.var))
+    push!(body, emit_return_nothing())
+    return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
+end
+
+# a plain function call, not a macrocall -- JACC.parallel_for is an
+# ordinary function, with no thread/block sizing to compute at this
+# level (that's internal to JACC, unlike cgen_launch_expr's cld(...))
+function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
+    n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+    return Expr(:call, Expr(:., :JACC, QuoteNode(:parallel_for)), n_iter, jgen_kernel_fname(owner, idx), fargs...)
+end
+
+function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol)
+    exprs = Any[]
+    for stmt in body
+        if stmt.kind == :assign
+            push!(exprs, jgen_device_assign(stmt, thread_var))
+        elseif stmt.kind == :if
+            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var), jgen_device_body(stmt.els, thread_var)))
+        elseif stmt.kind == :for
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var)))
+        end
+    end
+    return exprs
+end
+
+# identical decision to cgen_device_assign, reusing cgen_'s own
+# occurs-check and sum-flattening helpers -- only the atomic macro's
+# target module is fixed rather than coming from a backend descriptor
+function jgen_device_assign(stmt, thread_var::Symbol)
+    if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains(stmt.lhs.args[2:end], thread_var)
+        terms = cgen_flatten_sum(stmt.rhs)
+        self_idx = findfirst(t -> t == stmt.lhs, terms)
+        if self_idx !== nothing
+            other = cgen_sum_excluding(terms, self_idx)
+            return Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
+                        Expr(:(+=), stmt.lhs, other))
+        end
+    end
+    return Expr(:(=), stmt.lhs, stmt.rhs)
+end
+
+jgen_host_fname(name::Symbol) = Symbol(string(name) * "_jacc")
+
+function jgen_emit(gk)
+    kernels = Expr[]
+    host_body = jgen_body(gk.body, kernels, gk.name)
+    push!(host_body, emit_return_scalars(gk.ret))
+    host = Expr(:function, Expr(:call, jgen_host_fname(gk.name), gk.args...), Expr(:block, host_body...))
+    return (host = host, kernels = kernels)
+end
+
+function jgen_preamble()
+    return "import Pkg\nhaskey(Pkg.project().dependencies, \"JACC\") || Pkg.add(\"JACC\")\nhaskey(Pkg.project().dependencies, \"Atomix\") || Pkg.add(\"Atomix\")\nimport JACC\nimport Atomix\nJACC.@init_backend\n"
+end
+
+
 # ==================== val_* =======================================
 # Correctness oracle: <y, J*x> == <J'*y, x>, checked against random
 # seed vectors.
@@ -3925,6 +4730,21 @@ function io_write_kernel_corpus_file(path::String, primal_exprs::Dict{Symbol,Exp
 end
 
 io_path_exists(path::String) = isfile(path)
+
+# flat writer for the cgen_/jgen_ GPU-porting entry points (stade_gpu_file
+# et al.) -- unlike io_write_kernel_file/io_write_kernel_corpus_file there
+# is no single designated "primal" to append last: a multi-function input
+# may hand back several independent host functions (one per input def),
+# so the caller decides the full ordered list itself
+function io_write_gpu_file(path::String, exprs::Vector{Expr}; preamble::String = "")
+    parts = [io_expr_to_source(e) for e in exprs]
+    open(path, "w") do f
+        isempty(preamble) || write(f, preamble * "\n")
+        write(f, join(parts, "\n"))
+    end
+    return nothing
+end
+
 io_default_yaml_path(in_path::String) = splitext(in_path)[1] * ".yaml"
 
 # a minimal, hand-written YAML subset -- no external dependency. Two
@@ -4092,6 +4912,88 @@ function stade_hvp_file(in_path::String, out_path::String)
     return out_path
 end
 
+# Expr in, cuda_plan out -- accepts either a plain skill-jade kernel
+# or one of STADE's own generated functions (see cgen_ingest), for
+# whichever GPU backend descriptor is passed in. precision=nothing
+# (the default) means "use this backend's own default_precision" --
+# Float64 (a no-op) for CUDA/AMDGPU, Float32 for Metal. Passing an
+# explicit precision overrides that, except for a precision_locked
+# backend, where anything but its own default_precision is a hard
+# error at generation time rather than a silent guarantee that'll only
+# surface as a failure once the caller tries to compile/run the result.
+function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+    p = precision === nothing ? backend.default_precision : precision
+    if backend.precision_locked && p !== backend.default_precision
+        error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
+    end
+    plan = cgen_emit(cgen_ingest(expr), backend)
+    p === Float64 && return plan
+    return (host = cgen_convert_precision(plan.host, p),
+            kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
+end
+
+stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
+    stade_gpu(expr, cgen_backend_cuda(); precision = precision)
+stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
+    stade_gpu(expr, cgen_backend_amdgpu(); precision = precision)
+stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
+    stade_gpu(expr, cgen_backend_metal(); precision = precision)
+
+# path in, path out. Reads every function def in in_path (a plain
+# kernel file, or a stade_tangent_file/stade_adjoint_file output) and
+# writes one file: every device kernel first, then every host
+# function in original file order. `precision` applies uniformly to
+# every function converted in this call (initstacks_/adjoint/primal
+# alike, for a stade_adjoint_file output) -- for per-function control,
+# call stade_gpu directly on each def instead. The input file on disk
+# is only ever read, never rewritten, so precision=nothing is always
+# available again on the next call with nothing to reset.
+function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+    defs = io_read_kernel_bundle(in_path)
+    kernels = Expr[]
+    hosts = Expr[]
+    for expr in defs
+        plan = stade_gpu(expr, backend; precision = precision)
+        append!(kernels, plan.kernels)
+        push!(hosts, plan.host)
+    end
+    io_write_gpu_file(out_path, vcat(kernels, hosts); preamble = backend.preamble)
+    return out_path
+end
+
+stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision = precision)
+stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
+    stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision = precision)
+stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
+    stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision = precision)
+
+# JACC has no gpu_backend value at all -- there's only one JACC target
+# from cgen_/jgen_'s point of view, since which vendor it actually
+# runs on is chosen later, outside this call entirely. precision has
+# no locked default here for the same reason (see jgen_* section
+# comment): Float64 unless the caller explicitly asks otherwise.
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+    plan = jgen_emit(cgen_ingest(expr))
+    p = precision === nothing ? Float64 : precision
+    p === Float64 && return plan
+    return (host = cgen_convert_precision(plan.host, p),
+            kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
+end
+
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+    defs = io_read_kernel_bundle(in_path)
+    kernels = Expr[]
+    hosts = Expr[]
+    for expr in defs
+        plan = stade_jacc(expr; precision = precision)
+        append!(kernels, plan.kernels)
+        push!(hosts, plan.host)
+    end
+    io_write_gpu_file(out_path, vcat(kernels, hosts); preamble = jgen_preamble())
+    return out_path
+end
+
 
 # ==================== stade_* baseline validation (public API) =====
 # Numerically validates a generated tangent/adjoint/hvp file against
@@ -4247,4 +5149,80 @@ let
     @assert adjoint_out[:stub_caller].adjoint isa Expr && adjoint_out[:stub_caller].initstacks isa Expr
     @assert hvp_out[:stub_caller].hvp isa Expr && hvp_out[:stub_caller].initstacks isa Expr
     println("STADE.jl inl_* stage round-tripped a two-kernel stub call graph through all three codegen modes OK")
+end
+
+let
+    trivial = :(function stub(x, n, y)
+        return nothing
+    end)
+    tangent_out = stade_tangent(trivial)
+    adjoint_out = stade_adjoint(trivial)
+
+    cuda_primal = stade_cuda(trivial)
+    cuda_tangent = stade_cuda(tangent_out)
+    cuda_adjoint = stade_cuda(adjoint_out.adjoint)
+    cuda_initstacks = stade_cuda(adjoint_out.initstacks)
+    @assert cuda_primal.host isa Expr && cuda_tangent.host isa Expr
+    @assert cuda_adjoint.host isa Expr && cuda_initstacks.host isa Expr
+    println("cgen_* round-tripped the stub kernel's primal/tangent/adjoint/initstacks forms OK (CUDA backend)")
+
+    rocm_primal = stade_amdgpu(trivial)
+    @assert rocm_primal.host isa Expr
+    @assert String(rocm_primal.host.args[1].args[1]) == "stub_amdgpu"
+    println("cgen_* round-tripped the stub kernel's primal form OK (AMDGPU backend)")
+
+    f32_plan = stade_cuda(:(function stub2(u, v, n)
+        for i_x = 1:n
+            v[i_x] = 2.5 * u[i_x]
+        end
+        return nothing
+    end); precision = Float32)
+    @assert any(l -> l isa Float32, f32_plan.kernels[1].args[2].args) ||
+            occursin("2.5f0", string(f32_plan.kernels[1]))
+    f64_plan = stade_cuda(:(function stub2(u, v, n)
+        for i_x = 1:n
+            v[i_x] = 2.5 * u[i_x]
+        end
+        return nothing
+    end))
+    @assert occursin("2.5", string(f64_plan.kernels[1])) && !occursin("2.5f0", string(f64_plan.kernels[1]))
+    println("precision=Float32 downcasts generated code OK; default stays Float64 OK")
+
+    metal_plan = stade_metal(:(function stub3(u, v, n)
+        for i_x = 1:n
+            v[i_x] = u[i_x] / 2 + sqrt(n) * 1.5
+        end
+        return nothing
+    end))
+    @assert String(metal_plan.host.args[1].args[1]) == "stub3_metal"
+    ksrc = string(metal_plan.kernels[1])
+    @assert occursin("thread_position_in_grid", ksrc) && occursin("1.5f0", ksrc) && occursin("Float32(n)", ksrc)
+    @assert occursin("@metal", string(:(@metal threads = 1 groups = 1 f()))) # sanity on macro name only
+    threw = false
+    try
+        stade_metal(:(function stub3(u, v, n) return nothing end); precision = Float64)
+    catch
+        threw = true
+    end
+    @assert threw
+    println("cgen_* round-tripped a kernel through the Metal backend OK; precision_locked correctly rejected Float64")
+
+    jacc_plan = stade_jacc(:(function stub4(u, v, n)
+        for i_x = 1:n
+            v[i_x] = v[i_x] + 2.0 * u[i_x]
+            v[1] = v[1] + u[i_x]
+        end
+        acc = 0.0
+        for i_seq_t = 1:n
+            acc = acc + u[i_seq_t]
+        end
+        v[2] = acc
+        return nothing
+    end))
+    @assert String(jacc_plan.host.args[1].args[1]) == "stub4_jacc"
+    hsrc = string(jacc_plan.host)
+    @assert occursin("JACC.parallel_for", hsrc) && occursin("for i_seq_t", hsrc)
+    ksrc = string(jacc_plan.kernels[1])
+    @assert occursin("Atomix.@atomic", ksrc) && !occursin("threadIdx", ksrc) && !occursin("blockIdx", ksrc)
+    println("jgen_* round-tripped a kernel through the JACC target OK (split loop -> parallel_for + kernel, atomic write via Atomix, sequential loop left on host)")
 end
