@@ -1,12 +1,10 @@
 function initstacks_geomrecur_b()
     u_stack = Vector{Float64}()
-    loss_stack = Vector{Float64}()
-    return (u_stack, loss_stack)
+    return u_stack
 end
 
-function geomrecur_hv(loss, lossb, u, ub, c, cb, i_n, lossd, lossbd, ud, ubd, cd, cbd, u_stack, loss_stack)
+function geomrecur_hv(loss, lossb, u, ub, c, cb, i_n, lossd, lossbd, ud, ubd, cd, cbd, u_stack)
     u_stack_d = Vector{Float64}()
-    loss_stack_d = Vector{Float64}()
     for i_seq_x = 2:i_n
         push!(u_stack_d, ud[i_seq_x])
         push!(u_stack, u[i_seq_x])
@@ -14,14 +12,10 @@ function geomrecur_hv(loss, lossb, u, ub, c, cb, i_n, lossd, lossbd, ud, ubd, cd
         u[i_seq_x] = c * u[i_seq_x - 1]
     end
     for i_seq_x = 1:i_n
-        push!(loss_stack_d, lossd[1])
-        push!(loss_stack, loss[1])
         lossd[1] = lossd[1] + (2 * u[i_seq_x]) * ud[i_seq_x]
         loss[1] = loss[1] + u[i_seq_x] ^ 2
     end
     for i_seq_x = i_n:-1:1
-        lossd[1] = pop!(loss_stack_d)
-        loss[1] = pop!(loss_stack)
         ubd[i_seq_x] = ubd[i_seq_x] + (lossb[1] * (2 * ud[i_seq_x]) + (2 * u[i_seq_x]) * lossbd[1])
         ub[i_seq_x] = ub[i_seq_x] + (2 * u[i_seq_x]) * lossb[1]
     end

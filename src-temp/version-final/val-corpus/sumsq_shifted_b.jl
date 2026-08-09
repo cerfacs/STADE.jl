@@ -1,15 +1,12 @@
 function initstacks_sumsq_shifted_b()
-    loss_stack = Vector{Float64}()
-    return loss_stack
+    return nothing
 end
 
-function sumsq_shifted_b(loss, lossb, u, ub, alpha, alphab, beta, betab, i_n, loss_stack)
+function sumsq_shifted_b(loss, lossb, u, ub, alpha, alphab, beta, betab, i_n)
     for i_seq_x = 1:i_n
-        push!(loss_stack, loss[1])
         loss[1] = loss[1] + (alpha * u[i_seq_x] + beta) ^ 2
     end
     for i_seq_x = i_n:-1:1
-        loss[1] = pop!(loss_stack)
         alphab = alphab + u[i_seq_x] * ((2 * (alpha * u[i_seq_x] + beta)) * lossb[1])
         ub[i_seq_x] = ub[i_seq_x] + alpha * ((2 * (alpha * u[i_seq_x] + beta)) * lossb[1])
         betab = betab + (2 * (alpha * u[i_seq_x] + beta)) * lossb[1]

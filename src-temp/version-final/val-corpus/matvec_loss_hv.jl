@@ -1,12 +1,10 @@
 function initstacks_matvec_loss_b()
     v_stack = Vector{Float64}()
-    loss_stack = Vector{Float64}()
-    return (v_stack, loss_stack)
+    return v_stack
 end
 
-function matvec_loss_hv(loss, lossb, a, ab, u, ub, v, vb, i_m, i_n, lossd, lossbd, ad, abd, ud, ubd, vd, vbd, v_stack, loss_stack)
+function matvec_loss_hv(loss, lossb, a, ab, u, ub, v, vb, i_m, i_n, lossd, lossbd, ad, abd, ud, ubd, vd, vbd, v_stack)
     v_stack_d = Vector{Float64}()
-    loss_stack_d = Vector{Float64}()
     for i_i = 1:i_m
         for i_seq_j = 1:i_n
             push!(v_stack_d, vd[i_i])
@@ -16,14 +14,10 @@ function matvec_loss_hv(loss, lossb, a, ab, u, ub, v, vb, i_m, i_n, lossd, lossb
         end
     end
     for i_seq_i = 1:i_m
-        push!(loss_stack_d, lossd[1])
-        push!(loss_stack, loss[1])
         lossd[1] = lossd[1] + (2 * v[i_seq_i]) * vd[i_seq_i]
         loss[1] = loss[1] + v[i_seq_i] ^ 2
     end
     for i_seq_i = i_m:-1:1
-        lossd[1] = pop!(loss_stack_d)
-        loss[1] = pop!(loss_stack)
         vbd[i_seq_i] = vbd[i_seq_i] + (lossb[1] * (2 * vd[i_seq_i]) + (2 * v[i_seq_i]) * lossbd[1])
         vb[i_seq_i] = vb[i_seq_i] + (2 * v[i_seq_i]) * lossb[1]
     end

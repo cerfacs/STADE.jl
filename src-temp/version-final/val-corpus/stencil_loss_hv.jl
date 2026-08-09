@@ -1,23 +1,17 @@
 function initstacks_stencil_loss_b()
-    loss_stack = Vector{Float64}()
-    return loss_stack
+    return nothing
 end
 
-function stencil_loss_hv(loss, lossb, u, ub, w, wb, i_n, lossd, lossbd, ud, ubd, wd, wbd, loss_stack)
-    loss_stack_d = Vector{Float64}()
+function stencil_loss_hv(loss, lossb, u, ub, w, wb, i_n, lossd, lossbd, ud, ubd, wd, wbd)
     for i_x = 2:i_n - 1
         wd[i_x] = (ud[i_x - 1] + -(2.0 * ud[i_x])) + ud[i_x + 1]
         w[i_x] = (u[i_x - 1] - 2.0 * u[i_x]) + u[i_x + 1]
     end
     for i_seq_x = 2:i_n - 1
-        push!(loss_stack_d, lossd[1])
-        push!(loss_stack, loss[1])
         lossd[1] = lossd[1] + (2 * w[i_seq_x]) * wd[i_seq_x]
         loss[1] = loss[1] + w[i_seq_x] ^ 2
     end
     for i_seq_x = i_n - 1:-1:2
-        lossd[1] = pop!(loss_stack_d)
-        loss[1] = pop!(loss_stack)
         wbd[i_seq_x] = wbd[i_seq_x] + (lossb[1] * (2 * wd[i_seq_x]) + (2 * w[i_seq_x]) * lossbd[1])
         wb[i_seq_x] = wb[i_seq_x] + (2 * w[i_seq_x]) * lossb[1]
     end

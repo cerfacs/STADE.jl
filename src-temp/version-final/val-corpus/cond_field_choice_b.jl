@@ -1,11 +1,10 @@
 function initstacks_cond_field_choice_b()
     branch_stack = Vector{Int64}()
     w_stack = Vector{Float64}()
-    loss_stack = Vector{Float64}()
-    return (branch_stack, w_stack, loss_stack)
+    return (branch_stack, w_stack)
 end
 
-function cond_field_choice_b(loss, lossb, u, ub, v, vb, w, wb, i_branch, i_n, branch_stack, w_stack, loss_stack)
+function cond_field_choice_b(loss, lossb, u, ub, v, vb, w, wb, i_branch, i_n, branch_stack, w_stack)
     if i_branch == 1
         push!(branch_stack, 1)
         for i_x = 1:i_n
@@ -20,11 +19,9 @@ function cond_field_choice_b(loss, lossb, u, ub, v, vb, w, wb, i_branch, i_n, br
         end
     end
     for i_seq_x = 1:i_n
-        push!(loss_stack, loss[1])
         loss[1] = loss[1] + w[i_seq_x]
     end
     for i_seq_x = i_n:-1:1
-        loss[1] = pop!(loss_stack)
         wb[i_seq_x] = wb[i_seq_x] + lossb[1]
     end
     __branch = pop!(branch_stack)

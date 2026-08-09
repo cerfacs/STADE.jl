@@ -1,18 +1,15 @@
 function initstacks_normcomp_b()
-    loss_stack = Vector{Float64}()
-    return loss_stack
+    return nothing
 end
 
-function normcomp_b(loss, lossb, u, ub, v, vb, w, wb, i_n, loss_stack)
+function normcomp_b(loss, lossb, u, ub, v, vb, w, wb, i_n)
     for i_x = 1:i_n
         w[i_x] = u[i_x] - v[i_x]
     end
     for i_seq_x = 1:i_n
-        push!(loss_stack, loss[1])
         loss[1] = loss[1] + w[i_seq_x] ^ 2
     end
     for i_seq_x = i_n:-1:1
-        loss[1] = pop!(loss_stack)
         wb[i_seq_x] = wb[i_seq_x] + (2 * w[i_seq_x]) * lossb[1]
     end
     for i_x = 1:i_n

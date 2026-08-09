@@ -1,13 +1,11 @@
 function initstacks_clamped_sumsq_b()
     branch_stack = Vector{Int64}()
     w_stack = Vector{Float64}()
-    loss_stack = Vector{Float64}()
-    return (branch_stack, w_stack, loss_stack)
+    return (branch_stack, w_stack)
 end
 
-function clamped_sumsq_hv(loss, lossb, u, ub, i_n, lossd, lossbd, ud, ubd, branch_stack, w_stack, loss_stack)
+function clamped_sumsq_hv(loss, lossb, u, ub, i_n, lossd, lossbd, ud, ubd, branch_stack, w_stack)
     w_stack_d = Vector{Float64}()
-    loss_stack_d = Vector{Float64}()
     w = 0.0
     wb = 0.0
     wd = 0.0
@@ -24,8 +22,6 @@ function clamped_sumsq_hv(loss, lossb, u, ub, i_n, lossd, lossbd, ud, ubd, branc
             wd = 0.0
             w = 0.0
         end
-        push!(loss_stack_d, lossd[1])
-        push!(loss_stack, loss[1])
         lossd[1] = lossd[1] + wd
         loss[1] = loss[1] + w
     end
@@ -43,8 +39,6 @@ function clamped_sumsq_hv(loss, lossb, u, ub, i_n, lossd, lossbd, ud, ubd, branc
             wd = 0.0
             w = 0.0
         end
-        lossd[1] = pop!(loss_stack_d)
-        loss[1] = pop!(loss_stack)
         wbd = wbd + lossbd[1]
         wb = wb + lossb[1]
         if __branch_pre_1 == 1

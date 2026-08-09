@@ -1,19 +1,13 @@
 function initstacks_weightedsumsq_b()
-    loss_stack = Vector{Float64}()
-    return loss_stack
+    return nothing
 end
 
-function weightedsumsq_hv(loss, lossb, u, ub, w, wb, i_n, lossd, lossbd, ud, ubd, wd, wbd, loss_stack)
-    loss_stack_d = Vector{Float64}()
+function weightedsumsq_hv(loss, lossb, u, ub, w, wb, i_n, lossd, lossbd, ud, ubd, wd, wbd)
     for i_seq_x = 1:i_n
-        push!(loss_stack_d, lossd[1])
-        push!(loss_stack, loss[1])
         lossd[1] = lossd[1] + (u[i_seq_x] ^ 2 * wd[i_seq_x] + w[i_seq_x] * ((2 * u[i_seq_x]) * ud[i_seq_x]))
         loss[1] = loss[1] + w[i_seq_x] * u[i_seq_x] ^ 2
     end
     for i_seq_x = i_n:-1:1
-        lossd[1] = pop!(loss_stack_d)
-        loss[1] = pop!(loss_stack)
         wbd[i_seq_x] = wbd[i_seq_x] + (lossb[1] * ((2 * u[i_seq_x]) * ud[i_seq_x]) + u[i_seq_x] ^ 2 * lossbd[1])
         wb[i_seq_x] = wb[i_seq_x] + u[i_seq_x] ^ 2 * lossb[1]
         ubd[i_seq_x] = ubd[i_seq_x] + ((w[i_seq_x] * lossb[1]) * (2 * ud[i_seq_x]) + (2 * u[i_seq_x]) * (lossb[1] * wd[i_seq_x] + w[i_seq_x] * lossbd[1]))

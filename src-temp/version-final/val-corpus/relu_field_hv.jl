@@ -1,13 +1,11 @@
 function initstacks_relu_field_b()
     branch_stack = Vector{Int64}()
     v_stack = Vector{Float64}()
-    loss_stack = Vector{Float64}()
-    return (branch_stack, v_stack, loss_stack)
+    return (branch_stack, v_stack)
 end
 
-function relu_field_hv(loss, lossb, u, ub, v, vb, i_n, lossd, lossbd, ud, ubd, vd, vbd, branch_stack, v_stack, loss_stack)
+function relu_field_hv(loss, lossb, u, ub, v, vb, i_n, lossd, lossbd, ud, ubd, vd, vbd, branch_stack, v_stack)
     v_stack_d = Vector{Float64}()
-    loss_stack_d = Vector{Float64}()
     for i_x = 1:i_n
         if u[i_x] > 0.0
             push!(branch_stack, 1)
@@ -22,14 +20,10 @@ function relu_field_hv(loss, lossb, u, ub, v, vb, i_n, lossd, lossbd, ud, ubd, v
         end
     end
     for i_seq_x = 1:i_n
-        push!(loss_stack_d, lossd[1])
-        push!(loss_stack, loss[1])
         lossd[1] = lossd[1] + vd[i_seq_x]
         loss[1] = loss[1] + v[i_seq_x]
     end
     for i_seq_x = i_n:-1:1
-        lossd[1] = pop!(loss_stack_d)
-        loss[1] = pop!(loss_stack)
         vbd[i_seq_x] = vbd[i_seq_x] + lossbd[1]
         vb[i_seq_x] = vb[i_seq_x] + lossb[1]
     end

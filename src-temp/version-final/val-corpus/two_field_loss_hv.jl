@@ -1,10 +1,8 @@
 function initstacks_two_field_loss_b()
-    loss_stack = Vector{Float64}()
-    return loss_stack
+    return nothing
 end
 
-function two_field_loss_hv(loss, lossb, u, ub, v, vb, p, pb, q, qb, i_n, lossd, lossbd, ud, ubd, vd, vbd, pd, pbd, qd, qbd, loss_stack)
-    loss_stack_d = Vector{Float64}()
+function two_field_loss_hv(loss, lossb, u, ub, v, vb, p, pb, q, qb, i_n, lossd, lossbd, ud, ubd, vd, vbd, pd, pbd, qd, qbd)
     for i_x = 1:i_n
         pd[i_x] = (2 * u[i_x]) * ud[i_x]
         p[i_x] = u[i_x] ^ 2
@@ -14,14 +12,10 @@ function two_field_loss_hv(loss, lossb, u, ub, v, vb, p, pb, q, qb, i_n, lossd, 
         q[i_x] = v[i_x] ^ 3
     end
     for i_seq_x = 1:i_n
-        push!(loss_stack_d, lossd[1])
-        push!(loss_stack, loss[1])
         lossd[1] = (lossd[1] + pd[i_seq_x]) + qd[i_seq_x]
         loss[1] = loss[1] + p[i_seq_x] + q[i_seq_x]
     end
     for i_seq_x = i_n:-1:1
-        lossd[1] = pop!(loss_stack_d)
-        loss[1] = pop!(loss_stack)
         pbd[i_seq_x] = pbd[i_seq_x] + lossbd[1]
         pb[i_seq_x] = pb[i_seq_x] + lossb[1]
         qbd[i_seq_x] = qbd[i_seq_x] + lossbd[1]
