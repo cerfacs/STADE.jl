@@ -3867,6 +3867,29 @@ function io_read_kernel_corpus(path::String)
     return kernels
 end
 
+# every val_*/stade_validate_* function below only ever takes a
+# single primal Expr -- this is the one place that bridges a
+# possibly-multi-kernel FILE down to that single Expr, so nothing
+# downstream needs to know or care whether the file it came from had
+# one kernel or several. For a single-kernel file, returns that
+# kernel's Expr exactly as io_read_kernel always did (no inlining --
+# there's nothing to inline). For a multi-kernel corpus file, inlines
+# the whole call graph (inl_inline_calls) and returns the one kernel
+# whose name matches the file's own basename: the convention this
+# corpus already follows for single-kernel files (advection.jl
+# defines `advection`), extended to say a multi-kernel file's *entry*
+# kernel -- the one whose overall behavior is what the file is
+# actually validating -- is named after the file the same way.
+function io_read_corpus_entry(path::String)
+    kernels = io_read_kernel_corpus(path)
+    length(kernels) == 1 && return first(values(kernels))
+    entry_name = Symbol(splitext(basename(path))[1])
+    haskey(kernels, entry_name) ||
+        error("io_read_corpus_entry: $path defines $(length(kernels)) kernels but none is named :$(entry_name) (the file's own basename) -- a multi-kernel file needs an entry kernel named after the file")
+    inlined = inl_inline_calls(kernels)
+    return inlined[entry_name]
+end
+
 # bundles initstacks_foo_b, foo_b, and a copy of foo itself, in that order
 function io_write_kernel_file(path::String, primal_expr::Expr, generated::Vector{Expr})
     parts = [io_expr_to_source(e) for e in vcat(generated, [primal_expr])]
@@ -4083,7 +4106,7 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
                                        trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
     mode in (:tangent, :adjoint, :hvp) ||
         error("stade_validate_from_baseline: mode must be :tangent, :adjoint, or :hvp, got $mode")
-    primal_expr = io_read_kernel(in_path)
+    primal_expr = io_read_corpus_entry(in_path)
     kernel = parse_kernel(primal_expr)
     baseline = io_read_baseline_yaml(yaml_path)
     if mode == :tangent
@@ -4109,7 +4132,7 @@ end
 function stade_generate_baseline_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                        scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                        self_check::Bool = true)
-    primal_expr = io_read_kernel(in_path)
+    primal_expr = io_read_corpus_entry(in_path)
     kernel = parse_kernel(primal_expr)
     baseline = val_generate_baseline(kernel, primal_expr; scale = scale, int_lo = int_lo, int_hi = int_hi,
                                       self_check = self_check)
@@ -4163,7 +4186,7 @@ function stade_validate_adjoint_against_file(primal_path::String, adjoint_path::
                                               yaml_path::Union{String,Nothing} = nothing,
                                               scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                               trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
-    primal_expr = io_read_kernel(primal_path)
+    primal_expr = io_read_corpus_entry(primal_path)
     kernel = parse_kernel(primal_expr)
     bname = string(kernel.sig.name)
     defs = io_read_kernel_bundle(adjoint_path)
