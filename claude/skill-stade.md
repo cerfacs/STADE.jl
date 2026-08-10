@@ -58,8 +58,9 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    is built fresh *inside* the function that uses it and returned —
    never registered into module-level state.
 4. **Every function name starts with its stage's prefix**:
-   `parse_`, `shape_`, `der_`, `emit_`, `act_`, `snap_`, `lin_`,
-   `tgen_`, `agen_`, `hvp_`, `val_`, `io_`, `stade_`. `io_` is the only
+   `parse_`/`shape_`/`der_`/`emit_`/
+  `act_`/`snap_`/`lin_`/`inl_`/`tgen_`/`agen_`/`hvp_`/`cgen_`/`jgen_`/
+  `val_`/`io_`/`stade_`. `io_` is the only
    prefix permitted to touch the filesystem (open/read/write) —
    every other stage, including `stade_` itself, operates purely on
    in-memory `Expr`/`NamedTuple` values. This prefix rule is the
