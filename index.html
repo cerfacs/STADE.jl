@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>generate_file — Julia file generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:            #14151a;
+    --panel:         #1c1e26;
+    --panel-alt:     #1a1c24;
+    --border:        #2c2f3a;
+    --text:          #e8e6f0;
+    --text-muted:    #8b8fa3;
+    --julia-purple:  #9558b2;
+    --julia-green:   #389826;
+    --julia-red:     #cb3c33;
+    --julia-blue:    #4063d8;
+    --radius:        8px;
+    --font-ui:       'Space Grotesk', system-ui, sans-serif;
+    --font-code:     'JetBrains Mono', ui-monospace, monospace;
+  }
+
+  :root[data-theme="light"]{
+    --bg:            #f6f6f9;
+    --panel:         #ffffff;
+    --panel-alt:     #eef0f5;
+    --border:        #dcdfe8;
+    --text:          #1b1c22;
+    --text-muted:    #6b7080;
+  }
+
+  * { box-sizing: border-box; }
+
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--font-ui);
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    transition:background .18s ease, color .18s ease;
+  }
+
+  a { color: var(--julia-blue); }
+
+  /* ---------- Header ---------- */
+  header{
+    padding:20px 24px 8px;
+    border-bottom:1px solid var(--border);
+  }
+  .header-top{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:16px;
+  }
+  .header-icons{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-shrink:0;
+  }
+  .icon-btn{
+    width:32px;
+    height:32px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:var(--panel-alt);
+    border:1px solid var(--border);
+    border-radius:6px;
+    color:var(--text-muted);
+    cursor:pointer;
+    text-decoration:none;
+    transition:border-color .15s ease, color .15s ease, background .15s ease;
+  }
+  .icon-btn:hover{
+    border-color:var(--julia-purple);
+    color:var(--text);
+    background:rgba(149,88,178,.15);
+  }
+  .icon-btn svg{ width:16px; height:16px; }
+  #theme-toggle .icon-moon{ display:none; }
+  :root[data-theme="light"] #theme-toggle .icon-sun{ display:none; }
+  :root[data-theme="light"] #theme-toggle .icon-moon{ display:block; }
+  .julia-dots{ display:inline-flex; gap:3px; }
+  .julia-dots span{
+    width:7px; height:7px; border-radius:50%; display:inline-block;
+  }
+  .julia-dots span:nth-child(1){ background:var(--julia-red); }
+  .julia-dots span:nth-child(2){ background:var(--julia-green); }
+  .julia-dots span:nth-child(3){ background:var(--julia-purple); }
+  h1{
+    margin:0;
+    font-size:27.5px;
+    font-weight:600;
+    letter-spacing:-.01em;
+  }
+  h1.brand{
+    display:flex;
+    align-items:center;
+    gap:12px;
+  }
+  h1.brand img{
+    height:1.3em;
+    width:auto;
+    display:block;
+  }
+
+  /* ---------- Gallery tab strip ---------- */
+  .gallery-bar{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    padding:12px 24px;
+    overflow-x:auto;
+    border-bottom:1px solid var(--border);
+    background:var(--panel-alt);
+  }
+  .gallery-label{
+    font-size:13.75px;
+    color:var(--text-muted);
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    margin-right:6px;
+    white-space:nowrap;
+  }
+  .gallery-tab{
+    font-family:var(--font-code);
+    font-size:16.25px;
+    background:transparent;
+    color:var(--text-muted);
+    border:1px solid var(--border);
+    border-radius:6px;
+    padding:6px 12px;
+    cursor:pointer;
+    white-space:nowrap;
+    transition:border-color .15s ease, color .15s ease, background .15s ease;
+  }
+  .gallery-tab:hover{ border-color:var(--julia-purple); color:var(--text); }
+  .gallery-tab.active{
+    background:rgba(149,88,178,.15);
+    border-color:var(--julia-purple);
+    color:var(--text);
+  }
+  .gallery-tab:focus-visible, button:focus-visible, textarea:focus-visible{
+    outline:2px solid var(--julia-blue);
+    outline-offset:2px;
+  }
+
+  .section-label{
+    padding:14px 24px 0;
+    font-size:13.75px;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+  }
+
+  /* ---------- Panes grid (used by both the source/generated section and the yaml/validate section) ---------- */
+  .panes-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    align-items:start;
+    gap:1px 4px;
+    background:var(--border);
+  }
+  @media (max-width: 760px){
+    .panes-grid{ grid-template-columns:1fr; }
+  }
+  .pane{
+    background:var(--panel);
+    display:flex;
+    flex-direction:column;
+    min-height:340px;
+    min-width:0;
+  }
+  .pane-header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:10px 16px;
+    border-bottom:1px solid var(--border);
+    font-size:13.75px;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    color:var(--text-muted);
+  }
+  .pane-header .dot{
+    width:6px; height:6px; border-radius:50%;
+    display:inline-block; margin-right:6px;
+  }
+  .pane-header-actions{
+    display:flex;
+    align-items:center;
+    gap:10px;
+  }
+  .report-issue-btn{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    font-family:var(--font-ui);
+    font-size:13.75px;
+    letter-spacing:normal;
+    text-transform:none;
+    padding:4px 10px;
+    border:1px solid var(--border);
+    border-radius:6px;
+    background:var(--panel-alt);
+    color:var(--text-muted);
+    text-decoration:none;
+    cursor:pointer;
+    white-space:nowrap;
+    transition:border-color .15s ease, color .15s ease, background .15s ease;
+  }
+  .report-issue-btn:hover{
+    border-color:var(--julia-purple);
+    color:var(--text);
+    background:rgba(149,88,178,.15);
+  }
+  .report-issue-btn svg{ width:14px; height:14px; flex-shrink:0; }
+
+  /* Fixed proportion of viewport height, scrollable in both directions */
+  .pane-body{
+    position:relative;
+  }
+  .pane textarea, .pane pre{
+    height:40vh;
+    margin:0;
+    padding:16px;
+    background:transparent;
+    color:var(--text);
+    border:none;
+    resize:none;
+    font-family:var(--font-code);
+    font-size:16.25px;
+    line-height:1.6;
+    white-space:pre;
+    overflow:auto;
+    width:100%;
+    display:block;
+  }
+  .pane textarea:focus{ outline:none; background:rgba(255,255,255,.02); }
+  .pane pre.placeholder{ color:var(--text-muted); white-space:pre-wrap; word-break:break-word; }
+
+  /* ---------- Copy-to-clipboard icon (appears on hover) ---------- */
+  .copy-btn{
+    position:absolute;
+    top:10px;
+    right:10px;
+    width:28px;
+    height:28px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:var(--panel-alt);
+    border:1px solid var(--border);
+    border-radius:6px;
+    color:var(--text-muted);
+    cursor:pointer;
+    opacity:0;
+    pointer-events:none;
+    transition:opacity .12s ease, border-color .12s ease, color .12s ease, background .12s ease;
+    z-index:2;
+  }
+  .pane-body:hover .copy-btn,
+  .copy-btn:focus-visible{
+    opacity:1;
+    pointer-events:auto;
+  }
+  .copy-btn:hover{
+    border-color:var(--julia-purple);
+    color:var(--text);
+    background:rgba(149,88,178,.15);
+  }
+  .copy-btn svg{ width:14px; height:14px; }
+  .copy-btn .icon-check{ display:none; color:var(--julia-green); }
+  .copy-btn.copied .icon-copy{ display:none; }
+  .copy-btn.copied .icon-check{ display:block; }
+
+  /* ---------- Syntax highlighting (highlight.js tokens, mapped to app palette) ---------- */
+  .hljs{ background:transparent; color:var(--text); }
+  .hljs-comment, .hljs-quote{ color:var(--text-muted); font-style:italic; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type, .hljs-doctag{ color:var(--julia-purple); }
+  .hljs-string, .hljs-regexp{ color:var(--julia-green); }
+  .hljs-number{ color:var(--julia-blue); }
+  .hljs-title, .hljs-section, .hljs-built_in, .hljs-name,
+  .hljs-selector-id, .hljs-selector-class{ color:var(--julia-blue); font-weight:600; }
+  .hljs-attr, .hljs-attribute, .hljs-symbol, .hljs-bullet, .hljs-link{ color:var(--julia-red); }
+  .hljs-variable, .hljs-template-variable, .hljs-params, .hljs-meta{ color:var(--text); }
+  .hljs-deletion{ background:rgba(203,60,51,.15); }
+  .hljs-addition{ background:rgba(56,152,38,.15); }
+  .hljs-emphasis{ font-style:italic; }
+  .hljs-strong{ font-weight:700; }
+
+  /* ---------- Editable code editor overlay (highlighted <pre> behind a transparent textarea) ---------- */
+  .code-editor{
+    position:relative;
+    height:40vh;
+  }
+  .code-editor pre, .code-editor textarea{
+    position:absolute;
+    top:0; right:0; bottom:0; left:0;
+    height:100%;
+    width:100%;
+    margin:0;
+  }
+  .code-editor pre{
+    overflow:hidden;
+    pointer-events:none;
+  }
+  .code-editor pre code{
+    display:block;
+    padding:0;
+    background:none;
+    color:var(--text);
+    font:inherit;
+    white-space:inherit;
+  }
+  .code-editor textarea{
+    z-index:1;
+    color:transparent;
+    -webkit-text-fill-color:transparent;
+    caret-color:var(--text);
+    background:transparent;
+  }
+
+  /* ---------- Action bar ---------- */
+  .action-bar{
+    display:flex;
+    justify-content:center;
+    padding:20px;
+    border-top:1px solid var(--border);
+  }
+  #generate-btn, #validate-btn{
+    font-family:var(--font-ui);
+    font-weight:600;
+    font-size:17.5px;
+    color:#fff;
+    background:var(--julia-purple);
+    border:none;
+    border-radius:var(--radius);
+    padding:12px 28px;
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    transition:background .15s ease, transform .1s ease;
+  }
+  #generate-btn:hover, #validate-btn:hover{ background:#8249a3; }
+  #generate-btn:active, #validate-btn:active{ transform:scale(.98); }
+  #generate-btn:disabled, #validate-btn:disabled{ background:#4a3f57; cursor:not-allowed; }
+
+  .pulse-dots{ display:inline-flex; gap:4px; }
+  .pulse-dots span{
+    width:6px; height:6px; border-radius:50%;
+    background:#fff; opacity:.35;
+    animation:pulse 1.1s ease-in-out infinite;
+  }
+  .pulse-dots span:nth-child(1){ background:var(--julia-red); animation-delay:0s; }
+  .pulse-dots span:nth-child(2){ background:var(--julia-green); animation-delay:.18s; }
+  .pulse-dots span:nth-child(3){ background:var(--julia-blue); animation-delay:.36s; }
+  @keyframes pulse{
+    0%, 100% { opacity:.3; transform:scale(.85); }
+    50%      { opacity:1;  transform:scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce){
+    .pulse-dots span{ animation:none; opacity:.9; }
+  }
+
+  /* ---------- Status bar ---------- */
+  .status-bar{
+    font-family:var(--font-code);
+    font-size:15px;
+    padding:8px 16px;
+    color:#fff;
+    background:var(--julia-blue);
+    transition:background .2s ease;
+  }
+  .status-bar.ok{ background:var(--julia-green); }
+  .status-bar.error{ background:var(--julia-red); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-top">
+    <div class="header-title">
+      <h1 class="brand">
+        <img src="cerfacs_logo.png" alt="CERFACS logo">
+        <span>STADE.jl</span>
+      </h1>
+    </div>
+    <div class="header-icons">
+      <button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle light / dark theme" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/cerfacs/STADE.jl" target="_blank" rel="noopener noreferrer" aria-label="View source on GitHub" title="View on GitHub">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<div class="gallery-bar" id="gallery-bar">
+  <span class="gallery-label">gallery/</span>
+  <span id="gallery-status" style="color:var(--text-muted); font-size:15px;">loading files…</span>
+</div>
+
+<main class="panes-grid">
+  <section class="pane">
+    <div class="pane-header">
+      <span><span class="dot" style="background:var(--julia-blue);"></span>source</span>
+      <span id="source-meta"></span>
+    </div>
+    <div class="pane-body">
+      <div class="code-editor">
+        <pre class="code-highlight" aria-hidden="true"><code id="source-highlight" class="language-julia"></code></pre>
+        <textarea id="source-input" placeholder="Paste Julia source here, or pick a file from gallery/ above…" spellcheck="false"></textarea>
+      </div>
+      <button class="copy-btn" type="button" data-target="source-input" aria-label="Copy source to clipboard" title="Copy">
+        <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+      </button>
+    </div>
+  </section>
+
+  <section class="pane">
+    <div class="pane-header">
+      <span><span class="dot" style="background:var(--julia-green);"></span>generated</span>
+      <span id="generated-meta"></span>
+    </div>
+    <div class="pane-body">
+      <pre id="generated-output" class="placeholder">Output will appear here after you click Generate.</pre>
+      <button class="copy-btn" type="button" data-target="generated-output" aria-label="Copy generated output to clipboard" title="Copy">
+        <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+      </button>
+    </div>
+  </section>
+</main>
+
+<div class="action-bar">
+  <button id="generate-btn">
+    <span class="julia-dots" id="btn-dots"><span></span><span></span><span></span></span>
+    Generate
+  </button>
+</div>
+
+<div class="status-bar" id="status-bar">ready</div>
+
+<div class="action-bar">
+  <button id="validate-btn" disabled title="Generate successfully first to enable Validate">
+    <span class="julia-dots" id="validate-btn-dots"><span></span><span></span><span></span></span>
+    Validate
+  </button>
+</div>
+
+<section class="panes-grid">
+  <section class="pane">
+    <div class="pane-header">
+      <span><span class="dot" style="background:var(--julia-blue);"></span>yaml input</span>
+      <span id="yaml-meta"></span>
+    </div>
+    <div class="pane-body">
+      <div class="code-editor">
+        <pre class="code-highlight" aria-hidden="true"><code id="yaml-highlight" class="language-yaml"></code></pre>
+        <textarea id="yaml-input" placeholder="Enter YAML-compliant parameters here…" spellcheck="false"></textarea>
+      </div>
+      <button class="copy-btn" type="button" data-target="yaml-input" aria-label="Copy YAML input to clipboard" title="Copy">
+        <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+      </button>
+    </div>
+  </section>
+
+  <section class="pane">
+    <div class="pane-header">
+      <span><span class="dot" style="background:var(--julia-green);"></span>validate output</span>
+      <div class="pane-header-actions">
+        <span id="validate-meta"></span>
+        <a id="report-issue-btn" class="report-issue-btn" href="https://github.com/cerfacs/STADE.jl/issues/new" target="_blank" rel="noopener noreferrer" title="Pre-fill a GitHub issue with the contents of all four boxes">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
+          Report Issue
+        </a>
+      </div>
+    </div>
+    <div class="pane-body">
+      <pre id="validate-output" class="placeholder">Output will appear here after you click Validate.</pre>
+      <button class="copy-btn" type="button" data-target="validate-output" aria-label="Copy validate output to clipboard" title="Copy">
+        <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+      </button>
+    </div>
+  </section>
+</section>
+
+<div class="status-bar" id="validate-status-bar">ready</div>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/julia.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"></script>
+<script>
+/* ---------- Theme toggle (dark / light) ---------- */
+(function initTheme(){
+  const THEME_KEY = 'julia-gui-theme';
+
+  function getStoredTheme(){
+    try{ return localStorage.getItem(THEME_KEY); }
+    catch(err){ return null; } // storage unavailable (e.g. sandboxed preview)
+  }
+  function storeTheme(theme){
+    try{ localStorage.setItem(THEME_KEY, theme); }
+    catch(err){ /* ignore — theme just won't persist across reloads */ }
+  }
+
+  let theme = getStoredTheme() || 'light';
+  document.documentElement.setAttribute('data-theme', theme);
+
+  document.getElementById('theme-toggle').addEventListener('click', () => {
+    theme = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', theme);
+    storeTheme(theme);
+  });
+})();
+
+/* ============================================================
+   CONFIG — fill these in before deploying
+   ============================================================ */
+const CONFIG = {
+  GITHUB_OWNER:  "cerfacs",   // e.g. "octocat"
+  GITHUB_REPO:   "STADE.jl",         // e.g. "my-julia-tools"
+  GITHUB_BRANCH: "pages",
+  GALLERY_PATH:  "gallery",
+  BACKEND_URL:   "https://vps-8abb7fc4.vps.ovh.net/generate", // the Julia HTTP.jl / Genie.jl endpoint
+  VALIDATE_URL:  "https://vps-8abb7fc4.vps.ovh.net/validate",  // validates Julia code using the YAML input as parameters
+};
+
+const sourceInput   = document.getElementById('source-input');
+const generatedOut   = document.getElementById('generated-output');
+const galleryBar     = document.getElementById('gallery-bar');
+const galleryStatus  = document.getElementById('gallery-status');
+const generateBtn    = document.getElementById('generate-btn');
+const statusBar      = document.getElementById('status-bar');
+const sourceMeta     = document.getElementById('source-meta');
+const generatedMeta  = document.getElementById('generated-meta');
+
+const yamlInput      = document.getElementById('yaml-input');
+const yamlMeta       = document.getElementById('yaml-meta');
+const validateOutput    = document.getElementById('validate-output');
+const validateBtn       = document.getElementById('validate-btn');
+const validateStatusBar = document.getElementById('validate-status-bar');
+const validateMeta      = document.getElementById('validate-meta');
+
+/* ---------- Syntax highlighting (Julia / YAML via highlight.js) ---------- */
+const sourceHighlight = document.getElementById('source-highlight'); // <code> behind source-input
+const yamlHighlight   = document.getElementById('yaml-highlight');   // <code> behind yaml-input
+const sourceEditorPre = sourceHighlight.parentElement;                // the overlay <pre>
+const yamlEditorPre   = yamlHighlight.parentElement;
+
+function syncEditorScroll(textareaEl, preEl){
+  preEl.scrollTop = textareaEl.scrollTop;
+  preEl.scrollLeft = textareaEl.scrollLeft;
+}
+
+function highlightEditor(textareaEl, codeEl, lang){
+  if(typeof hljs === 'undefined') return; // CDN failed to load — degrade to plain textarea
+  codeEl.innerHTML = hljs.highlight(textareaEl.value, { language: lang, ignoreIllegals: true }).value + '\n';
+  syncEditorScroll(textareaEl, codeEl.parentElement);
+}
+
+// Highlights a read-only <pre> (generated/validate output) in place.
+function applyHljs(el, lang){
+  if(typeof hljs === 'undefined') return;
+  delete el.dataset.highlighted;
+  el.className = el.className.replace(/\blanguage-\S+\b/g, '').trim();
+  el.classList.add('language-' + lang);
+  hljs.highlightElement(el);
+}
+
+sourceInput.addEventListener('input', () => highlightEditor(sourceInput, sourceHighlight, 'julia'));
+sourceInput.addEventListener('scroll', () => syncEditorScroll(sourceInput, sourceEditorPre));
+yamlInput.addEventListener('input', () => highlightEditor(yamlInput, yamlHighlight, 'yaml'));
+yamlInput.addEventListener('scroll', () => syncEditorScroll(yamlInput, yamlEditorPre));
+
+function setBarStatus(bar, text, kind){
+  bar.textContent = text;
+  bar.className = 'status-bar' + (kind ? ' ' + kind : '');
+}
+function setStatus(text, kind){ setBarStatus(statusBar, text, kind); }
+function setValidateStatus(text, kind){ setBarStatus(validateStatusBar, text, kind); }
+
+/* ---------- Load gallery/ file list from the public repo ---------- */
+async function loadGallery(){
+  const api = `https://api.github.com/repos/${CONFIG.GITHUB_OWNER}/${CONFIG.GITHUB_REPO}/contents/${CONFIG.GALLERY_PATH}?ref=${CONFIG.GITHUB_BRANCH}`;
+  try{
+    const res = await fetch(api);
+    if(!res.ok) throw new Error(`GitHub API responded ${res.status}`);
+    const files = (await res.json()).filter(f => f.type === 'file' && f.name.endsWith('.jl'));
+    galleryStatus.remove();
+    if(files.length === 0){
+      const span = document.createElement('span');
+      span.style.color = 'var(--text-muted)';
+      span.style.fontSize = '15px';
+      span.textContent = 'no .jl files found';
+      galleryBar.appendChild(span);
+      return;
+    }
+    files.forEach((f, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'gallery-tab';
+      btn.textContent = f.name;
+      btn.addEventListener('click', () => selectFile(f, btn));
+      galleryBar.appendChild(btn);
+      if(i === 0) selectFile(f, btn);
+    });
+  }catch(err){
+    galleryStatus.textContent = `couldn't load gallery/ (${err.message})`;
+  }
+}
+
+async function selectFile(file, btnEl){
+  document.querySelectorAll('.gallery-tab').forEach(b => b.classList.remove('active'));
+  btnEl.classList.add('active');
+  sourceMeta.textContent = 'loading…';
+  try{
+    const res = await fetch(file.download_url);
+    const text = await res.text();
+    sourceInput.value = text;
+    highlightEditor(sourceInput, sourceHighlight, 'julia');
+    sourceMeta.textContent = file.name;
+  }catch(err){
+    sourceMeta.textContent = 'load failed';
+  }
+}
+
+/* ---------- Call the Julia backend ---------- */
+async function generate(){
+  const content = sourceInput.value;
+  if(!content.trim()){
+    setStatus('nothing to generate — paste or pick some source first', 'error');
+    return;
+  }
+  generateBtn.disabled = true;
+  setStatus('calling Julia backend…');
+  generatedOut.classList.add('placeholder');
+  generatedOut.textContent = 'Generating…';
+
+  try{
+    const res = await fetch(CONFIG.BACKEND_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if(!res.ok) throw new Error(`backend responded ${res.status}`);
+    const data = await res.json();
+    generatedOut.classList.remove('placeholder');
+    generatedOut.textContent = data.result;
+    applyHljs(generatedOut, 'julia');
+    generatedMeta.textContent = 'just now';
+    setStatus('generated successfully', 'ok');
+    validateBtn.disabled = false;
+    validateBtn.title = '';
+
+    // Backend also returns a derived YAML prefill (e.g. extracted from the
+    // generated code) — drop it into the yaml input box automatically.
+    if(typeof data.yaml_prefill === 'string' && data.yaml_prefill.trim()){
+      yamlInput.value = data.yaml_prefill;
+      highlightEditor(yamlInput, yamlHighlight, 'yaml');
+      yamlMeta.textContent = 'auto-filled from generated output';
+    }
+  }catch(err){
+    generatedOut.classList.add('placeholder');
+    generatedOut.textContent = `Request failed: ${err.message}\n\nCheck that BACKEND_URL in index.html points to a running instance of backend/generate_server.jl, and that CORS is enabled there.`;
+    setStatus(`error — ${err.message}`, 'error');
+  }finally{
+    generateBtn.disabled = false;
+  }
+}
+
+/* ---------- Validate Julia code (backend uses YAML input as parameters) ---------- */
+async function validate(){
+  const yaml = yamlInput.value;
+  if(!yaml.trim()){
+    setValidateStatus('nothing to validate — enter some YAML input first', 'error');
+    return;
+  }
+  validateBtn.disabled = true;
+  setValidateStatus('validating…');
+  validateOutput.classList.add('placeholder');
+  validateOutput.textContent = 'Validating…';
+
+  try{
+    const res = await fetch(CONFIG.VALIDATE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ yaml }),
+    });
+    if(!res.ok) throw new Error(`backend responded ${res.status}`);
+    const data = await res.json();
+    validateOutput.classList.remove('placeholder');
+    validateOutput.textContent = data.result;
+    validateMeta.textContent = 'just now';
+    setValidateStatus('validated successfully', 'ok');
+  }catch(err){
+    validateOutput.classList.add('placeholder');
+    validateOutput.textContent = `Request failed: ${err.message}\n\nCheck that VALIDATE_URL in index.html points to a running instance of the Julia backend, and that CORS is enabled there.`;
+    setValidateStatus(`error — ${err.message}`, 'error');
+  }finally{
+    validateBtn.disabled = false;
+  }
+}
+
+/* ---------- Copy-to-clipboard icons ---------- */
+async function copyPaneContent(btn){
+  const targetEl = document.getElementById(btn.dataset.target);
+  const text = targetEl.tagName === 'TEXTAREA' ? targetEl.value : targetEl.textContent;
+  if(!text){ return; }
+  try{
+    await navigator.clipboard.writeText(text);
+  }catch(err){
+    // fallback for browsers/contexts without Clipboard API access
+    const tmp = document.createElement('textarea');
+    tmp.value = text;
+    tmp.style.position = 'fixed';
+    tmp.style.opacity = '0';
+    document.body.appendChild(tmp);
+    tmp.select();
+    document.execCommand('copy');
+    document.body.removeChild(tmp);
+  }
+  btn.classList.add('copied');
+  clearTimeout(btn._copyTimeout);
+  btn._copyTimeout = setTimeout(() => btn.classList.remove('copied'), 1400);
+}
+
+document.querySelectorAll('.copy-btn').forEach(btn => {
+  btn.addEventListener('click', () => copyPaneContent(btn));
+});
+
+/* ---------- Report Issue: pre-fill a GitHub issue with all box contents ---------- */
+const reportIssueBtn = document.getElementById('report-issue-btn');
+const REPORT_ISSUE_BASE_URL = 'https://github.com/cerfacs/STADE.jl/issues/new';
+
+function boxContentOrEmpty(el){
+  if(el.classList.contains('placeholder')) return '(empty)';
+  const value = el.tagName === 'TEXTAREA' ? el.value : el.textContent;
+  return value && value.trim() ? value : '(empty)';
+}
+
+function buildIssueBody(){
+  const sections = [
+    ['Source',           boxContentOrEmpty(sourceInput)],
+    ['Generated',        boxContentOrEmpty(generatedOut)],
+    ['YAML input',       boxContentOrEmpty(yamlInput)],
+    ['Validate output',  boxContentOrEmpty(validateOutput)],
+  ];
+  return sections
+    .map(([label, content]) => `### ${label}\n\`\`\`\n${content}\n\`\`\``)
+    .join('\n\n');
+}
+
+reportIssueBtn.addEventListener('click', () => {
+  const title = 'Validation issue';
+  const body = buildIssueBody();
+  const params = new URLSearchParams({ title, body });
+  reportIssueBtn.href = `${REPORT_ISSUE_BASE_URL}?${params.toString()}`;
+});
+
+generateBtn.addEventListener('click', generate);
+validateBtn.addEventListener('click', validate);
+yamlInput.addEventListener('input', () => { yamlMeta.textContent = ''; });
+loadGallery();
+</script>
+</body>
+</html>
