@@ -1,0 +1,23 @@
+import Pkg
+haskey(Pkg.project().dependencies, "Metal") || Pkg.add("Metal")
+using Metal
+Metal.allowscalar(false)
+
+function metal_kernel_affine_loss_1!(a, b, i_n, u, v)
+    __tid = (thread_position_in_grid()).x
+    if __tid > div(i_n - 1, 1) + 1
+        return nothing
+    end
+    i_x = 1 + (__tid - 1)
+    v[i_x] = a[i_x] * u[i_x] + b[i_x]
+    return nothing
+end
+
+function affine_loss_metal(loss, u, a, b, v, i_n)
+    nthread_per_block = 256
+    @metal threads = nthread_per_block groups = cld(div(i_n - 1, 1) + 1, nthread_per_block) metal_kernel_affine_loss_1!(a, b, i_n, u, v)
+    for i_seq_x = 1:i_n
+        loss[1] = loss[1] + v[i_seq_x] ^ 2
+    end
+    return nothing
+end
