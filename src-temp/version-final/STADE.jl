@@ -4,8 +4,6 @@
 #
 # Pipeline stages, in the order data flows through them:
 #
-# Pipeline stages, in the order data flows through them:
-#
 #   inl_    Inline       multi-kernel-only: splices callee bodies into
 #                         caller bodies (raw Expr, before parse_kernel
 #                         ever runs) so nested call graphs reduce to
