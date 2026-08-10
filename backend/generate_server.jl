@@ -29,8 +29,8 @@ end
 # a demo; for anything real, replace it with your exact Pages origin,
 # e.g. "https://YOUR_GITHUB_USERNAME.github.io".
 # ------------------------------------------------------------------
-# const ALLOWED_ORIGIN = "https://luciano-drozda.github.io"
-const ALLOWED_ORIGIN = "*"
+const ALLOWED_ORIGIN = "https://cerfacs.github.io/STADE.jl"
+# const ALLOWED_ORIGIN = "*"
 
 function cors_headers()
     return [
