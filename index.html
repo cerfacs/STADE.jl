@@ -254,6 +254,9 @@
   /* Fixed proportion of viewport height, scrollable in both directions */
   .pane-body{
     position:relative;
+    --code-font-size:16.25px; /* per-box zoom level; overridden inline by the
+                                 zoom in/out buttons via JS, scoped to just
+                                 this pane so boxes zoom independently */
   }
   .pane textarea, .pane pre{
     height:40vh;
@@ -264,7 +267,7 @@
     border:none;
     resize:none;
     font-family:var(--font-code);
-    font-size:16.25px;
+    font-size:var(--code-font-size, 16.25px);
     line-height:1.6;
     white-space:pre;
     overflow:auto;
@@ -274,11 +277,10 @@
   .pane textarea:focus{ outline:none; background:rgba(255,255,255,.02); }
   .pane pre.placeholder{ color:var(--text-muted); white-space:pre-wrap; word-break:break-word; }
 
-  /* ---------- Copy-to-clipboard icon (appears on hover) ---------- */
-  .copy-btn{
+  /* ---------- Zoom & copy-to-clipboard icons (appear on hover) ---------- */
+  .pane-icon-btn{
     position:absolute;
     top:10px;
-    right:10px;
     width:28px;
     height:28px;
     display:flex;
@@ -294,17 +296,20 @@
     transition:opacity .12s ease, border-color .12s ease, color .12s ease, background .12s ease;
     z-index:2;
   }
-  .pane-body:hover .copy-btn,
-  .copy-btn:focus-visible{
+  .copy-btn{ right:10px; }
+  .zoom-in-btn{ right:46px; }
+  .zoom-out-btn{ right:82px; }
+  .pane-body:hover .pane-icon-btn,
+  .pane-icon-btn:focus-visible{
     opacity:1;
     pointer-events:auto;
   }
-  .copy-btn:hover{
+  .pane-icon-btn:hover{
     border-color:var(--julia-purple);
     color:var(--text);
     background:rgba(149,88,178,.15);
   }
-  .copy-btn svg{ width:14px; height:14px; }
+  .pane-icon-btn svg{ width:14px; height:14px; }
   .copy-btn .icon-check{ display:none; color:var(--julia-green); }
   .copy-btn.copied .icon-copy{ display:none; }
   .copy-btn.copied .icon-check{ display:block; }
@@ -451,7 +456,13 @@
         <pre class="code-highlight" aria-hidden="true"><code id="source-highlight" class="language-julia"></code></pre>
         <textarea id="source-input" placeholder="Paste Julia source here, or pick a file from gallery/ above…" spellcheck="false"></textarea>
       </div>
-      <button class="copy-btn" type="button" data-target="source-input" aria-label="Copy source to clipboard" title="Copy">
+      <button class="pane-icon-btn zoom-out-btn" type="button" aria-label="Zoom out" title="Zoom out">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </button>
+      <button class="pane-icon-btn zoom-in-btn" type="button" aria-label="Zoom in" title="Zoom in">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </button>
+      <button class="pane-icon-btn copy-btn" type="button" data-target="source-input" aria-label="Copy source to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </button>
@@ -465,7 +476,13 @@
     </div>
     <div class="pane-body">
       <pre id="generated-output" class="placeholder">Output will appear here after you click Generate — the concatenation of stade_tangent_file, stade_adjoint_file, stade_hvp_file, stade_cuda_file, stade_amdgpu_file, stade_metal_file, and stade_jacc_file run against the source on the left, each section marked with a banner comment.</pre>
-      <button class="copy-btn" type="button" data-target="generated-output" aria-label="Copy generated output to clipboard" title="Copy">
+      <button class="pane-icon-btn zoom-out-btn" type="button" aria-label="Zoom out" title="Zoom out">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </button>
+      <button class="pane-icon-btn zoom-in-btn" type="button" aria-label="Zoom in" title="Zoom in">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </button>
+      <button class="pane-icon-btn copy-btn" type="button" data-target="generated-output" aria-label="Copy generated output to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </button>
@@ -500,7 +517,13 @@
         <pre class="code-highlight" aria-hidden="true"><code id="yaml-highlight" class="language-yaml"></code></pre>
         <textarea id="yaml-input" placeholder="Leave empty and click Validate to auto-generate a baseline here, or paste your own YAML-compliant parameters…" spellcheck="false"></textarea>
       </div>
-      <button class="copy-btn" type="button" data-target="yaml-input" aria-label="Copy YAML input to clipboard" title="Copy">
+      <button class="pane-icon-btn zoom-out-btn" type="button" aria-label="Zoom out" title="Zoom out">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </button>
+      <button class="pane-icon-btn zoom-in-btn" type="button" aria-label="Zoom in" title="Zoom in">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </button>
+      <button class="pane-icon-btn copy-btn" type="button" data-target="yaml-input" aria-label="Copy YAML input to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </button>
@@ -520,7 +543,13 @@
     </div>
     <div class="pane-body">
       <pre id="validate-output" class="placeholder">Output will appear here after you click Validate. If the YAML pane is empty, a baseline is generated and filled in for you first; if it already has values (auto-filled or your own), those are reused as-is against tangent, adjoint, and hvp finite-difference checks.</pre>
-      <button class="copy-btn" type="button" data-target="validate-output" aria-label="Copy validate output to clipboard" title="Copy">
+      <button class="pane-icon-btn zoom-out-btn" type="button" aria-label="Zoom out" title="Zoom out">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </button>
+      <button class="pane-icon-btn zoom-in-btn" type="button" aria-label="Zoom in" title="Zoom in">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
+      </button>
+      <button class="pane-icon-btn copy-btn" type="button" data-target="validate-output" aria-label="Copy validate output to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </button>
@@ -805,6 +834,40 @@ async function copyPaneContent(btn){
 
 document.querySelectorAll('.copy-btn').forEach(btn => {
   btn.addEventListener('click', () => copyPaneContent(btn));
+});
+
+/* ---------- Zoom in/out icons ----------
+   Each pane's font size lives in its own --code-font-size custom property
+   (declared per .pane-body in CSS, defaulting to 16.25px), read by both the
+   textarea and its syntax-highlighted <pre> overlay (or the plain output
+   <pre> for generated/validate) via the existing `.pane textarea, .pane
+   pre{ font-size:var(--code-font-size) }` rule. Setting it inline here
+   scopes the zoom to just the pane clicked in, and keeps the textarea and
+   its highlight overlay in sync since they share the same variable. */
+const ZOOM_MIN = 10, ZOOM_MAX = 28, ZOOM_STEP = 1.5, ZOOM_DEFAULT = 16.25;
+
+function paneFontSize(paneBody){
+  const inline = paneBody.style.getPropertyValue('--code-font-size');
+  const parsed = parseFloat(inline);
+  return Number.isFinite(parsed) ? parsed : ZOOM_DEFAULT;
+}
+
+function setPaneFontSize(paneBody, size){
+  const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, size));
+  paneBody.style.setProperty('--code-font-size', `${clamped}px`);
+}
+
+document.querySelectorAll('.zoom-in-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const paneBody = btn.closest('.pane-body');
+    setPaneFontSize(paneBody, paneFontSize(paneBody) + ZOOM_STEP);
+  });
+});
+document.querySelectorAll('.zoom-out-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const paneBody = btn.closest('.pane-body');
+    setPaneFontSize(paneBody, paneFontSize(paneBody) - ZOOM_STEP);
+  });
 });
 
 /* ---------- Report Issue: pre-fill a GitHub issue with all box contents ---------- */
