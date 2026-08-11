@@ -88,13 +88,7 @@
   #theme-toggle .icon-moon{ display:none; }
   :root[data-theme="light"] #theme-toggle .icon-sun{ display:none; }
   :root[data-theme="light"] #theme-toggle .icon-moon{ display:block; }
-  .julia-dots{ display:inline-flex; gap:3px; }
-  .julia-dots span{
-    width:7px; height:7px; border-radius:50%; display:inline-block;
-  }
-  .julia-dots span:nth-child(1){ background:var(--julia-red); }
-  .julia-dots span:nth-child(2){ background:var(--julia-green); }
-  .julia-dots span:nth-child(3){ background:var(--julia-purple); }
+  .btn-icon{ height:1.1em; width:auto; display:block; }
   h1{
     margin:0;
     font-size:27.5px;
@@ -111,6 +105,13 @@
     width:auto;
     display:block;
   }
+  /* Swap to the white CERFACS wordmark in dark theme -- the default
+     (dark-text) logo is invisible against the dark panel background.
+     Both images are always in the DOM (so nothing needs to be
+     re-fetched on toggle); only visibility switches with the theme. */
+  h1.brand .brand-logo-dark{ display:none; }
+  :root[data-theme="dark"] h1.brand .brand-logo-light{ display:none; }
+  :root[data-theme="dark"] h1.brand .brand-logo-dark{ display:block; }
 
   /* ---------- Gallery tab strip ---------- */
   .gallery-bar{
@@ -183,26 +184,47 @@
     display:flex;
     align-items:center;
     justify-content:space-between;
+    gap:10px;
     padding:10px 16px;
     border-bottom:1px solid var(--border);
     font-size:13.75px;
     letter-spacing:.08em;
     text-transform:uppercase;
     color:var(--text-muted);
+    min-width:0; /* let this shrink to the pane's actual (grid-fixed) width instead
+                    of stretching it to fit whichever header has more content --
+                    e.g. the extra Report Issue button on "validate output" --
+                    which would otherwise make that pane wider than its sibling */
   }
   .pane-header .dot{
     width:6px; height:6px; border-radius:50%;
     display:inline-block; margin-right:6px;
   }
+  .pane-header > span:first-child{
+    flex-shrink:0; /* the "source"/"generated"/"yaml input"/"validate output" label:
+                       always keep this fully readable; anything that needs to give
+                       ground when space is tight is the meta text or actions next to it */
+    white-space:nowrap;
+  }
+  #source-meta, #generated-meta, #yaml-meta, #validate-meta{
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    min-width:0;
+    flex-shrink:1;
+  }
   .pane-header-actions{
     display:flex;
     align-items:center;
     gap:10px;
+    min-width:0; /* so its own #validate-meta child is actually free to shrink/ellipsize
+                    rather than forcing this whole row past the pane's fixed width */
   }
   .report-issue-btn{
     display:inline-flex;
     align-items:center;
     gap:6px;
+    flex-shrink:0; /* never truncate the control itself -- #validate-meta gives way first */
     font-family:var(--font-ui);
     font-size:13.75px;
     letter-spacing:normal;
@@ -391,7 +413,8 @@
   <div class="header-top">
     <div class="header-title">
       <h1 class="brand">
-        <img src="assets/cerfacs_logo.png" alt="CERFACS logo">
+        <img class="brand-logo brand-logo-light" src="assets/cerfacs_logo.png" alt="CERFACS logo">
+        <img class="brand-logo brand-logo-dark" src="assets/cerfacs_logo_white.png" alt="CERFACS logo">
         <span>STADE.jl</span>
       </h1>
     </div>
@@ -436,7 +459,7 @@
       <span id="generated-meta"></span>
     </div>
     <div class="pane-body">
-      <pre id="generated-output" class="placeholder">Output will appear here after you click Generate.</pre>
+      <pre id="generated-output" class="placeholder">Output will appear here after you click Generate — the concatenation of stade_tangent_file, stade_adjoint_file, stade_hvp_file, stade_cuda_file, stade_amdgpu_file, stade_metal_file, and stade_jacc_file run against the source on the left, each section marked with a banner comment.</pre>
       <button class="copy-btn" type="button" data-target="generated-output" aria-label="Copy generated output to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
@@ -447,7 +470,7 @@
 
 <div class="action-bar">
   <button id="generate-btn">
-    <span class="julia-dots" id="btn-dots"><span></span><span></span><span></span></span>
+    <img class="btn-icon" src="assets/cerfacs_logo_icon_white.png" alt="" id="btn-dots">
     Generate
   </button>
 </div>
@@ -456,7 +479,7 @@
 
 <div class="action-bar">
   <button id="validate-btn" disabled title="Generate successfully first to enable Validate">
-    <span class="julia-dots" id="validate-btn-dots"><span></span><span></span><span></span></span>
+    <img class="btn-icon" src="assets/cerfacs_logo_icon_white.png" alt="" id="validate-btn-dots">
     Validate
   </button>
 </div>
@@ -470,7 +493,7 @@
     <div class="pane-body">
       <div class="code-editor">
         <pre class="code-highlight" aria-hidden="true"><code id="yaml-highlight" class="language-yaml"></code></pre>
-        <textarea id="yaml-input" placeholder="Enter YAML-compliant parameters here…" spellcheck="false"></textarea>
+        <textarea id="yaml-input" placeholder="Leave empty and click Validate to auto-generate a baseline here, or paste your own YAML-compliant parameters…" spellcheck="false"></textarea>
       </div>
       <button class="copy-btn" type="button" data-target="yaml-input" aria-label="Copy YAML input to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
@@ -491,7 +514,7 @@
       </div>
     </div>
     <div class="pane-body">
-      <pre id="validate-output" class="placeholder">Output will appear here after you click Validate.</pre>
+      <pre id="validate-output" class="placeholder">Output will appear here after you click Validate. If the YAML pane is empty, a baseline is generated and filled in for you first; if it already has values (auto-filled or your own), those are reused as-is against tangent, adjoint, and hvp finite-difference checks.</pre>
       <button class="copy-btn" type="button" data-target="validate-output" aria-label="Copy validate output to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
@@ -640,7 +663,15 @@ async function selectFile(file, btnEl){
   }
 }
 
-/* ---------- Call the Julia backend ---------- */
+/* ---------- Call the Julia backend ----------
+   POSTs the source pane's text as { content }. The backend runs it through
+   every stade_*_file generator (tangent, adjoint, hvp, then the cuda/amdgpu/
+   metal/jacc GPU ports) and sends back their concatenation as { result },
+   one banner-commented section per generator -- which we drop straight into
+   the generated-output pane below. A generator that fails on this input
+   (e.g. GPU porting on a multi-kernel corpus, a known gap) still shows up
+   as its own section with an error message in place of code, rather than
+   failing the whole request. */
 async function generate(){
   const content = sourceInput.value;
   if(!content.trim()){
@@ -663,8 +694,14 @@ async function generate(){
     generatedOut.classList.remove('placeholder');
     generatedOut.textContent = data.result;
     applyHljs(generatedOut, 'julia');
-    generatedMeta.textContent = 'just now';
-    setStatus('generated successfully', 'ok');
+    generatedMeta.textContent = 'just now — tangent · adjoint · hvp · cuda · amdgpu · metal · jacc';
+    const failedSections = (data.result.match(/^# generation failed:/gm) || []).length;
+    setStatus(
+      failedSections > 0
+        ? `generated successfully — ${failedSections} section${failedSections === 1 ? '' : 's'} reported a generation error (see output)`
+        : 'generated successfully',
+      'ok'
+    );
     validateBtn.disabled = false;
     validateBtn.title = '';
 
@@ -684,15 +721,25 @@ async function generate(){
   }
 }
 
-/* ---------- Validate Julia code (backend uses YAML input as parameters) ---------- */
+/* ---------- Validate Julia code ----------
+   POSTs the same source used for Generate, plus whatever's currently in the
+   YAML pane, as { content, yaml }. If the YAML pane is empty, the backend
+   generates a fresh baseline (via stade_generate_baseline_file) and sends
+   it back as { yaml }, which we drop into the pane. If the YAML pane
+   already has something in it -- either from a previous auto-fill, or
+   hand-edited -- the backend uses those values as-is (io_read_baseline_yaml)
+   and sends back yaml: null, so we leave the pane untouched. Either way,
+   { result } is the concatenation of the tangent/adjoint/hvp
+   finite-difference checks against that baseline. */
 async function validate(){
-  const yaml = yamlInput.value;
-  if(!yaml.trim()){
-    setValidateStatus('nothing to validate — enter some YAML input first', 'error');
+  const content = sourceInput.value;
+  if(!content.trim()){
+    setValidateStatus('nothing to validate — generate successfully first', 'error');
     return;
   }
+  const yaml = yamlInput.value;
   validateBtn.disabled = true;
-  setValidateStatus('validating…');
+  setValidateStatus(yaml.trim() ? 'validating…' : 'generating baseline & validating…');
   validateOutput.classList.add('placeholder');
   validateOutput.textContent = 'Validating…';
 
@@ -700,10 +747,21 @@ async function validate(){
     const res = await fetch(CONFIG.VALIDATE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ yaml }),
+      body: JSON.stringify({ content, yaml }),
     });
     if(!res.ok) throw new Error(`backend responded ${res.status}`);
     const data = await res.json();
+
+    // Backend only sends a non-null yaml when it generated a fresh baseline
+    // (i.e. the pane was empty) -- if it's hand-edited or already filled,
+    // the backend leaves it alone and this is null, so the pane is untouched.
+    if(typeof data.yaml === 'string' && data.yaml.trim()){
+      yamlInput.value = data.yaml;
+      highlightEditor(yamlInput, yamlHighlight, 'yaml');
+      yamlMeta.textContent = 'auto-filled baseline';
+      yamlMeta.title = 'Edit these values and click Validate again to check against your own inputs instead.';
+    }
+
     validateOutput.classList.remove('placeholder');
     validateOutput.textContent = data.result;
     validateMeta.textContent = 'just now';
