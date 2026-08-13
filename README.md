@@ -5,6 +5,8 @@
 
 [Try STADE.jl out in our website!](https://cerfacs.github.io/STADE.jl)
 
+[Here](https://github.com/cerfacs/STADE.jl/blob/main/claude/skill-stade-kernels.md) are defined STADE-differentiable kernels.
+
 ## Why STADE.jl ?
 
 
