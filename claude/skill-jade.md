@@ -4,9 +4,7 @@ description: >
   Use whenever writing, reviewing, or refactoring Julia code for numerical
   kernels in scientific computing (stencils, linear algebra, integrators,
   elementwise/reduction kernels, etc.) intended to run on a single
-  processor. Trigger any time the user asks for a Julia function or kernel
-  to crunch numbers, even without naming "skill-jade" or the rules
-  themselves. Enforces a strict house style: snake_case names (sequential
+  processor. Enforces a strict house style: snake_case names (sequential
   loop variables prefixed `i_seq_`), loop headers written with `=` and
   always naming the iteration variable (never a throwaway `_`), untyped
   positional-only arguments, loops over branching, iteration-independent
