@@ -5013,7 +5013,7 @@ function io_read_kernel(path::String)
 end
 
 function io_expr_to_source(expr::Expr)
-    return string(expr) * "\n"
+    return string(Base.remove_linenums!(deepcopy(expr))) * "\n"
 end
 
 # like io_read_kernel, but for files bundling more than one top-level
