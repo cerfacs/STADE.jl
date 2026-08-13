@@ -58,9 +58,8 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    is built fresh *inside* the function that uses it and returned —
    never registered into module-level state.
 4. **Every function name starts with its stage's prefix**:
-   `parse_`/`shape_`/`der_`/`emit_`/
-  `act_`/`snap_`/`lin_`/`inl_`/`tgen_`/`agen_`/`hvp_`/`cgen_`/`jgen_`/
-  `val_`/`io_`/`stade_`. `io_` is the only
+   `parse_`, `shape_`, `der_`, `emit_`, `act_`, `snap_`, `lin_`,
+   `tgen_`, `agen_`, `hvp_`, `val_`, `io_`, `stade_`. `io_` is the only
    prefix permitted to touch the filesystem (open/read/write) —
    every other stage, including `stade_` itself, operates purely on
    in-memory `Expr`/`NamedTuple` values. This prefix rule is the
@@ -96,7 +95,107 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
 9. **STADE.jl contains no corpus-specific code.** Nothing in it may
    reference any particular kernel inside `val-corpus-*` by name.
 
-## Testing convention
+## `keep_push_pop`: the `:indexed` snapshot-storage strategy
+
+`stade_adjoint`/`stade_hvp` (and their `_file`/`_corpus` wrappers) take a
+`keep_push_pop::Bool = true` keyword. `true` is the original behaviour
+(unchanged, byte-identical output — verified against the pre-feature
+codebase across the whole corpus). `false` replaces every snapshot
+stack's `push!`/`pop!` pair with a direct write/read into a pre-sized
+`Vector`, indexed by a compile-time-derived, runtime-evaluated position —
+this is what makes GPU code generation for these push/pop sites
+*possible at all*: a shared mutable stack pointer has no meaning once a
+loop is split across independent GPU threads (`counter_vs_index.jl`
+demonstrates concretely why a running counter isn't a valid substitute
+either — a GPU launch doesn't guarantee threads visit indices in any
+particular order, so only a closed-form, thread-local index works).
+
+**Tier A (implemented):** a snapshot site's index is computable in
+closed form from kernel arguments and its own enclosing loop nest alone.
+For a site inside loop nest `L1..Lk` (outermost to innermost), with
+`pos0(Li) = (Li.var - Li.lo) / Li.step` (0-based) and
+`stride(Li) = product of tripcount(Lj) for j > i`:
+
+```
+local_position = 1 + sum_i pos0(Li) * stride(Li)
+index = base_offset + local_position
+```
+
+`base_offset` for one occurrence = the sum of the *local multiplicities*
+(product of enclosing-loop tripcounts, or 1 if none) of every earlier
+occurrence sharing its stack, in kernel-source order — i.e. stacks are
+still shared across sites the same way they are today (`agen_site_stack_name`
+unchanged), just laid out as consecutive fixed-size blocks instead of a
+LIFO stream. A stack's total size is the sum of all its occurrences'
+multiplicities (folded to a single term, no degenerate `+()`, when only
+one site maps to it). `initstacks_*`'s signature grows to accept the
+*minimal* free-variable set the size expressions actually reference
+(built via the same free-variable collection every other sizing helper
+in this file uses) — this is the one unavoidable calling-convention
+change, verified against a hand-derived reference
+(`advection_b_arr.jl`, multi-site/looped case; `branchsel_b_arr.jl`,
+single unlooped site, no signature change needed at all).
+
+Matching a specific push site to its corresponding pop site is done by
+a **structural key**, not a running counter: `agen_site_key(body, idx[, bv])`
+= `(objectid(body), idx, bv_or_nothing)`, where `body` is the *kernel.body-side*
+`Vector` containing the statement and `idx` its position in it.
+`agen_backward_body` threads a `primal_body` argument (kernel.body's own
+matching sub-`Vector`, passed down structurally parallel to `lin_plan`)
+purely so it can reconstruct this same key at the corresponding backward
+site — deliberately *not* relying on any assumption about generation-time
+call ordering between forward and backward (branch-scalar hoisting
+already reorders pops relative to a naive full reversal; a counter-based
+scheme breaks silently under that reordering, a running-counter approach
+was tried and rejected during design for exactly this reason).
+`agen_local_position` is recomputed fresh from the current `loop_ctx` at
+both the push and pop call sites rather than cached, since `loop_ctx`
+is guaranteed structurally identical at both (same `(var,lo,hi,step)`
+values from the same statement, regardless of which direction the
+generated loop actually iterates at runtime).
+
+Branch-scalar hoisting's discard-pop (the `__snap_discard` lines) is
+*dropped entirely* under `:indexed` mode — it exists only to keep a
+shared LIFO pointer in sync, which is meaningless once storage is
+randomly addressable. The corresponding forward-written slot is simply
+never read back — a harmless over-snapshot, the same philosophy `snap_*`
+already applies to its own iteration-independent elision.
+
+**Tier B (detected, not yet implemented):** a loop whose own
+bound-determining symbol is ever an assignment target inside an
+*ancestor sequential loop* has a trip count that isn't a closed-form
+function of kernel arguments (`mg_vcycle`/`mg_vcycle_multi`, whose inner
+loop bounds derive from `nl`, reassigned once per outer sequential
+`i_seq_level` iteration, are the two confirmed corpus instances).
+`agen_tier_b_offender`/`agen_tier_b_walk` detect this up front and
+`agen_emit`/`stade_hvp` refuse loudly (`error(...)`, naming the
+offending symbol) rather than emit a wrong or under-sized buffer.
+Actual Tier B support (ragged/data-dependent sizing) is a separate,
+not-yet-implemented follow-up.
+
+**Validated:** all 19 Tier A corpus kernels pass central
+finite-difference validation under `keep_push_pop=false` for both
+adjoint and HVP generation (`stade_validate_adjoint_against_file`,
+`val_validate_hvp`); the 2 Tier B kernels refuse loudly as designed.
+`keep_push_pop=true` output is provably byte-identical to the
+pre-feature codebase across the full corpus. GPU-split-count regression
+checked via `stade_cuda`: `:indexed` mode never reduces the number of
+loops split into parallel GPU kernels versus `:stack` mode, and often
+increases it (removing the push/pop sequential dependency unlocks
+splits `:stack` mode couldn't attempt at all — e.g. `advection` 2→4,
+`matvec_loss`/`relu_field` 0→2).
+
+**Known follow-up (not blocking, not yet done):** Tier B ragged sizing.
+
+`cgen_device_assign`'s atomic-write detection has already been hardened
+(independent of, but recommended alongside, this feature): it now does
+a real occurs-check for the enclosing device loop's thread variable
+anywhere in a write's index expression, and refuses loudly (rather than
+silently emitting an unprotected write) for any thread-invariant-indexed
+write that isn't a plain additive accumulation, since a non-additive
+race has no atomic-wrapper fix.
+
+### Testing convention
 
 Every change is checked against the shared golden corpus (19 kernels), 
 using `validate_corpus.jl` (central finite differences)
