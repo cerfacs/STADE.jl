@@ -29,10 +29,22 @@ function mg_relax_b(u, ub, f, fb, n, hl2, hl2b, lvl, nu, left_stack, branch_stac
                 push!(branch_stack, 0)
             end
             u[i_seq_j, lvl] = 0.5 * (hl2 * f[i_seq_j, lvl] + left + right)
+            push!(left_stack, left)
+            push!(right_stack, right)
         end
+        push!(left_stack, left)
+        push!(right_stack, right)
     end
+    push!(left_stack, left)
+    push!(right_stack, right)
+    left = pop!(left_stack)
+    right = pop!(right_stack)
     for i_seq_k = nu:-1:1
+        left = pop!(left_stack)
+        right = pop!(right_stack)
         for i_seq_j = n:-1:1
+            left = pop!(left_stack)
+            right = pop!(right_stack)
             __branch_pre_4 = pop!(branch_stack)
             if __branch_pre_4 == 1
                 __snap_discard = pop!(right_stack)
@@ -170,7 +182,11 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
                 end
                 push!(u_stack, u[i_seq_j_mg_relax_c1, i_seq_level])
                 u[i_seq_j_mg_relax_c1, i_seq_level] = 0.5 * (hl2 * f[i_seq_j_mg_relax_c1, i_seq_level] + left_mg_relax_c1 + right_mg_relax_c1)
+                push!(left_mg_relax_c1_stack, left_mg_relax_c1)
+                push!(right_mg_relax_c1_stack, right_mg_relax_c1)
             end
+            push!(left_mg_relax_c1_stack, left_mg_relax_c1)
+            push!(right_mg_relax_c1_stack, right_mg_relax_c1)
         end
         push!(tripcount_stack, n)
         for j = 1:n
@@ -192,6 +208,8 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
             end
             push!(r_stack, r[j, i_seq_level])
             r[j, i_seq_level] = f[j, i_seq_level] - ((2.0 * u[j, i_seq_level] - left) - right) / hl2
+            push!(left_stack, left)
+            push!(right_stack, right)
         end
         ncg = div(nl, 2)
         nc = ncg - 1
@@ -208,6 +226,10 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
         nl = ncg
         push!(hl_stack, hl)
         hl = hl * 2.0
+        push!(left_stack, left)
+        push!(left_mg_relax_c1_stack, left_mg_relax_c1)
+        push!(right_stack, right)
+        push!(right_mg_relax_c1_stack, right_mg_relax_c1)
     end
     push!(hl2_stack, hl2)
     hl2 = hl * hl
@@ -249,6 +271,8 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
             end
             push!(u_stack, u[jf, i_seq_level])
             u[jf, i_seq_level] = u[jf, i_seq_level] + 0.5 * (cl + cr)
+            push!(cl_stack, cl)
+            push!(cr_stack, cr)
         end
         for i_seq_k_mg_relax_c2 = 1:nu2
             push!(tripcount_stack, n)
@@ -271,13 +295,49 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
                 end
                 push!(u_stack, u[i_seq_j_mg_relax_c2, i_seq_level])
                 u[i_seq_j_mg_relax_c2, i_seq_level] = 0.5 * (hl2 * f[i_seq_j_mg_relax_c2, i_seq_level] + left_mg_relax_c2 + right_mg_relax_c2)
+                push!(left_mg_relax_c2_stack, left_mg_relax_c2)
+                push!(right_mg_relax_c2_stack, right_mg_relax_c2)
             end
+            push!(left_mg_relax_c2_stack, left_mg_relax_c2)
+            push!(right_mg_relax_c2_stack, right_mg_relax_c2)
         end
+        push!(cl_stack, cl)
+        push!(cr_stack, cr)
+        push!(left_mg_relax_c2_stack, left_mg_relax_c2)
+        push!(right_mg_relax_c2_stack, right_mg_relax_c2)
     end
+    push!(cl_stack, cl)
+    push!(cr_stack, cr)
+    push!(hl_stack, hl)
+    push!(hl2_stack, hl2)
+    push!(left_stack, left)
+    push!(left_mg_relax_c1_stack, left_mg_relax_c1)
+    push!(left_mg_relax_c2_stack, left_mg_relax_c2)
+    push!(right_stack, right)
+    push!(right_mg_relax_c1_stack, right_mg_relax_c1)
+    push!(right_mg_relax_c2_stack, right_mg_relax_c2)
+    cl = pop!(cl_stack)
+    cr = pop!(cr_stack)
+    hl = pop!(hl_stack)
+    hl2 = pop!(hl2_stack)
+    left = pop!(left_stack)
+    left_mg_relax_c1 = pop!(left_mg_relax_c1_stack)
+    left_mg_relax_c2 = pop!(left_mg_relax_c2_stack)
+    right = pop!(right_stack)
+    right_mg_relax_c1 = pop!(right_mg_relax_c1_stack)
+    right_mg_relax_c2 = pop!(right_mg_relax_c2_stack)
     for i_seq_level = 1:num_levels - 1
+        cl = pop!(cl_stack)
+        cr = pop!(cr_stack)
+        left_mg_relax_c2 = pop!(left_mg_relax_c2_stack)
+        right_mg_relax_c2 = pop!(right_mg_relax_c2_stack)
         for i_seq_k_mg_relax_c2 = nu2:-1:1
+            left_mg_relax_c2 = pop!(left_mg_relax_c2_stack)
+            right_mg_relax_c2 = pop!(right_mg_relax_c2_stack)
             n = pop!(tripcount_stack)
             for i_seq_j_mg_relax_c2 = n:-1:1
+                left_mg_relax_c2 = pop!(left_mg_relax_c2_stack)
+                right_mg_relax_c2 = pop!(right_mg_relax_c2_stack)
                 __branch_pre_4 = pop!(branch_stack)
                 if __branch_pre_4 == 1
                     __snap_discard = pop!(right_mg_relax_c2_stack)
@@ -318,6 +378,8 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
         end
         nc = pop!(tripcount_stack)
         for j = nc + 1:-1:1
+            cl = pop!(cl_stack)
+            cr = pop!(cr_stack)
             jf = j * 2 - 1
             __branch_pre_5 = pop!(branch_stack)
             if __branch_pre_5 == 1
@@ -375,6 +437,10 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
     hlb = hlb + hl * hl2b
     hl2b = 0.0
     for i_seq_level = num_levels - 1:-1:1
+        left = pop!(left_stack)
+        left_mg_relax_c1 = pop!(left_mg_relax_c1_stack)
+        right = pop!(right_stack)
+        right_mg_relax_c1 = pop!(right_mg_relax_c1_stack)
         hl = pop!(hl_stack)
         hlb = 2.0hlb
         nc = pop!(tripcount_stack)
@@ -392,6 +458,8 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
         end
         n = pop!(tripcount_stack)
         for j = n:-1:1
+            left = pop!(left_stack)
+            right = pop!(right_stack)
             __branch_pre_4 = pop!(branch_stack)
             if __branch_pre_4 == 1
                 __snap_discard = pop!(right_stack)
@@ -431,8 +499,12 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
             leftb = 0.0
         end
         for i_seq_k_mg_relax_c1 = nu1:-1:1
+            left_mg_relax_c1 = pop!(left_mg_relax_c1_stack)
+            right_mg_relax_c1 = pop!(right_mg_relax_c1_stack)
             n = pop!(tripcount_stack)
             for i_seq_j_mg_relax_c1 = n:-1:1
+                left_mg_relax_c1 = pop!(left_mg_relax_c1_stack)
+                right_mg_relax_c1 = pop!(right_mg_relax_c1_stack)
                 __branch_pre_4 = pop!(branch_stack)
                 if __branch_pre_4 == 1
                     __snap_discard = pop!(right_mg_relax_c1_stack)
