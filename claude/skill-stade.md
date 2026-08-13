@@ -94,6 +94,23 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    / spec doc, not inline in STADE.jl.
 9. **STADE.jl contains no corpus-specific code.** Nothing in it may
    reference any particular kernel inside `val-corpus-*` by name.
+10. **A loop nest is whatever `for` structure the kernel source actually
+   contains — never "un-fuse" it back into synthetic sub-loops.**
+   skill-jade fuses a rectangular nest of iteration-independent loops (see
+   skill-jade rule 2) into one `for idx = 1:n * m` loop with the original
+   indices recovered inside the body via `div`/`mod`, rather than writing
+   literal nested `for`s. Every stage that walks loop nests for indexing or
+   tripcount purposes (`snap_*`'s `pos0`/`stride` math in the `:indexed`
+   strategy, `agen_tier_b_walk`'s ancestor-loop check, GPU split counting
+   in `stade_cuda`) must treat a fused single loop as a depth-1 nest with
+   tripcount `n * m` — its `pos0`/`stride` formula already reduces to the
+   depth-1 case (`stride(L1) = 1`) with no special-casing needed. Do not
+   add logic that pattern-matches `div(idx - 1, m)`/`mod(idx - 1, m)`
+   inside a loop body to reconstruct a synthetic multi-level nest; the
+   closed-form Tier A formula is defined over the *actual* enclosing `for`
+   statements a snapshot site sits inside, and a fused loop's body-level
+   `div`/`mod` expressions are ordinary assignment statements to that
+   formula, not loop structure.
 
 ## `keep_push_pop`: the `:indexed` snapshot-storage strategy
 
@@ -218,3 +235,7 @@ inside `val-corpus-tapenade-adjoint` is a secondary style check, not a correctne
 - [ ] Comments are one line or less, and present only where non-obvious
 - [ ] No filesystem access outside `io_*`
 - [ ] No reference to any specific corpus kernel by name
+- [ ] Loop-nest analysis (`pos0`/`stride`, Tier B ancestor-loop detection,
+      GPU split counting) walks the kernel source's actual `for` structure
+      only — no logic reconstructs a synthetic nest by pattern-matching a
+      fused loop's `div`/`mod` body statements

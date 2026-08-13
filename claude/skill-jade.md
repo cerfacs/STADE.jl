@@ -10,7 +10,8 @@ description: >
   loop variables prefixed `i_seq_`), loop headers written with `=` and
   always naming the iteration variable (never a throwaway `_`), untyped
   positional-only arguments, loops over branching, iteration-independent
-  loops over loop-carried dependencies, no broadcasting, no indirect
+  loops over loop-carried dependencies, fusing nested iteration-independent
+  loops into one flattened loop when the nest is rectangular, no broadcasting, no indirect
   indexing, no in-function array allocation, no compound assignment, only
   Fortran-intrinsic-equivalent calls (plus user-supplied helpers),
   `#`-comment input headers instead of docstrings, and functions that
@@ -88,6 +89,41 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    start with the reserved prefix `i_seq_` (e.g. `i_seq_k`, `i_seq_idx`).
    That way the loop-carried dependency is visible at a glance, without
    having to read the loop body.
+
+   **Fuse a nest of iteration-independent loops into one when the nest is
+   rectangular.** If an outer independent loop's body is *just* an inner
+   independent loop (plus, optionally, more independent loops — no
+   sequential loop or branch sitting between them), and the inner loop's
+   trip count doesn't depend on the outer loop's variable (a rectangular
+   nest, e.g. `for i = 1:n` wrapping `for j = 1:m` with `m` fixed), collapse
+   the whole nest into one loop over the flattened index range, then recover
+   each original index inside the body with `div` and `mod` (both already
+   fair game under rule 11) instead of keeping the nest:
+```julia
+   # not fused: two independent loops nested
+   for i = 1:n
+       for j = 1:m
+           y[i, j] = x[i, j] * 2.0
+       end
+   end
+   # fused: one independent loop over the flattened range
+   for idx = 1:n * m
+       i = div(idx - 1, m) + 1
+       j = mod(idx - 1, m) + 1
+       y[i, j] = x[i, j] * 2.0
+   end
+```
+   Only fuse when every loop in the nest is independent and rectangular in
+   this sense. Don't fuse when: any loop in the nest is sequential
+   (`i_seq_...`) — fusing would change what "one iteration" means for the
+   carried state; the inner bound is computed from the outer variable
+   (e.g. a triangular loop where `j`'s upper bound depends on `i`) — there
+   is no fixed `m` to flatten against; or a boundary-vs-interior split
+   (rule 4) still needs to sit between two of the loops — do the split
+   first, then fuse each resulting rectangular interior nest on its own.
+   A loop that started as `i_seq_` never gets folded into a fused loop's
+   flattened range, even if it sits alongside independent loops in the
+   same original nest.
 
 3. **Loop headers use `=`, not `in`, and always name the iteration
    variable explicitly.** Write `for i = 1:n`, never `for i in 1:n`. This
@@ -268,6 +304,36 @@ function dotprod(x, y, n, out)
 end
 ```
 
+A third example showing fusion: scaling every entry of an `n`-by-`m`
+matrix stored as a flat `Array{Float64}` (row `i`, column `j` at linear
+offset `(i - 1) * m + j`). Iterating `i` and `j` independently over a
+fixed `n`-by-`m` rectangle is exactly the case rule 2 says to fuse, so it
+becomes one loop over `1:n * m` with `i` and `j` recovered via `div`/`mod`
+rather than two nested loops:
+
+```julia
+# scale_matrix(x, y, n, m, factor)
+#
+# Multiplies every entry of the n-by-m matrix x by factor, writing into y.
+#
+# x: input array of length n * m, row-major (row i, col j at (i-1)*m+j)
+# y: output array of length n * m, filled in place, same layout as x
+# n: number of rows
+# m: number of columns
+# factor: scalar multiplier
+function scale_matrix(x, y, n, m, factor)
+    # rows and columns are both independent, and m is fixed across every
+    # row, so the two loops fuse into one over the flattened range
+    for idx = 1:n * m
+        i = div(idx - 1, m) + 1
+        j = mod(idx - 1, m) + 1
+        k = (i - 1) * m + j
+        y[k] = x[k] * factor
+    end
+    return nothing
+end
+```
+
 Contrast with a non-compliant version a naive first draft might produce —
 annotated/keyword args, an allocated output, `ifelse`, a branch inside the
 loop instead of split statements, broadcasting, an unnecessary sequential
@@ -315,6 +381,11 @@ fails before sharing it:
       mathematically required by the kernel being computed, and every such
       genuinely sequential loop's variable starts with `i_seq_` (ordinary
       independent loops do not use that prefix)
+- [ ] No rectangular nest of purely iteration-independent loops was left
+      un-fused — if the inner trip count doesn't depend on the outer
+      variable and no sequential loop or boundary split needs to sit
+      between them, it's collapsed into one loop with `div`/`mod`-recovered
+      indices
 - [ ] Every called function is either ordinary arithmetic/indexing, has a
       direct Fortran-intrinsic counterpart, or was supplied by the user
 - [ ] Integer division uses `div`, never `÷`/`fld`/floor-based tricks
