@@ -1,106 +1,3 @@
-function initstacks_mg_relax_b()
-    left_stack = Vector{Float64}()
-    branch_stack = Vector{Int64}()
-    right_stack = Vector{Float64}()
-    return (left_stack, branch_stack, right_stack)
-end
-
-function mg_relax_b(u, ub, f, fb, n, hl2, hl2b, lvl, nu, left_stack, branch_stack, right_stack)
-    left = 0.0
-    right = 0.0
-    leftb = 0.0
-    rightb = 0.0
-    for i_seq_k = 1:nu
-        for i_seq_j = 1:n
-            left = 0.0
-            if i_seq_j > 1
-                push!(branch_stack, 1)
-                push!(left_stack, left)
-                left = u[i_seq_j - 1, lvl]
-            else
-                push!(branch_stack, 0)
-            end
-            right = 0.0
-            if i_seq_j < n
-                push!(branch_stack, 1)
-                push!(right_stack, right)
-                right = u[i_seq_j + 1, lvl]
-            else
-                push!(branch_stack, 0)
-            end
-            u[i_seq_j, lvl] = 0.5 * (hl2 * f[i_seq_j, lvl] + left + right)
-            push!(left_stack, left)
-            push!(right_stack, right)
-        end
-        push!(left_stack, left)
-        push!(right_stack, right)
-    end
-    push!(left_stack, left)
-    push!(right_stack, right)
-    left = pop!(left_stack)
-    right = pop!(right_stack)
-    for i_seq_k = nu:-1:1
-        left = pop!(left_stack)
-        right = pop!(right_stack)
-        for i_seq_j = n:-1:1
-            left = pop!(left_stack)
-            right = pop!(right_stack)
-            __branch_pre_4 = pop!(branch_stack)
-            if __branch_pre_4 == 1
-                __snap_discard = pop!(right_stack)
-            end
-            right = 0.0
-            if __branch_pre_4 == 1
-                right = u[i_seq_j + 1, lvl]
-            else
-                right = 0.0
-            end
-            __branch_pre_2 = pop!(branch_stack)
-            if __branch_pre_2 == 1
-                __snap_discard = pop!(left_stack)
-            end
-            left = 0.0
-            if __branch_pre_2 == 1
-                left = u[i_seq_j - 1, lvl]
-            else
-                left = 0.0
-            end
-            hl2b = hl2b + f[i_seq_j, lvl] * (0.5 * ub[i_seq_j, lvl])
-            fb[i_seq_j, lvl] = fb[i_seq_j, lvl] + hl2 * (0.5 * ub[i_seq_j, lvl])
-            leftb = leftb + 0.5 * ub[i_seq_j, lvl]
-            rightb = rightb + 0.5 * ub[i_seq_j, lvl]
-            ub[i_seq_j, lvl] = 0.0
-            if __branch_pre_4 == 1
-                ub[i_seq_j + 1, lvl] = ub[i_seq_j + 1, lvl] + rightb
-                rightb = 0.0
-            end
-            rightb = 0.0
-            if __branch_pre_2 == 1
-                ub[i_seq_j - 1, lvl] = ub[i_seq_j - 1, lvl] + leftb
-                leftb = 0.0
-            end
-            leftb = 0.0
-        end
-    end
-    return hl2b
-end
-
-function mg_relax(u, f, n, hl2, lvl, nu)
-    for i_seq_k = 1:nu
-        for i_seq_j = 1:n
-            left = 0.0
-            if i_seq_j > 1
-                left = u[i_seq_j - 1, lvl]
-            end
-            right = 0.0
-            if i_seq_j < n
-                right = u[i_seq_j + 1, lvl]
-            end
-            u[i_seq_j, lvl] = 0.5 * (hl2 * f[i_seq_j, lvl] + left + right)
-        end
-    end
-end
-
 function initstacks_mg_vcycle_multi_b()
     hl_stack = Vector{Float64}()
     hl2_stack = Vector{Float64}()
@@ -549,7 +446,19 @@ function mg_vcycle_multi(u, f, r, nfine, num_levels, h1, nu1, nu2, n)
     for i_seq_level = 1:num_levels - 1
         n = nl - 1
         hl2 = hl * hl
-        mg_relax(u, f, n, hl2, i_seq_level, nu1)
+        for i_seq_k_mg_relax_c1 = 1:nu1
+            for i_seq_j_mg_relax_c1 = 1:n
+                left_mg_relax_c1 = 0.0
+                if i_seq_j_mg_relax_c1 > 1
+                    left_mg_relax_c1 = u[i_seq_j_mg_relax_c1 - 1, i_seq_level]
+                end
+                right_mg_relax_c1 = 0.0
+                if i_seq_j_mg_relax_c1 < n
+                    right_mg_relax_c1 = u[i_seq_j_mg_relax_c1 + 1, i_seq_level]
+                end
+                u[i_seq_j_mg_relax_c1, i_seq_level] = 0.5 * (hl2 * f[i_seq_j_mg_relax_c1, i_seq_level] + left_mg_relax_c1 + right_mg_relax_c1)
+            end
+        end
         for j = 1:n
             left = 0.0
             if j > 1
@@ -598,6 +507,18 @@ function mg_vcycle_multi(u, f, r, nfine, num_levels, h1, nu1, nu2, n)
             end
             u[jf, i_seq_level] = u[jf, i_seq_level] + 0.5 * (cl + cr)
         end
-        mg_relax(u, f, n, hl2, i_seq_level, nu2)
+        for i_seq_k_mg_relax_c2 = 1:nu2
+            for i_seq_j_mg_relax_c2 = 1:n
+                left_mg_relax_c2 = 0.0
+                if i_seq_j_mg_relax_c2 > 1
+                    left_mg_relax_c2 = u[i_seq_j_mg_relax_c2 - 1, i_seq_level]
+                end
+                right_mg_relax_c2 = 0.0
+                if i_seq_j_mg_relax_c2 < n
+                    right_mg_relax_c2 = u[i_seq_j_mg_relax_c2 + 1, i_seq_level]
+                end
+                u[i_seq_j_mg_relax_c2, i_seq_level] = 0.5 * (hl2 * f[i_seq_j_mg_relax_c2, i_seq_level] + left_mg_relax_c2 + right_mg_relax_c2)
+            end
+        end
     end
 end

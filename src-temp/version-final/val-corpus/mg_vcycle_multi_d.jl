@@ -1,41 +1,3 @@
-function mg_relax_d(u, ud, f, fd, n, hl2, hl2d, lvl, nu)
-    for i_seq_k = 1:nu
-        for i_seq_j = 1:n
-            leftd = 0.0
-            left = 0.0
-            if i_seq_j > 1
-                leftd = ud[i_seq_j - 1, lvl]
-                left = u[i_seq_j - 1, lvl]
-            end
-            rightd = 0.0
-            right = 0.0
-            if i_seq_j < n
-                rightd = ud[i_seq_j + 1, lvl]
-                right = u[i_seq_j + 1, lvl]
-            end
-            ud[i_seq_j, lvl] = 0.5 * (((f[i_seq_j, lvl] * hl2d + hl2 * fd[i_seq_j, lvl]) + leftd) + rightd)
-            u[i_seq_j, lvl] = 0.5 * (hl2 * f[i_seq_j, lvl] + left + right)
-        end
-    end
-    return nothing
-end
-
-function mg_relax(u, f, n, hl2, lvl, nu)
-    for i_seq_k = 1:nu
-        for i_seq_j = 1:n
-            left = 0.0
-            if i_seq_j > 1
-                left = u[i_seq_j - 1, lvl]
-            end
-            right = 0.0
-            if i_seq_j < n
-                right = u[i_seq_j + 1, lvl]
-            end
-            u[i_seq_j, lvl] = 0.5 * (hl2 * f[i_seq_j, lvl] + left + right)
-        end
-    end
-end
-
 function mg_vcycle_multi_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, n)
     nd = 0.0
     n = n * 2
@@ -171,7 +133,19 @@ function mg_vcycle_multi(u, f, r, nfine, num_levels, h1, nu1, nu2, n)
     for i_seq_level = 1:num_levels - 1
         n = nl - 1
         hl2 = hl * hl
-        mg_relax(u, f, n, hl2, i_seq_level, nu1)
+        for i_seq_k_mg_relax_c1 = 1:nu1
+            for i_seq_j_mg_relax_c1 = 1:n
+                left_mg_relax_c1 = 0.0
+                if i_seq_j_mg_relax_c1 > 1
+                    left_mg_relax_c1 = u[i_seq_j_mg_relax_c1 - 1, i_seq_level]
+                end
+                right_mg_relax_c1 = 0.0
+                if i_seq_j_mg_relax_c1 < n
+                    right_mg_relax_c1 = u[i_seq_j_mg_relax_c1 + 1, i_seq_level]
+                end
+                u[i_seq_j_mg_relax_c1, i_seq_level] = 0.5 * (hl2 * f[i_seq_j_mg_relax_c1, i_seq_level] + left_mg_relax_c1 + right_mg_relax_c1)
+            end
+        end
         for j = 1:n
             left = 0.0
             if j > 1
@@ -220,6 +194,18 @@ function mg_vcycle_multi(u, f, r, nfine, num_levels, h1, nu1, nu2, n)
             end
             u[jf, i_seq_level] = u[jf, i_seq_level] + 0.5 * (cl + cr)
         end
-        mg_relax(u, f, n, hl2, i_seq_level, nu2)
+        for i_seq_k_mg_relax_c2 = 1:nu2
+            for i_seq_j_mg_relax_c2 = 1:n
+                left_mg_relax_c2 = 0.0
+                if i_seq_j_mg_relax_c2 > 1
+                    left_mg_relax_c2 = u[i_seq_j_mg_relax_c2 - 1, i_seq_level]
+                end
+                right_mg_relax_c2 = 0.0
+                if i_seq_j_mg_relax_c2 < n
+                    right_mg_relax_c2 = u[i_seq_j_mg_relax_c2 + 1, i_seq_level]
+                end
+                u[i_seq_j_mg_relax_c2, i_seq_level] = 0.5 * (hl2 * f[i_seq_j_mg_relax_c2, i_seq_level] + left_mg_relax_c2 + right_mg_relax_c2)
+            end
+        end
     end
 end

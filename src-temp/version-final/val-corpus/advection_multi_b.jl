@@ -1,25 +1,3 @@
-function initstacks_advection_diff_b()
-    return nothing
-end
-
-function advection_diff_b(u, ub, du, dub, i_nnode)
-    for i_x = 2:i_nnode
-        du[i_x] = u[i_x] - u[i_x - 1]
-    end
-    for i_x = 2:i_nnode
-        ub[i_x] = ub[i_x] + dub[i_x]
-        ub[i_x - 1] = ub[i_x - 1] + -(dub[i_x])
-        dub[i_x] = 0.0
-    end
-    return nothing
-end
-
-function advection_diff(u, du, i_nnode)
-    for i_x = 2:i_nnode
-        du[i_x] = u[i_x] - u[i_x - 1]
-    end
-end
-
 function initstacks_advection_multi_b()
     du_stack = Vector{Float64}()
     return du_stack
@@ -54,30 +32,11 @@ end
 
 function advection_multi(u, du, c, dx, dt, i_nstep, i_nnode)
     for i_seq_ = 1:i_nstep
-        advection_diff(u, du, i_nnode)
-        advection_update(u, du, c, dx, dt, i_nnode)
-    end
-end
-
-function initstacks_advection_update_b()
-    return nothing
-end
-
-function advection_update_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nnode)
-    for i_x = 2:i_nnode
-        u[i_x] = u[i_x] - (c * dt * du[i_x]) / dx
-    end
-    for i_x = 2:i_nnode
-        cb = cb + (dt * du[i_x]) * ((1.0 / dx) * -(ub[i_x]))
-        dtb = dtb + (c * du[i_x]) * ((1.0 / dx) * -(ub[i_x]))
-        dub[i_x] = dub[i_x] + (c * dt) * ((1.0 / dx) * -(ub[i_x]))
-        dxb = dxb + -((c * dt * du[i_x]) / dx ^ 2) * -(ub[i_x])
-    end
-    return (cb, dxb, dtb)
-end
-
-function advection_update(u, du, c, dx, dt, i_nnode)
-    for i_x = 2:i_nnode
-        u[i_x] = u[i_x] - (c * dt * du[i_x]) / dx
+        for i_x_advection_diff_c1 = 2:i_nnode
+            du[i_x_advection_diff_c1] = u[i_x_advection_diff_c1] - u[i_x_advection_diff_c1 - 1]
+        end
+        for i_x_advection_update_c2 = 2:i_nnode
+            u[i_x_advection_update_c2] = u[i_x_advection_update_c2] - (c * dt * du[i_x_advection_update_c2]) / dx
+        end
     end
 end
