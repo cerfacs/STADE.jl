@@ -422,6 +422,10 @@
   }
   .status-bar.ok{ background:var(--julia-green); }
   .status-bar.error{ background:var(--julia-red); }
+  /* the two status bars now sit flush against each other (no gap) --
+     a hairline border keeps them visually distinguishable as two bars
+     rather than reading as one merged block */
+  #validate-status-bar{ border-top:1px solid rgba(0,0,0,.15); }
 </style>
 </head>
 <body>
@@ -507,6 +511,7 @@
 </div>
 
 <div class="status-bar" id="status-bar">ready</div>
+<div class="status-bar" id="validate-status-bar">ready</div>
 
 <div class="action-bar">
   <button id="validate-btn" disabled title="Differentiate successfully first to enable Validate">
@@ -565,8 +570,6 @@
     </div>
   </section>
 </section>
-
-<div class="status-bar" id="validate-status-bar">ready</div>
 
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -716,6 +719,15 @@ async function selectFile(file, btnEl){
    as its own section with an error message in place of code, rather than
    failing the whole request. */
 async function generate(){
+  // Baseline values are tied to a specific source/derivative pairing --
+  // once Differentiate is pressed the old baseline no longer necessarily
+  // matches whatever comes back, so the YAML pane is voided every time
+  // this button is pressed (Validate will auto-generate a fresh one).
+  yamlInput.value = '';
+  highlightEditor(yamlInput, yamlHighlight, 'yaml');
+  yamlMeta.textContent = '';
+  yamlMeta.title = '';
+
   const content = sourceInput.value;
   if(!content.trim()){
     setStatus('nothing to differentiate — paste or pick some source first', 'error');
