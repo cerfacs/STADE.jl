@@ -112,6 +112,13 @@
   h1.brand .brand-logo-dark{ display:none; }
   :root[data-theme="dark"] h1.brand .brand-logo-light{ display:none; }
   :root[data-theme="dark"] h1.brand .brand-logo-dark{ display:block; }
+  .brand-logo-link{
+    display:flex;
+    align-items:center;
+    opacity:1;
+    transition:opacity .15s ease;
+  }
+  .brand-logo-link:hover{ opacity:.8; }
 
   /* ---------- Gallery tab strip ---------- */
   .gallery-bar{
@@ -254,12 +261,12 @@
   /* Fixed proportion of viewport height, scrollable in both directions */
   .pane-body{
     position:relative;
-    --code-font-size:16.25px; /* per-box zoom level; overridden inline by the
+    --code-font-size:14px; /* per-box zoom level; overridden inline by the
                                  zoom in/out buttons via JS, scoped to just
                                  this pane so boxes zoom independently */
   }
   .pane textarea, .pane pre{
-    height:40vh;
+    height:50vh;
     margin:0;
     padding:16px;
     background:transparent;
@@ -267,7 +274,7 @@
     border:none;
     resize:none;
     font-family:var(--font-code);
-    font-size:var(--code-font-size, 16.25px);
+    font-size:var(--code-font-size, 14px);
     line-height:1.6;
     white-space:pre;
     overflow:auto;
@@ -332,7 +339,7 @@
   /* ---------- Editable code editor overlay (highlighted <pre> behind a transparent textarea) ---------- */
   .code-editor{
     position:relative;
-    height:40vh;
+    height:50vh;
   }
   .code-editor pre, .code-editor textarea{
     position:absolute;
@@ -423,8 +430,10 @@
   <div class="header-top">
     <div class="header-title">
       <h1 class="brand">
-        <img class="brand-logo brand-logo-light" src="assets/cerfacs_logo.png" alt="CERFACS logo">
-        <img class="brand-logo brand-logo-dark" src="assets/cerfacs_logo_white.png" alt="CERFACS logo">
+        <a class="brand-logo-link" href="https://cerfacs.fr/en" target="_blank" rel="noopener noreferrer" title="CERFACS website" aria-label="CERFACS website">
+          <img class="brand-logo brand-logo-light" src="assets/cerfacs_logo.png" alt="CERFACS logo">
+          <img class="brand-logo brand-logo-dark" src="assets/cerfacs_logo_white.png" alt="CERFACS logo">
+        </a>
         <span>STADE.jl</span>
       </h1>
     </div>
@@ -475,7 +484,7 @@
       <span id="generated-meta"></span>
     </div>
     <div class="pane-body">
-      <pre id="generated-output" class="placeholder">Output will appear here after you click Generate — the concatenation of stade_tangent_file, stade_adjoint_file, stade_hvp_file, stade_cuda_file, stade_amdgpu_file, stade_metal_file, and stade_jacc_file run against the source on the left, each section marked with a banner comment.</pre>
+      <pre id="generated-output" class="placeholder">Output will appear here after you click Differentiate — the concatenation of stade_tangent_file, stade_adjoint_file, stade_hvp_file, stade_cuda_file, stade_amdgpu_file, stade_metal_file, and stade_jacc_file run against the source on the left, each section marked with a banner comment.</pre>
       <button class="pane-icon-btn zoom-out-btn" type="button" aria-label="Zoom out" title="Zoom out">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
       </button>
@@ -493,14 +502,14 @@
 <div class="action-bar">
   <button id="generate-btn">
     <img class="btn-icon" src="assets/cerfacs_logo_icon_white.png" alt="" id="btn-dots">
-    Generate
+    Differentiate
   </button>
 </div>
 
 <div class="status-bar" id="status-bar">ready</div>
 
 <div class="action-bar">
-  <button id="validate-btn" disabled title="Generate successfully first to enable Validate">
+  <button id="validate-btn" disabled title="Differentiate successfully first to enable Validate">
     <img class="btn-icon" src="assets/cerfacs_logo_icon_white.png" alt="" id="validate-btn-dots">
     Validate
   </button>
@@ -509,7 +518,7 @@
 <section class="panes-grid">
   <section class="pane">
     <div class="pane-header">
-      <span><span class="dot" style="background:var(--julia-blue);"></span>yaml input</span>
+      <span><span class="dot" style="background:var(--julia-blue);"></span>baseline input (yaml)</span>
       <span id="yaml-meta"></span>
     </div>
     <div class="pane-body">
@@ -523,7 +532,7 @@
       <button class="pane-icon-btn zoom-in-btn" type="button" aria-label="Zoom in" title="Zoom in">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
       </button>
-      <button class="pane-icon-btn copy-btn" type="button" data-target="yaml-input" aria-label="Copy YAML input to clipboard" title="Copy">
+      <button class="pane-icon-btn copy-btn" type="button" data-target="yaml-input" aria-label="Copy Baseline Input (YAML) to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </button>
@@ -532,7 +541,7 @@
 
   <section class="pane">
     <div class="pane-header">
-      <span><span class="dot" style="background:var(--julia-green);"></span>validate output</span>
+      <span><span class="dot" style="background:var(--julia-green);"></span>validation output</span>
       <div class="pane-header-actions">
         <span id="validate-meta"></span>
         <a id="report-issue-btn" class="report-issue-btn" href="https://github.com/cerfacs/STADE.jl/issues/new" target="_blank" rel="noopener noreferrer" title="Pre-fill a GitHub issue with the contents of the Source box">
@@ -549,7 +558,7 @@
       <button class="pane-icon-btn zoom-in-btn" type="button" aria-label="Zoom in" title="Zoom in">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
       </button>
-      <button class="pane-icon-btn copy-btn" type="button" data-target="validate-output" aria-label="Copy validate output to clipboard" title="Copy">
+      <button class="pane-icon-btn copy-btn" type="button" data-target="validate-output" aria-label="Copy Validation Output to clipboard" title="Copy">
         <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </button>
@@ -709,13 +718,13 @@ async function selectFile(file, btnEl){
 async function generate(){
   const content = sourceInput.value;
   if(!content.trim()){
-    setStatus('nothing to generate — paste or pick some source first', 'error');
+    setStatus('nothing to differentiate — paste or pick some source first', 'error');
     return;
   }
   generateBtn.disabled = true;
   setStatus('calling Julia backend…');
   generatedOut.classList.add('placeholder');
-  generatedOut.textContent = 'Generating…';
+  generatedOut.textContent = 'Differentiating…';
 
   try{
     const res = await fetch(CONFIG.BACKEND_URL, {
@@ -732,8 +741,8 @@ async function generate(){
     const failedSections = (data.result.match(/^# generation failed:/gm) || []).length;
     setStatus(
       failedSections > 0
-        ? `generated successfully — ${failedSections} section${failedSections === 1 ? '' : 's'} reported a generation error (see output)`
-        : 'generated successfully',
+        ? `differentiated successfully — ${failedSections} section${failedSections === 1 ? '' : 's'} reported a generation error (see output)`
+        : 'differentiated successfully',
       'ok'
     );
     validateBtn.disabled = false;
@@ -768,7 +777,7 @@ async function generate(){
 async function validate(){
   const content = sourceInput.value;
   if(!content.trim()){
-    setValidateStatus('nothing to validate — generate successfully first', 'error');
+    setValidateStatus('nothing to validate — differentiate successfully first', 'error');
     return;
   }
   const yaml = yamlInput.value;
@@ -838,13 +847,13 @@ document.querySelectorAll('.copy-btn').forEach(btn => {
 
 /* ---------- Zoom in/out icons ----------
    Each pane's font size lives in its own --code-font-size custom property
-   (declared per .pane-body in CSS, defaulting to 16.25px), read by both the
+   (declared per .pane-body in CSS, defaulting to 14px), read by both the
    textarea and its syntax-highlighted <pre> overlay (or the plain output
    <pre> for generated/validate) via the existing `.pane textarea, .pane
    pre{ font-size:var(--code-font-size) }` rule. Setting it inline here
    scopes the zoom to just the pane clicked in, and keeps the textarea and
    its highlight overlay in sync since they share the same variable. */
-const ZOOM_MIN = 10, ZOOM_MAX = 28, ZOOM_STEP = 1.5, ZOOM_DEFAULT = 16.25;
+const ZOOM_MIN = 10, ZOOM_MAX = 28, ZOOM_STEP = 1.5, ZOOM_DEFAULT = 14;
 
 function paneFontSize(paneBody){
   const inline = paneBody.style.getPropertyValue('--code-font-size');
