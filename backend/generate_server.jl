@@ -28,9 +28,18 @@ include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 # ever visible outside this function -- the temp dir is removed
 # again before it returns.
 #
-# The seven generators, in the order they're concatenated:
-#   tangent, adjoint, hvp          -- stade_*_file (AD, via io_read_kernel_corpus)
-#   cuda, amdgpu, metal, jacc      -- stade_*_file (GPU porting, via io_read_kernel_bundle)
+# tangent, adjoint, hvp always run (via io_read_kernel_corpus), and
+# take a `keep_push_pop` kwarg -- STADE's own AD emission stages
+# either use push!/pop! stacks for adjoint/hvp checkpointing
+# (keep_push_pop=true, useful for stepping through in a debugger) or
+# a sized, indexed allocation instead (keep_push_pop=false, STADE's
+# own default). The "Differentiate" button flips this the other way:
+# it defaults to keep_push_pop=false and only sets it true when the
+# "Keep push!/pop!" option is checked, because push!/pop! stacks
+# aren't GPU-portable -- so whenever they're kept, cuda/amdgpu/metal/
+# jacc (the cgen_*/jgen_* GPU-porting stages, via stade_*_file's
+# io_read_kernel_bundle path) are skipped entirely rather than run
+# against code that can't actually reach a GPU.
 #
 # A single generator failing (e.g. GPU porting on a multi-kernel
 # `*_multi.jl`-style corpus -- a documented gap, see
@@ -38,10 +47,12 @@ include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 # abort the whole request: that section's banner is followed by the
 # error message instead of code, and every other section still runs.
 # ------------------------------------------------------------------
-const GENERATORS = [
+const AD_GENERATORS = [
     (:tangent, stade_tangent_file),
     (:adjoint, stade_adjoint_file),
     (:hvp,     stade_hvp_file),
+]
+const GPU_GENERATORS = [
     (:cuda,    stade_cuda_file),
     (:amdgpu,  stade_amdgpu_file),
     (:metal,   stade_metal_file),
@@ -53,7 +64,7 @@ function banner(label::Symbol)
     return "# " * "="^20 * title * "="^20
 end
 
-function generate_content(original_content::AbstractString)::String
+function generate_content(original_content::AbstractString; keep_push_pop::Bool = false)::String
     mktempdir() do dir
         entry = try
             corpus_entry_name(original_content)
@@ -64,15 +75,33 @@ function generate_content(original_content::AbstractString)::String
         write(in_path, original_content)
 
         sections = String[]
-        for (label, fn) in GENERATORS
+        for (label, fn) in AD_GENERATORS
             out_path = joinpath(dir, "output_$(label).jl")
             body = try
-                fn(in_path, out_path)
+                fn(in_path, out_path; keep_push_pop = keep_push_pop)
                 read(out_path, String)
             catch err
                 "# generation failed: $(sprint(showerror, err))\n"
             end
             push!(sections, banner(label) * "\n" * body)
+        end
+
+        if keep_push_pop
+            push!(sections, banner(:gpu) * "\n" *
+                "# skipped: push!/pop! is kept (\"Keep push!/pop!\" option checked), and\n" *
+                "# push!/pop! stacks are not amenable to GPU porting -- uncheck that option\n" *
+                "# to also generate cuda/amdgpu/metal/jacc ports.\n")
+        else
+            for (label, fn) in GPU_GENERATORS
+                out_path = joinpath(dir, "output_$(label).jl")
+                body = try
+                    fn(in_path, out_path)
+                    read(out_path, String)
+                catch err
+                    "# generation failed: $(sprint(showerror, err))\n"
+                end
+                push!(sections, banner(label) * "\n" * body)
+            end
         end
 
         return join(sections, "\n")
@@ -204,8 +233,10 @@ function handle_generate(req::HTTP.Request)
         if content === nothing || !(content isa AbstractString)
             return HTTP.Response(400, cors_headers(), body = JSON3.write((; error = "missing 'content' string field")))
         end
+        keep_push_pop = get(body, :keep_push_pop, false)
+        keep_push_pop isa Bool || (keep_push_pop = false)
 
-        result = generate_content(content)
+        result = generate_content(content; keep_push_pop = keep_push_pop)
         return HTTP.Response(200, cors_headers(),
                               body = JSON3.write((; result = result)))
     catch err

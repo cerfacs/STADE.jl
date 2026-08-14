@@ -394,6 +394,82 @@
   #generate-btn:active, #validate-btn:active{ transform:scale(.98); }
   #generate-btn:disabled, #validate-btn:disabled{ background:#4a3f57; cursor:not-allowed; }
 
+  /* ---------- Differentiate split button + options dropdown ---------- */
+  .split-btn-wrap{
+    position:relative;
+    display:inline-flex;
+  }
+  .split-btn-wrap #generate-btn{
+    border-top-right-radius:0;
+    border-bottom-right-radius:0;
+  }
+  .split-btn-arrow{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:40px;
+    background:var(--julia-purple);
+    color:#fff;
+    border:none;
+    border-left:1px solid rgba(255,255,255,.25);
+    border-top-right-radius:var(--radius);
+    border-bottom-right-radius:var(--radius);
+    cursor:pointer;
+    transition:background .15s ease;
+  }
+  .split-btn-arrow:hover{ background:#8249a3; }
+  .split-btn-arrow svg{ width:16px; height:16px; display:block; transition:transform .15s ease; }
+  .split-btn-wrap.open .split-btn-arrow svg{ transform:rotate(180deg); }
+
+  .options-menu{
+    position:absolute;
+    top:calc(100% + 8px);
+    right:0;
+    min-width:230px;
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    box-shadow:0 8px 24px rgba(0,0,0,.3);
+    padding:6px;
+    display:none;
+    z-index:20;
+  }
+  .split-btn-wrap.open .options-menu{ display:block; }
+  .options-menu-item{
+    display:flex;
+    align-items:flex-start;
+    gap:10px;
+    width:100%;
+    padding:8px 10px;
+    background:transparent;
+    border:none;
+    border-radius:6px;
+    color:var(--text);
+    font-family:var(--font-ui);
+    font-size:14px;
+    text-align:left;
+    line-height:1.35;
+    cursor:pointer;
+  }
+  .options-menu-item:hover{ background:var(--panel-alt); }
+  .options-menu-check{
+    width:16px; height:16px;
+    flex-shrink:0;
+    margin-top:2px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    color:var(--julia-green);
+  }
+  .options-menu-check svg{ width:100%; height:100%; visibility:hidden; }
+  .options-menu-item[aria-checked="true"] .options-menu-check svg{ visibility:visible; }
+  .options-menu-sublabel{
+    display:block;
+    font-size:12px;
+    color:var(--text-muted);
+    margin-top:2px;
+  }
+
   .pulse-dots{ display:inline-flex; gap:4px; }
   .pulse-dots span{
     width:6px; height:6px; border-radius:50%;
@@ -504,10 +580,23 @@
 </main>
 
 <div class="action-bar">
-  <button id="generate-btn">
-    <img class="btn-icon" src="assets/cerfacs_logo_icon_white.png" alt="" id="btn-dots">
-    Differentiate
-  </button>
+  <div class="split-btn-wrap" id="differentiate-wrap">
+    <button id="generate-btn">
+      <img class="btn-icon" src="assets/cerfacs_logo_icon_white.png" alt="" id="btn-dots">
+      Differentiate
+    </button>
+    <button id="differentiate-options-btn" class="split-btn-arrow" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Differentiate options" title="Options">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+    </button>
+    <div class="options-menu" id="differentiate-options-menu" role="menu">
+      <button type="button" class="options-menu-item" id="keep-push-pop-option" role="menuitemcheckbox" aria-checked="false">
+        <span class="options-menu-check">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </span>
+        <span class="options-menu-label">Keep push!/pop!<span class="options-menu-sublabel">(for debugging)</span></span>
+      </button>
+    </div>
+  </div>
 </div>
 
 <div class="status-bar" id="status-bar">ready</div>
@@ -616,6 +705,10 @@ const generatedOut   = document.getElementById('generated-output');
 const galleryBar     = document.getElementById('gallery-bar');
 const galleryStatus  = document.getElementById('gallery-status');
 const generateBtn    = document.getElementById('generate-btn');
+const differentiateWrap        = document.getElementById('differentiate-wrap');
+const differentiateOptionsBtn  = document.getElementById('differentiate-options-btn');
+const differentiateOptionsMenu = document.getElementById('differentiate-options-menu');
+const keepPushPopOption        = document.getElementById('keep-push-pop-option');
 const statusBar      = document.getElementById('status-bar');
 const sourceMeta     = document.getElementById('source-meta');
 const generatedMeta  = document.getElementById('generated-meta');
@@ -709,11 +802,46 @@ async function selectFile(file, btnEl){
   }
 }
 
+/* ---------- Differentiate options dropdown ----------
+   A single option so far: "Keep push!/pop!" -- maps straight to STADE.jl's
+   own `keep_push_pop` kwarg on stade_tangent_file/stade_adjoint_file/
+   stade_hvp_file. Unchecked (default) sends keep_push_pop=false, matching
+   what the "Differentiate" button should default to per product policy
+   (push!/pop! stacks aren't GPU-portable, so the default should be the one
+   that keeps the GPU ports available); checked sends keep_push_pop=true,
+   and the backend skips cuda/amdgpu/metal/jacc generation entirely in that
+   case rather than running it against non-portable code. */
+let keepPushPop = false;
+
+function closeDifferentiateOptions(){
+  differentiateWrap.classList.remove('open');
+  differentiateOptionsBtn.setAttribute('aria-expanded', 'false');
+}
+function openDifferentiateOptions(){
+  differentiateWrap.classList.add('open');
+  differentiateOptionsBtn.setAttribute('aria-expanded', 'true');
+}
+differentiateOptionsBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  differentiateWrap.classList.contains('open') ? closeDifferentiateOptions() : openDifferentiateOptions();
+});
+keepPushPopOption.addEventListener('click', () => {
+  keepPushPop = !keepPushPop;
+  keepPushPopOption.setAttribute('aria-checked', String(keepPushPop));
+});
+document.addEventListener('click', (e) => {
+  if(!differentiateWrap.contains(e.target)) closeDifferentiateOptions();
+});
+document.addEventListener('keydown', (e) => {
+  if(e.key === 'Escape') closeDifferentiateOptions();
+});
+
 /* ---------- Call the Julia backend ----------
-   POSTs the source pane's text as { content }. The backend runs it through
-   every stade_*_file generator (tangent, adjoint, hvp, then the cuda/amdgpu/
-   metal/jacc GPU ports) and sends back their concatenation as { result },
-   one banner-commented section per generator -- which we drop straight into
+   POSTs the source pane's text as { content, keep_push_pop }. The backend
+   runs it through every stade_*_file generator (tangent, adjoint, hvp,
+   then -- unless keep_push_pop is true -- the cuda/amdgpu/metal/jacc GPU
+   ports) and sends back their concatenation as { result }, one
+   banner-commented section per generator -- which we drop straight into
    the generated-output pane below. A generator that fails on this input
    (e.g. GPU porting on a multi-kernel corpus, a known gap) still shows up
    as its own section with an error message in place of code, rather than
@@ -742,14 +870,16 @@ async function generate(){
     const res = await fetch(CONFIG.BACKEND_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, keep_push_pop: keepPushPop }),
     });
     if(!res.ok) throw new Error(`backend responded ${res.status}`);
     const data = await res.json();
     generatedOut.classList.remove('placeholder');
     generatedOut.textContent = data.result;
     applyHljs(generatedOut, 'julia');
-    generatedMeta.textContent = 'just now — tangent · adjoint · hvp · cuda · amdgpu · metal · jacc';
+    generatedMeta.textContent = keepPushPop
+      ? 'just now — tangent · adjoint · hvp (GPU ports skipped — push!/pop! kept)'
+      : 'just now — tangent · adjoint · hvp · cuda · amdgpu · metal · jacc';
     const failedSections = (data.result.match(/^# generation failed:/gm) || []).length;
     setStatus(
       failedSections > 0
