@@ -5,10 +5,9 @@ description: >
   meant to be fed into STADE (the automatic differentiation engine) for
   tangent/adjoint/HVP generation -- stencils, linear algebra, integrators,
   elementwise/reduction kernels, and similar monoprocessor scientific-
-  computing code. Trigger any time the user asks for a Julia kernel that
-  STADE will differentiate, mentions the validation corpus, or asks to
-  add/modify a kernel alongside STADE.jl itself, even without naming this
-  skill.
+  computing code. Covers the `i_seq_` sequential-loop convention, 
+  fusing rectangular nests of independent loops into one flattened loop, 
+  and the other STADE-parseability constraints below.
 ---
 
 # skill-stade-kernels: house style for kernels STADE differentiates
@@ -74,15 +73,49 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    can be anything a valid Julia identifier allows -- case, underscores,
    camelCase, whatever reads best to you.
 
-2. **Loop headers always name the iteration variable explicitly** --
+2. **Fuse a rectangular nest of iteration-independent loops into one loop
+   over the flattened range.** If an outer independent loop's body is
+   *just* another independent loop (optionally several, nested deeper),
+   with no `i_seq_` loop or branch sitting between them, and the inner
+   loop's trip count doesn't depend on the outer loop's variable, collapse
+   the whole nest into a single loop over `1:n * m` (extend the product for
+   deeper nests) and recover each original index inside the body with
+   `div`/`mod` (rule 10) instead of keeping the nest. This isn't purely
+   cosmetic: STADE's loop-nest analysis -- the `:indexed` snapshot-indexing
+   math and its GPU-split counting -- treats a fused loop as its own
+   single-level nest, so fusing it yourself up front hands STADE the
+   simplest structural form to analyze instead of an extra nesting level
+   for what's really one flat iteration. Don't fuse when: a loop in the
+   nest is sequential (`i_seq_...`, rule 1) -- fusing would blur what "one
+   iteration" carries state across; the inner bound is computed from the
+   outer variable (a triangular loop, where there's no fixed trip count to
+   flatten against); or a boundary/interior split (rule 4) needs to sit
+   between two of the loops -- split first, then fuse each resulting
+   rectangular interior nest on its own.
+```julia
+   # not fused: two independent loops nested
+   for i = 1:n
+       for j = 1:m
+           y[i, j] = x[i, j] * 2.0
+       end
+   end
+   # fused: one independent loop over the flattened range
+   for idx = 1:n * m
+       i = div(idx - 1, m) + 1
+       j = mod(idx - 1, m) + 1
+       y[i, j] = x[i, j] * 2.0
+   end
+```
+
+3. **Loop headers always name the iteration variable explicitly** --
    `for i = 1:n` and `for i in 1:n` are equivalent and both fine (Julia's
    parser produces the same `Expr` either way), and an unused counter can
    now be written `for _ = 1:n` if you'd rather not invent a name for it.
 
-3. **Prefer loops over conditionals.** Keep `if`/`elseif`/`else` to the
+4. **Prefer loops over conditionals.** Keep `if`/`elseif`/`else` to the
    strict minimum the math requires, and never use `ifelse`. Concretely:
    - Replace `if`-based clipping/selection with the matching arithmetic
-     function where one exists (`max`, `min`, `abs`, `sign` -- see rule 9
+     function where one exists (`max`, `min`, `abs`, `sign` -- see rule 10
      for which functions are fair game).
    - Handle boundary points by splitting the iteration range into separate
      loops (or single statements) for interior vs. boundary, instead of
@@ -94,11 +127,11 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
      activity analysis handles it -- but don't reach for it as a
      substitute for the loop-based patterns above.
 
-4. **Don't use keyword arguments.** Every input is positional -- no `;`
+5. **Don't use keyword arguments.** Every input is positional -- no `;`
    section in the signature, no `name=default` arguments. Call sites
    should never need `f(x, y; a=1.0)`; use `f(x, y, a)`.
 
-5. **Only four variable "shapes" exist: `Float64`, `Int64`,
+6. **Only four variable "shapes" exist: `Float64`, `Int64`,
    `Array{Float64}`, `Array{Int64}`.** Every local variable and argument
    should be one of these (the function itself always returns nothing --
    see rule 14). In particular:
@@ -119,16 +152,16 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
      `Array{Float64}` or `Array{Int64}` output argument rather than
      returning it -- see rule 14.
 
-6. **Never allocate an array inside the function.** No `zeros(n)`,
+7. **Never allocate an array inside the function.** No `zeros(n)`,
    `similar(x)`, `Array{Float64}(undef, n)`, `Vector{Int64}(undef, n)`,
    array comprehensions, `collect(...)`, etc. All arrays a kernel touches
    -- inputs, outputs, and any scalar "results" boxed as length-1 arrays
-   (rule 5) -- are allocated by the caller and passed in; the kernel only
+   (rule 6) -- are allocated by the caller and passed in; the kernel only
    reads and writes into them in place. Plain scalar locals
    (`Float64`/`Int64`) may still be declared and initialized freely --
    this rule is about arrays only.
 
-7. **Never index an array with another array's element inline
+8. **Never index an array with another array's element inline
    (`a[b[i]]`).** Indirect/gather-scatter indexing like `y[idx[i]] = x[i]`
    or `x[perm[i]]` is not allowed -- STADE's snapshot analysis assumes
    every write's index is derivable without depending on another array's
@@ -144,35 +177,35 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    y[j] = x[i]
 ```
 
-8. **Never use a broadcasted/dot operator (`.+`, `.-`, `.*`, `./`, `.=`,
+9. **Never use a broadcasted/dot operator (`.+`, `.-`, `.*`, `./`, `.=`,
    `sin.(x)`, etc.).** Write the explicit `for` loop over the array
    instead. This applies to assignment too: no `y .= x`.
 
-9. **Only call Julia functions that have a direct native-Fortran-intrinsic
-   counterpart -- plus any helper functions the user has defined and
-   supplied.** Fair game: things like `abs`, `sqrt`, `exp`, `log`, `log10`,
-   `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`,
-   `mod`, `div`, `max`, `min`, `sign`, `floor`, `ceil`, `trunc` -- these all
-   mirror a standard Fortran intrinsic, and each one has a matching
-   derivative rule already registered in STADE. Avoid Julia-only
-   conveniences that don't have a Fortran counterpart, even if they'd be
-   idiomatic elsewhere: `sum`, `prod`, `map`, `filter`, `reduce`,
-   `foldl`/`foldr`, `enumerate`, `zip`, `findfirst`/`findall`, `clamp`,
-   `ifelse`, `any`/`all`, `cumsum`, and `Float64(...)`/`Int64(...)`
-   conversion calls -- and (as already covered by other rules)
-   comprehensions, broadcasting, and array-allocating functions. Calling
-   something outside this list means STADE has no derivative rule for it
-   and will hard-error rather than guess. If the user provides their own
-   Julia functions during the conversation, those are always fine to call.
+10. **Only call Julia functions that have a direct native-Fortran-intrinsic
+    counterpart -- plus any helper functions the user has defined and
+    supplied.** Fair game: things like `abs`, `sqrt`, `exp`, `log`, `log10`,
+    `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`,
+    `mod`, `div`, `max`, `min`, `sign`, `floor`, `ceil`, `trunc` -- these all
+    mirror a standard Fortran intrinsic, and each one has a matching
+    derivative rule already registered in STADE. Avoid Julia-only
+    conveniences that don't have a Fortran counterpart, even if they'd be
+    idiomatic elsewhere: `sum`, `prod`, `map`, `filter`, `reduce`,
+    `foldl`/`foldr`, `enumerate`, `zip`, `findfirst`/`findall`, `clamp`,
+    `ifelse`, `any`/`all`, `cumsum`, and `Float64(...)`/`Int64(...)`
+    conversion calls -- and (as already covered by other rules)
+    comprehensions, broadcasting, and array-allocating functions. Calling
+    something outside this list means STADE has no derivative rule for it
+    and will hard-error rather than guess. If the user provides their own
+    Julia functions during the conversation, those are always fine to call.
 
-10. **Integer division always goes through `div`.** Write `div(a, b)`,
+11. **Integer division always goes through `div`.** Write `div(a, b)`,
     never `a ÷ b`, `fld(a, b)`, or `Int(floor(a / b))`. STADE's shape
     inference specifically looks for a literal `div(...)` call as one of
     its two structural signals for proving a variable is `Int64`; any
     other spelling of integer division won't be recognized, and the
     variable could silently default to `Float64` instead.
 
-11. **Every function gets a `#`-comment header describing each input --
+12. **Every function gets a `#`-comment header describing each input --
     never a `"""..."""` docstring.** Directly above `function ...`, write
     plain `#` comment lines: one line for what the kernel computes, then
     one short `#` line per input argument explaining what it represents
@@ -184,15 +217,15 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
     recognize as a kernel at all -- the kernel would silently fail to
     load.
 
-12. **Comment the algorithm as you go.** Short, concise `#` comments along
+13. **Comment the algorithm as you go.** Short, concise `#` comments along
     the implementation explaining *why* a step happens (e.g. "interior
     stencil", "boundary copied through unchanged", "accumulate
     sequentially"), not comments that just restate the Julia syntax.
 
-13. **Every function ends with an explicit `return nothing` statement.**
+14. **Every function ends with an explicit `return nothing` statement.**
     Because a kernel's real output is whatever it wrote into its array
     arguments (including any length-1 arrays boxing a scalar result, per
-    rule 5), there's nothing meaningful to hand back to the caller -- but
+    rule 6), there's nothing meaningful to hand back to the caller -- but
     say so explicitly. The last line of every function body must be
     `return nothing`, spelled out in full; don't leave it implicit, and
     don't shorten it to a bare `nothing`.
@@ -237,6 +270,36 @@ shapes; it has a `#`-comment header and inline comments instead of a
 docstring; and it ends with an explicit `return nothing`. The type
 annotations and the unused `nInterior` local (camelCase, not `i_seq_`-
 prefixed since it never touches a loop) are both fine under this style.
+
+A third example showing fusion (rule 2): scaling every entry of an
+`n`-by-`m` matrix stored as a flat `Array{Float64}` (row `i`, column `j`
+at linear offset `(i - 1) * m + j`). Rows and columns are both
+independent, and `m` is fixed across every row, so the rectangular nest
+fuses into one loop over `1:n * m`, with `i` and `j` recovered via
+`div`/`mod`:
+
+```julia
+# scale_matrix(x, y, n, m, factor)
+#
+# Multiplies every entry of the n-by-m matrix x by factor, writing into y.
+#
+# x: input array of length n * m, row-major (row i, col j at (i-1)*m+j)
+# y: output array of length n * m, filled in place, same layout as x
+# n: number of rows
+# m: number of columns
+# factor: scalar multiplier
+function scale_matrix(x, y, n, m, factor)
+    # rows and columns are both independent, and m is fixed across every
+    # row, so the two loops fuse into one over the flattened range
+    for idx = 1:n * m
+        i = div(idx - 1, m) + 1
+        j = mod(idx - 1, m) + 1
+        k = (i - 1) * m + j
+        y[k] = x[k] * factor
+    end
+    return nothing
+end
+```
 
 A second example with a genuinely sequential loop -- a dot product, which
 must accumulate a running sum, so its loop variable is prefixed `i_seq_`
@@ -289,6 +352,10 @@ fails before sharing it:
 
 - [ ] Every genuinely sequential loop's variable starts with `i_seq_`, and
       no non-sequential loop's variable does
+- [ ] No rectangular nest of purely iteration-independent loops was left
+      un-fused -- if the inner trip count doesn't depend on the outer
+      variable and no `i_seq_` loop or boundary split needs to sit between
+      them, it's collapsed into one loop with `div`/`mod`-recovered indices
 - [ ] Every loop header names its iteration variable explicitly (`_` is
       fine when genuinely unused) -- `=` and `in` are both fine
 - [ ] `if`/`else` only appears where the math truly has no loop/range-based
