@@ -55,7 +55,12 @@ end
 
 function generate_content(original_content::AbstractString)::String
     mktempdir() do dir
-        in_path = joinpath(dir, "input.jl")
+        entry = try
+            corpus_entry_name(original_content)
+        catch
+            "input"
+        end
+        in_path = joinpath(dir, entry * ".jl")
         write(in_path, original_content)
 
         sections = String[]
