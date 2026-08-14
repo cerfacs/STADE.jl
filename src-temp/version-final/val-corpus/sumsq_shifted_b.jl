@@ -15,11 +15,7 @@ function sumsq_shifted_b(loss, lossb, u, ub, alpha, alphab, beta, betab, i_n)
 end
 
 function sumsq_shifted(loss, u, alpha, beta, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_seq_x = 1:i_n
-        #= none:3 =#
         loss[1] = loss[1] + (alpha * u[i_seq_x] + beta) ^ 2
-        #= none:4 =#
     end
 end

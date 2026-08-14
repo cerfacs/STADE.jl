@@ -33,17 +33,10 @@ function geomrecur_hv(loss, lossb, u, ub, c, cb, i_n, lossd, lossbd, ud, ubd, cd
 end
 
 function geomrecur(loss, u, c, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_seq_x = 2:i_n
-        #= none:3 =#
         u[i_seq_x] = c * u[i_seq_x - 1]
-        #= none:4 =#
     end
-    #= none:5 =#
     for i_seq_x = 1:i_n
-        #= none:6 =#
         loss[1] = loss[1] + u[i_seq_x] ^ 2
-        #= none:7 =#
     end
 end

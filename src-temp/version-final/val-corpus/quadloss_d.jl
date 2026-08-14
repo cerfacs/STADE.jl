@@ -5,7 +5,5 @@ function quadloss_d(loss, lossd, x, xd, y, yd, z, zd)
 end
 
 function quadloss(loss, x, y, z)
-    #= none:1 =#
-    #= none:2 =#
     loss[1] = (x ^ 2 * y - 3.0 * y * z) + z ^ 3
 end

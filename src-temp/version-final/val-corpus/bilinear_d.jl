@@ -9,15 +9,9 @@ function bilinear_d(loss, lossd, x, xd, a, ad, y, yd, i_m, i_n)
 end
 
 function bilinear(loss, x, a, y, i_m, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_seq_i = 1:i_m
-        #= none:3 =#
         for i_seq_j = 1:i_n
-            #= none:4 =#
             loss[1] = loss[1] + x[i_seq_i] * a[i_seq_i, i_seq_j] * y[i_seq_j]
-            #= none:5 =#
         end
-        #= none:6 =#
     end
 end

@@ -7,11 +7,7 @@ function dotprod_d(loss, lossd, u, ud, v, vd, i_n)
 end
 
 function dotprod(loss, u, v, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_seq_x = 1:i_n
-        #= none:3 =#
         loss[1] = loss[1] + u[i_seq_x] * v[i_seq_x]
-        #= none:4 =#
     end
 end

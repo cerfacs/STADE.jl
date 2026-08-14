@@ -128,30 +128,18 @@ function mg_relax_hv(u, ub, f, fb, n, hl2, hl2b, lvl, nu, ud, ubd, fd, fbd, hl2d
 end
 
 function mg_relax(u, f, n, hl2, lvl, nu)
-    #= none:1 =#
-    #= none:2 =#
     for i_seq_k = 1:nu
-        #= none:3 =#
         for i_seq_j = 1:n
-            #= none:4 =#
             left = 0.0
-            #= none:5 =#
             if i_seq_j > 1
-                #= none:6 =#
                 left = u[i_seq_j - 1, lvl]
             end
-            #= none:8 =#
             right = 0.0
-            #= none:9 =#
             if i_seq_j < n
-                #= none:10 =#
                 right = u[i_seq_j + 1, lvl]
             end
-            #= none:12 =#
             u[i_seq_j, lvl] = 0.5 * (hl2 * f[i_seq_j, lvl] + left + right)
-            #= none:13 =#
         end
-        #= none:14 =#
     end
 end
 
@@ -842,115 +830,61 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
 end
 
 function mg_vcycle_multi(u, f, r, nfine, num_levels, h1, nu1, nu2, n)
-    #= none:17 =#
-    #= none:18 =#
     n = n * 2
-    #= none:19 =#
     nl = nfine
-    #= none:20 =#
     hl = h1
-    #= none:21 =#
     for i_seq_level = 1:num_levels - 1
-        #= none:22 =#
         n = nl - 1
-        #= none:23 =#
         hl2 = hl * hl
-        #= none:24 =#
         mg_relax(u, f, n, hl2, i_seq_level, nu1)
-        #= none:25 =#
         for j = 1:n
-            #= none:26 =#
             left = 0.0
-            #= none:27 =#
             if j > 1
-                #= none:28 =#
                 left = u[j - 1, i_seq_level]
             end
-            #= none:30 =#
             right = 0.0
-            #= none:31 =#
             if j < n
-                #= none:32 =#
                 right = u[j + 1, i_seq_level]
             end
-            #= none:34 =#
             r[j, i_seq_level] = f[j, i_seq_level] - ((2.0 * u[j, i_seq_level] - left) - right) / hl2
-            #= none:35 =#
         end
-        #= none:36 =#
         ncg = div(nl, 2)
-        #= none:37 =#
         nc = ncg - 1
-        #= none:38 =#
         for j = 1:nc
-            #= none:39 =#
             jf = j * 2
-            #= none:40 =#
             f[j, i_seq_level + 1] = 0.25 * r[jf - 1, i_seq_level] + 0.5 * r[jf, i_seq_level] + 0.25 * r[jf + 1, i_seq_level]
-            #= none:41 =#
         end
-        #= none:42 =#
         for j = 1:nc
-            #= none:43 =#
             u[j, i_seq_level + 1] = 0.0
-            #= none:44 =#
         end
-        #= none:45 =#
         nl = ncg
-        #= none:46 =#
         hl = hl * 2.0
-        #= none:47 =#
     end
-    #= none:48 =#
     hl2 = hl * hl
-    #= none:49 =#
     u[1, num_levels] = 0.5 * hl2 * f[1, num_levels]
-    #= none:50 =#
     for i_seq_level = num_levels - 1:-1:1
-        #= none:51 =#
         nl = nl * 2
-        #= none:52 =#
         hl = hl / 2.0
-        #= none:53 =#
         n = nl - 1
-        #= none:54 =#
         ncg = div(nl, 2)
-        #= none:55 =#
         nc = ncg - 1
-        #= none:56 =#
         hl2 = hl * hl
-        #= none:57 =#
         for j = 1:nc
-            #= none:58 =#
             jf = j * 2
-            #= none:59 =#
             u[jf, i_seq_level] = u[jf, i_seq_level] + u[j, i_seq_level + 1]
-            #= none:60 =#
         end
-        #= none:61 =#
         for j = 1:nc + 1
-            #= none:62 =#
             jf = j * 2 - 1
-            #= none:63 =#
             cl = 0.0
-            #= none:64 =#
             if j > 1
-                #= none:65 =#
                 cl = u[j - 1, i_seq_level + 1]
             end
-            #= none:67 =#
             cr = 0.0
-            #= none:68 =#
             if j <= nc
-                #= none:69 =#
                 cr = u[j, i_seq_level + 1]
             end
-            #= none:71 =#
             u[jf, i_seq_level] = u[jf, i_seq_level] + 0.5 * (cl + cr)
-            #= none:72 =#
         end
-        #= none:73 =#
         mg_relax(u, f, n, hl2, i_seq_level, nu2)
-        #= none:74 =#
     end
 end

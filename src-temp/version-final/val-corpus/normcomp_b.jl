@@ -21,17 +21,10 @@ function normcomp_b(loss, lossb, u, ub, v, vb, w, wb, i_n)
 end
 
 function normcomp(loss, u, v, w, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_x = 1:i_n
-        #= none:3 =#
         w[i_x] = u[i_x] - v[i_x]
-        #= none:4 =#
     end
-    #= none:5 =#
     for i_seq_x = 1:i_n
-        #= none:6 =#
         loss[1] = loss[1] + w[i_seq_x] ^ 2
-        #= none:7 =#
     end
 end

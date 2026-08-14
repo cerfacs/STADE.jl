@@ -33,13 +33,9 @@ function branchsel_hv(loss, lossb, x, xb, y, yb, lossd, lossbd, xd, xbd, yd, ybd
 end
 
 function branchsel(loss, x, y)
-    #= none:1 =#
-    #= none:2 =#
     if x > y
-        #= none:3 =#
         loss[1] = x ^ 2 - y
     else
-        #= none:5 =#
         loss[1] = y ^ 2 - x
     end
 end

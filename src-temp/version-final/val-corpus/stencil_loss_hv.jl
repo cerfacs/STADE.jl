@@ -29,17 +29,10 @@ function stencil_loss_hv(loss, lossb, u, ub, w, wb, i_n, lossd, lossbd, ud, ubd,
 end
 
 function stencil_loss(loss, u, w, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_x = 2:i_n - 1
-        #= none:3 =#
         w[i_x] = (u[i_x - 1] - 2.0 * u[i_x]) + u[i_x + 1]
-        #= none:4 =#
     end
-    #= none:5 =#
     for i_seq_x = 2:i_n - 1
-        #= none:6 =#
         loss[1] = loss[1] + w[i_seq_x] ^ 2
-        #= none:7 =#
     end
 end

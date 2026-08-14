@@ -14,11 +14,7 @@ function weightedsumsq_b(loss, lossb, u, ub, w, wb, i_n)
 end
 
 function weightedsumsq(loss, u, w, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_seq_x = 1:i_n
-        #= none:3 =#
         loss[1] = loss[1] + w[i_seq_x] * u[i_seq_x] ^ 2
-        #= none:4 =#
     end
 end

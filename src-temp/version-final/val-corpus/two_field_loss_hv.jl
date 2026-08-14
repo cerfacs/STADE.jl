@@ -37,23 +37,13 @@ function two_field_loss_hv(loss, lossb, u, ub, v, vb, p, pb, q, qb, i_n, lossd, 
 end
 
 function two_field_loss(loss, u, v, p, q, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_x = 1:i_n
-        #= none:3 =#
         p[i_x] = u[i_x] ^ 2
-        #= none:4 =#
     end
-    #= none:5 =#
     for i_x = 1:i_n
-        #= none:6 =#
         q[i_x] = v[i_x] ^ 3
-        #= none:7 =#
     end
-    #= none:8 =#
     for i_seq_x = 1:i_n
-        #= none:9 =#
         loss[1] = loss[1] + p[i_seq_x] + q[i_seq_x]
-        #= none:10 =#
     end
 end

@@ -13,21 +13,12 @@ function advection_d(u, ud, du, dud, c, cd, dx, dxd, dt, dtd, i_nstep, i_nnode)
 end
 
 function advection(u, du, c, dx, dt, i_nstep, i_nnode)
-    #= none:1 =#
-    #= none:2 =#
     for i_seq_ = 1:i_nstep
-        #= none:3 =#
         for i_x = 2:i_nnode
-            #= none:4 =#
             du[i_x] = u[i_x] - u[i_x - 1]
-            #= none:5 =#
         end
-        #= none:6 =#
         for i_x = 2:i_nnode
-            #= none:7 =#
             u[i_x] = u[i_x] - (c * dt * du[i_x]) / dx
-            #= none:8 =#
         end
-        #= none:9 =#
     end
 end

@@ -15,12 +15,8 @@ function advection_diff_b(u, ub, du, dub, i_nnode)
 end
 
 function advection_diff(u, du, i_nnode)
-    #= none:1 =#
-    #= none:2 =#
     for i_x = 2:i_nnode
-        #= none:3 =#
         du[i_x] = u[i_x] - u[i_x - 1]
-        #= none:4 =#
     end
 end
 
@@ -57,14 +53,9 @@ function advection_multi_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_n
 end
 
 function advection_multi(u, du, c, dx, dt, i_nstep, i_nnode)
-    #= none:13 =#
-    #= none:14 =#
     for i_seq_ = 1:i_nstep
-        #= none:15 =#
         advection_diff(u, du, i_nnode)
-        #= none:16 =#
         advection_update(u, du, c, dx, dt, i_nnode)
-        #= none:17 =#
     end
 end
 
@@ -86,11 +77,7 @@ function advection_update_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nnode)
 end
 
 function advection_update(u, du, c, dx, dt, i_nnode)
-    #= none:7 =#
-    #= none:8 =#
     for i_x = 2:i_nnode
-        #= none:9 =#
         u[i_x] = u[i_x] - (c * dt * du[i_x]) / dx
-        #= none:10 =#
     end
 end

@@ -35,21 +35,12 @@ function matvec_loss_hv(loss, lossb, a, ab, u, ub, v, vb, i_m, i_n, lossd, lossb
 end
 
 function matvec_loss(loss, a, u, v, i_m, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_i = 1:i_m
-        #= none:3 =#
         for i_seq_j = 1:i_n
-            #= none:4 =#
             v[i_i] = v[i_i] + a[i_i, i_seq_j] * u[i_seq_j]
-            #= none:5 =#
         end
-        #= none:6 =#
     end
-    #= none:7 =#
     for i_seq_i = 1:i_m
-        #= none:8 =#
         loss[1] = loss[1] + v[i_seq_i] ^ 2
-        #= none:9 =#
     end
 end

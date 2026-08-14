@@ -22,17 +22,10 @@ function affine_loss_b(loss, lossb, u, ub, a, ab, b, bb, v, vb, i_n)
 end
 
 function affine_loss(loss, u, a, b, v, i_n)
-    #= none:1 =#
-    #= none:2 =#
     for i_x = 1:i_n
-        #= none:3 =#
         v[i_x] = a[i_x] * u[i_x] + b[i_x]
-        #= none:4 =#
     end
-    #= none:5 =#
     for i_seq_x = 1:i_n
-        #= none:6 =#
         loss[1] = loss[1] + v[i_seq_x] ^ 2
-        #= none:7 =#
     end
 end

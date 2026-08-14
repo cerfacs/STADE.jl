@@ -18,27 +18,16 @@ function cond_field_choice_d(loss, lossd, u, ud, v, vd, w, wd, i_branch, i_n)
 end
 
 function cond_field_choice(loss, u, v, w, i_branch, i_n)
-    #= none:1 =#
-    #= none:2 =#
     if i_branch == 1
-        #= none:3 =#
         for i_x = 1:i_n
-            #= none:4 =#
             w[i_x] = u[i_x] ^ 2
-            #= none:5 =#
         end
     else
-        #= none:7 =#
         for i_x = 1:i_n
-            #= none:8 =#
             w[i_x] = v[i_x] ^ 2
-            #= none:9 =#
         end
     end
-    #= none:11 =#
     for i_seq_x = 1:i_n
-        #= none:12 =#
         loss[1] = loss[1] + w[i_seq_x]
-        #= none:13 =#
     end
 end

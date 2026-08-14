@@ -10,13 +10,9 @@ function branchsel_d(loss, lossd, x, xd, y, yd)
 end
 
 function branchsel(loss, x, y)
-    #= none:1 =#
-    #= none:2 =#
     if x > y
-        #= none:3 =#
         loss[1] = x ^ 2 - y
     else
-        #= none:5 =#
         loss[1] = y ^ 2 - x
     end
 end
