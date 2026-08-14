@@ -4613,17 +4613,87 @@ function val_random_int_args(sig; lo::Int = 2, hi::Int = 5)
     return Dict{Symbol,Int}(a => rand(lo:hi) for a in sig.args if sig.kinds[a] == :scalar_int)
 end
 
+# ---- avoiding near-zero/negative divisors in random baselines ------
+#
+# A float argument used anywhere as the divisor of a `/` (e.g. a
+# "volume"/"weight"/"mass"-like quantity a kernel divides by) has no
+# guarantee of staying away from zero -- or even staying positive --
+# under plain `randn()`. That's not usually just imprecision: an
+# iterative relaxation (Jacobi-style correction loops, etc.) dividing
+# by a near-zero or sign-flipped value on every step is a classic
+# divergence trigger, unrelated to whether the generated derivative
+# code is correct. This is a general, kernel-agnostic property (many
+# numerical kernels divide by a physically-positive quantity) rather
+# than anything up.jl-specific, so it's detected the same way
+# val_arg_ndims detects usage shape: a static scan of `kernel.body`.
+function val_divisor_args(kernel)
+    found = Set{Symbol}()
+    val_scan_divisors!(kernel.body, found)
+    return found
+end
+
+function val_scan_divisors!(body, found::Set{Symbol})
+    for stmt in body
+        if stmt.kind == :assign
+            val_scan_expr_divisors!(stmt.lhs, found)
+            val_scan_expr_divisors!(stmt.rhs, found)
+        elseif stmt.kind == :for
+            val_scan_expr_divisors!(stmt.lo, found)
+            val_scan_expr_divisors!(stmt.hi, found)
+            val_scan_divisors!(stmt.body, found)
+        elseif stmt.kind == :if
+            val_scan_expr_divisors!(stmt.cond, found)
+            val_scan_divisors!(stmt.then, found)
+            val_scan_divisors!(stmt.els, found)
+        end
+    end
+    return nothing
+end
+
+function val_scan_expr_divisors!(expr, found::Set{Symbol})
+    if expr isa Expr && expr.head == :call && expr.args[1] == :/ && length(expr.args) == 3
+        divisor = expr.args[3]
+        base = divisor isa Expr && divisor.head == :ref ? divisor.args[1] : divisor
+        base isa Symbol && push!(found, base)
+    end
+    if expr isa Expr
+        for a in expr.args
+            val_scan_expr_divisors!(a, found)
+        end
+    end
+    return nothing
+end
+
 function val_random_values(kernel, shapes::Dict, int_args::Dict{Symbol,Int}; scale::Float64 = 1.0)
     sig = kernel.sig
     values = Dict{Symbol,Any}()
+    # val_grow_shapes sizes every array_float/array_int arg's every
+    # dimension to the SAME N (a uniform grid -- see its own comment).
+    # An array_int arg used to index into another array (e.g. a mesh
+    # connectivity table) is therefore always safely in-bounds if its
+    # own entries are drawn from 1:N too, regardless of which specific
+    # array it's actually used to index -- no per-argument "what does
+    # this index into" analysis needed. Falls back to 1 if there are
+    # no array args at all (so no array_int arg could exist either).
+    N = isempty(shapes) ? 1 : minimum(minimum(s) for s in Base.values(shapes))
+    divisors = val_divisor_args(kernel)
+    # a positive-but-wide-spread divisor (e.g. abs(randn())+0.5) still
+    # lets the RATIO between two independent divisor-like args (e.g. a
+    # "cell volume" divided into a "node volume", as in an iterative
+    # relaxation's per-step gain) land far from 1 -- and an iterative
+    # loop amplifies whatever that ratio is on every one of its steps.
+    # Narrowing the spread specifically for divisor args (still always
+    # positive, still random, just closer to a common scale) keeps
+    # that per-step gain closer to 1 without hard-coding anything
+    # about what the ratio "means" for any particular kernel.
     for a in sig.args
         k = sig.kinds[a]
         if k == :scalar_float
-            values[a] = scale * randn()
+            values[a] = a in divisors ? scale * (1.0 + 0.1 * randn()) : scale * randn()
         elseif k == :array_float
-            values[a] = scale .* randn(shapes[a]...)
+            values[a] = a in divisors ? scale .* (1.0 .+ 0.1 .* randn(shapes[a]...)) : scale .* randn(shapes[a]...)
         elseif k == :array_int
-            values[a] = rand(1:3, shapes[a]...)
+            values[a] = rand(1:N, shapes[a]...)
         end
     end
     return values
@@ -4677,13 +4747,31 @@ function val_generate_baseline(kernel, primal_expr::Expr;
                                 scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                 grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 5,
                                 self_check::Bool = true, self_check_trials::Int = 2,
-                                self_check_epsilon::Float64 = 1e-6, self_check_rtol::Float64 = 1e-3)
+                                self_check_epsilon::Float64 = 1e-6, self_check_rtol::Float64 = 1e-3,
+                                max_output_magnitude::Float64 = 1e6)
     primal_fn = val_compile(primal_expr)
     obs_fn = self_check ? val_compile(val_primal_observing_expr(kernel, primal_expr)) : nothing
     tangent_fn = self_check ? val_compile(val_build_tangent(kernel)) : nothing
     last_err = nothing
+    # a scalar_int arg is very often an iteration count (a relaxation
+    # loop bound, a refinement-pass count, etc.) -- more iterations
+    # means more chances for any per-step amplification, however
+    # small, to compound into a blown-up result under otherwise
+    # perfectly reasonable random data (see the diverging-relaxation
+    # comment below). Narrowing the *upper* end of the scalar_int
+    # range specifically after a divergence -- rather than just
+    # redrawing at the same range -- directly targets that, without
+    # assuming anything about what any particular scalar_int arg
+    # means. Allowed to fall below the caller's own `int_lo` as a
+    # last resort (down to 1, never 0 -- a zero-iteration loop would
+    # trivially "pass" by not exercising the kernel at all): a working
+    # baseline with a smaller iteration count than requested is far
+    # more useful than no baseline at all. Reset for a non-divergence
+    # failure, since those aren't evidence the range itself is the
+    # problem.
+    cur_hi = int_hi
     for attempt in 1:attempts
-        int_args = val_random_int_args(kernel.sig; lo = int_lo, hi = int_hi)
+        int_args = val_random_int_args(kernel.sig; lo = min(int_lo, cur_hi), hi = cur_hi)
         try
             shapes = val_grow_shapes(kernel, primal_fn, int_args; start = grow_start, max_size = grow_max)
             values = val_random_values(kernel, shapes, int_args; scale = scale)
@@ -4691,6 +4779,23 @@ function val_generate_baseline(kernel, primal_expr::Expr;
                 x0 = val_flatten(kernel, values)
                 f_eval_vec = x -> val_call_primal_observed(obs_fn, kernel, int_args,
                                                             val_unflatten(kernel, int_args, values, x))
+                # a candidate whose own output has blown up (e.g. a
+                # Jacobi-style relaxation loop diverging for a random,
+                # physically meaningless input) makes h=epsilon finite
+                # differences numerically meaningless -- their step's
+                # own contribution to the function value falls below
+                # floating-point precision at that magnitude, so the
+                # FD "reference" itself is garbage, not the exactly-
+                # computed adjoint/tangent being compared against it.
+                # Reject and redraw before even reaching the tangent
+                # self-check below, same as any other bad candidate.
+                y0 = f_eval_vec(x0)
+                if !(all(isfinite, y0) && maximum(abs.(y0); init = 0.0) <= max_output_magnitude)
+                    cur_hi = max(1, div(cur_hi + 1, 2))
+                    error("candidate baseline's own primal output is non-finite or too large " *
+                          "(max|y|=$(maximum(abs.(y0); init = 0.0))) -- likely a diverging relaxation " *
+                          "under random, physically meaningless inputs")
+                end
                 f_jvp = (x, d) -> begin
                     vals = val_unflatten(kernel, int_args, values, x)
                     dvals = val_unflatten(kernel, int_args, val_zeros_like(kernel, values), d)
@@ -4754,6 +4859,14 @@ function val_zeros_like(kernel, values::Dict)
         v = values[a]
         out[a] = v isa Number ? 0.0 : zeros(size(v))
     end
+    # val_unflatten unconditionally reads template[a] for every
+    # :array_int arg (to pass its real, non-perturbed data through
+    # unchanged) -- any dict handed to it as `template` must carry
+    # those keys too, not just the float ones this function's own
+    # loop above covers.
+    for a in kernel.sig.args
+        kernel.sig.kinds[a] == :array_int && (out[a] = values[a])
+    end
     return out
 end
 
@@ -4762,6 +4875,10 @@ function val_random_values_like(kernel, values::Dict; scale::Float64 = 1.0)
     for a in val_float_arg_order(kernel.sig)
         v = values[a]
         out[a] = v isa Number ? scale * randn() : scale .* randn(size(v)...)
+    end
+    # see val_zeros_like's own comment just above -- same contract.
+    for a in kernel.sig.args
+        kernel.sig.kinds[a] == :array_int && (out[a] = values[a])
     end
     return out
 end
@@ -5206,6 +5323,24 @@ function io_read_baseline_yaml(path::String)
     return (int_args = int_args, values = values)
 end
 
+# io_read_baseline_yaml is kernel-agnostic (plain text in, numbers
+# out) so it has no way to know which `values:` entries are really
+# array_int args (e.g. a mesh connectivity table) rather than
+# array_float ones -- everything comes back parsed as Float64. Any
+# caller that has `kernel` in scope must coerce those specific entries
+# back to Int before using them as array indices (round rather than a
+# raw Int(...) truncation, purely for exact-integer-valued Float64 ->
+# Int robustness against any future non-integral-looking formatting;
+# the values were always written as whole numbers in the first place).
+function val_coerce_int_arrays!(kernel, values::Dict)
+    for a in kernel.sig.args
+        if kernel.sig.kinds[a] == :array_int && haskey(values, a)
+            values[a] = round.(Int, values[a])
+        end
+    end
+    return values
+end
+
 
 # ==================== stade_* (public API) ========================
 # independents/dependents auto-derived -- see parse_infer_indep_dep.
@@ -5405,6 +5540,7 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
     primal_expr = io_read_corpus_entry(in_path)
     kernel = parse_kernel(primal_expr)
     baseline = io_read_baseline_yaml(yaml_path)
+    val_coerce_int_arrays!(kernel, baseline.values)
     if mode == :tangent
         tangent_expr = stade_tangent(primal_expr)
         return val_validate_tangent(kernel, primal_expr, tangent_expr, baseline;
@@ -5494,6 +5630,7 @@ function stade_validate_adjoint_against_file(primal_path::String, adjoint_path::
     yp = yaml_path === nothing ? io_default_yaml_path(primal_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(primal_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi)
     baseline = io_read_baseline_yaml(yp)
+    val_coerce_int_arrays!(kernel, baseline.values)
 
     return val_validate_adjoint(kernel, primal_expr, adjoint_out, baseline;
                                  trials = trials, epsilon = epsilon, rtol = rtol,
