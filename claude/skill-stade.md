@@ -94,23 +94,6 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    / spec doc, not inline in STADE.jl.
 9. **STADE.jl contains no corpus-specific code.** Nothing in it may
    reference any particular kernel inside `val-corpus-*` by name.
-10. **A loop nest is whatever `for` structure the kernel source actually
-   contains — never "un-fuse" it back into synthetic sub-loops.**
-   skill-jade fuses a rectangular nest of iteration-independent loops (see
-   skill-jade rule 2) into one `for idx = 1:n * m` loop with the original
-   indices recovered inside the body via `div`/`mod`, rather than writing
-   literal nested `for`s. Every stage that walks loop nests for indexing or
-   tripcount purposes (`snap_*`'s `pos0`/`stride` math in the `:indexed`
-   strategy, `agen_tier_b_walk`'s ancestor-loop check, GPU split counting
-   in `stade_cuda`) must treat a fused single loop as a depth-1 nest with
-   tripcount `n * m` — its `pos0`/`stride` formula already reduces to the
-   depth-1 case (`stride(L1) = 1`) with no special-casing needed. Do not
-   add logic that pattern-matches `div(idx - 1, m)`/`mod(idx - 1, m)`
-   inside a loop body to reconstruct a synthetic multi-level nest; the
-   closed-form Tier A formula is defined over the *actual* enclosing `for`
-   statements a snapshot site sits inside, and a fused loop's body-level
-   `div`/`mod` expressions are ordinary assignment statements to that
-   formula, not loop structure.
 
 ## `keep_push_pop`: the `:indexed` snapshot-storage strategy
 
@@ -212,6 +195,139 @@ silently emitting an unprotected write) for any thread-invariant-indexed
 write that isn't a plain additive accumulation, since a non-additive
 race has no atomic-wrapper fix.
 
+## Testing convention
+
+### Indirect-indexing shape-inference fix (2026-08-12)
+
+`shape_force_int_expr!` (the backward pass of `shape_propagate_int!`,
+which pushes int-ness discovered on an assignment's LHS back onto
+whatever RHS operands it depends on) had no case for `expr.head ==
+:ref`. This meant a gather/permutation-table array used only to
+produce indices for other arrays -- e.g. `i_node = i_cell_to_node[i_loc,
+i_cell]`, with `i_node` itself later confirmed int by its own use as a
+subscript elsewhere -- never had that int-ness propagated back onto
+`i_cell_to_node`, the array actually being indexed. It defaulted to
+`array_float`, so downstream adjoint generation treated a pure
+integer connectivity/index table as a differentiable field, producing
+spurious shadow arguments (`i_cell_to_nodeb`, etc.) that don't
+correspond to any real gradient. Fixed by adding an `expr.head ==
+:ref` case: the base array symbol is marked int whenever the
+indexing result is (or becomes) known int -- sound, since indexing a
+true `Vector{Float64}` field can never itself be forced int by any of
+this file's existing int-evidence rules. Verified against the full
+20-kernel corpus (`phase1_adjoint.jl`/`phase1_hvp.jl`/
+`phase1_splitcount.jl`/byte-compat diff against the pre-feature
+baseline): zero regressions, all previously-passing kernels
+unaffected. Confirmed fixed on a real unstructured-mesh kernel (mesh
+connectivity + periodicity permutation tables): those arrays are now
+correctly classified `array_int`, and the spurious shadow arguments
+are gone from the generated adjoint.
+
+**Separately found and fixed (2026-08-13):** that same real-world
+kernel's adjoint was numerically wrong under finite-difference
+validation. Initially misdiagnosed as an array-aliasing issue (two
+mesh cells sharing a node, both accumulating into `res[i_k_node]`
+where `i_k_node` comes from a connectivity table) -- but a
+matched-settings comparison showed a *disjoint* (non-aliased) mesh
+failing just as badly, ruling that out. The actual cause: a scalar
+(`cavgx`/`cavgy`/`cavgz`) written by one nested sub-loop and read
+unchanged by a *later sibling* sub-loop within the same repeating
+outer iteration had no restore mechanism reaching that sibling read --
+see the write-up immediately below, which is the fix. Confirmed via
+machine-precision complex-step differentiation against a from-scratch
+reimplementation (ruling out finite-difference truncation noise as an
+alternative explanation) and via instrumented traces of the generated
+code showing the scalar frozen at one outer iteration's value
+throughout the entire backward sweep.
+
+### Cross-sibling-loop scalar restoration fix (2026-08-13)
+
+A scalar written by one nested sub-loop and read unchanged by a
+*later sibling* sub-loop within the same repeating outer iteration
+(e.g. `cavgx`/`cavgy`/`cavgz`: built by one `for i_loc` loop, read by
+a second, separate `for i_loc` loop, both inside a repeating `for
+i_cell`) had no restore mechanism reaching that sibling read. The
+per-write-statement push/pop machinery only restores a var to what it
+held immediately *before its own next write* -- correct for a var read
+again within the *same* loop that writes it (`vere` elsewhere in this
+file), but wrong here, since nothing re-established the var's
+post-loop value before the sibling's backward code ran. Only the
+last-processed outer iteration (in backward order) ever saw the
+correct value; every earlier one silently inherited the previous
+iteration's corrupted leftover state -- with no aliasing or indirect
+indexing involved at all.
+
+`agen_nested_write_vars`/`agen_block_boundary_vars` find the affected
+variables for a given block `body`: value-needed scalars written only
+inside nested sub-`:for`/`:if`s of `body` (never as a top-level
+statement of `body` itself). `agen_forward_body` now pushes each such
+var once at the end of `body` (its value as this iteration leaves it);
+`agen_backward_body` pops/restores it once at the very start of
+processing `body`'s own backward code -- using the SAME `(:value,
+var)` stack and the same `agen_emit_push`/`agen_emit_pop`/
+`agen_site_key` machinery every other site already uses (key =
+`agen_site_key(body, 0, var)`, the `idx=0` sentinel never colliding
+with a real per-statement index), so it works identically under
+`keep_push_pop=true` and `=false` with no separate code path, and HVP
+inherits it for free since `hvp_emit` calls the same
+`agen_forward_body`/`agen_backward_body`. `agen_body_has_snapshot`
+also checks `agen_block_boundary_vars` now, so a loop needing only
+this treatment still gets correctly reversed.
+
+Verified: the original failing case matches a complex-step reference
+to `8.9e-16` (was 1-3% off); a disjoint/aliased x `i_njac`=0/1/2 test
+matrix is ~1e-9 everywhere (was 0.8%-5.5%); the full 19-kernel Tier A
+corpus is unaffected (still passes adjoint + HVP validation, byte-
+identical generated output for 19 of 21 kernels); `mg_vcycle`/
+`mg_vcycle_multi` are the only corpus kernels whose generated
+`keep_push_pop=true` output changed (they have this pattern too) and
+both still pass their own validation correctly afterward.
+
+### val_generate_baseline fixes for indirect-indexing kernels (2026-08-13)
+
+Four bugs surfaced getting the website's "Validate" button working for
+up.jl (mesh connectivity args); all generic, none up.jl-specific:
+
+1. `val_zeros_like`/`val_random_values_like` only populated float-arg
+   keys, but `val_unflatten` unconditionally reads `template[a]` for
+   every `:array_int` arg too (to pass real, non-perturbed data
+   through unchanged) -- caused `KeyError(:i_cell_to_node)`. Fixed:
+   both now also copy the array_int entries through.
+2. `val_random_values` filled array_int args from a hardcoded `1:3`,
+   unrelated to what they actually index into. Fixed: uses `1:N`
+   where N is the shared array size `val_grow_shapes` already grows
+   every array dimension to -- safe against whatever it indexes,
+   with no per-argument "what does this index into" analysis needed.
+3. `io_read_baseline_yaml` has no per-kernel type info, so array_int
+   values always come back Float64 -- `ArgumentError: invalid index:
+   3.0`. Fixed: new `val_coerce_int_arrays!(kernel, values)`, called
+   at both call sites right after reading a baseline back.
+4. A float arg used as a `/` divisor (e.g. cell/node "volume") has no
+   guarantee of staying positive or of a comparable scale to whatever
+   it's divided against under plain `randn()` -- for a kernel with an
+   iterative relaxation, that can make the per-step gain exceed 1 and
+   blow up over repeated iterations to astronomical output magnitudes,
+   at which point `epsilon=1e-6` finite differences become numerically
+   meaningless (the step's own contribution falls below float64
+   precision at that scale) -- not an adjoint bug, but it looks like
+   one. Fixed: `val_divisor_args` statically finds every arg ever used
+   as a `/` divisor (kernel-agnostic, same style as `val_arg_ndims`)
+   and draws it narrowly around 1.0 instead of wide `randn()`;
+   `val_generate_baseline` also rejects a candidate whose own output
+   is non-finite or too large, and adaptively narrows the scalar_int
+   range (an iteration-count arg is a common divergence amplifier)
+   toward 1 on repeated divergence, down to below the caller's own
+   `int_lo` if needed as a last resort -- a working baseline with a
+   smaller iteration count beats none.
+
+With these, up.jl's tangent and HVP validate reliably (~1e-8). Adjoint
+validation sometimes still reports elevated error on a random
+baseline -- confirmed via independent complex-step differentiation
+this is not an adjoint-correctness bug (HVP, which calls the identical
+adjoint function internally, passes consistently) but FD-precision
+sensitivity in `val_validate_adjoint`'s dot-product check methodology
+for this still numerically stiff kernel; not yet resolved.
+
 ### Testing convention
 
 Every change is checked against the shared golden corpus (19 kernels), 
@@ -235,7 +351,3 @@ inside `val-corpus-tapenade-adjoint` is a secondary style check, not a correctne
 - [ ] Comments are one line or less, and present only where non-obvious
 - [ ] No filesystem access outside `io_*`
 - [ ] No reference to any specific corpus kernel by name
-- [ ] Loop-nest analysis (`pos0`/`stride`, Tier B ancestor-loop detection,
-      GPU split counting) walks the kernel source's actual `for` structure
-      only — no logic reconstructs a synthetic nest by pattern-matching a
-      fused loop's `div`/`mod` body statements
