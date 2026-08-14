@@ -371,8 +371,6 @@ function inl_rename_map(callee_kernel, callee_body::Expr, call_site_id::Int)
     subst = Dict{Symbol,Symbol}()
     for v in locals
         new_name = Symbol(String(v) * "_" * String(callee_kernel.sig.name) * "_c" * string(call_site_id))
-        parse_check_snake_case(new_name) ||
-            error("inl_inline_calls: generated local name :$(new_name) is not snake_case")
         subst[v] = new_name
     end
     return subst
@@ -418,12 +416,16 @@ end
 
 # ==================== parse_* ================================
 # Raw Expr -> validated kernel. Enforces every skill-jade rule that
-# is actually visible at the Expr level as a hard error: snake_case,
-# no argument annotations/kwargs (at the def or at any call site),
-# only the four variable shapes (no Bool/String/tuple/range stored
-# in a variable), no indirect indexing, no broadcasting, i_seq_
-# prefix discipline, the intrinsic whitelist, div-not-÷, no compound
-# assignment. Two skill-jade rules are pure *source-text* concerns
+# is actually visible at the Expr level as a hard error: no keyword
+# args/defaults (at the def or at any call site; type annotations are
+# allowed but inert), only the four variable shapes (no
+# Bool/String/tuple/range stored in a variable), no indirect indexing,
+# no broadcasting, i_seq_ prefix discipline, the intrinsic whitelist,
+# div-not-÷. Compound assignment (`+=`/`-=`/`*=`/`/=`/`^=`) is allowed
+# and desugared to a plain assignment; `÷=`/`%=`/`\=`/`.=` remain
+# errors (no registered operator rule, or broadcast). General
+# snake_case is not enforced -- STADE identifies names by symbol
+# identity only. Two skill-jade rules are pure *source-text* concerns
 # -- the `#`-comment header, and `for i = ...` vs `for i in ...`
 # (Julia's parser produces an identical Expr for both) -- and can't
 # be checked from an Expr at all, so they're left to source review.
@@ -435,7 +437,6 @@ function parse_kernel(expr::Expr)
         error("parse_kernel: malformed function Expr (expected signature + body)")
     name, args = parse_signature(expr.args[1])
     body = parse_statements(parse_strip_lines(expr.args[2]))
-    parse_check_local_names(body)
     kinds = shape_infer((name = name, args = args), body)
     indep, dep = parse_infer_indep_dep(args, kinds)
     sig = (name = name, args = args, kinds = kinds,
@@ -458,24 +459,18 @@ function parse_override_indep_dep(kernel, independents, dependents)
     return (sig = new_sig, body = kernel.body)
 end
 
-# lowercase letters, digits, underscores only; can't be empty or
-# start with a digit
-function parse_check_snake_case(name::Symbol)
-    s = String(name)
-    isempty(s) && return false
-    isdigit(s[1]) && return false
-    return all(c -> islowercase(c) || isdigit(c) || c == '_', s)
-end
-
 # the reserved i_seq_ prefix marks a genuinely sequential loop --
-# the prefix and the sequential flag must agree, and the whole name
-# must still be snake_case
+# the prefix and the sequential flag must agree. Case/style is
+# otherwise unconstrained: STADE identifies variables by symbol
+# identity only, never by how the name is spelled.
 function parse_check_loop_prefix(var::Symbol, sequential::Bool)
     has_prefix = startswith(String(var), "i_seq_")
-    return has_prefix == sequential && parse_check_snake_case(var)
+    return has_prefix == sequential
 end
 
-# ---- function signature: name + positional, untyped arguments ----
+# ---- function signature: name + positional arguments ----
+# (type annotations are allowed but inert -- shapes come from usage,
+# never from a declared type, so the annotation is stripped and dropped)
 
 function parse_signature(sig_expr)
     sig_expr isa Expr && sig_expr.head == :call ||
@@ -483,19 +478,18 @@ function parse_signature(sig_expr)
     name_expr = sig_expr.args[1]
     name_expr isa Symbol ||
         error("parse_kernel: function name must be a plain identifier")
-    parse_check_snake_case(name_expr) ||
-        error("parse_kernel: function name :$(name_expr) is not snake_case")
 
     args = Symbol[]
     for a in sig_expr.args[2:end]
         if a isa Symbol
-            parse_check_snake_case(a) ||
-                error("parse_kernel: argument name :$a is not snake_case")
             push!(args, a)
         elseif a isa Expr && a.head == :parameters
             error("parse_kernel: keyword arguments aren't allowed (found a `;` section in the signature of :$(name_expr))")
         elseif a isa Expr && a.head == :(::)
-            error("parse_kernel: argument `$(a)` has a type annotation, which isn't allowed")
+            arg_name = a.args[1]
+            arg_name isa Symbol ||
+                error("parse_kernel: argument `$(a)` must annotate a plain identifier")
+            push!(args, arg_name)
         elseif a isa Expr && a.head == :kw
             error("parse_kernel: argument `$(a)` has a default value -- every argument must be positional")
         else
@@ -556,11 +550,23 @@ function parse_statement(stmt)
         return parse_if(stmt)
     elseif stmt.head == :while
         error("parse_kernel: `while` loops aren't supported yet (see skill-stade.md)")
-    elseif stmt.head in (:+=, :-=, :*=, :/=, :÷=, :^=, :%=, Symbol("\\="), :.=)
-        error("parse_kernel: compound/broadcast assignment `$(stmt)` isn't allowed -- write it out in full, e.g. `x = x + ...`")
+    elseif stmt.head in (:+=, :-=, :*=, :/=, :^=)
+        return parse_assign(parse_desugar_compound(stmt))
+    elseif stmt.head in (:÷=, :%=, Symbol("\\="), :.=)
+        error("parse_kernel: `$(stmt)` isn't allowed -- `÷=`/`%=`/`\\=` have no registered operator rule and `.=` is broadcast assignment")
     else
         error("parse_kernel: unsupported statement form `Expr(:$(stmt.head), ...)`")
     end
+end
+
+# compound assignment (`+=`, `-=`, `*=`, `/=`, `^=`) desugars to the
+# same thing as writing it out in full -- rewrite to a plain `:(=)`
+# Expr with an explicit binary-op call and hand off to parse_assign,
+# rather than teaching every downstream stage a second statement shape
+function parse_desugar_compound(stmt::Expr)
+    op = Symbol(String(stmt.head)[1:end-1])   # :+= -> :+, etc.
+    lhs, rhs = stmt.args[1], stmt.args[2]
+    return Expr(:(=), lhs, Expr(:call, op, lhs, rhs))
 end
 
 # ---- assignment ----
@@ -595,8 +601,6 @@ function parse_for(stmt::Expr)
     var = header.args[1]
     var isa Symbol ||
         error("parse_kernel: `for` loop variable must be a plain identifier")
-    var == Symbol("_") &&
-        error("parse_kernel: `for` loops must name their iteration variable -- never a throwaway `_`")
 
     range_expr = header.args[2]
     range_expr isa Expr && range_expr.head == :call && range_expr.args[1] == :(:) ||
@@ -744,31 +748,12 @@ function parse_contains_ref(expr)
     return any(parse_contains_ref, expr.args)
 end
 
-# ---- naming discipline over the parsed body (args + function name
-# are already checked in parse_signature; this covers locals) ----
-
-function parse_check_local_names(body::Vector{NamedTuple})
-    for stmt in body
-        if stmt.kind == :assign
-            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            parse_check_snake_case(var) ||
-                error("parse_kernel: variable name :$var is not snake_case")
-        elseif stmt.kind == :for
-            parse_check_local_names(stmt.body)   # loop var already checked in parse_for
-        elseif stmt.kind == :if
-            parse_check_local_names(stmt.then)
-            parse_check_local_names(stmt.els)
-        end
-    end
-    return nothing
-end
-
-
 # ==================== shape_* =================================
 # Infer each argument/local's kind syntactically -- no explicit
-# manifest to cross-check against, since skill-jade kernels never
-# carry type annotations. Two syntactic signals decide a variable's
-# kind:
+# manifest to cross-check against -- any type annotation a kernel
+# does carry is stripped in parse_signature and never consulted here,
+# since STADE infers shapes from usage, not from declared types. Two
+# syntactic signals decide a variable's kind:
 #   array vs scalar: is it ever indexed (`v[...]`) anywhere?
 #   int vs float:    is there any evidence it must be an index/size
 #                     (a for-loop variable, a range bound, a `div`
