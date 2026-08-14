@@ -5164,6 +5164,21 @@ function io_read_kernel_corpus(path::String)
     return kernels
 end
 
+# shared by io_read_corpus_entry and every stade_*_file writer below:
+# resolves which kernel in a corpus is the *entry* -- the one whose
+# overall behavior the file is actually about. For a single-kernel
+# file that's just its one kernel. For a multi-kernel corpus file, the
+# convention this corpus already follows for single-kernel files
+# (advection.jl defines `advection`) extends to say the entry kernel
+# is named after the file itself.
+function io_corpus_entry_name(path::String, kernels::Dict{Symbol,Expr})
+    length(kernels) == 1 && return first(keys(kernels))
+    entry_name = Symbol(splitext(basename(path))[1])
+    haskey(kernels, entry_name) ||
+        error("io_corpus_entry_name: $path defines $(length(kernels)) kernels but none is named :$(entry_name) (the file's own basename) -- a multi-kernel file needs an entry kernel named after the file")
+    return entry_name
+end
+
 # every val_*/stade_validate_* function below only ever takes a
 # single primal Expr -- this is the one place that bridges a
 # possibly-multi-kernel FILE down to that single Expr, so nothing
@@ -5171,18 +5186,12 @@ end
 # one kernel or several. For a single-kernel file, returns that
 # kernel's Expr exactly as io_read_kernel always did (no inlining --
 # there's nothing to inline). For a multi-kernel corpus file, inlines
-# the whole call graph (inl_inline_calls) and returns the one kernel
-# whose name matches the file's own basename: the convention this
-# corpus already follows for single-kernel files (advection.jl
-# defines `advection`), extended to say a multi-kernel file's *entry*
-# kernel -- the one whose overall behavior is what the file is
-# actually validating -- is named after the file the same way.
+# the whole call graph (inl_inline_calls) and returns the entry
+# kernel (io_corpus_entry_name).
 function io_read_corpus_entry(path::String)
     kernels = io_read_kernel_corpus(path)
-    length(kernels) == 1 && return first(values(kernels))
-    entry_name = Symbol(splitext(basename(path))[1])
-    haskey(kernels, entry_name) ||
-        error("io_read_corpus_entry: $path defines $(length(kernels)) kernels but none is named :$(entry_name) (the file's own basename) -- a multi-kernel file needs an entry kernel named after the file")
+    entry_name = io_corpus_entry_name(path, kernels)
+    length(kernels) == 1 && return kernels[entry_name]
     inlined = inl_inline_calls(kernels)
     return inlined[entry_name]
 end
@@ -5196,21 +5205,24 @@ function io_write_kernel_file(path::String, primal_expr::Expr, generated::Vector
     return nothing
 end
 
-# corpus counterpart of io_write_kernel_file: for every kernel in the
-# corpus (sorted by name for a deterministic file layout), bundles
-# that kernel's own generated parts (already assembled by the caller,
-# e.g. `[tangent_expr]` or `[initstacks_expr, adjoint_expr]` -- same
-# shape io_write_kernel_file already expects per kernel) followed by
-# a copy of its own original (un-inlined) primal. The written primal
-# defs are always the ORIGINAL bodies (still calling each other as
-# authored), never the fully-inlined copies -- those exist only
-# internally, to keep the written file's primal code exactly as
-# compact as its source. Reduces to io_write_kernel_file's own output
-# for a single-kernel corpus.
+# corpus counterpart of io_write_kernel_file: for every name in
+# primal_exprs (sorted for a deterministic file layout -- today that's
+# a single entry from every stade_*_file caller below, but the
+# function stays general), bundles that name's own generated parts,
+# if any (already assembled by the caller, e.g. `[tangent_expr]` or
+# `[initstacks_expr, adjoint_expr]` -- same shape io_write_kernel_file
+# already expects) followed by its primal_exprs entry, exactly as
+# handed in -- this function has no opinion on whether that primal is
+# an original as-authored body or an inlined one; stade_tangent_file
+# et al. pass the entry kernel's fully-inlined primal (the flattened
+# body the derivative was actually generated from), so the written
+# file is just that one kernel's derivative plus its own primal, with
+# no other corpus member appearing at all. Reduces to
+# io_write_kernel_file's own output for a single-entry call.
 function io_write_kernel_corpus_file(path::String, primal_exprs::Dict{Symbol,Expr}, generated_parts::Dict{Symbol,Vector{Expr}})
     parts = String[]
     for name in sort(collect(keys(primal_exprs)); by = string)
-        for e in generated_parts[name]
+        for e in get(generated_parts, name, Expr[])
             push!(parts, io_expr_to_source(e))
         end
         push!(parts, io_expr_to_source(primal_exprs[name]))
@@ -5416,28 +5428,40 @@ end
 
 # reads any number of kernels from one file (a lone kernel, or a
 # corpus of kernels that call each other -- see inl_*), differentiates
-# every one of them, and writes the whole bundle back out. One code
-# path handles both: a single-kernel file is just a one-entry corpus,
-# and the _corpus functions above are already no-ops for a kernel with
-# no calls.
+# only the corpus's entry kernel (io_corpus_entry_name: the file's own
+# basename for a multi-kernel corpus, its one kernel otherwise) against
+# its whole call graph inlined away, and writes back out just that one
+# kernel: its generated derivative parts, followed by its own INLINED
+# primal (the call graph already flattened, exactly the body the
+# derivative was generated from) -- not a per-kernel bundle of every
+# original definition the corpus happened to contain. One code path
+# handles both: a single-kernel file is just a one-entry corpus, where
+# inlining is a no-op and this reduces to differentiating that lone
+# kernel exactly as before.
 function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
     kernels = io_read_kernel_corpus(in_path)
-    generated = stade_tangent_corpus(kernels; keep_push_pop = keep_push_pop)
-    io_write_kernel_corpus_file(out_path, kernels, Dict(name => Expr[g] for (name, g) in generated))
+    entry_name = io_corpus_entry_name(in_path, kernels)
+    inlined = inl_inline_calls(kernels)
+    generated = stade_tangent(inlined[entry_name]; keep_push_pop = keep_push_pop)
+    io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated]))
     return out_path
 end
 
 function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
     kernels = io_read_kernel_corpus(in_path)
-    generated = stade_adjoint_corpus(kernels; keep_push_pop = keep_push_pop)
-    io_write_kernel_corpus_file(out_path, kernels, Dict(name => Expr[g.initstacks, g.adjoint] for (name, g) in generated))
+    entry_name = io_corpus_entry_name(in_path, kernels)
+    inlined = inl_inline_calls(kernels)
+    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop)
+    io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.adjoint]))
     return out_path
 end
 
 function stade_hvp_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
     kernels = io_read_kernel_corpus(in_path)
-    generated = stade_hvp_corpus(kernels; keep_push_pop = keep_push_pop)
-    io_write_kernel_corpus_file(out_path, kernels, Dict(name => Expr[g.initstacks, g.hvp] for (name, g) in generated))
+    entry_name = io_corpus_entry_name(in_path, kernels)
+    inlined = inl_inline_calls(kernels)
+    generated = stade_hvp(inlined[entry_name]; keep_push_pop = keep_push_pop)
+    io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.hvp]))
     return out_path
 end
 
