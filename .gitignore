@@ -6,7 +6,6 @@
 
 # Some folders
 version-final-*/
-val-corpus-tapenade-adjoint-full/
 
 # STADE-generated files
 # *_b.jl
