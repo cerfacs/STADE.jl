@@ -28,18 +28,29 @@ include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 # ever visible outside this function -- the temp dir is removed
 # again before it returns.
 #
-# tangent, adjoint, hvp always run (via io_read_kernel_corpus), and
-# take a `keep_push_pop` kwarg -- STADE's own AD emission stages
-# either use push!/pop! stacks for adjoint/hvp checkpointing
-# (keep_push_pop=true, useful for stepping through in a debugger) or
-# a sized, indexed allocation instead (keep_push_pop=false, STADE's
-# own default). The "Differentiate" button flips this the other way:
-# it defaults to keep_push_pop=false and only sets it true when the
-# "Keep push!/pop!" option is checked, because push!/pop! stacks
-# aren't GPU-portable -- so whenever they're kept, cuda/amdgpu/metal/
-# jacc (the cgen_*/jgen_* GPU-porting stages, via stade_*_file's
-# io_read_kernel_bundle path) are skipped entirely rather than run
-# against code that can't actually reach a GPU.
+# tangent, adjoint, hvp always run first, directly against the
+# person's own input (via io_read_kernel_corpus), and take a
+# `keep_push_pop` kwarg -- STADE's own AD emission stages either use
+# push!/pop! stacks for adjoint/hvp checkpointing (keep_push_pop=true,
+# useful for stepping through in a debugger) or a sized, indexed
+# allocation instead (keep_push_pop=false, STADE's own default). The
+# "Differentiate" button flips this the other way: it defaults to
+# keep_push_pop=false and only sets it true when the "Keep push!/pop!"
+# option is checked.
+#
+# cuda, amdgpu, metal, jacc (the cgen_*/jgen_* GPU-porting stages) run
+# second, and *not* against the original input -- against the
+# concatenation of what tangent/adjoint/hvp just produced, since the
+# point of porting to a GPU here is to run the differentiated code
+# there, not the plain undifferentiated kernel. Each AD output file
+# already bundles its own generated function(s) plus a trailing copy
+# of the primal kernel (io_write_kernel_file's convention); that
+# primal copy is identical across all three stages, so
+# merged_differentiated_bundle de-duplicates it down to one copy
+# rather than porting it three times over. When keep_push_pop is
+# true, this step is skipped entirely instead, because push!/pop!
+# stacks (which the adjoint/hvp outputs would then contain) aren't
+# amenable to GPU porting -- see the banner it leaves in their place.
 #
 # A single generator failing (e.g. GPU porting on a multi-kernel
 # `*_multi.jl`-style corpus -- a documented gap, see
@@ -64,6 +75,28 @@ function banner(label::Symbol)
     return "# " * "="^20 * title * "="^20
 end
 
+# Concatenates the function definitions found across one or more AD
+# output files (tangent_output.jl, adjoint_output.jl, hvp_output.jl)
+# into a single bundle source, keeping only the first occurrence of
+# each function name -- every AD output file ends with its own copy
+# of the same unchanged primal kernel (and adjoint/hvp both also
+# define the same initstacks_*_b), so later duplicates are dropped
+# rather than emitted (and GPU-ported) again.
+function merged_differentiated_bundle(ad_output_paths::Vector{String})::String
+    seen  = Set{Symbol}()
+    parts = String[]
+    for path in ad_output_paths
+        isfile(path) || continue
+        for expr in io_read_kernel_bundle(path)
+            name, _ = parse_signature(expr.args[1])
+            name in seen && continue
+            push!(seen, name)
+            push!(parts, io_expr_to_source(expr))
+        end
+    end
+    return join(parts, "\n")
+end
+
 function generate_content(original_content::AbstractString; keep_push_pop::Bool = false)::String
     mktempdir() do dir
         entry = try
@@ -75,10 +108,12 @@ function generate_content(original_content::AbstractString; keep_push_pop::Bool 
         write(in_path, original_content)
 
         sections = String[]
+        ad_output_paths = String[]
         for (label, fn) in AD_GENERATORS
             out_path = joinpath(dir, "output_$(label).jl")
             body = try
                 fn(in_path, out_path; keep_push_pop = keep_push_pop)
+                push!(ad_output_paths, out_path)
                 read(out_path, String)
             catch err
                 "# generation failed: $(sprint(showerror, err))\n"
@@ -91,11 +126,17 @@ function generate_content(original_content::AbstractString; keep_push_pop::Bool 
                 "# skipped: push!/pop! is kept (\"Keep push!/pop!\" option checked), and\n" *
                 "# push!/pop! stacks are not amenable to GPU porting -- uncheck that option\n" *
                 "# to also generate cuda/amdgpu/metal/jacc ports.\n")
+        elseif isempty(ad_output_paths)
+            push!(sections, banner(:gpu) * "\n" *
+                "# skipped: no differentiation output was generated above to port.\n")
         else
+            gpu_in_path = joinpath(dir, entry * "_differentiated.jl")
+            write(gpu_in_path, merged_differentiated_bundle(ad_output_paths))
+
             for (label, fn) in GPU_GENERATORS
                 out_path = joinpath(dir, "output_$(label).jl")
                 body = try
-                    fn(in_path, out_path)
+                    fn(gpu_in_path, out_path)
                     read(out_path, String)
                 catch err
                     "# generation failed: $(sprint(showerror, err))\n"
