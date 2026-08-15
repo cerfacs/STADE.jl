@@ -4541,7 +4541,15 @@ function val_primal_observing_expr(kernel, primal_expr::Expr)
     sig = kernel.sig
     fname = Symbol(string(sig.name) * "_valobs")
     scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
-    body = Expr(:block, primal_expr.args[2].args..., emit_return_scalars(scalar_args))
+    raw_stmts = [s for s in primal_expr.args[2].args if !(s isa LineNumberNode)]
+    # parse_kernel already validated that the only body-level `return` a raw
+    # kernel Expr may contain is a trailing `return nothing` -- strip it here
+    # too, or it fires before our appended return and this wrapper always
+    # observes `nothing` instead of the scalar args' final values.
+    if !isempty(raw_stmts) && raw_stmts[end] isa Expr && raw_stmts[end].head == :return
+        raw_stmts = raw_stmts[1:end-1]
+    end
+    body = Expr(:block, raw_stmts..., emit_return_scalars(scalar_args))
     return Expr(:function, Expr(:call, fname, sig.args...), body)
 end
 
