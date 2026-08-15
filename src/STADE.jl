@@ -1855,18 +1855,28 @@ end
 
 snap_read_before(body, target, var) = snap_read_before_walk(body, target, var)[1]
 
-# every variable ever reassigned via a scalar (non-array) :assign,
-# anywhere in the kernel, at any nesting depth
-function snap_collect_reassigned(body)
+# every variable assigned via a scalar (non-array) :assign somewhere
+# INSIDE a loop, at any nesting depth -- gated on in_loop rather than
+# collecting every :assign in the kernel, since only a write that can
+# execute more than once (i.e. sits inside some :for) can ever leave
+# a DIFFERENT value behind at different points in the kernel's single
+# execution. A var whose only :assign sites are all at top level,
+# outside every loop, is a plain one-shot constant for the whole
+# kernel run and can never need trip-count-style snapshot/restore --
+# including it here would wrongly flag every loop bound that merely
+# references it, forcing a push/pop pair whose pop then corrupts the
+# loop's own value (see keep_push_pop history for how such a
+# mis-scoped snapshot broke unet's adjoint).
+function snap_collect_reassigned(body, in_loop = false)
     reassigned = Set{Symbol}()
     for stmt in body
         if stmt.kind == :assign
-            stmt.lhs isa Symbol && push!(reassigned, stmt.lhs)
+            in_loop && stmt.lhs isa Symbol && push!(reassigned, stmt.lhs)
         elseif stmt.kind == :for
-            union!(reassigned, snap_collect_reassigned(stmt.body))
+            union!(reassigned, snap_collect_reassigned(stmt.body, true))
         elseif stmt.kind == :if
-            union!(reassigned, snap_collect_reassigned(stmt.then))
-            union!(reassigned, snap_collect_reassigned(stmt.els))
+            union!(reassigned, snap_collect_reassigned(stmt.then, in_loop))
+            union!(reassigned, snap_collect_reassigned(stmt.els, in_loop))
         end
     end
     return reassigned
@@ -2442,16 +2452,19 @@ end
 #      input/output shape (here: the sites list itself), not
 #      reaching into its private helpers ------------------------------
 
-function agen_collect_reassigned(body)
+# gated on in_loop -- see snap_collect_reassigned's comment; kept as
+# a separate agen_-prefixed duplicate for the same reason every other
+# agen_/snap_ pair in this file is duplicated rather than shared.
+function agen_collect_reassigned(body, in_loop = false)
     reassigned = Set{Symbol}()
     for stmt in body
         if stmt.kind == :assign
-            stmt.lhs isa Symbol && push!(reassigned, stmt.lhs)
+            in_loop && stmt.lhs isa Symbol && push!(reassigned, stmt.lhs)
         elseif stmt.kind == :for
-            union!(reassigned, agen_collect_reassigned(stmt.body))
+            union!(reassigned, agen_collect_reassigned(stmt.body, true))
         elseif stmt.kind == :if
-            union!(reassigned, agen_collect_reassigned(stmt.then))
-            union!(reassigned, agen_collect_reassigned(stmt.els))
+            union!(reassigned, agen_collect_reassigned(stmt.then, in_loop))
+            union!(reassigned, agen_collect_reassigned(stmt.els, in_loop))
         end
     end
     return reassigned
@@ -2478,10 +2491,18 @@ function agen_nested_write_vars(body, kinds)
     vars = Set{Symbol}()
     for stmt in body
         if stmt.kind == :for
-            union!(vars, agen_collect_reassigned(stmt.body))
+            union!(vars, agen_collect_reassigned(stmt.body, true))
         elseif stmt.kind == :if
-            union!(vars, agen_collect_reassigned(stmt.then))
-            union!(vars, agen_collect_reassigned(stmt.els))
+            # this function's own concern (a var written only inside
+            # some sub-loop/sub-if of `body`) is unrelated to
+            # agen_collect_reassigned's in_loop gating (which exists
+            # only to keep tripcount-snapshot candidates restricted to
+            # vars that can vary across a loop's own iterations) --
+            # force in_loop=true here so this call keeps collecting
+            # every assign in the subtree unconditionally, exactly as
+            # before that gating was added.
+            union!(vars, agen_collect_reassigned(stmt.then, true))
+            union!(vars, agen_collect_reassigned(stmt.els, true))
         end
     end
     return Set(v for v in vars if kinds[v] == :scalar_float)
@@ -2825,7 +2846,7 @@ function agen_tier_b_walk(body, seq_reassigned)
             for bv in bound_vars
                 bv in seq_reassigned && return bv
             end
-            inner_seq = stmt.sequential ? union(seq_reassigned, agen_collect_reassigned(stmt.body)) : seq_reassigned
+            inner_seq = stmt.sequential ? union(seq_reassigned, agen_collect_reassigned(stmt.body, true)) : seq_reassigned
             found = agen_tier_b_walk(stmt.body, inner_seq)
             found === nothing || return found
         elseif stmt.kind == :if

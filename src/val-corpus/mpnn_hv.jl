@@ -1,13 +1,12 @@
 function initstacks_mpnn_b()
-    tripcount_stack = Vector{Int64}()
     msg_input_stack = Vector{Float64}()
     msg_scratch_stack = Vector{Float64}()
     upd_input_stack = Vector{Float64}()
     upd_scratch_stack = Vector{Float64}()
-    return (tripcount_stack, msg_input_stack, msg_scratch_stack, upd_input_stack, upd_scratch_stack)
+    return (msg_input_stack, msg_scratch_stack, upd_input_stack, upd_scratch_stack)
 end
 
-function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w_msgb, b_msg, b_msgb, w_upd, w_updb, b_upd, b_updb, n_nodes, n_edges, n_node_feat, n_edge_feat, n_msg_feat, msg_input, msg_inputb, msg_scratch, msg_scratchb, messages, messagesb, agg, aggb, upd_input, upd_inputb, upd_scratch, upd_scratchb, node_feat_out, node_feat_outb, node_featd, node_featbd, edge_featd, edge_featbd, w_msgd, w_msgbd, b_msgd, b_msgbd, w_updd, w_updbd, b_updd, b_updbd, msg_inputd, msg_inputbd, msg_scratchd, msg_scratchbd, messagesd, messagesbd, aggd, aggbd, upd_inputd, upd_inputbd, upd_scratchd, upd_scratchbd, node_feat_outd, node_feat_outbd, tripcount_stack, msg_input_stack, msg_scratch_stack, upd_input_stack, upd_scratch_stack)
+function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w_msgb, b_msg, b_msgb, w_upd, w_updb, b_upd, b_updb, n_nodes, n_edges, n_node_feat, n_edge_feat, n_msg_feat, msg_input, msg_inputb, msg_scratch, msg_scratchb, messages, messagesb, agg, aggb, upd_input, upd_inputb, upd_scratch, upd_scratchb, node_feat_out, node_feat_outb, node_featd, node_featbd, edge_featd, edge_featbd, w_msgd, w_msgbd, b_msgd, b_msgbd, w_updd, w_updbd, b_updd, b_updbd, msg_inputd, msg_inputbd, msg_scratchd, msg_scratchbd, messagesd, messagesbd, aggd, aggbd, upd_inputd, upd_inputbd, upd_scratchd, upd_scratchbd, node_feat_outd, node_feat_outbd, msg_input_stack, msg_scratch_stack, upd_input_stack, upd_scratch_stack)
     msg_input_stack_d = Vector{Float64}()
     msg_scratch_stack_d = Vector{Float64}()
     upd_input_stack_d = Vector{Float64}()
@@ -20,7 +19,6 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
     n_in_msg = 2n_node_feat + n_edge_feat
     n_in_upd = n_node_feat + n_msg_feat
     n_agg = n_nodes * n_msg_feat
-    push!(tripcount_stack, n_agg)
     for k = 1:n_agg
         aggd[k] = 0.0
         agg[k] = 0.0
@@ -52,7 +50,6 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
         for o = 1:n_msg_feat
             sd = b_msgd[o]
             s = b_msg[o]
-            push!(tripcount_stack, n_in_msg)
             for i_seq_i = 1:n_in_msg
                 widx = (o - 1) * n_in_msg + i_seq_i
                 sd = sd + (msg_input[i_seq_i] * w_msgd[widx] + w_msg[widx] * msg_inputd[i_seq_i])
@@ -102,7 +99,6 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
         for o = 1:n_node_feat
             sd = b_updd[o]
             s = b_upd[o]
-            push!(tripcount_stack, n_in_upd)
             for i_seq_i = 1:n_in_upd
                 widx = (o - 1) * n_in_upd + i_seq_i
                 sd = sd + (upd_input[i_seq_i] * w_updd[widx] + w_upd[widx] * upd_inputd[i_seq_i])
@@ -150,7 +146,6 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             sb = sb + upd_scratchb[o]
             upd_scratchbd[o] = 0.0
             upd_scratchb[o] = 0.0
-            n_in_upd = pop!(tripcount_stack)
             for i_seq_i = n_in_upd:-1:1
                 widx = (o - 1) * n_in_upd + i_seq_i
                 w_updbd[widx] = w_updbd[widx] + (sb * upd_inputd[i_seq_i] + upd_input[i_seq_i] * sbd)
@@ -215,7 +210,6 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             sb = sb + msg_scratchb[o]
             msg_scratchbd[o] = 0.0
             msg_scratchb[o] = 0.0
-            n_in_msg = pop!(tripcount_stack)
             for i_seq_i = n_in_msg:-1:1
                 widx = (o - 1) * n_in_msg + i_seq_i
                 w_msgbd[widx] = w_msgbd[widx] + (sb * msg_inputd[i_seq_i] + msg_input[i_seq_i] * sbd)
@@ -253,7 +247,6 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             msg_inputb[zero_off + k] = 0.0
         end
     end
-    n_agg = pop!(tripcount_stack)
     for k = 1:n_agg
         aggbd[k] = 0.0
         aggb[k] = 0.0

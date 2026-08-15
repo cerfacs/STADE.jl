@@ -1,20 +1,18 @@
 function initstacks_mpnn_b()
-    tripcount_stack = Vector{Int64}()
     msg_input_stack = Vector{Float64}()
     msg_scratch_stack = Vector{Float64}()
     upd_input_stack = Vector{Float64}()
     upd_scratch_stack = Vector{Float64}()
-    return (tripcount_stack, msg_input_stack, msg_scratch_stack, upd_input_stack, upd_scratch_stack)
+    return (msg_input_stack, msg_scratch_stack, upd_input_stack, upd_scratch_stack)
 end
 
-function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w_msgb, b_msg, b_msgb, w_upd, w_updb, b_upd, b_updb, n_nodes, n_edges, n_node_feat, n_edge_feat, n_msg_feat, msg_input, msg_inputb, msg_scratch, msg_scratchb, messages, messagesb, agg, aggb, upd_input, upd_inputb, upd_scratch, upd_scratchb, node_feat_out, node_feat_outb, tripcount_stack, msg_input_stack, msg_scratch_stack, upd_input_stack, upd_scratch_stack)
+function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w_msgb, b_msg, b_msgb, w_upd, w_updb, b_upd, b_updb, n_nodes, n_edges, n_node_feat, n_edge_feat, n_msg_feat, msg_input, msg_inputb, msg_scratch, msg_scratchb, messages, messagesb, agg, aggb, upd_input, upd_inputb, upd_scratch, upd_scratchb, node_feat_out, node_feat_outb, msg_input_stack, msg_scratch_stack, upd_input_stack, upd_scratch_stack)
     s = 0.0
     sb = 0.0
     zero_off = 0
     n_in_msg = 2n_node_feat + n_edge_feat
     n_in_upd = n_node_feat + n_msg_feat
     n_agg = n_nodes * n_msg_feat
-    push!(tripcount_stack, n_agg)
     for k = 1:n_agg
         agg[k] = 0.0
     end
@@ -38,7 +36,6 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
         end
         for o = 1:n_msg_feat
             s = b_msg[o]
-            push!(tripcount_stack, n_in_msg)
             for i_seq_i = 1:n_in_msg
                 widx = (o - 1) * n_in_msg + i_seq_i
                 s = s + w_msg[widx] * msg_input[i_seq_i]
@@ -76,7 +73,6 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
         end
         for o = 1:n_node_feat
             s = b_upd[o]
-            push!(tripcount_stack, n_in_upd)
             for i_seq_i = 1:n_in_upd
                 widx = (o - 1) * n_in_upd + i_seq_i
                 s = s + w_upd[widx] * upd_input[i_seq_i]
@@ -111,7 +107,6 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
             upd_scratch[o] = pop!(upd_scratch_stack)
             sb = sb + upd_scratchb[o]
             upd_scratchb[o] = 0.0
-            n_in_upd = pop!(tripcount_stack)
             for i_seq_i = n_in_upd:-1:1
                 widx = (o - 1) * n_in_upd + i_seq_i
                 w_updb[widx] = w_updb[widx] + upd_input[i_seq_i] * sb
@@ -158,7 +153,6 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
             msg_scratch[o] = pop!(msg_scratch_stack)
             sb = sb + msg_scratchb[o]
             msg_scratchb[o] = 0.0
-            n_in_msg = pop!(tripcount_stack)
             for i_seq_i = n_in_msg:-1:1
                 widx = (o - 1) * n_in_msg + i_seq_i
                 w_msgb[widx] = w_msgb[widx] + msg_input[i_seq_i] * sb
@@ -183,7 +177,6 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
             msg_inputb[zero_off + k] = 0.0
         end
     end
-    n_agg = pop!(tripcount_stack)
     for k = 1:n_agg
         aggb[k] = 0.0
     end
