@@ -7,8 +7,22 @@ using Random
 For every `.jl` kernel in `dir`: generates its tangent (`_d.jl`), adjoint
 (`_b.jl`), and hvp (`_hv.jl`) files alongside it, then runs finite-difference
 / JVP / VJP validation on each against a random baseline.
+
+Before doing so, removes any pre-existing `_b.jl` / `_d.jl` / `_hv.jl` /
+`.yaml` files already in `dir` -- these are all derived/cached artifacts
+(generated code and cached random baselines) from prior runs, and a stale
+one lying around silently short-circuits regeneration (baseline `.yaml`
+files are only (re)written when absent) and can validate a kernel against
+a baseline or against generated code left over from a different STADE.jl
+revision than the one currently loaded. Only kernel source `.jl` files are
+the real inputs here, so everything else in `dir` is disposable.
 """
 function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
+    for f in readdir(dir)
+        if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") || endswith(f, ".yaml")
+            rm(joinpath(dir, f))
+        end
+    end
     generators = Dict(:tangent => (stade_tangent_file, "_d.jl"),
                        :adjoint => (stade_adjoint_file, "_b.jl"),
                        :hvp     => (stade_hvp_file, "_hv.jl"))

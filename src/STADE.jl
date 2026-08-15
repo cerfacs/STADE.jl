@@ -1902,19 +1902,19 @@ end
 # every snapshot's push and pop occupy the mirrored position in the
 # forward/backward walk, so nesting is always self-consistent
 # regardless of which subset of writes get one.
-function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, counter, in_seq, assign_counts, full_body)
+function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body)
     for stmt in body
         if stmt.kind == :assign
-            snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_seq, assign_counts, full_body)
+            snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_loop, assign_counts, full_body)
         elseif stmt.kind == :for
             snap_check_tripcount!(stmt, reassigned, sites, counter)
             snap_walk!(stmt.body, active_map, kinds, reassigned, value_needed, sites, counter,
-                       in_seq || stmt.sequential, assign_counts, full_body)
+                       true, assign_counts, full_body)
         elseif stmt.kind == :if
             counter[] = counter[] + 1
             push!(sites, (kind = :branch, array = :cond, at = counter[]))
-            snap_walk!(stmt.then, active_map, kinds, reassigned, value_needed, sites, counter, in_seq, assign_counts, full_body)
-            snap_walk!(stmt.els, active_map, kinds, reassigned, value_needed, sites, counter, in_seq, assign_counts, full_body)
+            snap_walk!(stmt.then, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body)
+            snap_walk!(stmt.els, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body)
         end
     end
     return nothing
@@ -1923,14 +1923,18 @@ end
 # a write needs a site iff `var in value_needed` (see
 # snap_value_needed_vars) -- subsumes both the old self-reference and
 # cross-statement rules in one test. Also gated by the iteration-
-# independent elision below (sole write, no sequential ancestor, no
-# self-reference, never read before it runs).
-function snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_seq, assign_counts, full_body)
+# independent elision below (sole write, no ENCLOSING LOOP AT ALL --
+# not just no sequential ancestor: a write inside any loop, sequential
+# or not, still re-executes on every iteration and needs its per-
+# iteration value restored for a later reverse-sweep read, so `in_loop`
+# must cover every :for ancestor -- no self-reference, never read
+# before it runs).
+function snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_loop, assign_counts, full_body)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     active_map[var] || return nothing
     var in value_needed || return nothing
     self_ref = snap_count_var_refs(stmt.rhs, var) > 0
-    if !self_ref && !in_seq && get(assign_counts, var, 0) == 1 && !snap_read_before(full_body, stmt, var)
+    if !self_ref && !in_loop && get(assign_counts, var, 0) == 1 && !snap_read_before(full_body, stmt, var)
         return nothing
     end
     kind = kinds[var] == :array_float ? :array : :value
@@ -2677,21 +2681,23 @@ agen_read_before(body, target, var) = agen_read_before_walk(body, target, var)[1
 # elision (mirrors snap_check_assign!'s per-statement test exactly,
 # just collected as a Set{Symbol} instead of gating site creation
 # directly -- var alone is enough to key it, since "sole assign site"
-# means there is only ever one statement this could refer to)
-function agen_collect_exempt_vars!(body, value_needed, assign_counts, full_body, in_seq, exempt)
+# means there is only ever one statement this could refer to).
+# `in_loop` must be true beneath ANY :for ancestor, not just a
+# sequential one -- see snap_check_assign!'s comment.
+function agen_collect_exempt_vars!(body, value_needed, assign_counts, full_body, in_loop, exempt)
     for stmt in body
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             self_ref = agen_count_var_refs(stmt.rhs, var) > 0
-            if !self_ref && var in value_needed && !in_seq && get(assign_counts, var, 0) == 1 &&
+            if !self_ref && var in value_needed && !in_loop && get(assign_counts, var, 0) == 1 &&
                !agen_read_before(full_body, stmt, var)
                 push!(exempt, var)
             end
         elseif stmt.kind == :for
-            agen_collect_exempt_vars!(stmt.body, value_needed, assign_counts, full_body, in_seq || stmt.sequential, exempt)
+            agen_collect_exempt_vars!(stmt.body, value_needed, assign_counts, full_body, true, exempt)
         elseif stmt.kind == :if
-            agen_collect_exempt_vars!(stmt.then, value_needed, assign_counts, full_body, in_seq, exempt)
-            agen_collect_exempt_vars!(stmt.els, value_needed, assign_counts, full_body, in_seq, exempt)
+            agen_collect_exempt_vars!(stmt.then, value_needed, assign_counts, full_body, in_loop, exempt)
+            agen_collect_exempt_vars!(stmt.els, value_needed, assign_counts, full_body, in_loop, exempt)
         end
     end
     return nothing

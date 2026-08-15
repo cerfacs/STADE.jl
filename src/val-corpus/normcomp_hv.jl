@@ -1,9 +1,13 @@
 function initstacks_normcomp_b()
-    return nothing
+    w_stack = Vector{Float64}()
+    return w_stack
 end
 
-function normcomp_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, ubd, vd, vbd, wd, wbd)
+function normcomp_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, ubd, vd, vbd, wd, wbd, w_stack)
+    w_stack_d = Vector{Float64}()
     for i_x = 1:i_n
+        push!(w_stack_d, wd[i_x])
+        push!(w_stack, w[i_x])
         wd[i_x] = ud[i_x] + -(vd[i_x])
         w[i_x] = u[i_x] - v[i_x]
     end
@@ -15,7 +19,9 @@ function normcomp_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, u
         wbd[i_seq_x] = wbd[i_seq_x] + (lossb[1] * (2 * wd[i_seq_x]) + (2 * w[i_seq_x]) * lossbd[1])
         wb[i_seq_x] = wb[i_seq_x] + (2 * w[i_seq_x]) * lossb[1]
     end
-    for i_x = 1:i_n
+    for i_x = i_n:-1:1
+        wd[i_x] = pop!(w_stack_d)
+        w[i_x] = pop!(w_stack)
         ubd[i_x] = ubd[i_x] + wbd[i_x]
         ub[i_x] = ub[i_x] + wb[i_x]
         vbd[i_x] = vbd[i_x] + -(wbd[i_x])
