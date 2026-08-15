@@ -1,12 +1,14 @@
-function ttgc(u, i_cell_to_node, cell_vol, i_ncell, res)
-    for i_cell = 1:i_ncell
-        for i_loc = 1:4
-            i_node = i_cell_to_node[i_loc, i_cell]
-            re = u[i_node] / cell_vol[i_cell]
-            for i_k = 1:4
-                i_k_node = i_cell_to_node[i_k, i_cell]
-                res[i_k_node] = res[i_k_node] + re * u[i_node]
-            end
+function ttgc(i_cell_to_node, node_vol, i_ncell, i_nnode, i_njac, up, mup)
+    for i_seq_ = 1:i_njac
+        for i_node = 1:i_nnode
+            mup[i_node] = 0.0
+        end
+        for i_cell = 1:i_ncell
+            i_node1 = i_cell_to_node[1, i_cell]
+            mup[i_node1] = mup[i_node1] + up[i_node1]
+        end
+        for i_node = 1:i_nnode
+            up[i_node] = up[i_node] - mup[i_node] / node_vol[i_node]
         end
     end
 end

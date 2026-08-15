@@ -1,68 +1,60 @@
 function initstacks_ttgc_b()
-    re_stack = Vector{Float64}()
-    return re_stack
+    mup_stack = Vector{Float64}()
+    return mup_stack
 end
 
-function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, i_ncell, res, resb, ud, ubd, cell_vold, cell_volbd, resd, resbd, re_stack)
-    re_stack_d = Vector{Float64}()
-    re = 0.0
-    reb = 0.0
-    red = 0.0
-    rebd = 0.0
-    for i_cell = 1:i_ncell
-        for i_loc = 1:4
-            i_node = i_cell_to_node[i_loc, i_cell]
-            push!(re_stack_d, red)
-            push!(re_stack, re)
-            red = (1.0 / cell_vol[i_cell]) * ud[i_node] + -(u[i_node] / cell_vol[i_cell] ^ 2) * cell_vold[i_cell]
-            re = u[i_node] / cell_vol[i_cell]
-            for i_k = 1:4
-                i_k_node = i_cell_to_node[i_k, i_cell]
-                resd[i_k_node] = resd[i_k_node] + (u[i_node] * red + re * ud[i_node])
-                res[i_k_node] = res[i_k_node] + re * u[i_node]
-            end
+function ttgc_hv(i_cell_to_node, node_vol, node_volb, i_ncell, i_nnode, i_njac, up, upb, mup, mupb, node_vold, node_volbd, upd, upbd, mupd, mupbd, mup_stack)
+    mup_stack_d = Vector{Float64}()
+    for i_seq_ = 1:i_njac
+        for i_node = 1:i_nnode
+            mupd[i_node] = 0.0
+            mup[i_node] = 0.0
         end
-        push!(re_stack_d, red)
-        push!(re_stack, re)
+        for i_cell = 1:i_ncell
+            i_node1 = i_cell_to_node[1, i_cell]
+            push!(mup_stack_d, mupd[i_node1])
+            push!(mup_stack, mup[i_node1])
+            mupd[i_node1] = mupd[i_node1] + upd[i_node1]
+            mup[i_node1] = mup[i_node1] + up[i_node1]
+        end
+        for i_node = 1:i_nnode
+            upd[i_node] = upd[i_node] + -(((1.0 / node_vol[i_node]) * mupd[i_node] + -(mup[i_node] / node_vol[i_node] ^ 2) * node_vold[i_node]))
+            up[i_node] = up[i_node] - mup[i_node] / node_vol[i_node]
+        end
     end
-    push!(re_stack_d, red)
-    push!(re_stack, re)
-    red = pop!(re_stack_d)
-    re = pop!(re_stack)
-    for i_cell = i_ncell:-1:1
-        red = pop!(re_stack_d)
-        re = pop!(re_stack)
-        for i_loc = 4:-1:1
-            i_node = i_cell_to_node[i_loc, i_cell]
-            for i_k = 1:4
-                i_k_node = i_cell_to_node[i_k, i_cell]
-                rebd = rebd + (resb[i_k_node] * ud[i_node] + u[i_node] * resbd[i_k_node])
-                reb = reb + u[i_node] * resb[i_k_node]
-                ubd[i_node] = ubd[i_node] + (resb[i_k_node] * red + re * resbd[i_k_node])
-                ub[i_node] = ub[i_node] + re * resb[i_k_node]
-            end
-            red = pop!(re_stack_d)
-            re = pop!(re_stack)
-            ubd[i_node] = ubd[i_node] + (reb * (-(1.0 / cell_vol[i_cell] ^ 2) * cell_vold[i_cell]) + (1.0 / cell_vol[i_cell]) * rebd)
-            ub[i_node] = ub[i_node] + (1.0 / cell_vol[i_cell]) * reb
-            cell_volbd[i_cell] = cell_volbd[i_cell] + (reb * -(((1.0 / cell_vol[i_cell] ^ 2) * ud[i_node] + -(u[i_node] / (cell_vol[i_cell] ^ 2) ^ 2) * ((2 * cell_vol[i_cell]) * cell_vold[i_cell]))) + -(u[i_node] / cell_vol[i_cell] ^ 2) * rebd)
-            cell_volb[i_cell] = cell_volb[i_cell] + -(u[i_node] / cell_vol[i_cell] ^ 2) * reb
-            rebd = 0.0
-            reb = 0.0
+    for i_seq_ = i_njac:-1:1
+        for i_node = 1:i_nnode
+            mupbd[i_node] = mupbd[i_node] + (-(upb[i_node]) * (-(1.0 / node_vol[i_node] ^ 2) * node_vold[i_node]) + (1.0 / node_vol[i_node]) * -(upbd[i_node]))
+            mupb[i_node] = mupb[i_node] + (1.0 / node_vol[i_node]) * -(upb[i_node])
+            node_volbd[i_node] = node_volbd[i_node] + (-(upb[i_node]) * -(((1.0 / node_vol[i_node] ^ 2) * mupd[i_node] + -(mup[i_node] / (node_vol[i_node] ^ 2) ^ 2) * ((2 * node_vol[i_node]) * node_vold[i_node]))) + -(mup[i_node] / node_vol[i_node] ^ 2) * -(upbd[i_node]))
+            node_volb[i_node] = node_volb[i_node] + -(mup[i_node] / node_vol[i_node] ^ 2) * -(upb[i_node])
+        end
+        for i_cell = i_ncell:-1:1
+            i_node1 = i_cell_to_node[1, i_cell]
+            mupd[i_node1] = pop!(mup_stack_d)
+            mup[i_node1] = pop!(mup_stack)
+            upbd[i_node1] = upbd[i_node1] + mupbd[i_node1]
+            upb[i_node1] = upb[i_node1] + mupb[i_node1]
+        end
+        for i_node = 1:i_nnode
+            mupbd[i_node] = 0.0
+            mupb[i_node] = 0.0
         end
     end
     return nothing
 end
 
-function ttgc(u, i_cell_to_node, cell_vol, i_ncell, res)
-    for i_cell = 1:i_ncell
-        for i_loc = 1:4
-            i_node = i_cell_to_node[i_loc, i_cell]
-            re = u[i_node] / cell_vol[i_cell]
-            for i_k = 1:4
-                i_k_node = i_cell_to_node[i_k, i_cell]
-                res[i_k_node] = res[i_k_node] + re * u[i_node]
-            end
+function ttgc(i_cell_to_node, node_vol, i_ncell, i_nnode, i_njac, up, mup)
+    for i_seq_ = 1:i_njac
+        for i_node = 1:i_nnode
+            mup[i_node] = 0.0
+        end
+        for i_cell = 1:i_ncell
+            i_node1 = i_cell_to_node[1, i_cell]
+            mup[i_node1] = mup[i_node1] + up[i_node1]
+        end
+        for i_node = 1:i_nnode
+            up[i_node] = up[i_node] - mup[i_node] / node_vol[i_node]
         end
     end
 end
