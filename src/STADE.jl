@@ -4665,18 +4665,25 @@ function val_scan_expr_divisors!(expr, found::Set{Symbol})
     return nothing
 end
 
-function val_random_values(kernel, shapes::Dict, int_args::Dict{Symbol,Int}; scale::Float64 = 1.0)
+function val_random_values(kernel, shapes::Dict, int_args::Dict{Symbol,Int};
+                            scale::Float64 = 1.0, idx_cap::Union{Int,Nothing} = nothing)
     sig = kernel.sig
     values = Dict{Symbol,Any}()
     # val_grow_shapes sizes every array_float/array_int arg's every
     # dimension to the SAME N (a uniform grid -- see its own comment).
-    # An array_int arg used to index into another array (e.g. a mesh
-    # connectivity table) is therefore always safely in-bounds if its
-    # own entries are drawn from 1:N too, regardless of which specific
-    # array it's actually used to index -- no per-argument "what does
-    # this index into" analysis needed. Falls back to 1 if there are
-    # no array args at all (so no array_int arg could exist either).
+    # array_int content is drawn from 1:idx_cap rather than 1:N: a
+    # direct-indexing array_int arg (e.g. a mesh connectivity table
+    # indexing straight into another array) is safely in-bounds with
+    # idx_cap==N, but a *compressed* id (e.g. a graph node id later
+    # scaled by a stride, `(id-1)*n_feat+k`, before it indexes an
+    # array) needs idx_cap far below N instead -- val_grow_shapes
+    # searches both independently and passes idx_cap through; falling
+    # back to N here keeps any caller that never passed idx_cap
+    # (direct-indexing behaviour) identical to before. Falls back to
+    # 1 if there are no array args at all (so no array_int arg could
+    # exist either).
     N = isempty(shapes) ? 1 : minimum(minimum(s) for s in Base.values(shapes))
+    cap = idx_cap === nothing ? N : idx_cap
     divisors = val_divisor_args(kernel)
     # a positive-but-wide-spread divisor (e.g. abs(randn())+0.5) still
     # lets the RATIO between two independent divisor-like args (e.g. a
@@ -4694,7 +4701,7 @@ function val_random_values(kernel, shapes::Dict, int_args::Dict{Symbol,Int}; sca
         elseif k == :array_float
             values[a] = a in divisors ? scale .* (1.0 .+ 0.1 .* randn(shapes[a]...)) : scale .* randn(shapes[a]...)
         elseif k == :array_int
-            values[a] = rand(1:N, shapes[a]...)
+            values[a] = rand(1:cap, shapes[a]...)
         end
     end
     return values
@@ -4706,27 +4713,41 @@ end
 # ones are wrong -- so this always converges on a *safe* (if not
 # minimal) size without any static index-range analysis, and stays
 # fully general across arbitrarily shaped index expressions.
+#
+# idx_cap (the array_int content range) is searched independently of
+# N (the array-size grid), outer loop over idx_cap around the inner
+# N loop -- tying them together (idx_cap==N) makes a compressed-id
+# argument scaled by a stride before indexing (see val_random_values)
+# unsatisfiable at any N, since the array it indirectly indexes needs
+# to grow faster than the id range itself. Starting idx_cap small and
+# growing it outward still finds direct-indexing kernels' previous
+# idx_cap==N solution immediately, since idx_cap<=N is all that case
+# ever required.
 function val_grow_shapes(kernel, primal_fn::Function, int_args::Dict{Symbol,Int};
                           start::Int = 4, growth::Int = 2, max_size::Int = 512)
     sig = kernel.sig
     ndims_of = Dict(a => val_arg_ndims(kernel, a) for a in sig.args
                      if sig.kinds[a] in (:array_float, :array_int))
-    N = start
-    while N <= max_size
-        shapes = Dict(a => ntuple(_ -> N, ndims_of[a]) for a in keys(ndims_of))
-        trial = val_random_values(kernel, shapes, int_args; scale = 1.0)
-        ok = try
-            call_args = Any[sig.kinds[a] == :scalar_int ? int_args[a] : deepcopy(trial[a]) for a in sig.args]
-            Base.invokelatest(primal_fn, call_args...)
-            true
-        catch e
-            e isa BoundsError || rethrow(e)
-            false
+    idx_cap = start
+    while idx_cap <= max_size
+        N = start
+        while N <= max_size
+            shapes = Dict(a => ntuple(_ -> N, ndims_of[a]) for a in keys(ndims_of))
+            trial = val_random_values(kernel, shapes, int_args; scale = 1.0, idx_cap = idx_cap)
+            ok = try
+                call_args = Any[sig.kinds[a] == :scalar_int ? int_args[a] : deepcopy(trial[a]) for a in sig.args]
+                Base.invokelatest(primal_fn, call_args...)
+                true
+            catch e
+                e isa BoundsError || rethrow(e)
+                false
+            end
+            ok && return (shapes = shapes, idx_cap = idx_cap)
+            N *= growth
         end
-        ok && return shapes
-        N *= growth
+        idx_cap *= growth
     end
-    error("val_grow_shapes: could not find a working array size up to $max_size for $(sig.name)")
+    error("val_grow_shapes: could not find a working array size/index range up to $max_size for $(sig.name)")
 end
 
 # orchestrates a full random baseline: random ints, a compiled primal
@@ -4774,8 +4795,8 @@ function val_generate_baseline(kernel, primal_expr::Expr;
     for attempt in 1:attempts
         int_args = val_random_int_args(kernel.sig; lo = min(int_lo, cur_hi), hi = cur_hi)
         try
-            shapes = val_grow_shapes(kernel, primal_fn, int_args; start = grow_start, max_size = grow_max)
-            values = val_random_values(kernel, shapes, int_args; scale = scale)
+            grown = val_grow_shapes(kernel, primal_fn, int_args; start = grow_start, max_size = grow_max)
+            values = val_random_values(kernel, grown.shapes, int_args; scale = scale, idx_cap = grown.idx_cap)
             if self_check
                 x0 = val_flatten(kernel, values)
                 f_eval_vec = x -> val_call_primal_observed(obs_fn, kernel, int_args,
