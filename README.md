@@ -15,6 +15,7 @@
 
 ## Wishlist 💡
 
+- [ ] `:while` statement support
 - [ ] (Binomial) checkpointing support
 - [ ] Fixed-point loops efficient differentiation
 
