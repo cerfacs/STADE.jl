@@ -2287,7 +2287,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
     append!(body, agen_forward_body(kernel.body, kernel.sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx))
-    append!(body, agen_backward_body(lin_plan, kernel.body, kernel.sig.kinds, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx))
+    append!(body, agen_backward_body(lin_plan, kernel.body, kernel.sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx))
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
     push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
@@ -2870,7 +2870,12 @@ function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, ex
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if kinds[var] in (:scalar_float, :array_float) && agen_expr_active(stmt.rhs, active_map) &&
+            # see agen_forward_body's matching comment: gate on the LHS
+            # var's own activity (active_map[var]), not this write's
+            # rhs activity, so a destructive inactive-rhs write (e.g. a
+            # per-iteration array reset) still gets a slot sized here
+            # exactly when snap_plan itself would create a site for it.
+            if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) &&
                agen_needs_snapshot(stmt.lhs, stmt.rhs, var, value_needed) && !(var in exempt)
                 nm = agen_site_stack_name((kind = agen_snapshot_kind(stmt.lhs), array = var, at = 0))
                 agen_layout_record!(occ_mult, key_order, nm, loop_ctx, agen_site_key(body, idx))
@@ -2944,19 +2949,21 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            # gate on THIS statement's own rhs activity, not the whole
-            # variable's -- a variable written by several statements
-            # can be active overall via one of them while another
-            # write is a plain inactive literal; the backward sweep
-            # only ever pops for a write whose own rhs is active, so
-            # pushing here on every write regardless would push more
-            # than gets popped. An int-kinded lhs never owns a
-            # :value/:array site regardless of what rhs activity says
-            # -- only :tripcount covers int reassignment -- matching
-            # snap_plan's own gate on the write's target, not its rhs.
+            # gate on the LHS var's own activity (active_map[var]), not
+            # this statement's rhs activity -- a write whose own rhs is
+            # a plain inactive literal (e.g. `mup[i] = 0.0`) can still
+            # DESTROY a value that some other, earlier-in-forward-order
+            # statement needs for its own nonlinear derivative (e.g. a
+            # divisor read later re-differentiated wrt a different
+            # var). Gating on this statement's own rhs activity misses
+            # exactly that case; matching snap_check_assign!'s own gate
+            # (active_map[var], not this write's rhs) is what keeps
+            # this in sync with snap_plan's site list. An int-kinded
+            # lhs never owns a :value/:array site regardless of
+            # activity -- only :tripcount covers int reassignment.
             # `exempt` skips the push entirely for a write snap_plan
             # itself would also elide -- see agen_exempt_vars.
-            if kinds[var] in (:scalar_float, :array_float) && agen_expr_active(stmt.rhs, active_map) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, value_needed) && !(var in exempt)
+            if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, value_needed) && !(var in exempt)
                 push!(exprs, agen_emit_push(stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs, ectx, agen_site_key(body, idx)))
             end
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
@@ -2985,22 +2992,6 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
         push!(exprs, agen_emit_push(stacks[(:value, var)], var, ectx, agen_site_key(body, 0, var)))
     end
     return exprs
-end
-
-# does expr read any variable currently marked active? Duplicated
-# (agen_-prefixed) from act_*'s own act_expr_active rather than
-# calling it directly -- same purity rule as the snap_* duplicates
-# above, applied to act_*'s private helper this time.
-function agen_expr_active(expr, active_map)
-    if expr isa Symbol
-        return get(active_map, expr, false)
-    elseif expr isa Expr
-        start = expr.head == :call ? 2 : 1
-        for a in expr.args[start:end]
-            agen_expr_active(a, active_map) && return true
-        end
-    end
-    return false
 end
 
 # an active lhs is always scalar_float or array_float -- :ref means
@@ -3063,7 +3054,7 @@ end
 # by an enclosing :if's hoist (see below) -- popping again here would
 # consume the wrong stack entry. Only ever non-empty for the direct
 # then/els body of a hoisted :if; every other call uses the default.
-function agen_backward_body(plan, primal_body, kinds, unsafe, value_needed, reassigned, stacks, exempt, skip_restore = Set{Symbol}(); ectx = agen_ectx_stack())
+function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt, skip_restore = Set{Symbol}(); ectx = agen_ectx_stack())
     exprs = Any[]
     # block-boundary restoration (see agen_block_boundary_vars above):
     # restore each such var here, at the very start of this body's own
@@ -3172,12 +3163,12 @@ function agen_backward_body(plan, primal_body, kinds, unsafe, value_needed, reas
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
-            append!(exprs, agen_backward_assign(stmt, kinds, value_needed, reassigned, stacks, exempt, skip_restore; ectx = ectx, key = agen_site_key(primal_body, idx)))
+            append!(exprs, agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, skip_restore; ectx = ectx, key = agen_site_key(primal_body, idx)))
         elseif stmt.kind == :for
             push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
-            inner = agen_backward_body(stmt.body, primal_body[idx].body, kinds, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
+            inner = agen_backward_body(stmt.body, primal_body[idx].body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
             pop!(ectx.loop_ctx)
-            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, kinds, value_needed, reassigned, exempt, stacks)
+            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks)
             loop_expr = reverse_it ?
                 emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
                 emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
@@ -3187,8 +3178,8 @@ function agen_backward_body(plan, primal_body, kinds, unsafe, value_needed, reas
             push!(exprs, loop_expr)
         elseif stmt.kind == :if
             skip = get(hoisted_vars, idx, Set{Symbol}())
-            then_exprs = agen_backward_body(stmt.then, primal_body[idx].then, kinds, unsafe, value_needed, reassigned, stacks, exempt, skip; ectx = ectx)
-            els_exprs = agen_backward_body(stmt.els, primal_body[idx].els, kinds, unsafe, value_needed, reassigned, stacks, exempt, skip; ectx = ectx)
+            then_exprs = agen_backward_body(stmt.then, primal_body[idx].then, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt, skip; ectx = ectx)
+            els_exprs = agen_backward_body(stmt.els, primal_body[idx].els, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt, skip; ectx = ectx)
             if haskey(branch_flags, idx)
                 push!(exprs, emit_if(Expr(:call, :(==), branch_flags[idx], 1), then_exprs, els_exprs))
             else
@@ -3211,17 +3202,21 @@ end
 # Also true whenever `body` itself has a block-boundary var (see
 # agen_block_boundary_vars): that push happens once per iteration of
 # whatever loop `body` is the direct body of, same as any other.
-function agen_body_has_snapshot(body, kinds, value_needed, reassigned, exempt, stacks)
+function agen_body_has_snapshot(body, kinds, active_map, value_needed, reassigned, exempt, stacks)
     !isempty(agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)) && return true
     for stmt in body
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if stmt.active && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, value_needed) && !(var in exempt)
+            # gate on active_map[var], matching agen_forward_body's own
+            # push gate (not stmt.active) -- see its comment: a write
+            # can need a push (and hence force this loop to reverse)
+            # even when its own rhs is a plain inactive literal.
+            if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, value_needed) && !(var in exempt)
                 return true
             end
         elseif stmt.kind == :for
             !isempty(agen_tripcount_bound_vars(stmt, reassigned)) && return true
-            agen_body_has_snapshot(stmt.body, kinds, value_needed, reassigned, exempt, stacks) && return true
+            agen_body_has_snapshot(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks) && return true
         elseif stmt.kind == :if
             return true   # every `if` pushes a branch flag, unconditionally
         end
@@ -3229,59 +3224,66 @@ function agen_body_has_snapshot(body, kinds, value_needed, reassigned, exempt, s
     return false
 end
 
-function agen_backward_assign(stmt, kinds, value_needed, reassigned, stacks, exempt, skip_restore = Set{Symbol}(); ectx = agen_ectx_stack(), key = nothing)
+function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, skip_restore = Set{Symbol}(); ectx = agen_ectx_stack(), key = nothing)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     is_accum = agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
     exprs = Any[]
-    # int-kinded lhs can't own a shadow at all, regardless of what
-    # stmt.active (this write's rhs) says -- same reasoning as the
-    # forward sweep's push gate
-    if kinds[var] in (:scalar_float, :array_float) && stmt.active
-        # `exempt` mirrors the forward sweep's own skip -- no push
-        # ever happened for this write, so there is nothing to pop,
-        # and `var` already holds its one true (post-write) value.
-        if agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, value_needed) && !(var in exempt) && !(var in skip_restore)
+    # int-kinded lhs can't own a shadow, or a pop, at all
+    if kinds[var] in (:scalar_float, :array_float)
+        # restore this write's overwritten old value whenever
+        # active_map[var] does -- matching agen_forward_body's push
+        # gate and snap_check_assign!'s own gate -- NOT stmt.active
+        # (this write's own rhs activity): a write can destroy a value
+        # some other, earlier-in-forward-order statement's nonlinear
+        # derivative still needs even when this particular write's own
+        # rhs is a plain inactive literal (e.g. a per-iteration array
+        # reset). `exempt`/`skip_restore` mirror the forward sweep's
+        # own skips -- no push ever happened for those, so there is
+        # nothing to pop.
+        if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, value_needed) && !(var in exempt) && !(var in skip_restore)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, agen_emit_pop(nm, ectx, key)))
         end
-        lhsb = agen_shadow(stmt.lhs)
-        if is_accum
-            agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = stmt.lhs)
-        else
-            # a leaf whose own slot exactly matches lhs is a GENUINE,
-            # non-identity self-reference -- is_accum only catches the
-            # identity case (+/-, coefficient exactly 1), so this is
-            # different and needs different treatment. Such a leaf's
-            # contribution can't be accumulated into lhsb the normal
-            # way: lhsb is simultaneously the seed being read FROM and
-            # a target being written TO, so `lhsb = lhsb + contribution`
-            # reads its own not-yet-updated self mid-computation --
-            # harmless in isolation, except the very next line
-            # (unconditional reset) then throws that whole sum away,
-            # silently dropping the contribution entirely. Collected
-            # separately and applied as a REPLACEMENT of lhsb instead:
-            # that replacement already reflects "lhsb now represents
-            # the OLD slot's adjoint", making a further reset both
-            # wrong (it would erase the value just computed) and
-            # unnecessary.
-            self_terms = Any[]
-            agen_distribute!(stmt.tree, lhsb, exprs; self_expr = stmt.lhs, self_terms = self_terms)
-            if isempty(self_terms)
-                push!(exprs, Expr(:(=), lhsb, 0.0))
+        if stmt.active
+            lhsb = agen_shadow(stmt.lhs)
+            if is_accum
+                agen_distribute!(stmt.tree, lhsb, exprs; skip_expr = stmt.lhs)
             else
-                push!(exprs, Expr(:(=), lhsb, der_sum_terms(self_terms)))
+                # a leaf whose own slot exactly matches lhs is a GENUINE,
+                # non-identity self-reference -- is_accum only catches the
+                # identity case (+/-, coefficient exactly 1), so this is
+                # different and needs different treatment. Such a leaf's
+                # contribution can't be accumulated into lhsb the normal
+                # way: lhsb is simultaneously the seed being read FROM and
+                # a target being written TO, so `lhsb = lhsb + contribution`
+                # reads its own not-yet-updated self mid-computation --
+                # harmless in isolation, except the very next line
+                # (unconditional reset) then throws that whole sum away,
+                # silently dropping the contribution entirely. Collected
+                # separately and applied as a REPLACEMENT of lhsb instead:
+                # that replacement already reflects "lhsb now represents
+                # the OLD slot's adjoint", making a further reset both
+                # wrong (it would erase the value just computed) and
+                # unnecessary.
+                self_terms = Any[]
+                agen_distribute!(stmt.tree, lhsb, exprs; self_expr = stmt.lhs, self_terms = self_terms)
+                if isempty(self_terms)
+                    push!(exprs, Expr(:(=), lhsb, 0.0))
+                else
+                    push!(exprs, Expr(:(=), lhsb, der_sum_terms(self_terms)))
+                end
             end
+        elseif !is_accum
+            # this specific write's rhs carries no active leaf at all --
+            # there's nothing to distribute, but the shadow this write
+            # "produced" still needs resetting here. Skipping the reset
+            # because THIS write happens to be a constant would let
+            # whatever an earlier (already-processed-in-reverse) statement
+            # accumulated into the shadow leak into the next
+            # (chronologically earlier) iteration's contribution instead
+            # of starting fresh.
+            push!(exprs, Expr(:(=), agen_shadow(stmt.lhs), 0.0))
         end
-    elseif !is_accum && kinds[var] in (:scalar_float, :array_float)
-        # this specific write's rhs carries no active leaf at all --
-        # there's nothing to distribute, but the shadow this write
-        # "produced" still needs resetting here. Skipping the reset
-        # because THIS write happens to be a constant would let
-        # whatever an earlier (already-processed-in-reverse) statement
-        # accumulated into the shadow leak into the next
-        # (chronologically earlier) iteration's contribution instead
-        # of starting fresh.
-        push!(exprs, Expr(:(=), agen_shadow(stmt.lhs), 0.0))
     end
     return exprs
 end
@@ -3416,7 +3418,7 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout)
 
     fwd = agen_forward_body(kernel.body, sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx)
-    bwd = agen_backward_body(lin_plan, kernel.body, sig.kinds, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
+    bwd = agen_backward_body(lin_plan, kernel.body, sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
 
     shadow_of = hvp_shadow_map(kernel, sites)
 

@@ -62,6 +62,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
         for i_seq_k = 1:nu1
             push!(tripcount_stack, n)
             for i_seq_j = 1:n
+                push!(left_stack_d, leftd)
+                push!(left_stack, left)
                 leftd = 0.0
                 left = 0.0
                 if i_seq_j > 1
@@ -73,6 +75,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 else
                     push!(branch_stack, 0)
                 end
+                push!(right_stack_d, rightd)
+                push!(right_stack, right)
                 rightd = 0.0
                 right = 0.0
                 if i_seq_j < n
@@ -100,6 +104,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
         end
         push!(tripcount_stack, n)
         for j = 1:n
+            push!(left_stack_d, leftd)
+            push!(left_stack, left)
             leftd = 0.0
             left = 0.0
             if j > 1
@@ -111,6 +117,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             else
                 push!(branch_stack, 0)
             end
+            push!(right_stack_d, rightd)
+            push!(right_stack, right)
             rightd = 0.0
             right = 0.0
             if j < n
@@ -143,6 +151,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
         end
         push!(tripcount_stack, nc)
         for j = 1:nc
+            push!(u_stack_d, ud[j, i_seq_level + 1])
+            push!(u_stack, u[j, i_seq_level + 1])
             ud[j, i_seq_level + 1] = 0.0
             u[j, i_seq_level + 1] = 0.0
         end
@@ -188,6 +198,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
         push!(tripcount_stack, nc)
         for j = 1:nc + 1
             jf = j * 2 - 1
+            push!(cl_stack_d, cld)
+            push!(cl_stack, cl)
             cld = 0.0
             cl = 0.0
             if j > 1
@@ -199,6 +211,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             else
                 push!(branch_stack, 0)
             end
+            push!(cr_stack_d, crd)
+            push!(cr_stack, cr)
             crd = 0.0
             cr = 0.0
             if j <= nc
@@ -222,6 +236,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
         for i_seq_k = 1:nu2
             push!(tripcount_stack, n)
             for i_seq_j = 1:n
+                push!(left_stack_d, leftd)
+                push!(left_stack, left)
                 leftd = 0.0
                 left = 0.0
                 if i_seq_j > 1
@@ -233,6 +249,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 else
                     push!(branch_stack, 0)
                 end
+                push!(right_stack_d, rightd)
+                push!(right_stack, right)
                 rightd = 0.0
                 right = 0.0
                 if i_seq_j < n
@@ -355,6 +373,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     rightbd = 0.0
                     rightb = 0.0
                 end
+                rightd = pop!(right_stack_d)
+                right = pop!(right_stack)
                 rightbd = 0.0
                 rightb = 0.0
                 if __branch_pre_2 == 1
@@ -363,6 +383,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     leftbd = 0.0
                     leftb = 0.0
                 end
+                leftd = pop!(left_stack_d)
+                left = pop!(left_stack)
                 leftbd = 0.0
                 leftb = 0.0
             end
@@ -412,6 +434,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 crbd = 0.0
                 crb = 0.0
             end
+            crd = pop!(cr_stack_d)
+            cr = pop!(cr_stack)
             crbd = 0.0
             crb = 0.0
             if __branch_pre_3 == 1
@@ -420,6 +444,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 clbd = 0.0
                 clb = 0.0
             end
+            cld = pop!(cl_stack_d)
+            cl = pop!(cl_stack)
             clbd = 0.0
             clb = 0.0
         end
@@ -470,7 +496,9 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
         hlbd = 2.0hlbd
         hlb = 2.0hlb
         nc = pop!(tripcount_stack)
-        for j = 1:nc
+        for j = nc:-1:1
+            ud[j, i_seq_level + 1] = pop!(u_stack_d)
+            u[j, i_seq_level + 1] = pop!(u_stack)
             ubd[j, i_seq_level + 1] = 0.0
             ub[j, i_seq_level + 1] = 0.0
         end
@@ -540,6 +568,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 rightbd = 0.0
                 rightb = 0.0
             end
+            rightd = pop!(right_stack_d)
+            right = pop!(right_stack)
             rightbd = 0.0
             rightb = 0.0
             if __branch_pre_2 == 1
@@ -548,6 +578,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 leftbd = 0.0
                 leftb = 0.0
             end
+            leftd = pop!(left_stack_d)
+            left = pop!(left_stack)
             leftbd = 0.0
             leftb = 0.0
         end
@@ -606,6 +638,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     rightbd = 0.0
                     rightb = 0.0
                 end
+                rightd = pop!(right_stack_d)
+                right = pop!(right_stack)
                 rightbd = 0.0
                 rightb = 0.0
                 if __branch_pre_2 == 1
@@ -614,6 +648,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     leftbd = 0.0
                     leftb = 0.0
                 end
+                leftd = pop!(left_stack_d)
+                left = pop!(left_stack)
                 leftbd = 0.0
                 leftb = 0.0
             end

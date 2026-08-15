@@ -37,6 +37,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         for i_seq_k = 1:nu1
             push!(tripcount_stack, n)
             for i_seq_j = 1:n
+                push!(left_stack, left)
                 left = 0.0
                 if i_seq_j > 1
                     push!(branch_stack, 1)
@@ -45,6 +46,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 else
                     push!(branch_stack, 0)
                 end
+                push!(right_stack, right)
                 right = 0.0
                 if i_seq_j < n
                     push!(branch_stack, 1)
@@ -63,6 +65,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         end
         push!(tripcount_stack, n)
         for j = 1:n
+            push!(left_stack, left)
             left = 0.0
             if j > 1
                 push!(branch_stack, 1)
@@ -71,6 +74,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             else
                 push!(branch_stack, 0)
             end
+            push!(right_stack, right)
             right = 0.0
             if j < n
                 push!(branch_stack, 1)
@@ -94,6 +98,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         end
         push!(tripcount_stack, nc)
         for j = 1:nc
+            push!(u_stack, u[j, i_seq_level + 1])
             u[j, i_seq_level + 1] = 0.0
         end
         nl = ncg
@@ -124,6 +129,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         push!(tripcount_stack, nc)
         for j = 1:nc + 1
             jf = j * 2 - 1
+            push!(cl_stack, cl)
             cl = 0.0
             if j > 1
                 push!(branch_stack, 1)
@@ -132,6 +138,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             else
                 push!(branch_stack, 0)
             end
+            push!(cr_stack, cr)
             cr = 0.0
             if j <= nc
                 push!(branch_stack, 1)
@@ -148,6 +155,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         for i_seq_k = 1:nu2
             push!(tripcount_stack, n)
             for i_seq_j = 1:n
+                push!(left_stack, left)
                 left = 0.0
                 if i_seq_j > 1
                     push!(branch_stack, 1)
@@ -156,6 +164,7 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 else
                     push!(branch_stack, 0)
                 end
+                push!(right_stack, right)
                 right = 0.0
                 if i_seq_j < n
                     push!(branch_stack, 1)
@@ -231,11 +240,13 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                     ub[i_seq_j + 1, i_seq_level] = ub[i_seq_j + 1, i_seq_level] + rightb
                     rightb = 0.0
                 end
+                right = pop!(right_stack)
                 rightb = 0.0
                 if __branch_pre_2 == 1
                     ub[i_seq_j - 1, i_seq_level] = ub[i_seq_j - 1, i_seq_level] + leftb
                     leftb = 0.0
                 end
+                left = pop!(left_stack)
                 leftb = 0.0
             end
         end
@@ -271,11 +282,13 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 ub[j, i_seq_level + 1] = ub[j, i_seq_level + 1] + crb
                 crb = 0.0
             end
+            cr = pop!(cr_stack)
             crb = 0.0
             if __branch_pre_3 == 1
                 ub[j - 1, i_seq_level + 1] = ub[j - 1, i_seq_level + 1] + clb
                 clb = 0.0
             end
+            cl = pop!(cl_stack)
             clb = 0.0
         end
         nc = pop!(tripcount_stack)
@@ -305,7 +318,8 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         hl = pop!(hl_stack)
         hlb = 2.0hlb
         nc = pop!(tripcount_stack)
-        for j = 1:nc
+        for j = nc:-1:1
+            u[j, i_seq_level + 1] = pop!(u_stack)
             ub[j, i_seq_level + 1] = 0.0
         end
         nc = pop!(tripcount_stack)
@@ -352,11 +366,13 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 ub[j + 1, i_seq_level] = ub[j + 1, i_seq_level] + rightb
                 rightb = 0.0
             end
+            right = pop!(right_stack)
             rightb = 0.0
             if __branch_pre_2 == 1
                 ub[j - 1, i_seq_level] = ub[j - 1, i_seq_level] + leftb
                 leftb = 0.0
             end
+            left = pop!(left_stack)
             leftb = 0.0
         end
         for i_seq_k = nu1:-1:1
@@ -396,11 +412,13 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                     ub[i_seq_j + 1, i_seq_level] = ub[i_seq_j + 1, i_seq_level] + rightb
                     rightb = 0.0
                 end
+                right = pop!(right_stack)
                 rightb = 0.0
                 if __branch_pre_2 == 1
                     ub[i_seq_j - 1, i_seq_level] = ub[i_seq_j - 1, i_seq_level] + leftb
                     leftb = 0.0
                 end
+                left = pop!(left_stack)
                 leftb = 0.0
             end
         end

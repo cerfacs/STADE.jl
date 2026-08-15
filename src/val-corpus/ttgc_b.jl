@@ -6,6 +6,7 @@ end
 function ttgc_b(i_cell_to_node, node_vol, node_volb, i_ncell, i_nnode, i_njac, up, upb, mup, mupb, mup_stack)
     for i_seq_ = 1:i_njac
         for i_node = 1:i_nnode
+            push!(mup_stack, mup[i_node])
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
@@ -27,7 +28,8 @@ function ttgc_b(i_cell_to_node, node_vol, node_volb, i_ncell, i_nnode, i_njac, u
             mup[i_node1] = pop!(mup_stack)
             upb[i_node1] = upb[i_node1] + mupb[i_node1]
         end
-        for i_node = 1:i_nnode
+        for i_node = i_nnode:-1:1
+            mup[i_node] = pop!(mup_stack)
             mupb[i_node] = 0.0
         end
     end

@@ -7,6 +7,8 @@ function ttgc_hv(i_cell_to_node, node_vol, node_volb, i_ncell, i_nnode, i_njac, 
     mup_stack_d = Vector{Float64}()
     for i_seq_ = 1:i_njac
         for i_node = 1:i_nnode
+            push!(mup_stack_d, mupd[i_node])
+            push!(mup_stack, mup[i_node])
             mupd[i_node] = 0.0
             mup[i_node] = 0.0
         end
@@ -36,7 +38,9 @@ function ttgc_hv(i_cell_to_node, node_vol, node_volb, i_ncell, i_nnode, i_njac, 
             upbd[i_node1] = upbd[i_node1] + mupbd[i_node1]
             upb[i_node1] = upb[i_node1] + mupb[i_node1]
         end
-        for i_node = 1:i_nnode
+        for i_node = i_nnode:-1:1
+            mupd[i_node] = pop!(mup_stack_d)
+            mup[i_node] = pop!(mup_stack)
             mupbd[i_node] = 0.0
             mupb[i_node] = 0.0
         end
