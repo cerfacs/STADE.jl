@@ -19,7 +19,7 @@
 - [ ] (Binomial) checkpointing support
 - [ ] Fixed-point loops efficient differentiation
 
-#### If you use this software, please cite us:
+#### If you use or build upon this software, please cite us:
 
 ```bibtex
 @software{drozda_STADE,
