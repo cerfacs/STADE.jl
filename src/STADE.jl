@@ -4457,35 +4457,26 @@ end
 # always reproduces the exact double-precision behavior of the source
 # kernel with nothing to undo.
 #
-# A literal walk alone isn't enough, though: some operators return
-# Float64 unconditionally regardless of their operand types, with no
-# Float64 *literal* anywhere in the source for a tree walk to find --
-# true division of two Integer operands (`2/2 -> Float64`), and every
-# whitelisted transcendental intrinsic applied to an Integer argument
-# (`sqrt(2) -> Float64`, but `sqrt(2.0f0) -> Float32`), both fall back
-# to Base's generic `f(x::Real) = f(float(x))`, and `float(::Integer)`
-# always means Float64 specifically, never T. So both are rewritten to
-# force their operands to T *before* the call, which is safe even when
-# an operand is already T (T(x::T) is the identity) and guarantees a
-# T-typed result regardless of what the operand actually was:
-#   a / b                 ->  T(a) / T(b)
-#   sqrt(x), sin(x), ...  ->  sqrt(T(x)), sin(T(x)), ...
-# `^` is deliberately left alone: Julia's own type tracking already
-# keeps `Float32 ^ Integer` as Float32 (verified), so there's no Expr-
-# level promotion bug to rewrite around -- but Metal.jl has had a real,
-# separate bug where its *compiler* computes `Float32 ^ Integer` in
-# double precision internally regardless of what Julia's type system
-# says (JuliaGPU/Metal.jl#552). No Julia-side Expr rewrite can fix a
-# backend compiler bug, so this is documented as a known Metal.jl
-# caveat (see cgen_backend_metal) rather than "fixed" by a rewrite that
-# might not even address it and could go stale as Metal.jl changes.
-function cgen_precision_unstable_unary()
-    return Set{Symbol}([
-        :sqrt, :exp, :log, :log10, :sin, :cos, :tan,
-        :asin, :acos, :atan, :sinh, :cosh, :tanh,
-    ])
-end
-
+# Deliberately just a literal walk, no operand-forcing rewrite: every
+# array/scalar the kernel operates on is caller-supplied (skill-jade
+# rule 8 -- no in-kernel allocation), so its precision is the caller's
+# responsibility to get right, not something STADE should silently
+# paper over by injecting T(...) casts around every division or
+# transcendental call. One known consequence worth knowing about: a
+# handful of Base operations return Float64 unconditionally when *both*
+# their operands happen to be Integer, with no Float64 literal anywhere
+# in the source for a tree walk to catch -- true division of two
+# Integers (`2/2 -> Float64`) and any transcendental intrinsic applied
+# to an Integer argument (`sqrt(2) -> Float64`), both via Base's generic
+# `f(x::Real) = f(float(x))` fallback, where `float(::Integer)` always
+# means Float64, never T. That's a real Integer-argument case, not a
+# caller-precision one (an Int stays semantically exact regardless of
+# T), so if a kernel's index/loop-bound arithmetic ever flows into a
+# bare `/` or transcendental call with no float operand alongside it,
+# the result is Float64 even under precision=Float32 -- on a
+# precision_locked backend (Metal) that then fails to compile rather
+# than silently running in double precision, so it surfaces immediately
+# rather than corrupting results.
 function cgen_convert_precision(expr, ::Type{T}) where {T<:AbstractFloat}
     tname = Symbol(string(T))
     if expr isa AbstractFloat
@@ -4495,26 +4486,21 @@ function cgen_convert_precision(expr, ::Type{T}) where {T<:AbstractFloat}
     # cgen_/jgen_ device stack allocation (Vector{Float64}, CuArray{Float64},
     # ROCArray{Float64}, MtlArray{Float64} -- see cgen_stack_device_expr)
     # or the first positional argument of JACC.zeros(Float64, size_expr)
-    # (see jgen_stack_device_expr). Both sit inside an ordinary Expr that
+    # (see jgen_stack_device_expr). This isn't the caller-precision
+    # question the comment above opts out of retyping for -- these
+    # stacks are STADE's own allocations, never caller-supplied, so
+    # retyping them to match every other downcast float in the same
+    # output is still STADE's job. Both sit inside an ordinary Expr that
     # the generic recursion branch below already walks arg-by-arg, so a
-    # single, context-free rewrite here is enough to retype a :array/
-    # :value stack's storage to match every other downcast float in the
-    # same output -- without this, a Metal.jl device kernel that reads
-    # from an un-retyped Float64 stack fails to compile (Apple GPUs have
-    # no FP64 hardware), exactly the gap this branch closes. `:Int64` is
+    # single, context-free rewrite here is enough -- without it, a
+    # Metal.jl device kernel that reads from an un-retyped Float64 stack
+    # fails to compile (Apple GPUs have no FP64 hardware). `:Int64` is
     # deliberately left untouched: a :branch/:tripcount stack's element
     # type is never precision-converted for any backend, mirroring how
     # every other Int-typed loop/index expression in this function is
     # left alone by the AbstractFloat-only literal walk above.
     elseif expr === :Float64
         return tname
-    elseif expr isa Expr && expr.head == :call && expr.args[1] == :/ && length(expr.args) == 3
-        a = cgen_convert_precision(expr.args[2], T)
-        b = cgen_convert_precision(expr.args[3], T)
-        return Expr(:call, :/, Expr(:call, tname, a), Expr(:call, tname, b))
-    elseif expr isa Expr && expr.head == :call && length(expr.args) == 2 && expr.args[1] in cgen_precision_unstable_unary()
-        arg = cgen_convert_precision(expr.args[2], T)
-        return Expr(:call, expr.args[1], Expr(:call, tname, arg))
     elseif expr isa Expr
         return Expr(expr.head, [cgen_convert_precision(a, T) for a in expr.args]...)
     end
@@ -6099,13 +6085,18 @@ let
 
     metal_plan = stade_metal(:(function stub3(u, v, n)
         for i_x = 1:n
-            v[i_x] = u[i_x] / 2 + sqrt(n) * 1.5
+            v[i_x] = u[i_x] / 2.0 + sqrt(2.0) * 1.5
         end
         return nothing
     end))
     @assert String(metal_plan.host.args[1].args[1]) == "stub3_metal"
     ksrc = string(metal_plan.kernels[1])
-    @assert occursin("thread_position_in_grid", ksrc) && occursin("1.5f0", ksrc) && occursin("Float32(n)", ksrc)
+    # no more operand-forcing T(...) wraps (see cgen_convert_precision's
+    # comment on why) -- just the literal walk: every bare Float64
+    # literal in the source (2.0, 2.0, 1.5) downcasts to f0, and nothing
+    # else is rewritten
+    @assert occursin("thread_position_in_grid", ksrc) && occursin("1.5f0", ksrc) &&
+            occursin("2.0f0", ksrc) && !occursin("Float32(", ksrc)
     @assert occursin("@metal", string(:(@metal threads = 1 groups = 1 f()))) # sanity on macro name only
     threw = false
     try
