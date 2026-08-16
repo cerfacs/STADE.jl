@@ -4069,22 +4069,84 @@ end
 # Array names never qualify (skill-jade forbids in-kernel allocation,
 # so an array symbol is always caller-supplied) -- only a bare-Symbol
 # assignment target counts, never an array-ref lhs.
+#
+# EXCEPTION: a *self-referencing* bare-Symbol assignment (`cb = cb +
+# ...`, reading its own lhs among the rhs's flattened +/- terms) is
+# not a fresh-per-iteration local at all -- it's a cross-thread scalar
+# reduction (an adjoint accumulator like `cb`/`dxb`/`dtb` is the
+# common case), the exact same "accumulate in place" pattern
+# cgen_device_assign already special-cases for an *array-indexed* lhs
+# (`x[k] = x[k] + v`). Excluding it here keeps it a free var (see
+# cgen_free_vars), so it's still passed as a kernel argument instead
+# of silently vanishing from the generated signature; the atomic
+# rewrite that makes accumulating it across threads actually safe
+# lives in cgen_device_assign/jgen_device_assign, driven by
+# cgen_scalar_reduction_vars below.
 function cgen_locally_assigned_scalars(body::Vector{NamedTuple})
     names = Set{Symbol}()
     cgen_collect_locally_assigned!(body, names)
     return names
 end
 
+function cgen_self_referencing_assign(stmt)
+    stmt.kind == :assign && stmt.lhs isa Symbol || return false
+    terms = cgen_flatten_sum(stmt.rhs)
+    return any(t -> t == stmt.lhs, terms)
+end
+
 function cgen_collect_locally_assigned!(body::Vector{NamedTuple}, names::Set{Symbol})
     for stmt in body
         if stmt.kind == :assign
-            stmt.lhs isa Symbol && push!(names, stmt.lhs)
+            if stmt.lhs isa Symbol && !cgen_self_referencing_assign(stmt)
+                push!(names, stmt.lhs)
+            end
         elseif stmt.kind == :for
             push!(names, stmt.var)
             cgen_collect_locally_assigned!(stmt.body, names)
         elseif stmt.kind == :if
             cgen_collect_locally_assigned!(stmt.then, names)
             cgen_collect_locally_assigned!(stmt.els, names)
+        end
+    end
+    return nothing
+end
+
+# The subset of a (to-be device-split) loop body's free vars that are
+# scalar cross-thread reductions (see the self-referencing exception
+# above) -- these are exactly the vars cgen_emit/jgen_emit must box
+# into a 1-element device array before any kernel launch can read or
+# atomically write them, and the ones cgen_device_assign/
+# jgen_device_assign must rewrite into an atomic add against that
+# boxed array rather than an ordinary per-thread-local assignment.
+#
+# NOT every self-referencing bare-Symbol assignment qualifies, though
+# -- a per-thread private running sum (`s = 0.0` then `s = s + ...`
+# inside a nested SEQUENTIAL loop, e.g. unet's inlined convolution
+# reduction over kernel taps) is self-referencing too, but it's fully
+# reinitialized ("fresh-init'd") within the same device-split
+# iteration before it's ever read, so it's thread-private and safe as
+# an ordinary per-thread local -- exactly cgen_locally_assigned_scalars'
+# own criterion. Only a var with a self-referencing assignment
+# SOMEWHERE and no fresh (non-self-referencing) init ANYWHERE in the
+# same body has no local initializer at all -- its value can only come
+# from outside the loop (a genuine cross-thread accumulator, e.g. an
+# adjoint scalar like `cb`). Hence: self-referenced vars, minus
+# whatever cgen_locally_assigned_scalars already deems local.
+function cgen_scalar_reduction_vars(body::Vector{NamedTuple})
+    self_ref = Set{Symbol}()
+    cgen_collect_scalar_reductions!(body, self_ref)
+    return setdiff(self_ref, cgen_locally_assigned_scalars(body))
+end
+
+function cgen_collect_scalar_reductions!(body::Vector{NamedTuple}, names::Set{Symbol})
+    for stmt in body
+        if stmt.kind == :assign
+            cgen_self_referencing_assign(stmt) && push!(names, stmt.lhs)
+        elseif stmt.kind == :if
+            cgen_collect_scalar_reductions!(stmt.then, names)
+            cgen_collect_scalar_reductions!(stmt.els, names)
+        elseif stmt.kind == :for
+            cgen_collect_scalar_reductions!(stmt.body, names)
         end
     end
     return nothing
@@ -4264,7 +4326,7 @@ function cgen_stack_device_expr(rhs::Expr, backend)
     return Expr(:call, Expr(:curly, backend.arrtype, T), :undef, size_expr)
 end
 
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend)
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol})
     exprs = Any[]
     for stmt in body
         if stmt.kind == :stackpush
@@ -4273,15 +4335,17 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? cgen_stack_device_expr(stmt.rhs, backend) : stmt.rhs
             push!(exprs, Expr(:(=), stmt.lhs, rhs))
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend), cgen_body(stmt.els, kernels, owner, backend)))
+            push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars), cgen_body(stmt.els, kernels, owner, backend, reduce_vars)))
         elseif stmt.kind == :for
             if !stmt.sequential && !cgen_contains_stackop(stmt.body)
                 idx = length(kernels) + 1
                 fargs = cgen_free_vars(stmt, stmt.var)
-                push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend))
+                loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
+                union!(reduce_vars, loop_reduce_vars)
+                push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars))
                 push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars)))
             end
         end
     end
@@ -4303,7 +4367,7 @@ cgen_loopvar_from_tid(lo, step, tid) =
     step == 1 ? Expr(:call, :+, lo, Expr(:call, :-, tid, 1)) :
                 Expr(:call, :+, lo, Expr(:call, :*, Expr(:call, :-, tid, 1), step))
 
-function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
+function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, reduce_vars::Set{Symbol})
     tid = :__tid
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
     body = Any[
@@ -4311,7 +4375,7 @@ function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, b
         Expr(:if, Expr(:call, :>, tid, n_iter), Expr(:block, emit_return_nothing())),
         Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, tid)),
     ]
-    append!(body, cgen_device_body(stmt.body, stmt.var, backend))
+    append!(body, cgen_device_body(stmt.body, stmt.var, backend, reduce_vars))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...), Expr(:block, body...))
 end
@@ -4329,11 +4393,11 @@ end
 # device-side body walk -- never sees :stackpush or a pop!-rhs assign,
 # since cgen_body only reaches here for a loop cgen_contains_stackop
 # already confirmed is clean at every depth
-function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend, thread_dep::Set{Symbol} = Set([thread_var]))
+function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend, reduce_vars::Set{Symbol}, thread_dep::Set{Symbol} = Set([thread_var]))
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
-            push!(exprs, cgen_device_assign(stmt, thread_var, thread_dep, backend))
+            push!(exprs, cgen_device_assign(stmt, thread_var, thread_dep, backend, reduce_vars))
             # a write's index can be computed through a same-body
             # scalar let-binding one or more hops from the thread
             # variable (`yi = f(idx); arr[yi] = ...`), not just written
@@ -4350,9 +4414,9 @@ function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend,
                 end
             end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, copy(thread_dep)), cgen_device_body(stmt.els, thread_var, backend, copy(thread_dep))))
+            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, reduce_vars, copy(thread_dep)), cgen_device_body(stmt.els, thread_var, backend, reduce_vars, copy(thread_dep))))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, copy(thread_dep))))
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, copy(thread_dep))))
         end
     end
     return exprs
@@ -4375,7 +4439,22 @@ end
 # cheap insurance against a future sizing/offset bug (e.g. from
 # keep_push_pop=false's Tier A/B arithmetic) silently parallelizing
 # something wrong instead of getting caught at generation time.
-function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, backend)
+function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, backend, reduce_vars::Set{Symbol})
+    if stmt.lhs isa Symbol && stmt.lhs in reduce_vars
+        # scalar cross-thread reduction (e.g. an adjoint accumulator
+        # like `cb`/`dxb`/`dtb`) -- cgen_emit already boxed this free
+        # var into a 1-element device array before any kernel launch,
+        # so the accumulation becomes an atomic add against index 1,
+        # the exact same treatment as the array-indexed self-reference
+        # case below, just pre-boxed to a known-size-1 array instead of
+        # relying on an existing caller-supplied index.
+        terms = cgen_flatten_sum(stmt.rhs)
+        self_idx = findfirst(t -> t == stmt.lhs, terms)
+        self_idx === nothing && error("cgen_device_assign: `$(stmt.lhs)` was classified as a scalar reduction target (see cgen_scalar_reduction_vars) but `$(stmt.lhs) = $(stmt.rhs)` doesn't self-reference -- this should be unreachable")
+        other = cgen_sum_excluding(terms, self_idx)
+        return Expr(:macrocall, backend.atomic_macro, nothing,
+                    Expr(:(+=), Expr(:ref, stmt.lhs, 1), other))
+    end
     if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains_any(stmt.lhs.args[2:end], thread_dep)
         terms = cgen_flatten_sum(stmt.rhs)
         self_idx = findfirst(t -> t == stmt.lhs, terms)
@@ -4440,8 +4519,26 @@ cgen_host_fname(name::Symbol, backend) = Symbol(string(name) * backend.suffix)
 
 function cgen_emit(gk, backend)
     kernels = Expr[]
-    host_body = cgen_body(gk.body, kernels, gk.name, backend)
+    reduce_vars = Set{Symbol}()
+    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars)
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
+    # Every scalar cross-thread reduction free var (see
+    # cgen_scalar_reduction_vars) must already be a 1-element device
+    # array before the first kernel launch that atomically writes it,
+    # and must be unboxed back to a plain host scalar before it can be
+    # returned -- both transfers are whole-array host<->device copies
+    # (CuArray([v]) / Array(v)[1]), never an element-wise scalar index
+    # into a still-device-resident array, so this is legal under
+    # allowscalar(false). Sorted for deterministic codegen output,
+    # matching cgen_free_vars' own convention.
+    reduce_vars_sorted = sort(collect(reduce_vars); by = string)
+    for v in reverse(reduce_vars_sorted)
+        pushfirst!(host_body, Expr(:(=), v, Expr(:call, backend.arrtype, Expr(:vect, v))))
+    end
+    for v in reduce_vars_sorted
+        v in gk.ret || continue
+        push!(host_body, Expr(:(=), v, Expr(:ref, Expr(:call, :Array, v), 1)))
+    end
     push!(host_body, emit_return_scalars(gk.ret))
     host = Expr(:function, Expr(:call, cgen_host_fname(gk.name, backend), gk.args...), Expr(:block, host_body...))
     return (host = host, kernels = kernels)
@@ -4584,7 +4681,7 @@ function jgen_stack_device_expr(rhs::Expr)
     return Expr(:call, Expr(:., :JACC, QuoteNode(:zeros)), T, size_expr)
 end
 
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol)
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol})
     exprs = Any[]
     for stmt in body
         if stmt.kind == :stackpush
@@ -4593,15 +4690,17 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? jgen_stack_device_expr(stmt.rhs) : stmt.rhs
             push!(exprs, Expr(:(=), stmt.lhs, rhs))
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner), jgen_body(stmt.els, kernels, owner)))
+            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars), jgen_body(stmt.els, kernels, owner, reduce_vars)))
         elseif stmt.kind == :for
             if !stmt.sequential && !cgen_contains_stackop(stmt.body)
                 idx = length(kernels) + 1
                 fargs = cgen_free_vars(stmt, stmt.var)
-                push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs))
+                loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
+                union!(reduce_vars, loop_reduce_vars)
+                push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars))
                 push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars)))
             end
         end
     end
@@ -4614,10 +4713,10 @@ end
 # guarantees the index range. cgen_loopvar_from_tid still does the
 # affine lo/step remapping (JACC's own 1:N index space vs. the
 # original loop's actual lo/step/hi), same as it does for cgen_.
-function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
+function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, reduce_vars::Set{Symbol})
     jidx = :__jacc_i
     body = Any[Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, jidx))]
-    append!(body, jgen_device_body(stmt.body, stmt.var))
+    append!(body, jgen_device_body(stmt.body, stmt.var, reduce_vars))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
 end
@@ -4635,15 +4734,15 @@ function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
                 Expr(:call, jgen_kernel_fname(owner, idx), fargs...))
 end
 
-function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol)
+function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol})
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
-            push!(exprs, jgen_device_assign(stmt, thread_var))
+            push!(exprs, jgen_device_assign(stmt, thread_var, reduce_vars))
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var), jgen_device_body(stmt.els, thread_var)))
+            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var, reduce_vars), jgen_device_body(stmt.els, thread_var, reduce_vars)))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var)))
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars)))
         end
     end
     return exprs
@@ -4651,8 +4750,20 @@ end
 
 # identical decision to cgen_device_assign, reusing cgen_'s own
 # occurs-check and sum-flattening helpers -- only the atomic macro's
-# target module is fixed rather than coming from a backend descriptor
-function jgen_device_assign(stmt, thread_var::Symbol)
+# target module is fixed rather than coming from a backend descriptor.
+# The scalar-reduction branch mirrors cgen_device_assign's exactly:
+# reduce_vars was already boxed into a 1-element JACC.array by
+# jgen_emit before any kernel launch, so `cb = cb + other` becomes an
+# atomic add against index 1 of that boxed array.
+function jgen_device_assign(stmt, thread_var::Symbol, reduce_vars::Set{Symbol})
+    if stmt.lhs isa Symbol && stmt.lhs in reduce_vars
+        terms = cgen_flatten_sum(stmt.rhs)
+        self_idx = findfirst(t -> t == stmt.lhs, terms)
+        self_idx === nothing && error("jgen_device_assign: `$(stmt.lhs)` was classified as a scalar reduction target (see cgen_scalar_reduction_vars) but `$(stmt.lhs) = $(stmt.rhs)` doesn't self-reference -- this should be unreachable")
+        other = cgen_sum_excluding(terms, self_idx)
+        return Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
+                    Expr(:(+=), Expr(:ref, stmt.lhs, 1), other))
+    end
     if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains(stmt.lhs.args[2:end], thread_var)
         terms = cgen_flatten_sum(stmt.rhs)
         self_idx = findfirst(t -> t == stmt.lhs, terms)
@@ -4669,7 +4780,20 @@ jgen_host_fname(name::Symbol) = Symbol(string(name) * "_jacc")
 
 function jgen_emit(gk)
     kernels = Expr[]
-    host_body = jgen_body(gk.body, kernels, gk.name)
+    reduce_vars = Set{Symbol}()
+    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars)
+    # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
+    # for a host->device whole-array transfer, JACC.to_host for the
+    # reverse -- see the "JACC v1.x API" section of
+    # skill-runpod-julia-cuda-jacc's SKILL.md.
+    reduce_vars_sorted = sort(collect(reduce_vars); by = string)
+    for v in reverse(reduce_vars_sorted)
+        pushfirst!(host_body, Expr(:(=), v, Expr(:call, Expr(:., :JACC, QuoteNode(:array)), Expr(:vect, v))))
+    end
+    for v in reduce_vars_sorted
+        v in gk.ret || continue
+        push!(host_body, Expr(:(=), v, Expr(:ref, Expr(:call, Expr(:., :JACC, QuoteNode(:to_host)), v), 1)))
+    end
     push!(host_body, emit_return_scalars(gk.ret))
     host = Expr(:function, Expr(:call, jgen_host_fname(gk.name), gk.args...), Expr(:block, host_body...))
     return (host = host, kernels = kernels)
