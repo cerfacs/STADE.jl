@@ -42,12 +42,13 @@
 #                         see the cgen_* section header for that gap.
 #   jgen_   JACC codegen  sibling to cgen_, not a gpu_backend value:
 #                         JACC.jl's dispatch-deferred-to-runtime model
-#                         (JACC.parallel_for + a plain indexed function,
-#                         vendor chosen later via Preferences.jl) isn't
-#                         the same programming model as a launch-macro
-#                         backend, so it gets its own prefix, reusing
-#                         cgen_'s shared parsing/free-var/atomic-
-#                         detection helpers directly.
+#                         (JACC.@parallel_for range=N + a plain indexed
+#                         function, vendor chosen later via
+#                         Preferences.jl) isn't the same programming
+#                         model as a launch-macro backend, so it gets
+#                         its own prefix, reusing cgen_'s shared
+#                         parsing/free-var/atomic-detection helpers
+#                         directly.
 #   val_    Validate      correctness checking against ground truth
 #                         (finite differences; later the adjoint
 #                         identity once tangent codegen is real).
@@ -1733,14 +1734,14 @@ end
 # class of writes Hascoet et al. (2001) identify as needing no tape at
 # all inside a genuinely independent loop.
 
-function snap_plan(kernel, active_map)
+function snap_plan(kernel, active_map; site_needed = nothing)
     reassigned = snap_collect_reassigned(kernel.body)
     value_needed = snap_value_needed_vars(kernel)
     assign_counts = snap_count_assign_sites(kernel.body)
     sites = NamedTuple[]
     counter = Ref(0)
     snap_walk!(kernel.body, active_map, kernel.sig.kinds, reassigned, value_needed, sites, counter,
-               false, assign_counts, kernel.body)
+               false, assign_counts, kernel.body, site_needed)
     return sites
 end
 
@@ -1912,19 +1913,20 @@ end
 # every snapshot's push and pop occupy the mirrored position in the
 # forward/backward walk, so nesting is always self-consistent
 # regardless of which subset of writes get one.
-function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body)
-    for stmt in body
+function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed = nothing)
+    for idx in eachindex(body)
+        stmt = body[idx]
         if stmt.kind == :assign
-            snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_loop, assign_counts, full_body)
+            snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_loop, assign_counts, full_body, body, idx, site_needed)
         elseif stmt.kind == :for
             snap_check_tripcount!(stmt, reassigned, sites, counter)
             snap_walk!(stmt.body, active_map, kinds, reassigned, value_needed, sites, counter,
-                       true, assign_counts, full_body)
+                       true, assign_counts, full_body, site_needed)
         elseif stmt.kind == :if
             counter[] = counter[] + 1
             push!(sites, (kind = :branch, array = :cond, at = counter[]))
-            snap_walk!(stmt.then, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body)
-            snap_walk!(stmt.els, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body)
+            snap_walk!(stmt.then, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed)
+            snap_walk!(stmt.els, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed)
         end
     end
     return nothing
@@ -1939,18 +1941,39 @@ end
 # iteration value restored for a later reverse-sweep read, so `in_loop`
 # must cover every :for ancestor -- no self-reference, never read
 # before it runs).
-function snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_loop, assign_counts, full_body)
+function snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_loop, assign_counts, full_body, body = nothing, idx = nothing, site_needed = nothing)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-    active_map[var] || return nothing
-    var in value_needed || return nothing
-    self_ref = snap_count_var_refs(stmt.rhs, var) > 0
-    if !self_ref && !in_loop && get(assign_counts, var, 0) == 1 && !snap_read_before(full_body, stmt, var)
-        return nothing
+    if site_needed !== nothing
+        # site-level TBR path: consult the precomputed per-site Dict
+        # (snap_value_needed_sites) instead of the whole-variable test
+        # -- already folds in the active_map gate, so no separate
+        # check needed here
+        needed = get(site_needed, agen_site_key(body, idx), false)
+        kind = kinds[var] == :array_float ? :array : :value
+    else
+        _, needed, kind = snap_assign_site_decision(stmt, active_map, kinds, value_needed, in_loop, assign_counts, full_body)
     end
-    kind = kinds[var] == :array_float ? :array : :value
+    needed || return nothing
     counter[] = counter[] + 1
     push!(sites, (kind = kind, array = var, at = counter[]))
     return nothing
+end
+
+# the array/value site decision at a single :assign statement, factored
+# out of snap_check_assign! so the identical predicate can be reused by
+# comparison/instrumentation code (e.g. the site-level shadow analysis)
+# without duplicating the logic. Behavior-preserving refactor -- callers
+# of snap_check_assign! see no change.
+function snap_assign_site_decision(stmt, active_map, kinds, value_needed, in_loop, assign_counts, full_body)
+    var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+    active_map[var] || return (var, false, nothing)
+    var in value_needed || return (var, false, nothing)
+    self_ref = snap_count_var_refs(stmt.rhs, var) > 0
+    if !self_ref && !in_loop && get(assign_counts, var, 0) == 1 && !snap_read_before(full_body, stmt, var)
+        return (var, false, nothing)
+    end
+    kind = kinds[var] == :array_float ? :array : :value
+    return (var, true, kind)
 end
 
 function snap_check_tripcount!(stmt, reassigned, sites, counter)
@@ -2027,6 +2050,88 @@ function snap_count_expr_occurrences(expr, target)
         end
     end
     return total
+end
+
+# ---- site-level (forward-seen) TBR: shadow analysis ----
+# `snap_value_needed_vars` decides "does var's value matter anywhere"
+# at whole-variable granularity. `snap_fwd_walk!` refines this to a
+# per-write decision using the DIRECTION that actually matters for
+# TBR: a write w needs its pre-write value snapshotted iff (a) w is
+# self-referencing (its own rhs reads var -- the write's own backward
+# code needs var-old to distribute the adjoint to w's OTHER operands),
+# or (b) some nonlinear read of var occurred STRICTLY BEFORE w in
+# forward execution order (matching the existing snap_read_before
+# helper's own direction). A nonlinear read that happens AFTER w reads
+# w's own NEW value, not the value w is about to destroy, so it plays
+# no part in w's own snapshot need -- that read's write (if it has
+# one) has since overwritten w's contribution already; w's write is
+# only rewound for the benefit of something EARLIER in forward order.
+# Shadow analysis only for now -- computed and cross-checked against
+# snap_plan's existing decisions (new decisions must always be a
+# subset of the old ones), not yet wired into codegen. See
+# skill-stade's site-level TBR rollout plan.
+#
+# `seen` = vars with a nonlinear read (or unconditional if-cond read)
+# strictly before the current point. Returns the seen-set as it stood
+# just AFTER `body` finished (its OUT set), and records into
+# `decisions` (a Dict keyed by agen_site_key(body, idx)) whether each
+# :assign site needs a snapshot.
+function snap_fwd_walk!(body, seen, active_map, decisions)
+    for idx in eachindex(body)
+        stmt = body[idx]
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            # local_reads: vars read NONLINEARLY within this rhs alone
+            # (needed=false at the root, same rule as everywhere else)
+            # -- self-reference only forces a snapshot when var's own
+            # occurrence is one of these, not merely present under a
+            # linear +/- (pure accumulation needs no old value: house
+            # style's der_rule comment, d(new)/d(old)=1).
+            local_reads = Set{Symbol}()
+            snap_var_value_needed!(stmt.rhs, local_reads, false)
+            decisions[agen_site_key(body, idx)] = active_map[var] && (var in local_reads || var in seen)
+            seen = union(seen, local_reads)
+        elseif stmt.kind == :if
+            snap_var_value_needed!(stmt.cond, seen, true)   # cond always conservative
+            seen_then = snap_fwd_walk!(stmt.then, copy(seen), active_map, decisions)
+            seen_els  = snap_fwd_walk!(stmt.els,  copy(seen), active_map, decisions)
+            seen = union(seen_then, seen_els)
+        elseif stmt.kind == :for
+            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions)
+        end
+    end
+    return seen
+end
+
+# Loop forward fixed point: a read near the TOP of a loop body is, for
+# every iteration but the first, actually preceded by the PREVIOUS
+# iteration's reads from later in the body (iteration i+1's statement
+# 1 runs after iteration i's statement N) -- so a write near the top
+# can need a snapshot due to a read near the bottom, one iteration
+# back. `seen` only grows across passes (monotone, bounded by the
+# finite variable universe), so this terminates. A final pass re-walks
+# with the converged seen-set so `decisions` reflects the fixed point
+# (covering iteration >=2), not the first-iteration-only guess.
+function snap_fwd_walk_loop!(body, in_seen, active_map, decisions)
+    seen = copy(in_seen)
+    while true
+        scratch = Dict{Any,Bool}()
+        out_seen = snap_fwd_walk!(body, union(seen, in_seen), active_map, scratch)
+        out_seen == seen && break
+        seen = out_seen
+    end
+    final_in = union(seen, in_seen)
+    return snap_fwd_walk!(body, final_in, active_map, decisions)
+end
+
+# public entry point for the shadow analysis: per-site (not
+# per-variable) TBR decisions for every :assign in `kernel`, keyed by
+# agen_site_key(body, idx). Not yet consumed by snap_plan or
+# agen_needs_snapshot.
+function snap_value_needed_sites(kernel)
+    decisions = Dict{Any,Bool}()
+    snap_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions)
+    return decisions
 end
 
 
@@ -2240,7 +2345,7 @@ end
 # into the exact lhs location as the very first thing its backward
 # code does, before any contribution is computed.
 
-function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true)
+function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, push_pop = nothing)
     active_map = act_analyze(kernel)
     layout = nothing
     if !keep_push_pop
@@ -2250,9 +2355,9 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true)
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
         stacks = agen_stack_map(snapshot_plan)
-        layout = agen_indexed_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks)
+        layout = agen_indexed_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = push_pop)
     end
-    adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout)
+    adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = push_pop)
     initstacks_expr = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout)
     return (adjoint = adjoint_expr, initstacks = initstacks_expr)
 end
@@ -2281,7 +2386,7 @@ function agen_signature_args(sig)
     return fargs
 end
 
-function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing)
+function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing)
     fname = agen_fname(kernel.sig.name)
     stacks = agen_stack_map(sites)
     fargs = vcat(agen_signature_args(kernel.sig), agen_stack_names(sites))
@@ -2291,7 +2396,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
     unsafe = agen_unsafe_int_vars(kernel)
     exempt = agen_exempt_vars(kernel, value_needed)
 
-    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout)
+    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop)
 
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map))
@@ -2629,8 +2734,61 @@ end
 # already subsumes self-reference (a self-referencing statement's own
 # rhs is itself one of the statements value_needed was built from) --
 # no separate check is needed here.
-function agen_needs_snapshot(lhs, rhs, var, value_needed)
+# Polymorphic on `value_needed`'s type: a `Set{Symbol}` (default,
+# whole-variable) behaves exactly as before, ignoring `key`. A
+# `Dict{Any,Bool}` (site-level TBR, keyed by agen_site_key) looks up
+# THIS statement's own decision instead -- see agen_value_needed_sites
+# / snap_value_needed_sites and skill-stade's site-level TBR rollout.
+function agen_needs_snapshot(lhs, rhs, var, value_needed, key = nothing)
+    value_needed isa AbstractDict && return get(value_needed, key, false)
     return var in value_needed
+end
+
+# see snap_fwd_walk!'s comment -- identical logic, duplicated here for
+# the same purity-rule reason as every other agen_-prefixed pair in
+# this file. Shadow analysis only for now; must be checked against
+# snap_value_needed_sites for exact agreement (Dict equality, not just
+# subset) before either can be wired into real codegen -- forward push
+# (driven by the snap_* side today, prospectively this side) and
+# backward pop (driven by this agen_* side via agen_needs_snapshot)
+# must decide identically at every site or push/pop counts desync.
+function agen_fwd_walk!(body, seen, active_map, decisions)
+    for idx in eachindex(body)
+        stmt = body[idx]
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            local_reads = Set{Symbol}()
+            agen_var_value_needed!(stmt.rhs, local_reads, false)
+            decisions[agen_site_key(body, idx)] = active_map[var] && (var in local_reads || var in seen)
+            seen = union(seen, local_reads)
+        elseif stmt.kind == :if
+            agen_var_value_needed!(stmt.cond, seen, true)
+            seen_then = agen_fwd_walk!(stmt.then, copy(seen), active_map, decisions)
+            seen_els  = agen_fwd_walk!(stmt.els,  copy(seen), active_map, decisions)
+            seen = union(seen_then, seen_els)
+        elseif stmt.kind == :for
+            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions)
+        end
+    end
+    return seen
+end
+
+function agen_fwd_walk_loop!(body, in_seen, active_map, decisions)
+    seen = copy(in_seen)
+    while true
+        scratch = Dict{Any,Bool}()
+        out_seen = agen_fwd_walk!(body, union(seen, in_seen), active_map, scratch)
+        out_seen == seen && break
+        seen = out_seen
+    end
+    final_in = union(seen, in_seen)
+    return agen_fwd_walk!(body, final_in, active_map, decisions)
+end
+
+function agen_value_needed_sites(kernel)
+    decisions = Dict{Any,Bool}()
+    agen_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions)
+    return decisions
 end
 
 
@@ -2864,11 +3022,11 @@ end
 # push-gating order/conditions, recording each occurrence's stack,
 # key, and local multiplicity; then folds those into per-stack
 # running-sum base offsets and total sizes.
-function agen_indexed_layout(kernel, kinds, active_map, value_needed, reassigned, exempt, stacks)
+function agen_indexed_layout(kernel, kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = nothing)
     occ_mult = Dict{Symbol,Vector{Any}}()
     key_order = Dict{Symbol,Vector{Any}}()
     loop_ctx = Any[]
-    agen_layout_walk!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order)
+    agen_layout_walk!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop)
     offsets = Dict{Any,Any}()
     sizes = Dict{Symbol,Any}()
     for (stack, mults) in occ_mult
@@ -2887,7 +3045,7 @@ function agen_indexed_layout(kernel, kinds, active_map, value_needed, reassigned
     return (offsets = offsets, sizes = sizes, free_vars = sort(collect(free); by = string))
 end
 
-function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order)
+function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop = nothing)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
@@ -2896,8 +3054,13 @@ function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, ex
             # rhs activity, so a destructive inactive-rhs write (e.g. a
             # per-iteration array reset) still gets a slot sized here
             # exactly when snap_plan itself would create a site for it.
+            # `push_pop` (site-level TBR), when given, takes over from
+            # `value_needed` here exactly as it does in
+            # agen_forward_body's own push gate -- see
+            # agen_push_pop_source's comment.
+            site_source = push_pop === nothing ? value_needed : push_pop
             if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) &&
-               agen_needs_snapshot(stmt.lhs, stmt.rhs, var, value_needed) && !(var in exempt)
+               agen_needs_snapshot(stmt.lhs, stmt.rhs, var, site_source, agen_site_key(body, idx)) && !(var in exempt)
                 nm = agen_site_stack_name((kind = agen_snapshot_kind(stmt.lhs), array = var, at = 0))
                 agen_layout_record!(occ_mult, key_order, nm, loop_ctx, agen_site_key(body, idx))
             end
@@ -2906,12 +3069,12 @@ function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, ex
                 agen_layout_record!(occ_mult, key_order, :tripcount_stack, loop_ctx, agen_site_key(body, idx, bv))
             end
             push!(loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
-            agen_layout_walk!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order)
+            agen_layout_walk!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop)
             pop!(loop_ctx)
         elseif stmt.kind == :if
             agen_layout_record!(occ_mult, key_order, :branch_stack, loop_ctx, agen_site_key(body, idx))
-            agen_layout_walk!(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order)
-            agen_layout_walk!(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order)
+            agen_layout_walk!(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop)
+            agen_layout_walk!(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop)
         end
     end
     # block-boundary restoration -- see agen_block_boundary_vars.
@@ -2941,7 +3104,17 @@ end
 # :for's own recursion, in both agen_forward_body and
 # agen_backward_body. Under keep_push_pop=true, `layout` is never
 # consulted (ectx.keep_push_pop short-circuits first).
-agen_ectx_stack() = (keep_push_pop = true, loop_ctx = Any[], layout = nothing)
+agen_ectx_stack() = (keep_push_pop = true, loop_ctx = Any[], layout = nothing, push_pop = nothing)
+
+# resolves which value_needed-like info the per-statement push/pop
+# gate should consult: the site-level Dict (ectx.push_pop) when one
+# was computed, else falls back to the ordinary whole-variable Set
+# (`value_needed`) -- exactly today's behavior when the flag is off.
+# Never affects agen_block_boundary_vars/agen_exempt_vars/
+# agen_if_branch_scalar_vars, which stay on the plain `value_needed`
+# Set always -- those model a different (block-scope / branch-hoist)
+# question site-level TBR doesn't cover yet.
+agen_push_pop_source(value_needed, ectx) = ectx.push_pop === nothing ? value_needed : ectx.push_pop
 
 function agen_site_index(ectx, key)
     (_, offset) = ectx.layout.offsets[key]
@@ -2984,7 +3157,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
             # activity -- only :tripcount covers int reassignment.
             # `exempt` skips the push entirely for a write snap_plan
             # itself would also elide -- see agen_exempt_vars.
-            if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, value_needed) && !(var in exempt)
+            if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, agen_push_pop_source(value_needed, ectx), agen_site_key(body, idx)) && !(var in exempt)
                 push!(exprs, agen_emit_push(stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs, ectx, agen_site_key(body, idx)))
             end
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
@@ -3189,7 +3362,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
             inner = agen_backward_body(stmt.body, primal_body[idx].body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
             pop!(ectx.loop_ctx)
-            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks)
+            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, primal_body[idx].body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx)
             loop_expr = reverse_it ?
                 emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
                 emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
@@ -3223,21 +3396,21 @@ end
 # Also true whenever `body` itself has a block-boundary var (see
 # agen_block_boundary_vars): that push happens once per iteration of
 # whatever loop `body` is the direct body of, same as any other.
-function agen_body_has_snapshot(body, kinds, active_map, value_needed, reassigned, exempt, stacks)
+function agen_body_has_snapshot(body, primal_body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx)
     !isempty(agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)) && return true
-    for stmt in body
+    for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             # gate on active_map[var], matching agen_forward_body's own
             # push gate (not stmt.active) -- see its comment: a write
             # can need a push (and hence force this loop to reverse)
             # even when its own rhs is a plain inactive literal.
-            if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, value_needed) && !(var in exempt)
+            if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), agen_site_key(primal_body, idx)) && !(var in exempt)
                 return true
             end
         elseif stmt.kind == :for
             !isempty(agen_tripcount_bound_vars(stmt, reassigned)) && return true
-            agen_body_has_snapshot(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks) && return true
+            agen_body_has_snapshot(stmt.body, primal_body[idx].body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx) && return true
         elseif stmt.kind == :if
             return true   # every `if` pushes a branch flag, unconditionally
         end
@@ -3261,7 +3434,7 @@ function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned,
         # reset). `exempt`/`skip_restore` mirror the forward sweep's
         # own skips -- no push ever happened for those, so there is
         # nothing to pop.
-        if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, value_needed) && !(var in exempt) && !(var in skip_restore)
+        if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), key) && !(var in exempt) && !(var in skip_restore)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, agen_emit_pop(nm, ectx, key)))
         end
@@ -3428,7 +3601,7 @@ end
 # unchanged; only the NEW shadow stacks are this stage's concern, and
 # they never need to outlive one call.
 
-function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing)
+function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing)
     sig = kernel.sig
     stacks = agen_stack_map(sites)
     value_needed = agen_value_needed_vars(kernel)
@@ -3436,7 +3609,7 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     unsafe = agen_unsafe_int_vars(kernel)
     exempt = agen_exempt_vars(kernel, value_needed)
 
-    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout)
+    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop)
 
     fwd = agen_forward_body(kernel.body, sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx)
     bwd = agen_backward_body(lin_plan, kernel.body, sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
@@ -4114,23 +4287,40 @@ end
 # device-side body walk -- never sees :stackpush or a pop!-rhs assign,
 # since cgen_body only reaches here for a loop cgen_contains_stackop
 # already confirmed is clean at every depth
-function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend)
+function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend, thread_dep::Set{Symbol} = Set([thread_var]))
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
-            push!(exprs, cgen_device_assign(stmt, thread_var, backend))
+            push!(exprs, cgen_device_assign(stmt, thread_var, thread_dep, backend))
+            # a write's index can be computed through a same-body
+            # scalar let-binding one or more hops from the thread
+            # variable (`yi = f(idx); arr[yi] = ...`), not just written
+            # literally in the index expression itself -- extend
+            # thread_dep transitively so cgen_device_assign's occurs-
+            # check sees through it. Tracks CURRENT dependency per
+            # variable (removed on a reassignment that breaks the
+            # chain), not a once-true-always-true flag.
+            if stmt.lhs isa Symbol
+                if cgen_expr_contains_any(stmt.rhs, thread_dep)
+                    push!(thread_dep, stmt.lhs)
+                else
+                    delete!(thread_dep, stmt.lhs)
+                end
+            end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend), cgen_device_body(stmt.els, thread_var, backend)))
+            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, copy(thread_dep)), cgen_device_body(stmt.els, thread_var, backend, copy(thread_dep))))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend)))
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, copy(thread_dep))))
         end
     end
     return exprs
 end
 
 # a write races across threads unless the enclosing device loop's own
-# thread-mapped variable occurs (at any depth) in the write's index --
-# a real occurs-check, not shallow top-level membership. ANY
+# thread-mapped variable occurs (at any depth) in the write's index, OR
+# the index is computed from it through a chain of same-body scalar
+# let-bindings (`thread_dep` -- see cgen_device_body) -- a real
+# occurs-check, not shallow top-level membership. ANY
 # thread-invariant-indexed write from a parallel loop is a race
 # regardless of whether it's an additive accumulation pattern
 # (x[k]=x[k]+v) or a plain replacement -- an accumulation is safe to
@@ -4143,8 +4333,8 @@ end
 # cheap insurance against a future sizing/offset bug (e.g. from
 # keep_push_pop=false's Tier A/B arithmetic) silently parallelizing
 # something wrong instead of getting caught at generation time.
-function cgen_device_assign(stmt, thread_var::Symbol, backend)
-    if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains(stmt.lhs.args[2:end], thread_var)
+function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, backend)
+    if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains_any(stmt.lhs.args[2:end], thread_dep)
         terms = cgen_flatten_sum(stmt.rhs)
         self_idx = findfirst(t -> t == stmt.lhs, terms)
         if self_idx !== nothing
@@ -4152,7 +4342,7 @@ function cgen_device_assign(stmt, thread_var::Symbol, backend)
             return Expr(:macrocall, backend.atomic_macro, nothing,
                         Expr(:(+=), stmt.lhs, other))
         end
-        error("cgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`) and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade.md's cgen_device_assign hardening note.")
+        error("cgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade.md's cgen_device_assign hardening note.")
     end
     return Expr(:(=), stmt.lhs, stmt.rhs)
 end
@@ -4163,6 +4353,16 @@ function cgen_expr_contains(x, sym::Symbol)
     return false
 end
 cgen_expr_contains(xs::Vector, sym::Symbol) = any(x -> cgen_expr_contains(x, sym), xs)
+
+# same occurs-check, generalized to a set of symbols -- used for
+# cgen_device_assign's thread_dep (thread_var plus every scalar
+# transitively derived from it in the current device-loop body)
+function cgen_expr_contains_any(x, syms::Set{Symbol})
+    x isa Symbol && return x in syms
+    x isa Expr && return any(a -> cgen_expr_contains_any(a, syms), x.args)
+    return false
+end
+cgen_expr_contains_any(xs::Vector, syms::Set{Symbol}) = any(x -> cgen_expr_contains_any(x, syms), xs)
 
 # flattens a +/- spine into signed terms -- e.g. `x + a - b` -> [x, a, -b] --
 # so the self-reference check below works regardless of how many terms
@@ -4266,8 +4466,11 @@ end
 # JACC.jl codegen. JACC replaces CUDA.jl/AMDGPU.jl/Metal.jl's "write a
 # kernel + a vendor launch macro + vendor thread-index intrinsics"
 # model with a single plain function taking the loop index as its
-# first argument, dispatched via `JACC.parallel_for(N, f, args...)` --
-# which vendor backend actually executes it is chosen once per Julia
+# first argument, dispatched via `JACC.@parallel_for range=N f(args...)`
+# (JACC.jl v1.x; the pre-1.0/v0.0.x line used a plain function call
+# `JACC.parallel_for(N, f, args...)` instead -- see skill-stade.md's
+# jgen_ v1.x migration note if targeting an older JACC pin) -- which
+# vendor backend actually executes it is chosen once per Julia
 # *project*, outside any code jgen_ generates, via Preferences.jl. That
 # is a different enough model from cgen_'s gpu_backend (no launch
 # macro, no thread-index intrinsic to synthesize, and no way to know
@@ -4305,8 +4508,8 @@ end
 # possibility for the output.
 #
 # Bounds checking inside a split-off loop is deliberately omitted:
-# JACC.parallel_for(N, f, args...) is documented and exemplified
-# (JuliaGPU/JACC.jl's own current README) without an internal `i <=
+# JACC.@parallel_for range=N f(args...) is documented and exemplified
+# (JuliaGPU/JACC.jl's own current stable docs) without an internal `i <=
 # length(...)` guard inside the kernel function, unlike a raw @cuda/
 # @roc/@metal launch which can overshoot to block granularity. This is
 # taken on documentation/example evidence, not verified against a
@@ -4342,7 +4545,7 @@ end
 
 # JACC hands the loop index in directly as the split-off function's
 # first parameter -- no thread-index intrinsic to bind, unlike
-# cgen_kernel_def, since JACC.parallel_for(N, f, args...) already
+# cgen_kernel_def, since JACC.@parallel_for range=N already
 # guarantees the index range. cgen_loopvar_from_tid still does the
 # affine lo/step remapping (JACC's own 1:N index space vs. the
 # original loop's actual lo/step/hi), same as it does for cgen_.
@@ -4354,12 +4557,17 @@ function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
     return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
 end
 
-# a plain function call, not a macrocall -- JACC.parallel_for is an
-# ordinary function, with no thread/block sizing to compute at this
-# level (that's internal to JACC, unlike cgen_launch_expr's cld(...))
+# JACC.jl v1.x: JACC.@parallel_for range=N f(args...) -- a macro with a
+# `range=` keyword-style argument, not a plain function call (that was
+# the pre-1.0/v0.0.x API; see skill-stade.md's jgen_ v1.x migration
+# note). The underlying kernel function's own signature is unchanged
+# (index still its own first parameter, supplied internally by the
+# macro) -- only the launch call's shape moved.
 function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
-    return Expr(:call, Expr(:., :JACC, QuoteNode(:parallel_for)), n_iter, jgen_kernel_fname(owner, idx), fargs...)
+    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_for"))), nothing,
+                Expr(:(=), :range, n_iter),
+                Expr(:call, jgen_kernel_fname(owner, idx), fargs...))
 end
 
 function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol)
@@ -4403,7 +4611,12 @@ function jgen_emit(gk)
 end
 
 function jgen_preamble()
-    return "import Pkg\nhaskey(Pkg.project().dependencies, \"JACC\") || Pkg.add(\"JACC\")\nhaskey(Pkg.project().dependencies, \"Atomix\") || Pkg.add(\"Atomix\")\nimport JACC\nimport Atomix\nJACC.@init_backend\n"
+    # pinned to the v1.x line: jgen_launch_expr emits the v1.x
+    # `@parallel_for range=N` macro form (a breaking change from
+    # v0.0.x's plain-function-call API) -- an unpinned Pkg.add here
+    # would silently drift onto whatever major version is newest,
+    # exactly the class of mismatch that motivated this pin.
+    return "import Pkg\nhaskey(Pkg.project().dependencies, \"JACC\") || Pkg.add(name = \"JACC\", version = \"1\")\nhaskey(Pkg.project().dependencies, \"Atomix\") || Pkg.add(\"Atomix\")\nimport JACC\nimport Atomix\nJACC.@init_backend\n"
 end
 
 
@@ -5416,22 +5629,41 @@ function stade_tangent(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     return tgen_emit(kernel, lin_plan)
 end
 
+# computes the site-level TBR decision from BOTH independently
+# duplicated implementations (snap_* and agen_*, per skill-stade's
+# purity rule) and asserts they agree exactly before returning either
+# -- the permanent guard, so a future silent divergence between the
+# two hand-maintained copies fails loudly right here instead of
+# corrupting a gradient. Returns (snap_sites, agen_sites): snap_plan
+# consumes its own, agen_emit/hvp_emit consume theirs, keeping each
+# stage's own duplicate as its sole input per the stage-purity
+# convention -- this function is the one place allowed to compare them.
+function stade_site_level_tbr_check(kernel)
+    snap_sites = snap_value_needed_sites(kernel)
+    agen_sites = agen_value_needed_sites(kernel)
+    @assert keys(snap_sites) == keys(agen_sites) "site_level_tbr: snap_* and agen_* site-level analyses produced different site keys for `$(kernel.sig.name)` -- this should never happen; the two stages walked the kernel differently somewhere"
+    @assert snap_sites == agen_sites "site_level_tbr: snap_* and agen_* site-level analyses DISAGREE for `$(kernel.sig.name)` -- refusing to generate code that could desync push/pop counts. The two independently-duplicated implementations have drifted; see skill-stade's site-level TBR rollout notes."
+    return snap_sites, agen_sites
+end
+
 function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
-                        keep_push_pop::Bool=true)
+                        keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
     active_map = act_analyze(kernel)
-    snapshot_plan = snap_plan(kernel, active_map)
+    snap_sites, agen_sites = site_level_tbr ? stade_site_level_tbr_check(kernel) : (nothing, nothing)
+    snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
-    return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop)
+    return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, push_pop = agen_sites)
 end
 
 function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                     dependents::Union{Vector{Symbol},Nothing}=nothing,
-                    keep_push_pop::Bool=true)
+                    keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
     active_map = act_analyze(kernel)
-    snapshot_plan = snap_plan(kernel, active_map)
+    snap_sites, agen_sites = site_level_tbr ? stade_site_level_tbr_check(kernel) : (nothing, nothing)
+    snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
     layout = nothing
     if !keep_push_pop
@@ -5441,9 +5673,9 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
         stacks = agen_stack_map(snapshot_plan)
-        layout = agen_indexed_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks)
+        layout = agen_indexed_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = agen_sites)
     end
-    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout)
+    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites)
     initstacks_expr = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout)
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
@@ -5459,14 +5691,14 @@ function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=tr
     return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop) for (name, expr) in inlined)
 end
 
-function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true)
+function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop) for (name, expr) in inlined)
+    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr) for (name, expr) in inlined)
 end
 
-function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true)
+function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_hvp(expr; keep_push_pop = keep_push_pop) for (name, expr) in inlined)
+    return Dict(name => stade_hvp(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr) for (name, expr) in inlined)
 end
 
 # reads any number of kernels from one file (a lone kernel, or a
@@ -5490,20 +5722,20 @@ function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bo
     return out_path
 end
 
-function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
+function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop)
+    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.adjoint]))
     return out_path
 end
 
-function stade_hvp_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
+function stade_hvp_file(in_path::String, out_path::String; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_hvp(inlined[entry_name]; keep_push_pop = keep_push_pop)
+    generated = stade_hvp(inlined[entry_name]; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.hvp]))
     return out_path
 end
@@ -5819,7 +6051,7 @@ let
     end))
     @assert String(jacc_plan.host.args[1].args[1]) == "stub4_jacc"
     hsrc = string(jacc_plan.host)
-    @assert occursin("JACC.parallel_for", hsrc) && occursin("for i_seq_t", hsrc)
+    @assert occursin("JACC.@parallel_for", hsrc) && occursin("range = ", hsrc) && occursin("for i_seq_t", hsrc)
     ksrc = string(jacc_plan.kernels[1])
     @assert occursin("Atomix.@atomic", ksrc) && !occursin("threadIdx", ksrc) && !occursin("blockIdx", ksrc)
     println("jgen_* round-tripped a kernel through the JACC target OK (split loop -> parallel_for + kernel, atomic write via Atomix, sequential loop left on host)")

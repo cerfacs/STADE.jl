@@ -94,6 +94,23 @@ prepend `export PATH="/home/claude/julia-1.10.11/bin:$PATH"`.
    / spec doc, not inline in STADE.jl.
 9. **STADE.jl contains no corpus-specific code.** Nothing in it may
    reference any particular kernel inside `val-corpus-*` by name.
+10. **A loop nest is whatever `for` structure the kernel source actually
+   contains — never "un-fuse" it back into synthetic sub-loops.**
+   skill-jade fuses a rectangular nest of iteration-independent loops (see
+   skill-jade rule 2) into one `for idx = 1:n * m` loop with the original
+   indices recovered inside the body via `div`/`mod`, rather than writing
+   literal nested `for`s. Every stage that walks loop nests for indexing or
+   tripcount purposes (`snap_*`'s `pos0`/`stride` math in the `:indexed`
+   strategy, `agen_tier_b_walk`'s ancestor-loop check, GPU split counting
+   in `stade_cuda`) must treat a fused single loop as a depth-1 nest with
+   tripcount `n * m` — its `pos0`/`stride` formula already reduces to the
+   depth-1 case (`stride(L1) = 1`) with no special-casing needed. Do not
+   add logic that pattern-matches `div(idx - 1, m)`/`mod(idx - 1, m)`
+   inside a loop body to reconstruct a synthetic multi-level nest; the
+   closed-form Tier A formula is defined over the *actual* enclosing `for`
+   statements a snapshot site sits inside, and a fused loop's body-level
+   `div`/`mod` expressions are ordinary assignment statements to that
+   formula, not loop structure.
 
 ## `keep_push_pop`: the `:indexed` snapshot-storage strategy
 
@@ -195,139 +212,6 @@ silently emitting an unprotected write) for any thread-invariant-indexed
 write that isn't a plain additive accumulation, since a non-additive
 race has no atomic-wrapper fix.
 
-## Testing convention
-
-### Indirect-indexing shape-inference fix (2026-08-12)
-
-`shape_force_int_expr!` (the backward pass of `shape_propagate_int!`,
-which pushes int-ness discovered on an assignment's LHS back onto
-whatever RHS operands it depends on) had no case for `expr.head ==
-:ref`. This meant a gather/permutation-table array used only to
-produce indices for other arrays -- e.g. `i_node = i_cell_to_node[i_loc,
-i_cell]`, with `i_node` itself later confirmed int by its own use as a
-subscript elsewhere -- never had that int-ness propagated back onto
-`i_cell_to_node`, the array actually being indexed. It defaulted to
-`array_float`, so downstream adjoint generation treated a pure
-integer connectivity/index table as a differentiable field, producing
-spurious shadow arguments (`i_cell_to_nodeb`, etc.) that don't
-correspond to any real gradient. Fixed by adding an `expr.head ==
-:ref` case: the base array symbol is marked int whenever the
-indexing result is (or becomes) known int -- sound, since indexing a
-true `Vector{Float64}` field can never itself be forced int by any of
-this file's existing int-evidence rules. Verified against the full
-20-kernel corpus (`phase1_adjoint.jl`/`phase1_hvp.jl`/
-`phase1_splitcount.jl`/byte-compat diff against the pre-feature
-baseline): zero regressions, all previously-passing kernels
-unaffected. Confirmed fixed on a real unstructured-mesh kernel (mesh
-connectivity + periodicity permutation tables): those arrays are now
-correctly classified `array_int`, and the spurious shadow arguments
-are gone from the generated adjoint.
-
-**Separately found and fixed (2026-08-13):** that same real-world
-kernel's adjoint was numerically wrong under finite-difference
-validation. Initially misdiagnosed as an array-aliasing issue (two
-mesh cells sharing a node, both accumulating into `res[i_k_node]`
-where `i_k_node` comes from a connectivity table) -- but a
-matched-settings comparison showed a *disjoint* (non-aliased) mesh
-failing just as badly, ruling that out. The actual cause: a scalar
-(`cavgx`/`cavgy`/`cavgz`) written by one nested sub-loop and read
-unchanged by a *later sibling* sub-loop within the same repeating
-outer iteration had no restore mechanism reaching that sibling read --
-see the write-up immediately below, which is the fix. Confirmed via
-machine-precision complex-step differentiation against a from-scratch
-reimplementation (ruling out finite-difference truncation noise as an
-alternative explanation) and via instrumented traces of the generated
-code showing the scalar frozen at one outer iteration's value
-throughout the entire backward sweep.
-
-### Cross-sibling-loop scalar restoration fix (2026-08-13)
-
-A scalar written by one nested sub-loop and read unchanged by a
-*later sibling* sub-loop within the same repeating outer iteration
-(e.g. `cavgx`/`cavgy`/`cavgz`: built by one `for i_loc` loop, read by
-a second, separate `for i_loc` loop, both inside a repeating `for
-i_cell`) had no restore mechanism reaching that sibling read. The
-per-write-statement push/pop machinery only restores a var to what it
-held immediately *before its own next write* -- correct for a var read
-again within the *same* loop that writes it (`vere` elsewhere in this
-file), but wrong here, since nothing re-established the var's
-post-loop value before the sibling's backward code ran. Only the
-last-processed outer iteration (in backward order) ever saw the
-correct value; every earlier one silently inherited the previous
-iteration's corrupted leftover state -- with no aliasing or indirect
-indexing involved at all.
-
-`agen_nested_write_vars`/`agen_block_boundary_vars` find the affected
-variables for a given block `body`: value-needed scalars written only
-inside nested sub-`:for`/`:if`s of `body` (never as a top-level
-statement of `body` itself). `agen_forward_body` now pushes each such
-var once at the end of `body` (its value as this iteration leaves it);
-`agen_backward_body` pops/restores it once at the very start of
-processing `body`'s own backward code -- using the SAME `(:value,
-var)` stack and the same `agen_emit_push`/`agen_emit_pop`/
-`agen_site_key` machinery every other site already uses (key =
-`agen_site_key(body, 0, var)`, the `idx=0` sentinel never colliding
-with a real per-statement index), so it works identically under
-`keep_push_pop=true` and `=false` with no separate code path, and HVP
-inherits it for free since `hvp_emit` calls the same
-`agen_forward_body`/`agen_backward_body`. `agen_body_has_snapshot`
-also checks `agen_block_boundary_vars` now, so a loop needing only
-this treatment still gets correctly reversed.
-
-Verified: the original failing case matches a complex-step reference
-to `8.9e-16` (was 1-3% off); a disjoint/aliased x `i_njac`=0/1/2 test
-matrix is ~1e-9 everywhere (was 0.8%-5.5%); the full 19-kernel Tier A
-corpus is unaffected (still passes adjoint + HVP validation, byte-
-identical generated output for 19 of 21 kernels); `mg_vcycle`/
-`mg_vcycle_multi` are the only corpus kernels whose generated
-`keep_push_pop=true` output changed (they have this pattern too) and
-both still pass their own validation correctly afterward.
-
-### val_generate_baseline fixes for indirect-indexing kernels (2026-08-13)
-
-Four bugs surfaced getting the website's "Validate" button working for
-up.jl (mesh connectivity args); all generic, none up.jl-specific:
-
-1. `val_zeros_like`/`val_random_values_like` only populated float-arg
-   keys, but `val_unflatten` unconditionally reads `template[a]` for
-   every `:array_int` arg too (to pass real, non-perturbed data
-   through unchanged) -- caused `KeyError(:i_cell_to_node)`. Fixed:
-   both now also copy the array_int entries through.
-2. `val_random_values` filled array_int args from a hardcoded `1:3`,
-   unrelated to what they actually index into. Fixed: uses `1:N`
-   where N is the shared array size `val_grow_shapes` already grows
-   every array dimension to -- safe against whatever it indexes,
-   with no per-argument "what does this index into" analysis needed.
-3. `io_read_baseline_yaml` has no per-kernel type info, so array_int
-   values always come back Float64 -- `ArgumentError: invalid index:
-   3.0`. Fixed: new `val_coerce_int_arrays!(kernel, values)`, called
-   at both call sites right after reading a baseline back.
-4. A float arg used as a `/` divisor (e.g. cell/node "volume") has no
-   guarantee of staying positive or of a comparable scale to whatever
-   it's divided against under plain `randn()` -- for a kernel with an
-   iterative relaxation, that can make the per-step gain exceed 1 and
-   blow up over repeated iterations to astronomical output magnitudes,
-   at which point `epsilon=1e-6` finite differences become numerically
-   meaningless (the step's own contribution falls below float64
-   precision at that scale) -- not an adjoint bug, but it looks like
-   one. Fixed: `val_divisor_args` statically finds every arg ever used
-   as a `/` divisor (kernel-agnostic, same style as `val_arg_ndims`)
-   and draws it narrowly around 1.0 instead of wide `randn()`;
-   `val_generate_baseline` also rejects a candidate whose own output
-   is non-finite or too large, and adaptively narrows the scalar_int
-   range (an iteration-count arg is a common divergence amplifier)
-   toward 1 on repeated divergence, down to below the caller's own
-   `int_lo` if needed as a last resort -- a working baseline with a
-   smaller iteration count beats none.
-
-With these, up.jl's tangent and HVP validate reliably (~1e-8). Adjoint
-validation sometimes still reports elevated error on a random
-baseline -- confirmed via independent complex-step differentiation
-this is not an adjoint-correctness bug (HVP, which calls the identical
-adjoint function internally, passes consistently) but FD-precision
-sensitivity in `val_validate_adjoint`'s dot-product check methodology
-for this still numerically stiff kernel; not yet resolved.
-
 ### Testing convention
 
 Every change is checked against the shared golden corpus (19 kernels), 
@@ -335,6 +219,148 @@ using `validate_corpus.jl` (central finite differences)
 as the primary correctness oracle, checked against random seed vectors.
 A structural diff against existing Tapenade-generated `_b.jl` files 
 inside `val-corpus-tapenade-adjoint` is a secondary style check, not a correctness requirement.
+
+## `site_level_tbr`: per-statement (not per-variable) TBR pruning
+
+`stade_adjoint`/`stade_hvp` (and their `_file`/`_corpus` wrappers) take a
+`site_level_tbr::Bool = false` keyword. `snap_value_needed_vars`/
+`agen_value_needed_vars` decide "does var's value matter *anywhere*" at
+whole-*variable* granularity — every write to a value-needed var gets a
+snapshot, even when the specific nonlinear read that made it value-needed
+happens *after* that write, reading the write's own new value rather than
+what it destroyed (`affine_loss`'s `v_stack` was the original motivating
+case: `v` is value-needed because of a later `v^2`, but that read happens
+after `v`'s only write, so the write's snapshot is provably dead weight).
+
+**Direction rule:** a write needs a snapshot iff (a) it's self-referencing
+with its own occurrence appearing under a non-`+`/`-` op in its own rhs, or
+(b) some nonlinear read of the same variable occurred *strictly before* it
+in true forward execution order — never because of a read that comes
+*after*. (Confirmed against `snap_read_before`'s own existing forward
+convention; an earlier backward-liveness formulation of this got the
+direction wrong and was corrected before landing — see the design
+discussion in the conversation history that produced this feature.) Loops
+need a **forward** fixed point: a read near the top of a loop body is, for
+every iteration but the first, actually preceded by the *previous*
+iteration's reads from later in the body — `snap_fwd_walk_loop!`/
+`agen_fwd_walk_loop!` iterate to convergence (monotone, since `seen` only
+grows) before recording final per-site decisions.
+
+**Deliberately duplicated, not shared** (per Hard Rule 7): `snap_*`
+(`snap_fwd_walk!`/`snap_fwd_walk_loop!`/`snap_value_needed_sites`) and
+`agen_*` (`agen_fwd_walk!`/`agen_fwd_walk_loop!`/`agen_value_needed_sites`)
+are independent, hand-written-identical implementations, exactly like
+every other `snap_`/`agen_` pair in this file. `stade_site_level_tbr_check`
+is the *one* place allowed to compare them: it computes both, asserts
+exact `Dict` equality (not just subset), and only then hands each stage
+its own copy — `snap_plan` gets `snap_sites`, `agen_emit`/`hvp_emit` get
+`agen_sites`. This assertion runs automatically, every time the flag is
+on — not just in dev testing — so a future silent divergence between the
+two hand-maintained copies fails loudly instead of desyncing push/pop
+counts.
+
+**New frozen shape:** site-level TBR decision = `Dict{Any,Bool}` keyed by
+`agen_site_key(body, idx)`. `ectx` gained a `push_pop` field
+(`Union{Nothing,Dict{Any,Bool}}`); `agen_needs_snapshot(lhs, rhs, var,
+value_needed, key=nothing)` is polymorphic on `value_needed`'s type — a
+`Set{Symbol}` (default) behaves exactly as before and ignores `key`, a
+`Dict` looks up `key` instead. `snap_plan`/`snap_check_assign!` take a
+parallel `site_needed` keyword with the same fallback behavior.
+
+**Deliberately out of scope** (still whole-variable, unaffected by the
+flag regardless of its setting): `agen_block_boundary_vars`,
+`agen_exempt_vars`, `agen_if_branch_scalar_vars` — these model block-scope
+restoration and branch-hoist fallback, different questions from "does
+this one write need a snapshot" that this analysis doesn't cover.
+
+**Validated (CPU):** full corpus (22 kernels) plus three stress kernels
+added specifically to exercise the fixed point and conservative `if`
+merge — `stress_cross_iter` (single-loop write-then-read, cross-iteration
+coupling), `stress_nested` (same coupling through a nested loop), and
+`stress_if_asym` (asymmetric nonlinear-only-in-one-branch read) — pass
+central-difference validation for adjoint and HVP, in *both*
+`keep_push_pop=true` and `keep_push_pop=false` (`agen_layout_walk!`/
+`agen_indexed_layout` also take a `push_pop` keyword, wired the same way).
+`keep_push_pop=false` validation for `unet`/`transformer` hits a
+pre-existing gap in `val_validate_adjoint`'s test harness (can't supply
+values for derived/internal sizing free-variables like `hw2`, `n_d`) —
+confirmed pre-existing by reproducing identically with `site_level_tbr=
+false`, not a regression from this feature.
+
+**Known blocking issue — resolved.** Porting `site_level_tbr=true`-generated
+adjoint code to CUDA/AMDGPU via `stade_cuda`/`stade_amdgpu` used to fail for
+2 of 25 corpus+stress kernels (`unet`, `transformer`), both tripping
+`cgen_device_assign`'s data-race occurs-check on a scatter write
+(`xpad0[yi] = x[idx]`-shaped: the write's index is a *bare symbol* computed
+one or more assignment-hops earlier in the same device-loop body from the
+thread variable, e.g. `yi` derived from `idx` via `div`/`mod` unravel/
+reflatten arithmetic — not literally containing `idx` itself). Root cause
+confirmed by diffing generated code: `cgen_body` only splits a loop onto
+the GPU when it contains no `push!`/`pop!` (`cgen_contains_stackop`); with
+the flag off, these loops kept their now-pruned snapshot push and were
+never split at all, so `cgen_device_assign` never ran on them. Pruning the
+push made the loop GPU-eligible for the first time, exposing that
+`cgen_expr_contains`'s occurs-check was purely syntactic (top-level index
+expression only) with no transitive tracing through same-body scalar
+let-bindings.
+
+**Fix:** `cgen_device_body` now threads a `thread_dep::Set{Symbol}`
+(starting as `{thread_var}`) through the device loop body, adding any
+scalar (`lhs isa Symbol`) whose rhs references something already in
+`thread_dep`, and removing a symbol from it if a later reassignment
+breaks the chain (dataflow-correct, not a monotonic once-true-always-true
+flag). `cgen_device_assign` takes `thread_dep` instead of a bare
+`thread_var` for its check, via a new `cgen_expr_contains_any` (same
+occurs-check, generalized to a symbol set). This is strictly *more
+precise*, not more permissive in an unsound way: it still only accepts a
+write whose index provably, syntactically depends on the thread variable
+somewhere in its derivation — exactly the same soundness bar the original
+check used (neither version proves *injectivity*; a genuinely
+non-injective thread-dependent index, e.g. `arr[idx % 5]`, was accepted
+before this fix and still is — that's an inherent, documented limitation
+of "depends on thread_var" as a race proxy, unrelated to this fix, and
+still the kernel author's responsibility). Both flag states, all 25
+corpus+stress kernels, both CUDA and AMDGPU: 0 failures. `jgen_device_assign`
+(the JACC target) reuses `cgen_expr_contains` directly rather than
+duplicating it, and was **not** touched by this fix — it doesn't currently
+reproduce `cgen_device_assign`'s error-refusal at all for the
+non-additive/non-dependent case (a separate, pre-existing gap, out of
+scope here — see `jgen_` v1.x note below for what *was* fixed on the
+JACC side).
+
+## `jgen_`: JACC.jl v1.x migration
+
+`jgen_launch_expr` used to emit `JACC.parallel_for(N, f, args...)` — a
+plain positional-argument function call, which was JACC.jl's pre-1.0
+(`v0.0.x`-era) API. JACC.jl's stable v1.0 line (released ~March 2026)
+replaced this with a macro form: `JACC.@parallel_for range=N f(args...)`
+(confirmed against `juliagpu.github.io/JACC.jl/stable`'s current
+example, and structurally verified via `Meta.parse` to get the exact
+`Expr` shape — `Expr(:macrocall, Expr(:., :JACC,
+QuoteNode(Symbol("@parallel_for"))), nothing, Expr(:(=), :range, n_iter),
+Expr(:call, fname, fargs...))`). The underlying kernel function's own
+signature is unchanged (loop index still its own first parameter,
+supplied internally by the macro) — only the launch call's shape moved,
+so `jgen_kernel_def` itself needed no change, only `jgen_launch_expr`.
+
+`jgen_preamble()`'s `Pkg.add("JACC")` is now pinned to
+`Pkg.add(name = "JACC", version = "1")` — the previous unpinned call is
+exactly what let this mismatch happen silently in the first place (any
+fresh install pulls whatever's newest); pinning to the major version
+this code actually targets means a future v2 breaking change surfaces
+as a resolvable Pkg version conflict instead of a silent runtime API
+mismatch.
+
+**Validated:** the built-in self-test (`jgen_* round-tripped...`) checks
+for `JACC.@parallel_for` + `range = ` in the generated source. Every
+corpus + stress kernel's `stade_jacc` output was regenerated and
+confirmed to use the v1.x macro form with zero errors; `validate_corpus.jl`
+(unaffected by this change — a JACC-only code path) stayed at 75/75.
+Not independently confirmed against a running JACC v1.x install (no GPU
+hardware, of any vendor or through any target, has been available to
+actually execute anything `cgen_`/`jgen_` produce, at any point in this
+codebase's history) — this rests on documentation/example evidence, same
+epistemic status as the rest of `jgen_`'s design notes above.
 
 ## Self-check before returning STADE code
 
@@ -351,3 +377,10 @@ inside `val-corpus-tapenade-adjoint` is a secondary style check, not a correctne
 - [ ] Comments are one line or less, and present only where non-obvious
 - [ ] No filesystem access outside `io_*`
 - [ ] No reference to any specific corpus kernel by name
+- [ ] Loop-nest analysis (`pos0`/`stride`, Tier B ancestor-loop detection,
+      GPU split counting) walks the kernel source's actual `for` structure
+      only — no logic reconstructs a synthetic nest by pattern-matching a
+      fused loop's `div`/`mod` body statements
+- [ ] If touching `site_level_tbr`'s `snap_*`/`agen_*` pair, both copies
+      were changed identically and `stade_site_level_tbr_check` still
+      passes across the full corpus + stress kernels
