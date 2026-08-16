@@ -5616,7 +5616,7 @@ end
 
 function stade_tangent(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
-                        keep_push_pop::Bool=true)
+                        keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     # accepted, documented, and otherwise ignored -- tgen_* never
     # emits push!/pop! at all (every active statement gets a shadow
     # line directly, no stacks), so this is a pure interface-
@@ -5686,9 +5686,9 @@ end
 # overrides still don't belong here -- a caller who needs them can run
 # inl_inline_calls directly and call stade_tangent/stade_adjoint/
 # stade_hvp per kernel.
-function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true)
+function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop) for (name, expr) in inlined)
+    return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr) for (name, expr) in inlined)
 end
 
 function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
@@ -5713,11 +5713,11 @@ end
 # handles both: a single-kernel file is just a one-entry corpus, where
 # inlining is a no-op and this reduces to differentiating that lone
 # kernel exactly as before.
-function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
+function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_tangent(inlined[entry_name]; keep_push_pop = keep_push_pop)
+    generated = stade_tangent(inlined[entry_name]; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated]))
     return out_path
 end
