@@ -3946,9 +3946,16 @@ end
 
 cgen_is_pop_call(rhs) = rhs isa Expr && rhs.head == :call && length(rhs.args) == 2 && rhs.args[1] == :pop!
 
-# matches agen_stack_alloc_expr's own output: Vector{Float64}() / Vector{Int64}()
-cgen_is_stack_alloc(rhs) = rhs isa Expr && rhs.head == :call && length(rhs.args) == 1 &&
-    rhs.args[1] isa Expr && rhs.args[1].head == :curly && rhs.args[1].args[1] == :Vector
+# matches agen_stack_alloc_expr's own output: the keep_push_pop=true
+# empty form Vector{Float64}()/Vector{Int64}() (1 arg: just the curly),
+# and the keep_push_pop=false pre-sized form Vector{Float64}(undef,
+# size_expr)/Vector{Int64}(undef, size_expr) (3 args: curly, :undef,
+# an arbitrary size expression) -- size_expr itself is never validated
+# here since it's just carried verbatim into the emitted rhs (cgen_body
+# re-emits every :assign statement's rhs unexamined).
+cgen_is_stack_alloc(rhs) = rhs isa Expr && rhs.head == :call &&
+    rhs.args[1] isa Expr && rhs.args[1].head == :curly && rhs.args[1].args[1] == :Vector &&
+    (length(rhs.args) == 1 || (length(rhs.args) == 3 && rhs.args[2] == :undef))
 
 function cgen_parse_generated_for(stmt::Expr)
     header = stmt.args[1]
