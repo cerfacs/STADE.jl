@@ -3946,9 +3946,27 @@ end
 
 cgen_is_pop_call(rhs) = rhs isa Expr && rhs.head == :call && length(rhs.args) == 2 && rhs.args[1] == :pop!
 
-# matches agen_stack_alloc_expr's own output: Vector{Float64}() / Vector{Int64}()
-cgen_is_stack_alloc(rhs) = rhs isa Expr && rhs.head == :call && length(rhs.args) == 1 &&
-    rhs.args[1] isa Expr && rhs.args[1].head == :curly && rhs.args[1].args[1] == :Vector
+# matches agen_stack_alloc_expr's own output: the keep_push_pop=true
+# empty form Vector{Float64}()/Vector{Int64}() (1 arg: just the curly),
+# and the keep_push_pop=false pre-sized form Vector{Float64}(undef,
+# size_expr)/Vector{Int64}(undef, size_expr) (3 args: curly, :undef,
+# an arbitrary size expression) -- size_expr itself is never validated
+# here since it's just carried verbatim into the emitted rhs (cgen_body
+# re-emits every :assign statement's rhs unexamined).
+cgen_is_stack_alloc(rhs) = rhs isa Expr && rhs.head == :call &&
+    rhs.args[1] isa Expr && rhs.args[1].head == :curly && rhs.args[1].args[1] == :Vector &&
+    (length(rhs.args) == 1 || (length(rhs.args) == 3 && rhs.args[2] == :undef))
+
+# the pre-sized subset of cgen_is_stack_alloc -- the only form that
+# ever gets read/written from inside a *split* device kernel (see the
+# device-residency note above cgen_stack_device_expr/jgen_stack_device_expr
+# below). The empty, growing keep_push_pop=true form never needs this:
+# every loop touching it contains a push!/pop!, and skill-stade.md's
+# stack safety rule means such a loop is never split onto the device in
+# the first place, so that Vector legitimately stays a plain host Vector
+# (which is also the only Julia Vector variant push!/pop! works on at
+# all -- a device array supports neither).
+cgen_is_sized_stack_alloc(rhs) = cgen_is_stack_alloc(rhs) && length(rhs.args) == 3
 
 function cgen_parse_generated_for(stmt::Expr)
     header = stmt.args[1]
@@ -4165,6 +4183,7 @@ function cgen_backend_cuda()
         blocks_kw = :blocks,
         tid_rhs = :((blockIdx().x - 1) * blockDim().x + threadIdx().x),
         atomic_macro = Expr(:., :CUDA, QuoteNode(Symbol("@atomic"))),
+        arrtype = :CuArray,
         preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"CUDA\") || Pkg.add(\"CUDA\")\nusing CUDA\nCUDA.allowscalar(false)\n",
         default_precision = Float64,
         precision_locked = false,
@@ -4181,6 +4200,7 @@ function cgen_backend_amdgpu()
         blocks_kw = :gridsize,
         tid_rhs = :(workitemIdx().x + (workgroupIdx().x - 1) * workgroupDim().x),
         atomic_macro = Expr(:., :AMDGPU, QuoteNode(Symbol("@atomic"))),
+        arrtype = :ROCArray,
         preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"AMDGPU\") || Pkg.add(\"AMDGPU\")\nusing AMDGPU\nAMDGPU.allowscalar(false)\n",
         default_precision = Float64,
         precision_locked = false,
@@ -4216,11 +4236,32 @@ function cgen_backend_metal()
         blocks_kw = :groups,
         tid_rhs = :(thread_position_in_grid().x),
         atomic_macro = Expr(:., :Metal, QuoteNode(Symbol("@atomic"))),
+        arrtype = :MtlArray,
         preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"Metal\") || Pkg.add(\"Metal\")\nusing Metal\nMetal.allowscalar(false)\n",
         default_precision = Float32,
         precision_locked = true,
         precision_lock_reason = "Apple GPUs have no FP64 hardware -- Metal.jl disallows constructing Float64 arrays at all, and any kernel whose arithmetic touches a Float64 fails to compile",
     )
+end
+
+# device residency for a keep_push_pop=false stack: `agen_init_emit`
+# always writes the stack allocation as a plain host `Vector{T}(undef,
+# size_expr)`, since agen_ (skill-jade rule 3's "no top-level const"
+# aside) has no notion of a GPU backend at all -- it's cgen_'s own job,
+# same as everything else backend-specific, to turn that into a real
+# on-device allocation once it's known which device will actually read
+# and write it. This only ever fires for the pre-sized :indexed form
+# (cgen_is_sized_stack_alloc): that's the only stack shape a split
+# device kernel ever touches directly (see cgen_is_sized_stack_alloc's
+# own comment for why the push!/pop! form never needs this). `undef`
+# is preserved rather than switched to a zero-fill: every element gets
+# written by a stack push before its first read (the entire point of
+# the forward sweep), so a device-side `undef` allocation costs nothing
+# and matches the plain-Vector behavior this replaces exactly.
+function cgen_stack_device_expr(rhs::Expr, backend)
+    T = rhs.args[1].args[2]
+    size_expr = rhs.args[3]
+    return Expr(:call, Expr(:curly, backend.arrtype, T), :undef, size_expr)
 end
 
 function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend)
@@ -4229,7 +4270,8 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         if stmt.kind == :stackpush
             push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
-            push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+            rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? cgen_stack_device_expr(stmt.rhs, backend) : stmt.rhs
+            push!(exprs, Expr(:(=), stmt.lhs, rhs))
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend), cgen_body(stmt.els, kernels, owner, backend)))
         elseif stmt.kind == :for
@@ -4415,46 +4457,50 @@ end
 # always reproduces the exact double-precision behavior of the source
 # kernel with nothing to undo.
 #
-# A literal walk alone isn't enough, though: some operators return
-# Float64 unconditionally regardless of their operand types, with no
-# Float64 *literal* anywhere in the source for a tree walk to find --
-# true division of two Integer operands (`2/2 -> Float64`), and every
-# whitelisted transcendental intrinsic applied to an Integer argument
-# (`sqrt(2) -> Float64`, but `sqrt(2.0f0) -> Float32`), both fall back
-# to Base's generic `f(x::Real) = f(float(x))`, and `float(::Integer)`
-# always means Float64 specifically, never T. So both are rewritten to
-# force their operands to T *before* the call, which is safe even when
-# an operand is already T (T(x::T) is the identity) and guarantees a
-# T-typed result regardless of what the operand actually was:
-#   a / b                 ->  T(a) / T(b)
-#   sqrt(x), sin(x), ...  ->  sqrt(T(x)), sin(T(x)), ...
-# `^` is deliberately left alone: Julia's own type tracking already
-# keeps `Float32 ^ Integer` as Float32 (verified), so there's no Expr-
-# level promotion bug to rewrite around -- but Metal.jl has had a real,
-# separate bug where its *compiler* computes `Float32 ^ Integer` in
-# double precision internally regardless of what Julia's type system
-# says (JuliaGPU/Metal.jl#552). No Julia-side Expr rewrite can fix a
-# backend compiler bug, so this is documented as a known Metal.jl
-# caveat (see cgen_backend_metal) rather than "fixed" by a rewrite that
-# might not even address it and could go stale as Metal.jl changes.
-function cgen_precision_unstable_unary()
-    return Set{Symbol}([
-        :sqrt, :exp, :log, :log10, :sin, :cos, :tan,
-        :asin, :acos, :atan, :sinh, :cosh, :tanh,
-    ])
-end
-
+# Deliberately just a literal walk, no operand-forcing rewrite: every
+# array/scalar the kernel operates on is caller-supplied (skill-jade
+# rule 8 -- no in-kernel allocation), so its precision is the caller's
+# responsibility to get right, not something STADE should silently
+# paper over by injecting T(...) casts around every division or
+# transcendental call. One known consequence worth knowing about: a
+# handful of Base operations return Float64 unconditionally when *both*
+# their operands happen to be Integer, with no Float64 literal anywhere
+# in the source for a tree walk to catch -- true division of two
+# Integers (`2/2 -> Float64`) and any transcendental intrinsic applied
+# to an Integer argument (`sqrt(2) -> Float64`), both via Base's generic
+# `f(x::Real) = f(float(x))` fallback, where `float(::Integer)` always
+# means Float64, never T. That's a real Integer-argument case, not a
+# caller-precision one (an Int stays semantically exact regardless of
+# T), so if a kernel's index/loop-bound arithmetic ever flows into a
+# bare `/` or transcendental call with no float operand alongside it,
+# the result is Float64 even under precision=Float32 -- on a
+# precision_locked backend (Metal) that then fails to compile rather
+# than silently running in double precision, so it surfaces immediately
+# rather than corrupting results.
 function cgen_convert_precision(expr, ::Type{T}) where {T<:AbstractFloat}
     tname = Symbol(string(T))
     if expr isa AbstractFloat
         return T(expr)
-    elseif expr isa Expr && expr.head == :call && expr.args[1] == :/ && length(expr.args) == 3
-        a = cgen_convert_precision(expr.args[2], T)
-        b = cgen_convert_precision(expr.args[3], T)
-        return Expr(:call, :/, Expr(:call, tname, a), Expr(:call, tname, b))
-    elseif expr isa Expr && expr.head == :call && length(expr.args) == 2 && expr.args[1] in cgen_precision_unstable_unary()
-        arg = cgen_convert_precision(expr.args[2], T)
-        return Expr(:call, expr.args[1], Expr(:call, tname, arg))
+    # STADE never emits the bare Symbol :Float64 anywhere except as a
+    # stack's element-type marker -- the curly type parameter in a
+    # cgen_/jgen_ device stack allocation (Vector{Float64}, CuArray{Float64},
+    # ROCArray{Float64}, MtlArray{Float64} -- see cgen_stack_device_expr)
+    # or the first positional argument of JACC.zeros(Float64, size_expr)
+    # (see jgen_stack_device_expr). This isn't the caller-precision
+    # question the comment above opts out of retyping for -- these
+    # stacks are STADE's own allocations, never caller-supplied, so
+    # retyping them to match every other downcast float in the same
+    # output is still STADE's job. Both sit inside an ordinary Expr that
+    # the generic recursion branch below already walks arg-by-arg, so a
+    # single, context-free rewrite here is enough -- without it, a
+    # Metal.jl device kernel that reads from an un-retyped Float64 stack
+    # fails to compile (Apple GPUs have no FP64 hardware). `:Int64` is
+    # deliberately left untouched: a :branch/:tripcount stack's element
+    # type is never precision-converted for any backend, mirroring how
+    # every other Int-typed loop/index expression in this function is
+    # left alone by the AbstractFloat-only literal walk above.
+    elseif expr === :Float64
+        return tname
     elseif expr isa Expr
         return Expr(expr.head, [cgen_convert_precision(a, T) for a in expr.args]...)
     end
@@ -4520,13 +4566,32 @@ end
 
 jgen_kernel_fname(owner::Symbol, idx::Int) = Symbol("jacc_kernel_" * string(owner) * "_" * string(idx) * "!")
 
+# same device-residency need as cgen_stack_device_expr, but JACC has
+# no vendor-specific array constructor to reach for -- and, per the
+# section comment above, deliberately can't know at generation time
+# which vendor a given output will even run on. `JACC.zeros(T, N)` is
+# JACC.jl's own documented, portable, backend-dispatched allocator
+# (juliagpu.github.io/JACC.jl/stable's own example: `JACC.zeros(Float32,
+# N)`), so it's the only allocation call this can safely emit -- there
+# is no documented `undef`-style JACC allocator to fall back to, unlike
+# cgen_'s vendor `Array{T}(undef, N)` constructors, so this zero-fills
+# instead. That's a harmless no-op in practice (every element is
+# overwritten by a stack push before its first read), just a very
+# slightly more expensive allocation than the `undef` cgen_ backends use.
+function jgen_stack_device_expr(rhs::Expr)
+    T = rhs.args[1].args[2]
+    size_expr = rhs.args[3]
+    return Expr(:call, Expr(:., :JACC, QuoteNode(:zeros)), T, size_expr)
+end
+
 function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :stackpush
             push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
-            push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+            rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? jgen_stack_device_expr(stmt.rhs) : stmt.rhs
+            push!(exprs, Expr(:(=), stmt.lhs, rhs))
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner), jgen_body(stmt.els, kernels, owner)))
         elseif stmt.kind == :for
@@ -6020,13 +6085,18 @@ let
 
     metal_plan = stade_metal(:(function stub3(u, v, n)
         for i_x = 1:n
-            v[i_x] = u[i_x] / 2 + sqrt(n) * 1.5
+            v[i_x] = u[i_x] / 2.0 + sqrt(2.0) * 1.5
         end
         return nothing
     end))
     @assert String(metal_plan.host.args[1].args[1]) == "stub3_metal"
     ksrc = string(metal_plan.kernels[1])
-    @assert occursin("thread_position_in_grid", ksrc) && occursin("1.5f0", ksrc) && occursin("Float32(n)", ksrc)
+    # no more operand-forcing T(...) wraps (see cgen_convert_precision's
+    # comment on why) -- just the literal walk: every bare Float64
+    # literal in the source (2.0, 2.0, 1.5) downcasts to f0, and nothing
+    # else is rewritten
+    @assert occursin("thread_position_in_grid", ksrc) && occursin("1.5f0", ksrc) &&
+            occursin("2.0f0", ksrc) && !occursin("Float32(", ksrc)
     @assert occursin("@metal", string(:(@metal threads = 1 groups = 1 f()))) # sanity on macro name only
     threw = false
     try
