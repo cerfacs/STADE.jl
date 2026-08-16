@@ -183,7 +183,7 @@ const GPU_BACKEND_SPECS = Dict(
 )
 
 """
-    validate_corpus_gpu(dir="val-corpus-keep_push_pop_false-site_level_tbr_true";
+    validate_corpus_gpu(dir="val-corpus-gpu";
                          backends=(:cuda, :jacc), keep_push_pop=false,
                          site_level_tbr=true, rtol=1e-6)
 
@@ -227,7 +227,7 @@ loop scalar-indexing into a device array under `allowscalar(false)`; a
 real, previously-unexercised failure mode this script exists to surface,
 not something to silently work around here).
 """
-function validate_corpus_gpu(dir::String = "val-corpus-keep_push_pop_false-site_level_tbr_true";
+function validate_corpus_gpu(dir::String = "val-corpus-gpu";
                               backends::Tuple = (:cuda, :jacc),
                               keep_push_pop::Bool = false, site_level_tbr::Bool = true,
                               rtol::Float64 = 1e-6)
