@@ -3957,6 +3957,17 @@ cgen_is_stack_alloc(rhs) = rhs isa Expr && rhs.head == :call &&
     rhs.args[1] isa Expr && rhs.args[1].head == :curly && rhs.args[1].args[1] == :Vector &&
     (length(rhs.args) == 1 || (length(rhs.args) == 3 && rhs.args[2] == :undef))
 
+# the pre-sized subset of cgen_is_stack_alloc -- the only form that
+# ever gets read/written from inside a *split* device kernel (see the
+# device-residency note above cgen_stack_device_expr/jgen_stack_device_expr
+# below). The empty, growing keep_push_pop=true form never needs this:
+# every loop touching it contains a push!/pop!, and skill-stade.md's
+# stack safety rule means such a loop is never split onto the device in
+# the first place, so that Vector legitimately stays a plain host Vector
+# (which is also the only Julia Vector variant push!/pop! works on at
+# all -- a device array supports neither).
+cgen_is_sized_stack_alloc(rhs) = cgen_is_stack_alloc(rhs) && length(rhs.args) == 3
+
 function cgen_parse_generated_for(stmt::Expr)
     header = stmt.args[1]
     header isa Expr && header.head == :(=) ||
@@ -4172,6 +4183,7 @@ function cgen_backend_cuda()
         blocks_kw = :blocks,
         tid_rhs = :((blockIdx().x - 1) * blockDim().x + threadIdx().x),
         atomic_macro = Expr(:., :CUDA, QuoteNode(Symbol("@atomic"))),
+        arrtype = :CuArray,
         preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"CUDA\") || Pkg.add(\"CUDA\")\nusing CUDA\nCUDA.allowscalar(false)\n",
         default_precision = Float64,
         precision_locked = false,
@@ -4188,6 +4200,7 @@ function cgen_backend_amdgpu()
         blocks_kw = :gridsize,
         tid_rhs = :(workitemIdx().x + (workgroupIdx().x - 1) * workgroupDim().x),
         atomic_macro = Expr(:., :AMDGPU, QuoteNode(Symbol("@atomic"))),
+        arrtype = :ROCArray,
         preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"AMDGPU\") || Pkg.add(\"AMDGPU\")\nusing AMDGPU\nAMDGPU.allowscalar(false)\n",
         default_precision = Float64,
         precision_locked = false,
@@ -4223,11 +4236,32 @@ function cgen_backend_metal()
         blocks_kw = :groups,
         tid_rhs = :(thread_position_in_grid().x),
         atomic_macro = Expr(:., :Metal, QuoteNode(Symbol("@atomic"))),
+        arrtype = :MtlArray,
         preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"Metal\") || Pkg.add(\"Metal\")\nusing Metal\nMetal.allowscalar(false)\n",
         default_precision = Float32,
         precision_locked = true,
         precision_lock_reason = "Apple GPUs have no FP64 hardware -- Metal.jl disallows constructing Float64 arrays at all, and any kernel whose arithmetic touches a Float64 fails to compile",
     )
+end
+
+# device residency for a keep_push_pop=false stack: `agen_init_emit`
+# always writes the stack allocation as a plain host `Vector{T}(undef,
+# size_expr)`, since agen_ (skill-jade rule 3's "no top-level const"
+# aside) has no notion of a GPU backend at all -- it's cgen_'s own job,
+# same as everything else backend-specific, to turn that into a real
+# on-device allocation once it's known which device will actually read
+# and write it. This only ever fires for the pre-sized :indexed form
+# (cgen_is_sized_stack_alloc): that's the only stack shape a split
+# device kernel ever touches directly (see cgen_is_sized_stack_alloc's
+# own comment for why the push!/pop! form never needs this). `undef`
+# is preserved rather than switched to a zero-fill: every element gets
+# written by a stack push before its first read (the entire point of
+# the forward sweep), so a device-side `undef` allocation costs nothing
+# and matches the plain-Vector behavior this replaces exactly.
+function cgen_stack_device_expr(rhs::Expr, backend)
+    T = rhs.args[1].args[2]
+    size_expr = rhs.args[3]
+    return Expr(:call, Expr(:curly, backend.arrtype, T), :undef, size_expr)
 end
 
 function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend)
@@ -4236,7 +4270,8 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         if stmt.kind == :stackpush
             push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
-            push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+            rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? cgen_stack_device_expr(stmt.rhs, backend) : stmt.rhs
+            push!(exprs, Expr(:(=), stmt.lhs, rhs))
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend), cgen_body(stmt.els, kernels, owner, backend)))
         elseif stmt.kind == :for
@@ -4455,6 +4490,24 @@ function cgen_convert_precision(expr, ::Type{T}) where {T<:AbstractFloat}
     tname = Symbol(string(T))
     if expr isa AbstractFloat
         return T(expr)
+    # STADE never emits the bare Symbol :Float64 anywhere except as a
+    # stack's element-type marker -- the curly type parameter in a
+    # cgen_/jgen_ device stack allocation (Vector{Float64}, CuArray{Float64},
+    # ROCArray{Float64}, MtlArray{Float64} -- see cgen_stack_device_expr)
+    # or the first positional argument of JACC.zeros(Float64, size_expr)
+    # (see jgen_stack_device_expr). Both sit inside an ordinary Expr that
+    # the generic recursion branch below already walks arg-by-arg, so a
+    # single, context-free rewrite here is enough to retype a :array/
+    # :value stack's storage to match every other downcast float in the
+    # same output -- without this, a Metal.jl device kernel that reads
+    # from an un-retyped Float64 stack fails to compile (Apple GPUs have
+    # no FP64 hardware), exactly the gap this branch closes. `:Int64` is
+    # deliberately left untouched: a :branch/:tripcount stack's element
+    # type is never precision-converted for any backend, mirroring how
+    # every other Int-typed loop/index expression in this function is
+    # left alone by the AbstractFloat-only literal walk above.
+    elseif expr === :Float64
+        return tname
     elseif expr isa Expr && expr.head == :call && expr.args[1] == :/ && length(expr.args) == 3
         a = cgen_convert_precision(expr.args[2], T)
         b = cgen_convert_precision(expr.args[3], T)
@@ -4527,13 +4580,32 @@ end
 
 jgen_kernel_fname(owner::Symbol, idx::Int) = Symbol("jacc_kernel_" * string(owner) * "_" * string(idx) * "!")
 
+# same device-residency need as cgen_stack_device_expr, but JACC has
+# no vendor-specific array constructor to reach for -- and, per the
+# section comment above, deliberately can't know at generation time
+# which vendor a given output will even run on. `JACC.zeros(T, N)` is
+# JACC.jl's own documented, portable, backend-dispatched allocator
+# (juliagpu.github.io/JACC.jl/stable's own example: `JACC.zeros(Float32,
+# N)`), so it's the only allocation call this can safely emit -- there
+# is no documented `undef`-style JACC allocator to fall back to, unlike
+# cgen_'s vendor `Array{T}(undef, N)` constructors, so this zero-fills
+# instead. That's a harmless no-op in practice (every element is
+# overwritten by a stack push before its first read), just a very
+# slightly more expensive allocation than the `undef` cgen_ backends use.
+function jgen_stack_device_expr(rhs::Expr)
+    T = rhs.args[1].args[2]
+    size_expr = rhs.args[3]
+    return Expr(:call, Expr(:., :JACC, QuoteNode(:zeros)), T, size_expr)
+end
+
 function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :stackpush
             push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
-            push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+            rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? jgen_stack_device_expr(stmt.rhs) : stmt.rhs
+            push!(exprs, Expr(:(=), stmt.lhs, rhs))
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner), jgen_body(stmt.els, kernels, owner)))
         elseif stmt.kind == :for
