@@ -4152,6 +4152,191 @@ function cgen_collect_scalar_reductions!(body::Vector{NamedTuple}, names::Set{Sy
     return nothing
 end
 
+# ---- sequential-loop reduction-eligibility check --------------------
+# A loop marked i_seq_ (skill-jade's prefix convention) is normally
+# left entirely on the host (cgen_body's/jgen_body's `!stmt.sequential`
+# gate) because "sequential" covers BOTH genuine recurrences
+# (order-dependent, e.g. geomrecur's u[i]=c*u[i-1]) AND loops with no
+# real cross-iteration coupling at all beyond a commutative/associative
+# accumulation -- either INTO a shared scalar (dotprod's
+# loss[1]=loss[1]+u[i]*v[i]) or OUT to per-iteration-unique array slots
+# (a reverse-mode adjoint sweep's ub[i]=ub[i]+v[i]*lossb[1], the exact
+# shape STADE's own AD transform emits for dotprod_b). skill-jade's
+# naming rule only says "carries state across iterations", it doesn't
+# distinguish any of these. Leaving a loop like this unsplit means it
+# runs as an ordinary host-side Julia loop, indexing whatever arrays
+# the caller passed one element at a time -- fine for host Arrays, but
+# a `CUDA.allowscalar(false)` crash the moment those arguments are
+# device arrays (confirmed against a live GPU run of both dotprod_cuda
+# AND dotprod_b_cuda's reverse sweep).
+#
+# The one thing that's NEVER safe to parallelize is a genuine VALUE
+# recurrence: the same array read at one loop-var-dependent index and
+# written at a DIFFERENT loop-var-dependent index (geomrecur's
+# u[i]=c*u[i-1] -- iteration i needs iteration i-1's write). Notably,
+# an array that's read and written at the SAME index expression every
+# time (loss[1]=loss[1]+...; ub[i]=ub[i]+...) is NOT a recurrence in
+# this sense -- nothing about it depends on what order iterations run
+# in, so it's safe to hand to cgen_device_assign exactly as-is: a
+# thread-invariant index (loss[1]) becomes an atomic add (already
+# implemented, unchanged); a loop-var-dependent index (ub[i]) becomes
+# an ordinary per-thread-unique write (also already implemented,
+# unchanged) -- the same trust cgen_device_assign already extends to
+# every INDEPENDENT loop's adjoint accumulators (e.g. `cb[k]=cb[k]+v`).
+# A same-array read/write at differing indices where at least one
+# depends on the loop var is refused. So is a bare-Symbol
+# self-reference that isn't additive (a multiplicative or other
+# non-+/- recurrence, e.g. `p = p * r`) -- cgen_self_referencing_assign
+# already only recognizes +/- forms, so anything else self-referencing
+# is a real recurrence too.
+#
+# This intentionally does NOT try to prove indices are collision-free
+# across threads for cases like mpnn's per-edge scatter-add into a
+# shared-by-receiver-node accumulator (`agg[agg_off+j]=agg[agg_off+j]+
+# messages[...]`, agg_off derived from `dst[i_seq_e]`) -- that
+# read/write pair is at the SAME expression each time (not a
+# recurrence by the definition above), so it's allowed through, and
+# cgen_device_assign's EXISTING thread-dependent-index fast path
+# decides atomic-vs-plain for it exactly as it already does for any
+# independent loop with a data-dependent scatter target. Whether that
+# specific write ends up atomic or plain is unchanged by this feature
+# either way -- it's the same accepted trade-off cgen_device_assign's
+# own docs already flag for independent loops (kernel author's
+# responsibility to avoid or explicitly synchronize genuine
+# collisions), just now also reachable from a loop that used to be
+# sequential. Anything this can't prove free of a genuine recurrence
+# keeps today's behavior (stays sequential, host-side) rather than
+# guessing -- e.g. geomrecur's u[i]=c*u[i-1] and ttgc's Jacobi sweeps
+# (mup[i_node] overwritten with no self-reference at all while `up` is
+# read at a DIFFERENT node index derived from the same outer i_seq_
+# loop across sweeps).
+function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol)
+    cgen_reduction_only_scalar_check(body) || return false
+    writes = Dict{Any,Vector{Any}}()
+    reads = Dict{Any,Vector{Any}}()
+    cgen_collect_array_accesses!(body, writes, reads)
+    # Deliberately NOT scoped to "differing index expressions that
+    # mention the loop's own variable" -- a sweep-style recurrence
+    # (ttgc's Jacobi iterations, advection's timestep loop) carries
+    # its cross-iteration coupling through an INNER loop's index
+    # (e.g. `up[i_node]` written during sweep k, read during sweep
+    # k+1's traversal of the very same i_node range) with no mention
+    # of the outer i_seq_ variable anywhere in either index at all.
+    # The loop var doesn't have to appear in an index for reading and
+    # writing the same array at two different index expressions to be
+    # a genuine recurrence -- so ANY structural mismatch between a
+    # write index and a read index of the same array disqualifies the
+    # loop, unconditionally.
+    for (arr, widxs) in writes
+        ridxs = get(reads, arr, Any[])
+        for w in widxs, r in ridxs
+            w == r && continue
+            return false
+        end
+    end
+    return true
+end
+
+function cgen_reduction_only_scalar_check(body::Vector{NamedTuple})
+    local_names = cgen_locally_assigned_scalars(body)
+    return cgen_reduction_only_scalar_walk(body, Set{Symbol}(), local_names)[1]
+end
+
+# Program-order walk, scoped to exactly the vars cgen_locally_assigned_
+# scalars already calls "thread-private" (i.e. NOT in
+# cgen_scalar_reduction_vars, since those are boxed+atomic and their
+# correct initial value comes from the host-side box, unaffected by
+# where in the loop body their self-reference sits). For a
+# thread-private var, requires every self-referencing use to be
+# preceded, textually within THIS loop's own body, by SOME assignment
+# to it (fresh or self-referencing, doesn't matter which -- once it's
+# been assigned at all within the body, cgen_device_body's ordinary
+# per-thread-local codegen is correct). This is a strictly narrower
+# (safer) requirement than cgen_locally_assigned_scalars itself
+# applies, and deliberately so: that function is documented as correct
+# only "because the enclosing loop is iteration-independent" (see its
+# own comment) -- a precondition this function exists specifically to
+# stand in for once a SEQUENTIAL loop is under consideration, where it
+# doesn't automatically hold.
+#
+# Concretely this catches clamped_sumsq_b's reverse sweep: `wb` is
+# additively self-referencing (`wb = wb + lossb[1]`) AND has a fresh
+# reset (`wb = 0.0`) later in the SAME body, on every control-flow
+# path -- so cgen_locally_assigned_scalars (correctly, for ITS
+# purpose) calls it thread-private, not a cross-thread reduction
+# target. That's true value-wise (wb really does start every iteration
+# at 0, since both branches reset it before the loop moves on) -- but
+# the loop's ORIGINAL, unsplit source only has ONE textual `wb = 0.0`,
+# sitting BEFORE the loop entirely, not as the loop body's own first
+# statement. A per-thread kernel only receives the loop BODY, so its
+# very first line (`wb = wb + lossb[1]`) would read a `wb` neither
+# this kernel nor its caller ever assigned -- confirmed against a live
+# GPU run of the JACC target, where it manifested as a device-side
+# KernelException (undefined variable, caught by JACC's stricter
+# runtime check) rather than silently computing garbage, but CUDA.jl's
+# laxer runtime checking on the exact same generated shape means it
+# can NOT be relied on to fail loudly there either -- this must be
+# caught before either backend ever sees the loop, not left to
+# whichever backend happens to trap it.
+function cgen_reduction_only_scalar_walk(body::Vector{NamedTuple}, defined_in::Set{Symbol}, local_names::Set{Symbol})
+    defined = copy(defined_in)
+    for stmt in body
+        if stmt.kind == :assign && stmt.lhs isa Symbol
+            if stmt.lhs in local_names && cgen_expr_contains(stmt.rhs, stmt.lhs)
+                stmt.lhs in defined || return (false, defined)
+            end
+            push!(defined, stmt.lhs)
+        elseif stmt.kind == :if
+            ok_then, defined_then = cgen_reduction_only_scalar_walk(stmt.then, defined, local_names)
+            ok_then || return (false, defined)
+            ok_els, defined_els = cgen_reduction_only_scalar_walk(stmt.els, defined, local_names)
+            ok_els || return (false, defined)
+            defined = intersect(defined_then, defined_els)
+        elseif stmt.kind == :for
+            ok, _ = cgen_reduction_only_scalar_walk(stmt.body, defined, local_names)
+            ok || return (false, defined)
+        end
+    end
+    return (true, defined)
+end
+
+# collects every array read/write index expression (as a Vector of the
+# :ref node's index args, for structural `==` comparison) reachable
+# anywhere within body, at any nesting depth -- deliberately flat/
+# order-insensitive since cgen_reduction_only_loop only needs to know
+# WHICH index expressions a given array is touched at, not in what
+# sequence, to detect a genuine same-array differing-index recurrence.
+function cgen_collect_array_accesses!(body::Vector{NamedTuple}, writes::Dict, reads::Dict)
+    for stmt in body
+        if stmt.kind == :assign
+            if stmt.lhs isa Expr && stmt.lhs.head == :ref
+                push!(get!(writes, stmt.lhs.args[1], Any[]), stmt.lhs.args[2:end])
+                for a in stmt.lhs.args[2:end]
+                    cgen_collect_refs!(a, reads)
+                end
+            end
+            cgen_collect_refs!(stmt.rhs, reads)
+        elseif stmt.kind == :if
+            cgen_collect_refs!(stmt.cond, reads)
+            cgen_collect_array_accesses!(stmt.then, writes, reads)
+            cgen_collect_array_accesses!(stmt.els, writes, reads)
+        elseif stmt.kind == :for
+            cgen_collect_array_accesses!(stmt.body, writes, reads)
+        end
+    end
+end
+
+function cgen_collect_refs!(e, refs::Dict)
+    if e isa Expr
+        if e.head == :ref
+            push!(get!(refs, e.args[1], Any[]), e.args[2:end])
+        end
+        for a in e.args
+            cgen_collect_refs!(a, refs)
+        end
+    end
+end
+
 function cgen_collect_vars!(body::Vector{NamedTuple}, vars::Set{Symbol})
     for stmt in body
         if stmt.kind == :stackpush
@@ -4337,7 +4522,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars), cgen_body(stmt.els, kernels, owner, backend, reduce_vars)))
         elseif stmt.kind == :for
-            if !stmt.sequential && !cgen_contains_stackop(stmt.body)
+            if (!stmt.sequential || cgen_reduction_only_loop(stmt.body, stmt.var)) && !cgen_contains_stackop(stmt.body)
                 idx = length(kernels) + 1
                 fargs = cgen_free_vars(stmt, stmt.var)
                 loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
@@ -4692,7 +4877,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars), jgen_body(stmt.els, kernels, owner, reduce_vars)))
         elseif stmt.kind == :for
-            if !stmt.sequential && !cgen_contains_stackop(stmt.body)
+            if (!stmt.sequential || cgen_reduction_only_loop(stmt.body, stmt.var)) && !cgen_contains_stackop(stmt.body)
                 idx = length(kernels) + 1
                 fargs = cgen_free_vars(stmt, stmt.var)
                 loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
@@ -6236,17 +6421,129 @@ let
             v[i_x] = v[i_x] + 2.0 * u[i_x]
             v[1] = v[1] + u[i_x]
         end
-        acc = 0.0
-        for i_seq_t = 1:n
-            acc = acc + u[i_seq_t]
-        end
-        v[2] = acc
         return nothing
     end))
     @assert String(jacc_plan.host.args[1].args[1]) == "stub4_jacc"
     hsrc = string(jacc_plan.host)
-    @assert occursin("JACC.@parallel_for", hsrc) && occursin("range = ", hsrc) && occursin("for i_seq_t", hsrc)
+    @assert occursin("JACC.@parallel_for", hsrc) && occursin("range = ", hsrc)
     ksrc = string(jacc_plan.kernels[1])
     @assert occursin("Atomix.@atomic", ksrc) && !occursin("threadIdx", ksrc) && !occursin("blockIdx", ksrc)
-    println("jgen_* round-tripped a kernel through the JACC target OK (split loop -> parallel_for + kernel, atomic write via Atomix, sequential loop left on host)")
+    println("jgen_* round-tripped a kernel through the JACC target OK (split loop -> parallel_for + kernel, atomic write via Atomix)")
+
+    # cgen_reduction_only_loop: a pure scalar reduction (`i_seq_`,
+    # commutative/associative accumulation only) is now split onto the
+    # device with an atomic add against the boxed accumulator, exactly
+    # like dotprod_cuda's real-GPU failure mode this feature fixes --
+    # no more "for i_seq_t" left on the host for this shape.
+    reduce_plan = stade_cuda(:(function stub5(u, v, n)
+        acc = 0.0
+        for i_seq_t = 1:n
+            acc = acc + u[i_seq_t]
+        end
+        v[1] = acc
+        return nothing
+    end))
+    rhsrc = string(reduce_plan.host)
+    @assert occursin("@cuda", rhsrc) && !occursin("for i_seq_t", rhsrc)
+    rksrc = string(reduce_plan.kernels[1])
+    @assert occursin("CUDA.@atomic", rksrc)
+    println("cgen_reduction_only_loop split a pure scalar-reduction i_seq_ loop onto the device OK (atomic accumulate, no host loop left)")
+
+    # A per-iteration-unique array accumulation (dotprod_b's reverse
+    # sweep shape: ub[i]=ub[i]+... -- read/write at the SAME index
+    # every time, so NOT a recurrence) also splits, with a plain
+    # (non-atomic) per-thread write, since the index is injective in
+    # the loop var -- matches cgen_device_assign's existing trusted
+    # fast path for independent loops' adjoint accumulators.
+    unique_plan = stade_cuda(:(function stub7(ub, v, lossb, n)
+        for i_seq_x = n:-1:1
+            ub[i_seq_x] = ub[i_seq_x] + v[i_seq_x] * lossb[1]
+        end
+        return nothing
+    end))
+    @assert occursin("@cuda", string(unique_plan.host)) && !occursin("for i_seq_x", string(unique_plan.host))
+    uksrc = string(unique_plan.kernels[1])
+    @assert !occursin("CUDA.@atomic", uksrc)
+    println("cgen_reduction_only_loop split a per-thread-unique array accumulation onto the device OK (plain write, no atomic needed, no host loop left)")
+
+    # A genuine recurrence (array read of a value a PREVIOUS iteration
+    # of the same i_seq_ loop wrote, e.g. geomrecur's u[i]=c*u[i-1])
+    # must stay sequential/host-side -- cgen_reduction_only_loop
+    # refuses to split it because the read and write of `u` happen at
+    # two DIFFERENT loop-var-dependent index expressions (i_seq_k vs
+    # i_seq_k-1), so no per-thread trick could fix it.
+    recur_plan = stade_cuda(:(function stub6(u, c, n)
+        for i_seq_k = 2:n
+            u[i_seq_k] = c * u[i_seq_k - 1]
+        end
+        return nothing
+    end))
+    @assert occursin("for i_seq_k", string(recur_plan.host)) && isempty(recur_plan.kernels)
+    println("cgen_reduction_only_loop correctly refused to split a genuine recurrence OK (stays host-side, unchanged from prior behavior)")
+
+    # A sweep-style recurrence (ttgc's Jacobi iterations, advection's
+    # timestep loop): the outer i_seq_ variable itself never appears
+    # in either index -- the coupling is entirely through an INNER
+    # loop's index, reading a NEIGHBOR's value written during the
+    # previous outer sweep (mup[i_k] written at i_k, but up read at
+    # nbr[i_k] -- a genuinely different index expression). Must still
+    # be refused.
+    sweep_plan = stade_cuda(:(function stub8(up, mup, nbr, n)
+        for i_seq_sweep = 1:10
+            for i_k = 1:n
+                i_nbr = nbr[i_k]
+                mup[i_k] = 0.5 * up[i_nbr]
+            end
+            for i_k = 1:n
+                up[i_k] = mup[i_k]
+            end
+        end
+        return nothing
+    end))
+    @assert occursin("for i_seq_sweep", string(sweep_plan.host))
+    println("cgen_reduction_only_loop correctly refused a sweep-style recurrence carried through an inner loop's index OK (stays host-side)")
+
+    # clamped_sumsq_b's actual failure mode: a scalar (`wb`) that's
+    # additively self-referencing (a pure-reduction shape on its own)
+    # AND has a fresh reset later in the SAME body on every path --
+    # cgen_locally_assigned_scalars correctly calls that
+    # thread-private (matches unet/mpnn/transformer's legitimate
+    # per-thread-scratch idiom), but here the FIRST occurrence in
+    # program order is the self-referencing read, with the var's only
+    # true initializer sitting OUTSIDE the loop entirely -- a
+    # per-thread kernel body would read it undefined. Must stay
+    # host-side (confirmed the naive version of this shape crashes
+    # both backends live: JACC threw KernelException, CUDA generated
+    # the exact same use-before-def kernel silently).
+    wb_plan = stade_cuda(:(function stub9(loss, ub, u, n)
+        wb = 0.0
+        for i_seq_x = n:-1:1
+            wb = wb + loss[1]
+            if u[i_seq_x] > 0.0
+                ub[i_seq_x] = ub[i_seq_x] + wb
+                wb = 0.0
+            else
+                wb = 0.0
+            end
+        end
+        return nothing
+    end))
+    @assert occursin("for i_seq_x", string(wb_plan.host))
+    println("cgen_reduction_only_loop correctly refused a pre-loop-initialized/mid-loop-reset scalar (clamped_sumsq_b's wb shape) OK (stays host-side)")
+
+    # Regression guard: a PURE reduction var with no reset anywhere in
+    # the loop body (dotprod_b's/stub5's `acc`) must still split --
+    # it's boxed+atomic, so its correct initial value comes from the
+    # host-side box regardless of where in the body its self-reference
+    # sits, unlike wb above.
+    pure_reduce_plan = stade_cuda(:(function stub10(u, v, n)
+        acc = 0.0
+        for i_seq_t = 1:n
+            acc = acc + u[i_seq_t]
+        end
+        v[1] = acc
+        return nothing
+    end))
+    @assert occursin("@cuda", string(pure_reduce_plan.host)) && !occursin("for i_seq_t", string(pure_reduce_plan.host))
+    println("cgen_reduction_only_loop still splits a pure reduction var with no in-loop reset OK (regression guard)")
 end
