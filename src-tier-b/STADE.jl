@@ -2349,8 +2349,12 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     active_map = act_analyze(kernel)
     layout = nothing
     if !keep_push_pop
-        offender = agen_tier_b_offender(kernel)
-        offender === nothing || error("agen_emit: keep_push_pop=false does not yet support a ragged/data-dependent loop bound (found on `$offender`) -- see mg_vcycle in skill-stade.md's Tier B section")
+        # Tier B kernels (a ragged/data-dependent loop bound --
+        # agen_tier_b_offender) are no longer refused here: they flow
+        # through the same agen_indexed_layout call as any other
+        # kernel, which taints the stacks that need it and falls those
+        # back to :stack semantics -- see the "Tier B (implemented...)"
+        # comment above agen_local_position.
         value_needed = agen_value_needed_vars(kernel)
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
@@ -2519,6 +2523,15 @@ end
 
 # ---- initstacks_ generator ---------------------------------------
 
+# one `nm = Vector{T}(...)` init statement, growable for `keep_push_pop`
+# or a tainted (Tier B) stack, presized from layout.sizes otherwise --
+# factored out of agen_init_emit purely to keep that function's own
+# comprehension a plain one-call-per-element form.
+function agen_init_alloc_stmt(nm, kind, keep_push_pop::Bool, layout)
+    grow = keep_push_pop || (layout !== nothing && nm in layout.tainted_stacks)
+    return Expr(:(=), nm, agen_stack_alloc_expr(kind, grow, grow ? nothing : get(layout.sizes, nm, 0)))
+end
+
 function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = nothing)
     fname = agen_init_fname(kernel.sig.name)
     names = agen_stack_names(sites)
@@ -2532,9 +2545,11 @@ function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = noth
     # keep_push_pop entry for why the minimal set (rather than the
     # kernel's full argument list) was chosen
     fargs = keep_push_pop ? Symbol[] : layout.free_vars
-    body = Any[Expr(:(=), nm, agen_stack_alloc_expr(kind_of[nm], keep_push_pop,
-                                                     keep_push_pop ? nothing : get(layout.sizes, nm, 0)))
-               for nm in names]
+    # Tier B: a tainted stack (see agen_use_stack_push) has no size
+    # formula at all -- layout.sizes deliberately has no entry for it
+    # -- so it always allocates growable, exactly like keep_push_pop's
+    # own true-case, regardless of the kernel-wide flag.
+    body = Any[agen_init_alloc_stmt(nm, kind_of[nm], keep_push_pop, layout) for nm in names]
     push!(body, emit_return_scalars(names))
     return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
 end
@@ -2796,11 +2811,22 @@ end
 # else in the kernel -- the same set snap_plan's :tripcount sites are
 # keyed on
 function agen_tripcount_bound_vars(stmt, reassigned)
+    bound_vars = agen_for_bound_vars(stmt)
+    return [bv for bv in bound_vars if bv in reassigned]
+end
+
+# a :for statement's own lo/hi/step free variables -- factored out so
+# agen_tier_b_walk's detection and agen_layout_walk!'s taint-marking
+# (below) can never drift apart on what counts as "this loop's bound
+# variables": the two MUST agree exactly, since taint-marking is what
+# implements Tier B support for the exact loops agen_tier_b_offender
+# would otherwise have refused on.
+function agen_for_bound_vars(stmt)
     bound_vars = Set{Symbol}()
     agen_collect_expr_vars!(stmt.lo, bound_vars)
     agen_collect_expr_vars!(stmt.hi, bound_vars)
     agen_collect_expr_vars!(stmt.step, bound_vars)
-    return [bv for bv in bound_vars if bv in reassigned]
+    return bound_vars
 end
 
 function agen_negate_step(step)
@@ -2935,12 +2961,26 @@ end
 # elision).
 #
 # Tier A (implemented): every enclosing loop's trip count is a
-# closed-form expression of kernel arguments/constants. Tier B
-# (ragged/data-dependent trip counts, e.g. mg_vcycle's halving `nl`
-# sequence) is DETECTED and refused with a clear error --
-# `agen_tier_b_offender` --  rather than emitting a wrong or
-# under-sized buffer; Tier B support itself is a separate,
-# not-yet-implemented follow-up (see skill-stade.md).
+# closed-form expression of kernel arguments/constants -- offset and
+# size are each a single formula, computed once by
+# `agen_indexed_layout` and embedded directly in the generated code.
+#
+# Tier B (implemented, growable-buffer step -- see skill-stade.md):
+# `agen_tier_b_offender`'s own detection (a loop whose bound var is
+# ever reassigned inside an ANCESTOR sequential loop) is reused by
+# `agen_layout_walk!` to mark every stack touched by an occurrence
+# nested inside such a loop as TAINTED (`layout.tainted_stacks`).
+# Tainted stacks fall all the way back to `:stack` (push!/pop!,
+# growable `Vector`) semantics, unconditionally, regardless of
+# `keep_push_pop` -- exactly the one already-correct mechanism that
+# makes reversing a ragged loop's bound possible at all: the LIFO
+# stack lets each occurrence's runtime trip count be recovered at its
+# matching backward site (`n = pop!(tripcount_stack)`-style) without
+# ever needing a closed-form size or offset formula for it. A stack
+# with NO tainted occurrence keeps full Tier A `:indexed` treatment
+# unchanged. See skill-stade.md's Tier B entry for why this is a
+# per-STACK (not per-occurrence) decision, and for the follow-up that
+# would replace the growable fallback with true ahead-of-time sizing.
 
 # a snapshot site's unique identity for :indexed offset lookup -- see
 # the section comment above for why this is a key, not a count
@@ -2997,10 +3037,7 @@ end
 function agen_tier_b_walk(body, seq_reassigned)
     for stmt in body
         if stmt.kind == :for
-            bound_vars = Set{Symbol}()
-            agen_collect_expr_vars!(stmt.lo, bound_vars)
-            agen_collect_expr_vars!(stmt.hi, bound_vars)
-            agen_collect_expr_vars!(stmt.step, bound_vars)
+            bound_vars = agen_for_bound_vars(stmt)
             for bv in bound_vars
                 bv in seq_reassigned && return bv
             end
@@ -3025,11 +3062,17 @@ end
 function agen_indexed_layout(kernel, kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = nothing)
     occ_mult = Dict{Symbol,Vector{Any}}()
     key_order = Dict{Symbol,Vector{Any}}()
+    tainted_stacks = Set{Symbol}()
     loop_ctx = Any[]
-    agen_layout_walk!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop)
+    agen_layout_walk!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, tainted_stacks, Set{Symbol}(), false, push_pop)
     offsets = Dict{Any,Any}()
     sizes = Dict{Symbol,Any}()
     for (stack, mults) in occ_mult
+        # Tier B: a tainted stack gets neither an offset formula nor a
+        # size entry -- it falls back to :stack (push!/pop!, growable)
+        # semantics wholesale instead, via agen_use_stack_push -- see
+        # the "Tier B (implemented...)" comment above agen_local_position.
+        stack in tainted_stacks && continue
         keys = key_order[stack]
         running = 0
         for (k, m) in zip(keys, mults)
@@ -3042,10 +3085,19 @@ function agen_indexed_layout(kernel, kinds, active_map, value_needed, reassigned
     for (_, sz) in sizes
         agen_collect_expr_vars!(sz, free)
     end
-    return (offsets = offsets, sizes = sizes, free_vars = sort(collect(free); by = string))
+    return (offsets = offsets, sizes = sizes, free_vars = sort(collect(free); by = string), tainted_stacks = tainted_stacks)
 end
 
-function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop = nothing)
+# `seq_reassigned`/`in_ragged` mirror agen_tier_b_walk's own recursion
+# exactly (same bound-var test via agen_for_bound_vars, same
+# stmt.sequential-gated growth of seq_reassigned on descent into a
+# :for) -- but instead of stopping at the first offender, every
+# occurrence recorded while `in_ragged` is true gets its stack added
+# to `tainted_stacks`. `in_ragged` starts false and is OR'd in (never
+# cleared) on descent, so a loop nested inside a ragged ancestor stays
+# tainted regardless of its own bound -- occurrence COUNT, not just
+# occurrence content, is what a ragged ancestor puts in doubt.
+function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, tainted_stacks, seq_reassigned, in_ragged, push_pop = nothing)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
@@ -3062,19 +3114,27 @@ function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, ex
             if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) &&
                agen_needs_snapshot(stmt.lhs, stmt.rhs, var, site_source, agen_site_key(body, idx)) && !(var in exempt)
                 nm = agen_site_stack_name((kind = agen_snapshot_kind(stmt.lhs), array = var, at = 0))
-                agen_layout_record!(occ_mult, key_order, nm, loop_ctx, agen_site_key(body, idx))
+                agen_layout_record!(occ_mult, key_order, tainted_stacks, nm, loop_ctx, agen_site_key(body, idx), in_ragged)
             end
         elseif stmt.kind == :for
+            # this loop's OWN tripcount-site registration uses the
+            # OUTER in_ragged (whatever was passed in), not this
+            # loop's own raggedness: its occurrence count is governed
+            # by loop_ctx's CURRENT (not-yet-extended) frames alone --
+            # see the Tier B comment above agen_local_position.
             for bv in agen_tripcount_bound_vars(stmt, reassigned)
-                agen_layout_record!(occ_mult, key_order, :tripcount_stack, loop_ctx, agen_site_key(body, idx, bv))
+                agen_layout_record!(occ_mult, key_order, tainted_stacks, :tripcount_stack, loop_ctx, agen_site_key(body, idx, bv), in_ragged)
             end
+            bound_vars = agen_for_bound_vars(stmt)
+            this_ragged = in_ragged || any(bv -> bv in seq_reassigned, bound_vars)
+            inner_seq = stmt.sequential ? union(seq_reassigned, agen_collect_reassigned(stmt.body, true)) : seq_reassigned
             push!(loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
-            agen_layout_walk!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop)
+            agen_layout_walk!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, tainted_stacks, inner_seq, this_ragged, push_pop)
             pop!(loop_ctx)
         elseif stmt.kind == :if
-            agen_layout_record!(occ_mult, key_order, :branch_stack, loop_ctx, agen_site_key(body, idx))
-            agen_layout_walk!(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop)
-            agen_layout_walk!(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, push_pop)
+            agen_layout_record!(occ_mult, key_order, tainted_stacks, :branch_stack, loop_ctx, agen_site_key(body, idx), in_ragged)
+            agen_layout_walk!(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, tainted_stacks, seq_reassigned, in_ragged, push_pop)
+            agen_layout_walk!(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, tainted_stacks, seq_reassigned, in_ragged, push_pop)
         end
     end
     # block-boundary restoration -- see agen_block_boundary_vars.
@@ -3085,12 +3145,13 @@ function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, ex
     # by the caller before recursing here -- giving exactly the "once
     # per enclosing-loop iteration" multiplicity this occurrence needs).
     for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)
-        agen_layout_record!(occ_mult, key_order, stacks[(:value, var)], loop_ctx, agen_site_key(body, 0, var))
+        agen_layout_record!(occ_mult, key_order, tainted_stacks, stacks[(:value, var)], loop_ctx, agen_site_key(body, 0, var), in_ragged)
     end
     return nothing
 end
 
-function agen_layout_record!(occ_mult, key_order, stack_name, loop_ctx, key)
+function agen_layout_record!(occ_mult, key_order, tainted_stacks, stack_name, loop_ctx, key, tainted)
+    tainted && push!(tainted_stacks, stack_name)
     mult = agen_local_multiplicity(loop_ctx)
     push!(get!(() -> Any[], occ_mult, stack_name), mult)
     push!(get!(() -> Any[], key_order, stack_name), key)
@@ -3121,18 +3182,30 @@ function agen_site_index(ectx, key)
     return agen_add_exprs(offset, agen_local_position(ectx.loop_ctx))
 end
 
-# `key` is unused (and may be `nothing`) whenever ectx.keep_push_pop
-# is true, matching every call site below that only ever computes a
-# real key inside the :indexed branch's own guard
+# true whenever `stack_name` should use plain push!/pop! rather than
+# an :indexed direct write/read -- either the whole kernel is in
+# :stack mode, or (Tier B) this specific stack was tainted by
+# agen_indexed_layout because some occurrence on it sits inside a
+# ragged loop (see the "Tier B (implemented...)" comment above
+# agen_local_position). `ectx.layout` is only ever `nothing` when
+# `ectx.keep_push_pop` is already true (see agen_ectx_stack/agen_emit/
+# stade_hvp), so the `!== nothing` guard is just defensive.
+agen_use_stack_push(ectx, stack_name) = ectx.keep_push_pop ||
+    (ectx.layout !== nothing && stack_name in ectx.layout.tainted_stacks)
+
+# `key` is unused (and may be `nothing`) whenever
+# agen_use_stack_push(ectx, stack_name) is true, matching every call
+# site below that only ever computes a real key inside the :indexed
+# branch's own guard
 function agen_emit_push(stack_name::Symbol, value, ectx, key)
-    ectx.keep_push_pop && return Expr(:call, :push!, stack_name, value)
+    agen_use_stack_push(ectx, stack_name) && return Expr(:call, :push!, stack_name, value)
     return Expr(:(=), Expr(:ref, stack_name, agen_site_index(ectx, key)), value)
 end
 
 # returns the RHS expr only -- caller wraps `lhs = <this>`, matching
 # how a plain `pop!(stack)` was always just an rhs expr too
 function agen_emit_pop(stack_name::Symbol, ectx, key)
-    ectx.keep_push_pop && return Expr(:call, :pop!, stack_name)
+    agen_use_stack_push(ectx, stack_name) && return Expr(:call, :pop!, stack_name)
     return Expr(:ref, stack_name, agen_site_index(ectx, key))
 end
 
@@ -3688,8 +3761,11 @@ function hvp_shadow_stack_inits(sites, shadow_of, keep_push_pop::Bool = true, la
         # is needed here even though it's now runtime-sized: every
         # kernel argument any size expression could reference is
         # already in `_hv`'s own parameter list via agen_signature_args.
-        alloc = keep_push_pop ? Expr(:call, Expr(:curly, :Vector, :Float64)) :
-                                 Expr(:call, Expr(:curly, :Vector, :Float64), :undef, get(layout.sizes, nm, 0))
+        # Tier B: a tainted primal stack has no size formula (see
+        # agen_init_emit's matching comment) -- its shadow stack
+        # allocates growable right alongside it.
+        grow = keep_push_pop || (layout !== nothing && nm in layout.tainted_stacks)
+        alloc = agen_stack_alloc_expr(:value, grow, grow ? nothing : get(layout.sizes, nm, 0))
         push!(exprs, Expr(:(=), shadow_of[nm], alloc))
     end
     return exprs
@@ -6041,8 +6117,7 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     lin_plan = lin_build(kernel, active_map)
     layout = nothing
     if !keep_push_pop
-        offender = agen_tier_b_offender(kernel)
-        offender === nothing || error("stade_hvp: keep_push_pop=false does not yet support a ragged/data-dependent loop bound (found on `$offender`) -- see mg_vcycle in skill-stade.md's Tier B section")
+        # Tier B: see the matching comment in agen_emit above.
         value_needed = agen_value_needed_vars(kernel)
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
