@@ -14,7 +14,25 @@ using Random
 # the SAME order, as the CPU-generated function this was ported from).
 
 gpu_arrify(to_device, v) = v isa AbstractArray ? Base.invokelatest(to_device, v) : v
-gpu_hostify(v) = v isa AbstractArray ? Array(v) : v
+# same world-age reason gpu_arrify above wraps its call in
+# Base.invokelatest: `Array(::CuArray)` internally dispatches through
+# `size(::CuArray)`, a method CUDACore only defines once `using CUDA`
+# actually runs -- which happens dynamically, inside a generated
+# _cuda.jl/_jacc.jl file's own preamble, strictly AFTER this function
+# was first compiled. Without invokelatest here, every GPU-side result
+# readback (gpu_hostify wraps every array-typed tangent/adjoint/hvp
+# output before comparison) hits "method too new to be called from
+# this world context" -- confirmed against a live run: this fired
+# uniformly across every kernel/mode, even ones whose actual on-device
+# math ran fine, because the crash was in the comparison step, not the
+# kernel itself.
+gpu_hostify(v) = v isa AbstractArray ? Base.invokelatest(Array, v) : v
+
+# short, JSON-string-safe exception text for the `errmsg` result field --
+# sprint(showerror, e) can run long (LoadError wraps the original with
+# file/line, a MethodError lists candidates, etc.); truncate defensively
+# since this rides inside one JSON string in the RunPod result payload.
+gpu_errmsg(e) = (s = sprint(showerror, e); length(s) > 2000 ? s[1:2000] * "...[truncated]" : s)
 
 function gpu_tangent_call_args(sig, int_args::Dict, values::Dict, dvalues::Dict, to_device)
     call = Any[]
@@ -274,8 +292,9 @@ function validate_corpus_gpu(dir::String = "val-corpus-gpu";
                 cpu_ok[mode] = true
             catch e
                 cpu_ok[mode] = false
+                msg = gpu_errmsg(e)
                 for b in backends
-                    push!(results, (kernel = name, mode = mode, backend = b, status = :gen_error, max_rel_err = NaN))
+                    push!(results, (kernel = name, mode = mode, backend = b, status = :gen_error, max_rel_err = NaN, errmsg = msg))
                 end
             end
         end
@@ -296,7 +315,7 @@ function validate_corpus_gpu(dir::String = "val-corpus-gpu";
                     gpu_ok[mode] = true
                 catch e
                     gpu_ok[mode] = false
-                    push!(results, (kernel = name, mode = mode, backend = b, status = :gen_error, max_rel_err = NaN))
+                    push!(results, (kernel = name, mode = mode, backend = b, status = :gen_error, max_rel_err = NaN, errmsg = gpu_errmsg(e)))
                 end
             end
 
@@ -312,7 +331,7 @@ function validate_corpus_gpu(dir::String = "val-corpus-gpu";
                     err = maximum(abs.(cpu_out .- gpu_out)) / denom
                     push!(results, (kernel = name, mode = :tangent, backend = b, status = err <= rtol ? :ok : :FAIL, max_rel_err = err))
                 catch e
-                    push!(results, (kernel = name, mode = :tangent, backend = b, status = :run_error, max_rel_err = NaN))
+                    push!(results, (kernel = name, mode = :tangent, backend = b, status = :run_error, max_rel_err = NaN, errmsg = gpu_errmsg(e)))
                 end
             end
 
@@ -338,14 +357,14 @@ function validate_corpus_gpu(dir::String = "val-corpus-gpu";
                     adjoint_initstacks_cpu = initstacks_cpu
                     adjoint_initstacks_gpu = initstacks_gpu
                 catch e
-                    push!(results, (kernel = name, mode = :adjoint, backend = b, status = :run_error, max_rel_err = NaN))
+                    push!(results, (kernel = name, mode = :adjoint, backend = b, status = :run_error, max_rel_err = NaN, errmsg = gpu_errmsg(e)))
                 end
             end
 
             # ---- :hvp (reuses adjoint's initstacks, both sides -- see docstring)
             if get(gpu_ok, :hvp, false)
                 if adjoint_initstacks_cpu === nothing
-                    push!(results, (kernel = name, mode = :hvp, backend = b, status = :run_error, max_rel_err = NaN))
+                    push!(results, (kernel = name, mode = :hvp, backend = b, status = :run_error, max_rel_err = NaN, errmsg = "adjoint mode didn't produce usable initstacks (see its own :adjoint result)"))
                 else
                     try
                         hv_cpu = val_compile(cpu_defs[:hvp][2])
@@ -361,7 +380,7 @@ function validate_corpus_gpu(dir::String = "val-corpus-gpu";
                         err = maximum(abs.(cpu_out .- gpu_out)) / denom
                         push!(results, (kernel = name, mode = :hvp, backend = b, status = err <= rtol ? :ok : :FAIL, max_rel_err = err))
                     catch e
-                        push!(results, (kernel = name, mode = :hvp, backend = b, status = :run_error, max_rel_err = NaN))
+                        push!(results, (kernel = name, mode = :hvp, backend = b, status = :run_error, max_rel_err = NaN, errmsg = gpu_errmsg(e)))
                     end
                 end
             end
@@ -370,7 +389,8 @@ function validate_corpus_gpu(dir::String = "val-corpus-gpu";
 
     for r in results
         println(rpad("$(r.kernel) [$(r.mode)/$(r.backend)]", 36), " ", r.status,
-                isnan(r.max_rel_err) ? "" : "  max_rel_err=$(round(r.max_rel_err, sigdigits=4))")
+                isnan(r.max_rel_err) ? "" : "  max_rel_err=$(round(r.max_rel_err, sigdigits=4))",
+                hasproperty(r, :errmsg) ? "  -- $(first(r.errmsg, 200))" : "")
     end
     return results
 end
