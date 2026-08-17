@@ -4210,8 +4210,58 @@ end
 # (mup[i_node] overwritten with no self-reference at all while `up` is
 # read at a DIFFERENT node index derived from the same outer i_seq_
 # loop across sweeps).
-function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol)
-    cgen_reduction_only_scalar_check(body) || return false
+# All scalar symbols assigned anywhere in body (self-referencing or
+# not, any nesting depth) -- used only to invalidate cgen_body's/
+# jgen_body's known_consts tracking after an :if statement, since a
+# branch could reassign a tracked var to something non-constant and
+# cgen_locally_assigned_scalars alone (non-self-referencing assigns
+# only) wouldn't catch that.
+function cgen_all_assigned_scalars(body::Vector{NamedTuple})
+    names = Set{Symbol}()
+    cgen_collect_all_assigned!(body, names)
+    return names
+end
+
+function cgen_collect_all_assigned!(body::Vector{NamedTuple}, names::Set{Symbol})
+    for stmt in body
+        if stmt.kind == :assign && stmt.lhs isa Symbol
+            push!(names, stmt.lhs)
+        elseif stmt.kind == :if
+            cgen_collect_all_assigned!(stmt.then, names)
+            cgen_collect_all_assigned!(stmt.els, names)
+        elseif stmt.kind == :for
+            cgen_collect_all_assigned!(stmt.body, names)
+        end
+    end
+end
+
+function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
+    local_names = cgen_locally_assigned_scalars(body)
+    # A locally-assigned scalar that fails the plain "already defined"
+    # walk below MAY still be safe if it provably converges to the
+    # SAME literal constant on every control-flow path through the
+    # loop body (clamped_sumsq_b's `wb`: both the `__branch==1` and
+    # `else` arms end with `wb = 0.0`, so `wb` is 0.0 at the end of
+    # every iteration regardless of which branch ran) -- PROVIDED that
+    # constant also matches the value `wb` is known to hold coming
+    # into the loop in the first place (known_consts, populated by
+    # cgen_body from a plain top-level `wb = 0.0` literal assignment
+    # immediately preceding this loop in program order). Given both,
+    # by induction every iteration -- including the first -- starts
+    # with wb==0.0, so injecting `wb = 0.0` as the very first statement
+    # of the per-thread kernel body reproduces the sequential
+    # semantics exactly. Without a matching known_consts entry, we have
+    # no way to know the loop's TRUE entering value (cgen_body only
+    # hands this function the loop's own body, not its surrounding
+    # scope), so this stays unproven and the loop is refused, same as
+    # before this extension existed.
+    synth = Dict{Symbol,Any}()
+    for v in local_names
+        haskey(known_consts, v) || continue
+        c = cgen_loop_convergent_constant(body, v)
+        c !== nothing && c == known_consts[v] && (synth[v] = c)
+    end
+    cgen_reduction_only_scalar_walk(body, Set{Symbol}(), local_names, synth)[1] || return nothing
     writes = Dict{Any,Vector{Any}}()
     reads = Dict{Any,Vector{Any}}()
     cgen_collect_array_accesses!(body, writes, reads)
@@ -4231,15 +4281,64 @@ function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol)
         ridxs = get(reads, arr, Any[])
         for w in widxs, r in ridxs
             w == r && continue
-            return false
+            return nothing
         end
     end
-    return true
+    return synth
 end
 
-function cgen_reduction_only_scalar_check(body::Vector{NamedTuple})
-    local_names = cgen_locally_assigned_scalars(body)
-    return cgen_reduction_only_scalar_walk(body, Set{Symbol}(), local_names)[1]
+# Is `var` assigned anywhere within body, at any nesting depth
+# (self-referencing or not)? Used only to bail out of the convergence
+# analysis below when a NESTED loop touches the same variable --
+# proving convergence through a sub-loop's own repeated execution
+# needs its own fixed-point argument, which isn't needed for any
+# corpus kernel today, so it's simplest and safest to just decline.
+function cgen_var_assigned_anywhere(body::Vector{NamedTuple}, var::Symbol)
+    for stmt in body
+        if stmt.kind == :assign && stmt.lhs === var
+            return true
+        elseif stmt.kind == :if
+            (cgen_var_assigned_anywhere(stmt.then, var) || cgen_var_assigned_anywhere(stmt.els, var)) && return true
+        elseif stmt.kind == :for
+            cgen_var_assigned_anywhere(stmt.body, var) && return true
+        end
+    end
+    return false
+end
+
+# The value `var` provably holds at the END of one traversal of body,
+# if that's the SAME literal on every control-flow path -- else
+# `nothing`. Walks in program order threading a running "state" that's
+# one of :unchanged (not touched by any statement seen so far along
+# this path, so it still holds whatever value flowed in from outside
+# body), :unknown (touched, but not provably a single literal -- e.g.
+# assigned a computed expression, or an if/else where the two arms
+# disagree), or a Number (touched, and every touch since the last
+# branch point agrees on this exact literal).
+function cgen_loop_convergent_constant(body::Vector{NamedTuple}, var::Symbol)
+    state = cgen_terminal_value_walk(body, var, :unchanged)
+    return state isa Number ? state : nothing
+end
+
+function cgen_terminal_value_walk(body::Vector{NamedTuple}, var::Symbol, state)
+    for stmt in body
+        if stmt.kind == :assign && stmt.lhs === var
+            state = stmt.rhs isa Number ? stmt.rhs : :unknown
+        elseif stmt.kind == :if
+            then_state = cgen_terminal_value_walk(stmt.then, var, state)
+            els_state = cgen_terminal_value_walk(stmt.els, var, state)
+            state = if then_state isa Number && els_state isa Number && then_state == els_state
+                then_state
+            elseif then_state == :unchanged && els_state == :unchanged
+                :unchanged
+            else
+                :unknown
+            end
+        elseif stmt.kind == :for
+            cgen_var_assigned_anywhere(stmt.body, var) && (state = :unknown)
+        end
+    end
+    return state
 end
 
 # Program-order walk, scoped to exactly the vars cgen_locally_assigned_
@@ -4251,11 +4350,15 @@ end
 # preceded, textually within THIS loop's own body, by SOME assignment
 # to it (fresh or self-referencing, doesn't matter which -- once it's
 # been assigned at all within the body, cgen_device_body's ordinary
-# per-thread-local codegen is correct). This is a strictly narrower
-# (safer) requirement than cgen_locally_assigned_scalars itself
-# applies, and deliberately so: that function is documented as correct
-# only "because the enclosing loop is iteration-independent" (see its
-# own comment) -- a precondition this function exists specifically to
+# per-thread-local codegen is correct) -- OR to be listed in `synth`
+# (cgen_reduction_only_loop's convergent-constant proof), in which case
+# it's treated as already defined from the very start of the walk,
+# since cgen_kernel_def will inject `var = synth[var]` as the kernel
+# body's first statement. This is a strictly narrower (safer)
+# requirement than cgen_locally_assigned_scalars itself applies, and
+# deliberately so: that function is documented as correct only
+# "because the enclosing loop is iteration-independent" (see its own
+# comment) -- a precondition this function exists specifically to
 # stand in for once a SEQUENTIAL loop is under consideration, where it
 # doesn't automatically hold.
 #
@@ -4275,11 +4378,14 @@ end
 # KernelException (undefined variable, caught by JACC's stricter
 # runtime check) rather than silently computing garbage, but CUDA.jl's
 # laxer runtime checking on the exact same generated shape means it
-# can NOT be relied on to fail loudly there either -- this must be
-# caught before either backend ever sees the loop, not left to
-# whichever backend happens to trap it.
-function cgen_reduction_only_scalar_walk(body::Vector{NamedTuple}, defined_in::Set{Symbol}, local_names::Set{Symbol})
-    defined = copy(defined_in)
+# can NOT be relied on to fail loudly there either. cgen_reduction_
+# only_loop's convergence proof (see its own comment) now recovers
+# this case instead of just refusing it: `wb`'s missing fresh-init is
+# synthesized as a literal `wb = 0.0` at the top of the per-thread
+# kernel body, since it's provably the value every iteration starts
+# with anyway.
+function cgen_reduction_only_scalar_walk(body::Vector{NamedTuple}, defined_in::Set{Symbol}, local_names::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}())
+    defined = union(defined_in, Set{Symbol}(keys(synth)))
     for stmt in body
         if stmt.kind == :assign && stmt.lhs isa Symbol
             if stmt.lhs in local_names && cgen_expr_contains(stmt.rhs, stmt.lhs)
@@ -4287,13 +4393,13 @@ function cgen_reduction_only_scalar_walk(body::Vector{NamedTuple}, defined_in::S
             end
             push!(defined, stmt.lhs)
         elseif stmt.kind == :if
-            ok_then, defined_then = cgen_reduction_only_scalar_walk(stmt.then, defined, local_names)
+            ok_then, defined_then = cgen_reduction_only_scalar_walk(stmt.then, defined, local_names, synth)
             ok_then || return (false, defined)
-            ok_els, defined_els = cgen_reduction_only_scalar_walk(stmt.els, defined, local_names)
+            ok_els, defined_els = cgen_reduction_only_scalar_walk(stmt.els, defined, local_names, synth)
             ok_els || return (false, defined)
             defined = intersect(defined_then, defined_els)
         elseif stmt.kind == :for
-            ok, _ = cgen_reduction_only_scalar_walk(stmt.body, defined, local_names)
+            ok, _ = cgen_reduction_only_scalar_walk(stmt.body, defined, local_names, synth)
             ok || return (false, defined)
         end
     end
@@ -4513,25 +4619,45 @@ end
 
 function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol})
     exprs = Any[]
+    known_consts = Dict{Symbol,Any}()
     for stmt in body
         if stmt.kind == :stackpush
             push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? cgen_stack_device_expr(stmt.rhs, backend) : stmt.rhs
             push!(exprs, Expr(:(=), stmt.lhs, rhs))
+            # tracked purely so a LATER sequential loop in this same
+            # body can prove a locally-assigned scalar's true entering
+            # value (cgen_reduction_only_loop's convergent-constant
+            # check) -- see clamped_sumsq_b's `wb = 0.0` right before
+            # its reverse sweep. Only a bare literal counts; anything
+            # else invalidates (rather than tracks) the symbol, since
+            # we have no way to prove IT stayed constant either.
+            if stmt.lhs isa Symbol
+                if stmt.rhs isa Number
+                    known_consts[stmt.lhs] = stmt.rhs
+                else
+                    delete!(known_consts, stmt.lhs)
+                end
+            end
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars), cgen_body(stmt.els, kernels, owner, backend, reduce_vars)))
+            for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
+                delete!(known_consts, v)
+            end
         elseif stmt.kind == :for
-            if (!stmt.sequential || cgen_reduction_only_loop(stmt.body, stmt.var)) && !cgen_contains_stackop(stmt.body)
+            synth = !stmt.sequential ? Dict{Symbol,Any}() : cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+            if synth !== nothing && !cgen_contains_stackop(stmt.body)
                 idx = length(kernels) + 1
                 fargs = cgen_free_vars(stmt, stmt.var)
                 loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
                 union!(reduce_vars, loop_reduce_vars)
-                push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars))
+                push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth))
                 push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
             else
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars)))
             end
+            delete!(known_consts, stmt.var)
         end
     end
     return exprs
@@ -4552,7 +4678,7 @@ cgen_loopvar_from_tid(lo, step, tid) =
     step == 1 ? Expr(:call, :+, lo, Expr(:call, :-, tid, 1)) :
                 Expr(:call, :+, lo, Expr(:call, :*, Expr(:call, :-, tid, 1), step))
 
-function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, reduce_vars::Set{Symbol})
+function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, reduce_vars::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}())
     tid = :__tid
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
     body = Any[
@@ -4560,6 +4686,14 @@ function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, b
         Expr(:if, Expr(:call, :>, tid, n_iter), Expr(:block, emit_return_nothing())),
         Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, tid)),
     ]
+    # cgen_reduction_only_loop's convergent-constant proof: a
+    # locally-assigned scalar with no in-body fresh initializer (its
+    # true one sits outside the loop entirely) gets its provably-true
+    # entering value injected here, before the loop's own body runs --
+    # see clamped_sumsq_b's `wb`.
+    for (v, c) in synth
+        push!(body, Expr(:(=), v, c))
+    end
     append!(body, cgen_device_body(stmt.body, stmt.var, backend, reduce_vars))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...), Expr(:block, body...))
@@ -4868,25 +5002,38 @@ end
 
 function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol})
     exprs = Any[]
+    known_consts = Dict{Symbol,Any}()
     for stmt in body
         if stmt.kind == :stackpush
             push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? jgen_stack_device_expr(stmt.rhs) : stmt.rhs
             push!(exprs, Expr(:(=), stmt.lhs, rhs))
+            if stmt.lhs isa Symbol
+                if stmt.rhs isa Number
+                    known_consts[stmt.lhs] = stmt.rhs
+                else
+                    delete!(known_consts, stmt.lhs)
+                end
+            end
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars), jgen_body(stmt.els, kernels, owner, reduce_vars)))
+            for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
+                delete!(known_consts, v)
+            end
         elseif stmt.kind == :for
-            if (!stmt.sequential || cgen_reduction_only_loop(stmt.body, stmt.var)) && !cgen_contains_stackop(stmt.body)
+            synth = !stmt.sequential ? Dict{Symbol,Any}() : cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+            if synth !== nothing && !cgen_contains_stackop(stmt.body)
                 idx = length(kernels) + 1
                 fargs = cgen_free_vars(stmt, stmt.var)
                 loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
                 union!(reduce_vars, loop_reduce_vars)
-                push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars))
+                push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth))
                 push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
             else
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars)))
             end
+            delete!(known_consts, stmt.var)
         end
     end
     return exprs
@@ -4898,9 +5045,15 @@ end
 # guarantees the index range. cgen_loopvar_from_tid still does the
 # affine lo/step remapping (JACC's own 1:N index space vs. the
 # original loop's actual lo/step/hi), same as it does for cgen_.
-function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, reduce_vars::Set{Symbol})
+function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, reduce_vars::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}())
     jidx = :__jacc_i
     body = Any[Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, jidx))]
+    # see cgen_kernel_def's matching comment: cgen_reduction_only_loop's
+    # convergent-constant proof injects each synthesized initializer
+    # here, before the loop's own body runs.
+    for (v, c) in synth
+        push!(body, Expr(:(=), v, c))
+    end
     append!(body, jgen_device_body(stmt.body, stmt.var, reduce_vars))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
@@ -6503,18 +6656,21 @@ let
     @assert occursin("for i_seq_sweep", string(sweep_plan.host))
     println("cgen_reduction_only_loop correctly refused a sweep-style recurrence carried through an inner loop's index OK (stays host-side)")
 
-    # clamped_sumsq_b's actual failure mode: a scalar (`wb`) that's
-    # additively self-referencing (a pure-reduction shape on its own)
-    # AND has a fresh reset later in the SAME body on every path --
-    # cgen_locally_assigned_scalars correctly calls that
-    # thread-private (matches unet/mpnn/transformer's legitimate
-    # per-thread-scratch idiom), but here the FIRST occurrence in
-    # program order is the self-referencing read, with the var's only
-    # true initializer sitting OUTSIDE the loop entirely -- a
-    # per-thread kernel body would read it undefined. Must stay
-    # host-side (confirmed the naive version of this shape crashes
-    # both backends live: JACC threw KernelException, CUDA generated
-    # the exact same use-before-def kernel silently).
+    # clamped_sumsq_b's actual failure mode, now RESOLVED by the
+    # convergent-constant extension: `wb` is additively
+    # self-referencing (a pure-reduction shape on its own) AND has a
+    # fresh reset later in the SAME body on every control-flow path --
+    # cgen_locally_assigned_scalars correctly calls that thread-private
+    # (matches unet/mpnn/transformer's legitimate per-thread-scratch
+    # idiom), and its only textual initializer sits OUTSIDE the loop.
+    # But every path through the loop body resets it to the SAME
+    # literal (0.0) that its pre-loop initializer ALSO assigns -- so
+    # cgen_reduction_only_loop can prove wb is 0.0 at the top of every
+    # iteration and synthesize that as the kernel body's first
+    # statement. Confirmed against a live GPU run of the naive
+    # (pre-extension) version of this shape crashing both backends
+    # (JACC threw KernelException; CUDA generated the exact same
+    # use-before-def kernel silently) -- this test locks in the fix.
     wb_plan = stade_cuda(:(function stub9(loss, ub, u, n)
         wb = 0.0
         for i_seq_x = n:-1:1
@@ -6528,8 +6684,50 @@ let
         end
         return nothing
     end))
-    @assert occursin("for i_seq_x", string(wb_plan.host))
-    println("cgen_reduction_only_loop correctly refused a pre-loop-initialized/mid-loop-reset scalar (clamped_sumsq_b's wb shape) OK (stays host-side)")
+    @assert occursin("@cuda", string(wb_plan.host)) && !occursin("for i_seq_x", string(wb_plan.host))
+    wbksrc = string(wb_plan.kernels[1])
+    @assert occursin("wb = 0.0", wbksrc)
+    println("cgen_reduction_only_loop split clamped_sumsq_b's wb shape OK (convergent-constant proof: synthesized wb=0.0 at kernel start)")
+
+    # Negative case: the loop's OWN convergent constant (0.0) doesn't
+    # match what the pre-loop initializer actually assigns (1.0 here)
+    # -- unprovable, must stay host-side. (A contrived example: real
+    # STADE-generated code wouldn't disagree like this, but the
+    # eligibility check can't assume that -- it must verify.)
+    wb_mismatch_plan = stade_cuda(:(function stub11(loss, ub, u, n)
+        wb = 1.0
+        for i_seq_x = n:-1:1
+            wb = wb + loss[1]
+            if u[i_seq_x] > 0.0
+                ub[i_seq_x] = ub[i_seq_x] + wb
+                wb = 0.0
+            else
+                wb = 0.0
+            end
+        end
+        return nothing
+    end))
+    @assert occursin("for i_seq_x", string(wb_mismatch_plan.host))
+    println("cgen_reduction_only_loop correctly refused when the pre-loop value doesn't match the loop's convergent constant OK (stays host-side)")
+
+    # Negative case: pre-loop initializer isn't a literal at all (some
+    # arg-derived value) -- no known_consts entry to check against, so
+    # no proof is possible regardless of what the loop converges to.
+    wb_nonliteral_plan = stade_cuda(:(function stub12(loss, ub, u, w0, n)
+        wb = w0
+        for i_seq_x = n:-1:1
+            wb = wb + loss[1]
+            if u[i_seq_x] > 0.0
+                ub[i_seq_x] = ub[i_seq_x] + wb
+                wb = 0.0
+            else
+                wb = 0.0
+            end
+        end
+        return nothing
+    end))
+    @assert occursin("for i_seq_x", string(wb_nonliteral_plan.host))
+    println("cgen_reduction_only_loop correctly refused when the pre-loop value isn't a literal OK (stays host-side)")
 
     # Regression guard: a PURE reduction var with no reset anywhere in
     # the loop body (dotprod_b's/stub5's `acc`) must still split --
