@@ -44,6 +44,7 @@ STADE-generated adjoints / tangents / hvp are bundled with your primal source co
 - [ ] Add support to `:while` statement
 - [ ] Add support to (binomial) checkpointing
 - [ ] Add support to efficient differentiation of fixed-point loops 
+- [ ] Add support to un-inlined call graphs
 
 ### Acknowledgements
 
