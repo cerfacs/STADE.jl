@@ -16,19 +16,19 @@ of monoprocessor numerical kernels written using the Julia programming language.
 
 ## Why STADE.jl ?
 
-This is a legitimate question since the Automatic Differentiation (AD) ecosystem in Julia is already rich (see [DifferentiationInterface.jl](https://github.com/JuliaDiff/DifferentiationInterface.jl)). In a nutshell, our main motivations lean on obtaining:
+This is a legitimate question since the Automatic Differentiation (AD) ecosystem in Julia is already rich (see [DifferentiationInterface.jl](https://github.com/JuliaDiff/DifferentiationInterface.jl)). In a nutshell, our motivations lean on obtaining:
 
-1. Auditable adjoints / tangents / hvp
+1. **Auditable** adjoints / tangents / hvp
 
 STADE outputs human-readable Julia source code.
 
 
-2. Reproducible gradient-based experiments (e.g., AI models training)
+2. **Reproducible** gradient-based experiments (e.g., AI models training)
 
 STADE-generated adjoints / tangents / hvp are bundled with your primal source codes, such that your experiments are reproducible regardless of STADE availability or version in the machine they run.
 
 
-3. Accessible differentiable computing
+3. **Accessible** differentiable computing
 
 
 
