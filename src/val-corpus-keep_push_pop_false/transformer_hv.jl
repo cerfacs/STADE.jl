@@ -150,6 +150,7 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
         end
         for hh = 1:h
             head_offset = (hh - 1) * dk
+            score_off = (hh - 1) * n * n
             for idx2 = 1:n * n
                 i = div(idx2 - 1, n) + 1
                 j = mod(idx2 - 1, n) + 1
@@ -163,26 +164,26 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                     sd = sd + (k[(j - 1) * d + head_offset + i_seq_p] * qd[(i - 1) * d + head_offset + i_seq_p] + q[(i - 1) * d + head_offset + i_seq_p] * kd[(j - 1) * d + head_offset + i_seq_p])
                     s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                 end
-                scores_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1] = scoresd[(i - 1) * n + j]
-                scores_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1] = scores[(i - 1) * n + j]
-                scoresd[(i - 1) * n + j] = inv_sqrt_dk * sd + s * inv_sqrt_dkd
-                scores[(i - 1) * n + j] = s * inv_sqrt_dk
+                scores_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1] = scoresd[score_off + (i - 1) * n + j]
+                scores_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1] = scores[score_off + (i - 1) * n + j]
+                scoresd[score_off + (i - 1) * n + j] = inv_sqrt_dk * sd + s * inv_sqrt_dkd
+                scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
                 s_stack_d[(((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1)] = sd
                 s_stack[(((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1)] = s
             end
             for i = 1:n
                 row_max_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1] = row_maxd
                 row_max_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1] = row_max
-                row_maxd = scoresd[(i - 1) * n + 1]
-                row_max = scores[(i - 1) * n + 1]
+                row_maxd = scoresd[score_off + (i - 1) * n + 1]
+                row_max = scores[score_off + (i - 1) * n + 1]
                 for i_seq_j = 2:n
                     row_max_stack_d[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (i - 1) * (div(n - 2, 1) + 1) + (i_seq_j - 2)) + 1)] = row_maxd
                     row_max_stack[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (i - 1) * (div(n - 2, 1) + 1) + (i_seq_j - 2)) + 1)] = row_max
-                    row_maxd = (0.5 * (1.0 + sign(row_max - scores[(i - 1) * n + i_seq_j]))) * row_maxd + (0.5 * (1.0 + sign(scores[(i - 1) * n + i_seq_j] - row_max))) * scoresd[(i - 1) * n + i_seq_j]
-                    row_max = max(row_max, scores[(i - 1) * n + i_seq_j])
+                    row_maxd = (0.5 * (1.0 + sign(row_max - scores[score_off + (i - 1) * n + i_seq_j]))) * row_maxd + (0.5 * (1.0 + sign(scores[score_off + (i - 1) * n + i_seq_j] - row_max))) * scoresd[score_off + (i - 1) * n + i_seq_j]
+                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1] = probsd[kk]
                     probs_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1] = probs[kk]
                     probsd[kk] = exp(scores[kk] - row_max) * (scoresd[kk] + -row_maxd)
@@ -195,11 +196,11 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 for i_seq_j = 1:n
                     row_sum_stack_d[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = row_sumd
                     row_sum_stack[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = row_sum
-                    row_sumd = row_sumd + probsd[(i - 1) * n + i_seq_j]
-                    row_sum = row_sum + probs[(i - 1) * n + i_seq_j]
+                    row_sumd = row_sumd + probsd[score_off + (i - 1) * n + i_seq_j]
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs_stack_d[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1)] = probsd[kk]
                     probs_stack[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1)] = probs[kk]
                     probsd[kk] = (1.0 / row_sum) * probsd[kk] + -(probs[kk] / row_sum ^ 2) * row_sumd
@@ -220,8 +221,8 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 for i_seq_j = 1:n
                     s_stack_d[(((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (idx3 - 1) * (div(n - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = sd
                     s_stack[(((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (idx3 - 1) * (div(n - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = s
-                    sd = sd + (v[(i_seq_j - 1) * d + head_offset + p] * probsd[(i - 1) * n + i_seq_j] + probs[(i - 1) * n + i_seq_j] * vd[(i_seq_j - 1) * d + head_offset + p])
-                    s = s + probs[(i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+                    sd = sd + (v[(i_seq_j - 1) * d + head_offset + p] * probsd[score_off + (i - 1) * n + i_seq_j] + probs[score_off + (i - 1) * n + i_seq_j] * vd[(i_seq_j - 1) * d + head_offset + p])
+                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                 end
                 ctx_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (hh - 1) * (div(n * dk - 1, 1) + 1) + (idx3 - 1)) + 1] = ctxd[(i - 1) * d + head_offset + p]
                 ctx_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (hh - 1) * (div(n * dk - 1, 1) + 1) + (idx3 - 1)) + 1] = ctx[(i - 1) * d + head_offset + p]
@@ -745,6 +746,7 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = s_stack_d[(((((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (((i_seq_l - 1) * (div(h - 1, 1) + 1) + (hh - 1)) + 1)]
             s = s_stack[(((((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (((i_seq_l - 1) * (div(h - 1, 1) + 1) + (hh - 1)) + 1)]
             head_offset = (hh - 1) * dk
+            score_off = (hh - 1) * n * n
             for idx3 = n * dk:-1:1
                 sd = s_stack_d[((((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (hh - 1) * (div(n * dk - 1, 1) + 1) + (idx3 - 1)) + 1)]
                 s = s_stack[((((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (hh - 1) * (div(n * dk - 1, 1) + 1) + (idx3 - 1)) + 1)]
@@ -759,10 +761,10 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 for i_seq_j = n:-1:1
                     sd = s_stack_d[(((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (idx3 - 1) * (div(n - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                     s = s_stack[(((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n * dk - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (idx3 - 1) * (div(n - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
-                    probsbd[(i - 1) * n + i_seq_j] = probsbd[(i - 1) * n + i_seq_j] + (sb * vd[(i_seq_j - 1) * d + head_offset + p] + v[(i_seq_j - 1) * d + head_offset + p] * sbd)
-                    probsb[(i - 1) * n + i_seq_j] = probsb[(i - 1) * n + i_seq_j] + v[(i_seq_j - 1) * d + head_offset + p] * sb
-                    vbd[(i_seq_j - 1) * d + head_offset + p] = vbd[(i_seq_j - 1) * d + head_offset + p] + (sb * probsd[(i - 1) * n + i_seq_j] + probs[(i - 1) * n + i_seq_j] * sbd)
-                    vb[(i_seq_j - 1) * d + head_offset + p] = vb[(i_seq_j - 1) * d + head_offset + p] + probs[(i - 1) * n + i_seq_j] * sb
+                    probsbd[score_off + (i - 1) * n + i_seq_j] = probsbd[score_off + (i - 1) * n + i_seq_j] + (sb * vd[(i_seq_j - 1) * d + head_offset + p] + v[(i_seq_j - 1) * d + head_offset + p] * sbd)
+                    probsb[score_off + (i - 1) * n + i_seq_j] = probsb[score_off + (i - 1) * n + i_seq_j] + v[(i_seq_j - 1) * d + head_offset + p] * sb
+                    vbd[(i_seq_j - 1) * d + head_offset + p] = vbd[(i_seq_j - 1) * d + head_offset + p] + (sb * probsd[score_off + (i - 1) * n + i_seq_j] + probs[score_off + (i - 1) * n + i_seq_j] * sbd)
+                    vb[(i_seq_j - 1) * d + head_offset + p] = vb[(i_seq_j - 1) * d + head_offset + p] + probs[score_off + (i - 1) * n + i_seq_j] * sb
                 end
                 sd = s_stack_d[((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (hh - 1) * (div(n * dk - 1, 1) + 1) + (idx3 - 1)) + 1)]
                 s = s_stack[((((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * dk - 1, 1) + 1)) + (hh - 1) * (div(n * dk - 1, 1) + 1) + (idx3 - 1)) + 1)]
@@ -775,7 +777,7 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 row_sumd = row_sum_stack_d[((div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1)]
                 row_sum = row_sum_stack[((div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1)]
                 for j = n:-1:1
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probsd[kk] = probs_stack_d[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1)]
                     probs[kk] = probs_stack[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1)]
                     row_sumbd = row_sumbd + (probsb[kk] * -(((1.0 / row_sum ^ 2) * probsd[kk] + -(probs[kk] / (row_sum ^ 2) ^ 2) * ((2row_sum) * row_sumd))) + -(probs[kk] / row_sum ^ 2) * probsbd[kk])
@@ -786,15 +788,15 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 for i_seq_j = n:-1:1
                     row_sumd = row_sum_stack_d[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                     row_sum = row_sum_stack[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
-                    probsbd[(i - 1) * n + i_seq_j] = probsbd[(i - 1) * n + i_seq_j] + row_sumbd
-                    probsb[(i - 1) * n + i_seq_j] = probsb[(i - 1) * n + i_seq_j] + row_sumb
+                    probsbd[score_off + (i - 1) * n + i_seq_j] = probsbd[score_off + (i - 1) * n + i_seq_j] + row_sumbd
+                    probsb[score_off + (i - 1) * n + i_seq_j] = probsb[score_off + (i - 1) * n + i_seq_j] + row_sumb
                 end
                 row_sumd = row_sum_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1]
                 row_sum = row_sum_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1]
                 row_sumbd = 0.0
                 row_sumb = 0.0
                 for j = n:-1:1
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probsd[kk] = probs_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1]
                     probs[kk] = probs_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1]
                     scoresbd[kk] = scoresbd[kk] + (probsb[kk] * (exp(scores[kk] - row_max) * (scoresd[kk] + -row_maxd)) + exp(scores[kk] - row_max) * probsbd[kk])
@@ -807,15 +809,15 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 for i_seq_j = n:-1:2
                     row_maxd = row_max_stack_d[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (i - 1) * (div(n - 2, 1) + 1) + (i_seq_j - 2)) + 1)]
                     row_max = row_max_stack[(div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (i - 1) * (div(n - 2, 1) + 1) + (i_seq_j - 2)) + 1)]
-                    scoresbd[(i - 1) * n + i_seq_j] = scoresbd[(i - 1) * n + i_seq_j] + (0.5 * (1.0 + sign(scores[(i - 1) * n + i_seq_j] - row_max))) * row_maxbd
-                    scoresb[(i - 1) * n + i_seq_j] = scoresb[(i - 1) * n + i_seq_j] + (0.5 * (1.0 + sign(scores[(i - 1) * n + i_seq_j] - row_max))) * row_maxb
-                    row_maxbd = (0.5 * (1.0 + sign(row_max - scores[(i - 1) * n + i_seq_j]))) * row_maxbd
-                    row_maxb = (0.5 * (1.0 + sign(row_max - scores[(i - 1) * n + i_seq_j]))) * row_maxb
+                    scoresbd[score_off + (i - 1) * n + i_seq_j] = scoresbd[score_off + (i - 1) * n + i_seq_j] + (0.5 * (1.0 + sign(scores[score_off + (i - 1) * n + i_seq_j] - row_max))) * row_maxbd
+                    scoresb[score_off + (i - 1) * n + i_seq_j] = scoresb[score_off + (i - 1) * n + i_seq_j] + (0.5 * (1.0 + sign(scores[score_off + (i - 1) * n + i_seq_j] - row_max))) * row_maxb
+                    row_maxbd = (0.5 * (1.0 + sign(row_max - scores[score_off + (i - 1) * n + i_seq_j]))) * row_maxbd
+                    row_maxb = (0.5 * (1.0 + sign(row_max - scores[score_off + (i - 1) * n + i_seq_j]))) * row_maxb
                 end
                 row_maxd = row_max_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1]
                 row_max = row_max_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1]
-                scoresbd[(i - 1) * n + 1] = scoresbd[(i - 1) * n + 1] + row_maxbd
-                scoresb[(i - 1) * n + 1] = scoresb[(i - 1) * n + 1] + row_maxb
+                scoresbd[score_off + (i - 1) * n + 1] = scoresbd[score_off + (i - 1) * n + 1] + row_maxbd
+                scoresb[score_off + (i - 1) * n + 1] = scoresb[score_off + (i - 1) * n + 1] + row_maxb
                 row_maxbd = 0.0
                 row_maxb = 0.0
             end
@@ -824,12 +826,12 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 s = s_stack[(((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1)]
                 i = div(idx2 - 1, n) + 1
                 j = mod(idx2 - 1, n) + 1
-                scoresd[(i - 1) * n + j] = scores_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1]
-                scores[(i - 1) * n + j] = scores_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1]
-                sbd = sbd + (scoresb[(i - 1) * n + j] * inv_sqrt_dkd + inv_sqrt_dk * scoresbd[(i - 1) * n + j])
-                sb = sb + inv_sqrt_dk * scoresb[(i - 1) * n + j]
-                scoresbd[(i - 1) * n + j] = 0.0
-                scoresb[(i - 1) * n + j] = 0.0
+                scoresd[score_off + (i - 1) * n + j] = scores_stack_d[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1]
+                scores[score_off + (i - 1) * n + j] = scores_stack[((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (hh - 1) * (div(n * n - 1, 1) + 1) + (idx2 - 1)) + 1]
+                sbd = sbd + (scoresb[score_off + (i - 1) * n + j] * inv_sqrt_dkd + inv_sqrt_dk * scoresbd[score_off + (i - 1) * n + j])
+                sb = sb + inv_sqrt_dk * scoresb[score_off + (i - 1) * n + j]
+                scoresbd[score_off + (i - 1) * n + j] = 0.0
+                scoresb[score_off + (i - 1) * n + j] = 0.0
                 for i_seq_p = dk:-1:1
                     sd = s_stack_d[((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (hh - 1) * ((div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (idx2 - 1) * (div(dk - 1, 1) + 1) + (i_seq_p - 1)) + 1)]
                     s = s_stack[((((((((((div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1)) + (((i_seq_l - 1) * ((div(h - 1, 1) + 1) * (div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (hh - 1) * ((div(n * n - 1, 1) + 1) * (div(dk - 1, 1) + 1)) + (idx2 - 1) * (div(dk - 1, 1) + 1) + (i_seq_p - 1)) + 1)]
@@ -970,6 +972,7 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
         end
         for hh = 1:h
             head_offset = (hh - 1) * dk
+            score_off = (hh - 1) * n * n
             for idx2 = 1:n * n
                 i = div(idx2 - 1, n) + 1
                 j = mod(idx2 - 1, n) + 1
@@ -977,23 +980,23 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 for i_seq_p = 1:dk
                     s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                 end
-                scores[(i - 1) * n + j] = s * inv_sqrt_dk
+                scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
             end
             for i = 1:n
-                row_max = scores[(i - 1) * n + 1]
+                row_max = scores[score_off + (i - 1) * n + 1]
                 for i_seq_j = 2:n
-                    row_max = max(row_max, scores[(i - 1) * n + i_seq_j])
+                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = exp(scores[kk] - row_max)
                 end
                 row_sum = 0.0
                 for i_seq_j = 1:n
-                    row_sum = row_sum + probs[(i - 1) * n + i_seq_j]
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = probs[kk] / row_sum
                 end
             end
@@ -1002,7 +1005,7 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 p = mod(idx3 - 1, dk) + 1
                 s = 0.0
                 for i_seq_j = 1:n
-                    s = s + probs[(i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                 end
                 ctx[(i - 1) * d + head_offset + p] = s
             end
