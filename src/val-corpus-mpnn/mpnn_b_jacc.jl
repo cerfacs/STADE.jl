@@ -100,7 +100,7 @@ function jacc_kernel_mpnn_b_5!(__jacc_i, aggb, b_updb, n_in_upd, n_msg_feat, n_n
     agg_off = (v - 1) * n_msg_feat
     uin_off = (v - 1) * n_in_upd
     for k = 1:n_node_feat
-        Atomix.@atomic upd_scratchb[node_off + k] += node_feat_outb[node_off + k]
+        upd_scratchb[node_off + k] = upd_scratchb[node_off + k] + node_feat_outb[node_off + k]
         node_feat_outb[node_off + k] = 0.0
     end
     for k = n_node_feat:-1:1
@@ -114,19 +114,19 @@ function jacc_kernel_mpnn_b_5!(__jacc_i, aggb, b_updb, n_in_upd, n_msg_feat, n_n
         for i_seq_i = n_in_upd:-1:1
             widx = (o - 1) * n_in_upd + i_seq_i
             Atomix.@atomic w_updb[widx] += upd_input[uin_off + i_seq_i] * sb
-            Atomix.@atomic upd_inputb[uin_off + i_seq_i] += w_upd[widx] * sb
+            upd_inputb[uin_off + i_seq_i] = upd_inputb[uin_off + i_seq_i] + w_upd[widx] * sb
         end
         Atomix.@atomic b_updb[o] += sb
         sb = 0.0
     end
     for k = n_msg_feat:-1:1
         upd_input[uin_off + n_node_feat + k] = upd_input_stack[(div(n_nodes - 1, 1) + 1) * (div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)]
-        Atomix.@atomic aggb[agg_off + k] += upd_inputb[uin_off + n_node_feat + k]
+        aggb[agg_off + k] = aggb[agg_off + k] + upd_inputb[uin_off + n_node_feat + k]
         upd_inputb[uin_off + n_node_feat + k] = 0.0
     end
     for k = n_node_feat:-1:1
         upd_input[uin_off + k] = upd_input_stack[((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1]
-        Atomix.@atomic node_featb[node_off + k] += upd_inputb[uin_off + k]
+        node_featb[node_off + k] = node_featb[node_off + k] + upd_inputb[uin_off + k]
         upd_inputb[uin_off + k] = 0.0
     end
     return nothing
@@ -138,7 +138,7 @@ function jacc_kernel_mpnn_b_6!(__jacc_i, aggb, dst, messagesb, n_edges, n_msg_fe
     msg_off = (i_seq_e - 1) * n_msg_feat
     agg_off = (d_node - 1) * n_msg_feat
     for j = 1:n_msg_feat
-        Atomix.@atomic messagesb[msg_off + j] += aggb[agg_off + j]
+        messagesb[msg_off + j] = messagesb[msg_off + j] + aggb[agg_off + j]
     end
     return nothing
 end
@@ -153,7 +153,7 @@ function jacc_kernel_mpnn_b_7!(__jacc_i, b_msgb, dst, edge_featb, messagesb, msg
     in_off = (e - 1) * n_in_msg
     msg_off = (e - 1) * n_msg_feat
     for k = 1:n_msg_feat
-        Atomix.@atomic msg_scratchb[msg_off + k] += messagesb[msg_off + k]
+        msg_scratchb[msg_off + k] = msg_scratchb[msg_off + k] + messagesb[msg_off + k]
         messagesb[msg_off + k] = 0.0
     end
     for k = n_msg_feat:-1:1
@@ -167,14 +167,14 @@ function jacc_kernel_mpnn_b_7!(__jacc_i, b_msgb, dst, edge_featb, messagesb, msg
         for i_seq_i = n_in_msg:-1:1
             widx = (o - 1) * n_in_msg + i_seq_i
             Atomix.@atomic w_msgb[widx] += msg_input[in_off + i_seq_i] * sb
-            Atomix.@atomic msg_inputb[in_off + i_seq_i] += w_msg[widx] * sb
+            msg_inputb[in_off + i_seq_i] = msg_inputb[in_off + i_seq_i] + w_msg[widx] * sb
         end
         Atomix.@atomic b_msgb[o] += sb
         sb = 0.0
     end
     for k = n_edge_feat:-1:1
         msg_input[in_off + 2n_node_feat + k] = msg_input_stack[((div(n_edges - 1, 1) + 1) * (div(n_node_feat - 1, 1) + 1) + (div(n_edges - 1, 1) + 1) * (div(n_node_feat - 1, 1) + 1)) + (((e - 1) * (div(n_edge_feat - 1, 1) + 1) + (k - 1)) + 1)]
-        Atomix.@atomic edge_featb[edge_off + k] += msg_inputb[in_off + 2n_node_feat + k]
+        edge_featb[edge_off + k] = edge_featb[edge_off + k] + msg_inputb[in_off + 2n_node_feat + k]
         msg_inputb[in_off + 2n_node_feat + k] = 0.0
     end
     for k = n_node_feat:-1:1

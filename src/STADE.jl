@@ -4709,14 +4709,38 @@ function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, 
                 call)
 end
 
+# true iff `x` provably depends on the thread var ONLY through pure
+# arithmetic -- i.e. it's safe to trust as per-thread-unique. Two
+# things break that proof, either directly or transitively through a
+# chained scalar let-binding: (1) any array READ anywhere in the
+# expression (a `:ref` node) -- a gather through caller-supplied data
+# (mpnn's `dst[i_seq_e]`) can return the same value for two different
+# thread-var values, so nothing downstream of it can be trusted
+# injective no matter how much arithmetic follows; (2) any symbol
+# that's itself thread-dependent (`thread_dep`) but NOT already proven
+# injective (`injective_dep`) -- e.g. `agg_off = (d_node - 1) *
+# n_msg_feat` is pure arithmetic on its face, but `d_node` came from
+# that same array read, so the taint propagates through it. A symbol
+# that's thread-INdependent (not in thread_dep at all -- an ordinary
+# loop-invariant caller argument) is always fine, injective or not,
+# since it's constant across threads.
+function cgen_expr_injective_ok(x, injective_dep::Set{Symbol}, thread_dep::Set{Symbol})
+    x isa Symbol && return !(x in thread_dep) || (x in injective_dep)
+    x isa Expr || return true
+    x.head == :ref && return false
+    return all(a -> cgen_expr_injective_ok(a, injective_dep, thread_dep), x.args)
+end
+cgen_expr_injective_ok(xs::Vector, injective_dep::Set{Symbol}, thread_dep::Set{Symbol}) =
+    all(x -> cgen_expr_injective_ok(x, injective_dep, thread_dep), xs)
+
 # device-side body walk -- never sees :stackpush or a pop!-rhs assign,
 # since cgen_body only reaches here for a loop cgen_contains_stackop
 # already confirmed is clean at every depth
-function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend, reduce_vars::Set{Symbol}, thread_dep::Set{Symbol} = Set([thread_var]))
+function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend, reduce_vars::Set{Symbol}, thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
-            push!(exprs, cgen_device_assign(stmt, thread_var, thread_dep, backend, reduce_vars))
+            push!(exprs, cgen_device_assign(stmt, thread_var, thread_dep, injective_dep, backend, reduce_vars))
             # a write's index can be computed through a same-body
             # scalar let-binding one or more hops from the thread
             # variable (`yi = f(idx); arr[yi] = ...`), not just written
@@ -4724,18 +4748,28 @@ function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend,
             # thread_dep transitively so cgen_device_assign's occurs-
             # check sees through it. Tracks CURRENT dependency per
             # variable (removed on a reassignment that breaks the
-            # chain), not a once-true-always-true flag.
+            # chain), not a once-true-always-true flag. injective_dep
+            # is tracked the same way, one level stricter (see
+            # cgen_expr_injective_ok): a chain stays injective only as
+            # long as every hop is pure arithmetic on already-injective
+            # symbols, with no array read anywhere in the chain.
             if stmt.lhs isa Symbol
                 if cgen_expr_contains_any(stmt.rhs, thread_dep)
                     push!(thread_dep, stmt.lhs)
+                    if cgen_expr_injective_ok(stmt.rhs, injective_dep, thread_dep)
+                        push!(injective_dep, stmt.lhs)
+                    else
+                        delete!(injective_dep, stmt.lhs)
+                    end
                 else
                     delete!(thread_dep, stmt.lhs)
+                    delete!(injective_dep, stmt.lhs)
                 end
             end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, reduce_vars, copy(thread_dep)), cgen_device_body(stmt.els, thread_var, backend, reduce_vars, copy(thread_dep))))
+            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep)), cgen_device_body(stmt.els, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, copy(thread_dep))))
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep))))
         end
     end
     return exprs
@@ -4758,7 +4792,29 @@ end
 # cheap insurance against a future sizing/offset bug (e.g. from
 # keep_push_pop=false's Tier A/B arithmetic) silently parallelizing
 # something wrong instead of getting caught at generation time.
-function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, backend, reduce_vars::Set{Symbol})
+#
+# A thread-DEPENDENT index is not automatically race-free either,
+# though: "depends on the thread var" and "is injective in the thread
+# var" are different claims, and only the second one actually implies
+# per-thread-uniqueness. mpnn's edge-to-node scatter-add
+# (`agg[agg_off+j] = agg[agg_off+j] + messages[...]`, `agg_off`
+# derived from `dst[i_seq_e]`) is thread-dependent but NOT injective --
+# two different edges (threads) can gather the same receiver node from
+# `dst`, landing on the same `agg_off`. `injective_dep` (see
+# cgen_expr_injective_ok/cgen_device_body) distinguishes this from the
+# `ub[i_seq_x]`-style case where the index IS the thread var (or a
+# pure-arithmetic function of it, e.g. a div/mod loop-unravel), which
+# stays a plain per-thread-unique write exactly as before. An
+# additive write whose index depends on the thread var only through a
+# non-injective (gathered) chain gets the SAME atomic treatment as the
+# thread-invariant case above, rather than assuming uniqueness that
+# was never proven. A non-additive (overwrite) write through such a
+# gathered index is intentionally left untouched by this distinction --
+# an atomic can't fix a plain-replacement race either way, so that
+# case stays the same accepted kernel-author-responsibility trade-off
+# already documented on cgen_reduction_only_loop for any data-dependent
+# scatter target.
+function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, injective_dep::Set{Symbol}, backend, reduce_vars::Set{Symbol})
     if stmt.lhs isa Symbol && stmt.lhs in reduce_vars
         # scalar cross-thread reduction (e.g. an adjoint accumulator
         # like `cb`/`dxb`/`dtb`) -- cgen_emit already boxed this free
@@ -4774,15 +4830,19 @@ function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, b
         return Expr(:macrocall, backend.atomic_macro, nothing,
                     Expr(:(+=), Expr(:ref, stmt.lhs, 1), other))
     end
-    if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains_any(stmt.lhs.args[2:end], thread_dep)
-        terms = cgen_flatten_sum(stmt.rhs)
-        self_idx = findfirst(t -> t == stmt.lhs, terms)
-        if self_idx !== nothing
-            other = cgen_sum_excluding(terms, self_idx)
-            return Expr(:macrocall, backend.atomic_macro, nothing,
-                        Expr(:(+=), stmt.lhs, other))
+    if stmt.lhs isa Expr && stmt.lhs.head == :ref
+        thread_invariant = !cgen_expr_contains_any(stmt.lhs.args[2:end], thread_dep)
+        needs_atomic_check = thread_invariant || !cgen_expr_injective_ok(stmt.lhs.args[2:end], injective_dep, thread_dep)
+        if needs_atomic_check
+            terms = cgen_flatten_sum(stmt.rhs)
+            self_idx = findfirst(t -> t == stmt.lhs, terms)
+            if self_idx !== nothing
+                other = cgen_sum_excluding(terms, self_idx)
+                return Expr(:macrocall, backend.atomic_macro, nothing,
+                            Expr(:(+=), stmt.lhs, other))
+            end
+            thread_invariant && error("cgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade.md's cgen_device_assign hardening note.")
         end
-        error("cgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade.md's cgen_device_assign hardening note.")
     end
     return Expr(:(=), stmt.lhs, stmt.rhs)
 end
@@ -5072,28 +5132,52 @@ function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
                 Expr(:call, jgen_kernel_fname(owner, idx), fargs...))
 end
 
-function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol})
+function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol}, thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
-            push!(exprs, jgen_device_assign(stmt, thread_var, reduce_vars))
+            push!(exprs, jgen_device_assign(stmt, thread_var, thread_dep, injective_dep, reduce_vars))
+            # mirrors cgen_device_body's thread_dep/injective_dep
+            # tracking exactly -- see that function's comment. This
+            # brings the JACC target up to the same transitive
+            # occurs-check parity cgen_device_assign already has,
+            # rather than jgen_device_assign's previous bare
+            # (non-transitive) thread_var check.
+            if stmt.lhs isa Symbol
+                if cgen_expr_contains_any(stmt.rhs, thread_dep)
+                    push!(thread_dep, stmt.lhs)
+                    if cgen_expr_injective_ok(stmt.rhs, injective_dep, thread_dep)
+                        push!(injective_dep, stmt.lhs)
+                    else
+                        delete!(injective_dep, stmt.lhs)
+                    end
+                else
+                    delete!(thread_dep, stmt.lhs)
+                    delete!(injective_dep, stmt.lhs)
+                end
+            end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var, reduce_vars), jgen_device_body(stmt.els, thread_var, reduce_vars)))
+            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep)), jgen_device_body(stmt.els, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars)))
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep))))
         end
     end
     return exprs
 end
 
 # identical decision to cgen_device_assign, reusing cgen_'s own
-# occurs-check and sum-flattening helpers -- only the atomic macro's
-# target module is fixed rather than coming from a backend descriptor.
-# The scalar-reduction branch mirrors cgen_device_assign's exactly:
-# reduce_vars was already boxed into a 1-element JACC.array by
-# jgen_emit before any kernel launch, so `cb = cb + other` becomes an
-# atomic add against index 1 of that boxed array.
-function jgen_device_assign(stmt, thread_var::Symbol, reduce_vars::Set{Symbol})
+# occurs-check, injectivity-check, and sum-flattening helpers -- only
+# the atomic macro's target module is fixed rather than coming from a
+# backend descriptor. The scalar-reduction branch mirrors
+# cgen_device_assign's exactly: reduce_vars was already boxed into a
+# 1-element JACC.array by jgen_emit before any kernel launch, so `cb =
+# cb + other` becomes an atomic add against index 1 of that boxed
+# array. The array-ref branch now also mirrors cgen_device_assign's
+# thread-invariant refusal AND its injective_dep distinction (see that
+# function's comment) -- previously this used a bare, non-transitive
+# `thread_var` occurs-check with no refusal path at all for a genuine
+# non-additive race, which was a real (if narrower) gap of its own.
+function jgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, injective_dep::Set{Symbol}, reduce_vars::Set{Symbol})
     if stmt.lhs isa Symbol && stmt.lhs in reduce_vars
         terms = cgen_flatten_sum(stmt.rhs)
         self_idx = findfirst(t -> t == stmt.lhs, terms)
@@ -5102,13 +5186,18 @@ function jgen_device_assign(stmt, thread_var::Symbol, reduce_vars::Set{Symbol})
         return Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
                     Expr(:(+=), Expr(:ref, stmt.lhs, 1), other))
     end
-    if stmt.lhs isa Expr && stmt.lhs.head == :ref && !cgen_expr_contains(stmt.lhs.args[2:end], thread_var)
-        terms = cgen_flatten_sum(stmt.rhs)
-        self_idx = findfirst(t -> t == stmt.lhs, terms)
-        if self_idx !== nothing
-            other = cgen_sum_excluding(terms, self_idx)
-            return Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
-                        Expr(:(+=), stmt.lhs, other))
+    if stmt.lhs isa Expr && stmt.lhs.head == :ref
+        thread_invariant = !cgen_expr_contains_any(stmt.lhs.args[2:end], thread_dep)
+        needs_atomic_check = thread_invariant || !cgen_expr_injective_ok(stmt.lhs.args[2:end], injective_dep, thread_dep)
+        if needs_atomic_check
+            terms = cgen_flatten_sum(stmt.rhs)
+            self_idx = findfirst(t -> t == stmt.lhs, terms)
+            if self_idx !== nothing
+                other = cgen_sum_excluding(terms, self_idx)
+                return Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
+                            Expr(:(+=), stmt.lhs, other))
+            end
+            thread_invariant && error("jgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade.md's cgen_device_assign hardening note.")
         end
     end
     return Expr(:(=), stmt.lhs, stmt.rhs)
@@ -6618,6 +6707,43 @@ let
     uksrc = string(unique_plan.kernels[1])
     @assert !occursin("CUDA.@atomic", uksrc)
     println("cgen_reduction_only_loop split a per-thread-unique array accumulation onto the device OK (plain write, no atomic needed, no host loop left)")
+
+    # A scatter-add accumulation through a GATHERED (data-dependent)
+    # index -- mpnn's edge-to-node aggregation shape: `agg_off` comes
+    # from `dst[i_seq_e]`, an array read, so two different edges
+    # (threads) CAN land on the same `agg_off` (unlike the `ub[i_seq_x]`
+    # case just above, where the index IS the loop var). This must NOT
+    # take the plain-write fast path -- it needs an atomic add, since
+    # per-thread-uniqueness was never proven, only "depends on the
+    # thread var" was. This is the exact case cgen_reduction_only_loop's
+    # own comment names as accepted-but-unproven; injective_dep's job is
+    # making sure it's proven safe (via atomic) rather than left as an
+    # assumption.
+    scatter_plan = stade_cuda(:(function stub8(agg, dst, msg, n)
+        for i_seq_e = 1:n
+            d = dst[i_seq_e]
+            agg[d] = agg[d] + msg[i_seq_e]
+        end
+        return nothing
+    end))
+    @assert occursin("@cuda", string(scatter_plan.host)) && !occursin("for i_seq_e", string(scatter_plan.host))
+    sksrc = string(scatter_plan.kernels[1])
+    @assert occursin("CUDA.@atomic", sksrc)
+    println("cgen_reduction_only_loop correctly wraps a gather-indexed scatter-add in an atomic OK (index depends on thread var but isn't provably injective -- mpnn regression guard)")
+
+    # Same scatter-add shape, JACC target -- jgen_device_assign now
+    # carries the same thread_dep/injective_dep tracing as cgen_'s, so
+    # this must also come out atomic rather than plain.
+    scatter_plan_jacc = stade_jacc(:(function stub8j(agg, dst, msg, n)
+        for i_seq_e = 1:n
+            d = dst[i_seq_e]
+            agg[d] = agg[d] + msg[i_seq_e]
+        end
+        return nothing
+    end))
+    jksrc = string(scatter_plan_jacc.kernels[1])
+    @assert occursin("Atomix.@atomic", jksrc)
+    println("cgen_reduction_only_loop correctly wraps a gather-indexed scatter-add in an atomic OK (JACC target parity)")
 
     # A genuine recurrence (array read of a value a PREVIOUS iteration
     # of the same i_seq_ loop wrote, e.g. geomrecur's u[i]=c*u[i-1])

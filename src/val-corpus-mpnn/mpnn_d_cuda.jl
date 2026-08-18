@@ -82,8 +82,8 @@ function cuda_kernel_mpnn_d_3!(agg, aggd, dst, messages, messagesd, n_edges, n_m
     agg_offd = 0.0
     agg_off = (d_node - 1) * n_msg_feat
     for j = 1:n_msg_feat
-        aggd[agg_off + j] = aggd[agg_off + j] + messagesd[msg_off + j]
-        agg[agg_off + j] = agg[agg_off + j] + messages[msg_off + j]
+        CUDA.@atomic aggd[agg_off + j] += messagesd[msg_off + j]
+        CUDA.@atomic agg[agg_off + j] += messages[msg_off + j]
     end
     return nothing
 end
@@ -190,7 +190,7 @@ function cuda_kernel_mpnn_3!(agg, dst, messages, n_edges, n_msg_feat)
     msg_off = (i_seq_e - 1) * n_msg_feat
     agg_off = (d_node - 1) * n_msg_feat
     for j = 1:n_msg_feat
-        agg[agg_off + j] = agg[agg_off + j] + messages[msg_off + j]
+        CUDA.@atomic agg[agg_off + j] += messages[msg_off + j]
     end
     return nothing
 end
