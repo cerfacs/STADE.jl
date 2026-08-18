@@ -67,6 +67,8 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
         for hh = 1:h
             head_offsetd = 0.0
             head_offset = (hh - 1) * dk
+            score_offd = 0.0
+            score_off = (hh - 1) * n * n
             for idx2 = 1:n * n
                 id = 0.0
                 i = div(idx2 - 1, n) + 1
@@ -78,31 +80,31 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
                     sd = sd + (k[(j - 1) * d + head_offset + i_seq_p] * qd[(i - 1) * d + head_offset + i_seq_p] + q[(i - 1) * d + head_offset + i_seq_p] * kd[(j - 1) * d + head_offset + i_seq_p])
                     s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                 end
-                scoresd[(i - 1) * n + j] = inv_sqrt_dk * sd
-                scores[(i - 1) * n + j] = s * inv_sqrt_dk
+                scoresd[score_off + (i - 1) * n + j] = inv_sqrt_dk * sd
+                scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
             end
             for i = 1:n
-                row_maxd = scoresd[(i - 1) * n + 1]
-                row_max = scores[(i - 1) * n + 1]
+                row_maxd = scoresd[score_off + (i - 1) * n + 1]
+                row_max = scores[score_off + (i - 1) * n + 1]
                 for i_seq_j = 2:n
-                    row_maxd = (0.5 * (1.0 + sign(row_max - scores[(i - 1) * n + i_seq_j]))) * row_maxd + (0.5 * (1.0 + sign(scores[(i - 1) * n + i_seq_j] - row_max))) * scoresd[(i - 1) * n + i_seq_j]
-                    row_max = max(row_max, scores[(i - 1) * n + i_seq_j])
+                    row_maxd = (0.5 * (1.0 + sign(row_max - scores[score_off + (i - 1) * n + i_seq_j]))) * row_maxd + (0.5 * (1.0 + sign(scores[score_off + (i - 1) * n + i_seq_j] - row_max))) * scoresd[score_off + (i - 1) * n + i_seq_j]
+                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
                 end
                 for j = 1:n
                     kkd = 0.0
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probsd[kk] = exp(scores[kk] - row_max) * (scoresd[kk] + -row_maxd)
                     probs[kk] = exp(scores[kk] - row_max)
                 end
                 row_sumd = 0.0
                 row_sum = 0.0
                 for i_seq_j = 1:n
-                    row_sumd = row_sumd + probsd[(i - 1) * n + i_seq_j]
-                    row_sum = row_sum + probs[(i - 1) * n + i_seq_j]
+                    row_sumd = row_sumd + probsd[score_off + (i - 1) * n + i_seq_j]
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                 end
                 for j = 1:n
                     kkd = 0.0
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probsd[kk] = (1.0 / row_sum) * probsd[kk] + -(probs[kk] / row_sum ^ 2) * row_sumd
                     probs[kk] = probs[kk] / row_sum
                 end
@@ -115,8 +117,8 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
                 sd = 0.0
                 s = 0.0
                 for i_seq_j = 1:n
-                    sd = sd + (v[(i_seq_j - 1) * d + head_offset + p] * probsd[(i - 1) * n + i_seq_j] + probs[(i - 1) * n + i_seq_j] * vd[(i_seq_j - 1) * d + head_offset + p])
-                    s = s + probs[(i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+                    sd = sd + (v[(i_seq_j - 1) * d + head_offset + p] * probsd[score_off + (i - 1) * n + i_seq_j] + probs[score_off + (i - 1) * n + i_seq_j] * vd[(i_seq_j - 1) * d + head_offset + p])
+                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                 end
                 ctxd[(i - 1) * d + head_offset + p] = sd
                 ctx[(i - 1) * d + head_offset + p] = s
@@ -278,6 +280,7 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
         end
         for hh = 1:h
             head_offset = (hh - 1) * dk
+            score_off = (hh - 1) * n * n
             for idx2 = 1:n * n
                 i = div(idx2 - 1, n) + 1
                 j = mod(idx2 - 1, n) + 1
@@ -285,23 +288,23 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 for i_seq_p = 1:dk
                     s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                 end
-                scores[(i - 1) * n + j] = s * inv_sqrt_dk
+                scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
             end
             for i = 1:n
-                row_max = scores[(i - 1) * n + 1]
+                row_max = scores[score_off + (i - 1) * n + 1]
                 for i_seq_j = 2:n
-                    row_max = max(row_max, scores[(i - 1) * n + i_seq_j])
+                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = exp(scores[kk] - row_max)
                 end
                 row_sum = 0.0
                 for i_seq_j = 1:n
-                    row_sum = row_sum + probs[(i - 1) * n + i_seq_j]
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = probs[kk] / row_sum
                 end
             end
@@ -310,7 +313,7 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 p = mod(idx3 - 1, dk) + 1
                 s = 0.0
                 for i_seq_j = 1:n
-                    s = s + probs[(i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                 end
                 ctx[(i - 1) * d + head_offset + p] = s
             end
