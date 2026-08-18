@@ -26,8 +26,7 @@ This is a legitimate question since the Automatic Differentiation (AD) ecosystem
   STADE-generated adjoints / tangents / hvp are bundled with primal source codes, such that numerical experiments are reproducible regardless of STADE availability or version in the machine they run.
 
 
-- **Accessible** scalable differentiable computing
-
+- **Accessible** scalable differentiable computing\
   STADE generates GPU-ported adjoints / tangents / hvp from monoprocessor kernels, which are easy to craft and debug.
 
 
