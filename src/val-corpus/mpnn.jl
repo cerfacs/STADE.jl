@@ -21,16 +21,20 @@
 # n_node_feat: number of node features
 # n_edge_feat: number of edge features
 # n_msg_feat: number of message features
-# msg_input: scratch array, length 2*n_node_feat + n_edge_feat
-# msg_scratch: scratch array, length n_msg_feat
+# msg_input: scratch array, length n_edges * (2*n_node_feat + n_edge_feat) --
+#            one private (2*n_node_feat + n_edge_feat)-slice per edge
+# msg_scratch: scratch array, length n_edges * n_msg_feat --
+#              one private n_msg_feat-slice per edge
 # messages: scratch array, length n_edges * n_msg_feat
 # agg: scratch array, length n_nodes * n_msg_feat
-# upd_input: scratch array, length n_node_feat + n_msg_feat
-# upd_scratch: scratch array, length n_node_feat
+# upd_input: scratch array, length n_nodes * (n_node_feat + n_msg_feat) --
+#            one private (n_node_feat + n_msg_feat)-slice per node
+# upd_scratch: scratch array, length n_nodes * n_node_feat --
+#              one private n_node_feat-slice per node
 # node_feat_out: output array, length n_nodes * n_node_feat, filled in place
 function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_nodes, n_edges, n_node_feat, n_edge_feat, n_msg_feat, msg_input, msg_scratch, messages, agg, upd_input, upd_scratch, node_feat_out)
     # named zero offset, used wherever a copy starts at the beginning of an array
-    zero_off = 0
+    # zero_off = 0
     # sizes of the concatenated input vectors used by the two dense layers
     n_in_msg = 2 * n_node_feat + n_edge_feat
     n_in_upd = n_node_feat + n_msg_feat
@@ -48,15 +52,21 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
         src_off = (s_node - 1) * n_node_feat
         dst_off = (d_node - 1) * n_node_feat
         edge_off = (e - 1) * n_edge_feat
+        # this edge's own private slice of msg_input/msg_scratch -- required
+        # so that GPU-splitting this loop (one thread per edge) is race-free;
+        # a single shared slice reused every iteration is only safe under
+        # strictly sequential (CPU) execution
+        in_off = (e - 1) * n_in_msg
+        msg_off = (e - 1) * n_msg_feat
         # assemble [sender feature ; receiver feature ; edge feature]
         for k = 1:n_node_feat
-            msg_input[zero_off + k] = node_feat[src_off + k]
+            msg_input[in_off + k] = node_feat[src_off + k]
         end
         for k = 1:n_node_feat
-            msg_input[n_node_feat + k] = node_feat[dst_off + k]
+            msg_input[in_off + n_node_feat + k] = node_feat[dst_off + k]
         end
         for k = 1:n_edge_feat
-            msg_input[2 * n_node_feat + k] = edge_feat[edge_off + k]
+            msg_input[in_off + 2 * n_node_feat + k] = edge_feat[edge_off + k]
         end
         # dense layer: msg_scratch = w_msg * msg_input + b_msg
         for o = 1:n_msg_feat
@@ -64,17 +74,16 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
             # accumulate the dot product sequentially over the input features
             for i_seq_i = 1:n_in_msg
                 widx = (o - 1) * n_in_msg + i_seq_i
-                s = s + w_msg[widx] * msg_input[i_seq_i]
+                s = s + w_msg[widx] * msg_input[in_off + i_seq_i]
             end
-            msg_scratch[o] = s
+            msg_scratch[msg_off + o] = s
         end
         # ReLU activation
         for k = 1:n_msg_feat
-            msg_scratch[k] = max(msg_scratch[k], 0.0)
+            msg_scratch[msg_off + k] = max(msg_scratch[msg_off + k], 0.0)
         end
-        msg_off = (e - 1) * n_msg_feat
         for k = 1:n_msg_feat
-            messages[msg_off + k] = msg_scratch[zero_off + k]
+            messages[msg_off + k] = msg_scratch[msg_off + k]
         end
     end
 
@@ -95,12 +104,17 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
     for v = 1:n_nodes
         node_off = (v - 1) * n_node_feat
         agg_off = (v - 1) * n_msg_feat
+        # this node's own private slice of upd_input, for the same
+        # GPU-split-race reason as in_off/msg_off above; upd_scratch reuses
+        # node_off directly since both it and node_feat_out are already
+        # n_node_feat-per-node
+        uin_off = (v - 1) * n_in_upd
         # assemble [previous feature ; aggregated incoming message]
         for k = 1:n_node_feat
-            upd_input[zero_off + k] = node_feat[node_off + k]
+            upd_input[uin_off + k] = node_feat[node_off + k]
         end
         for k = 1:n_msg_feat
-            upd_input[n_node_feat + k] = agg[agg_off + k]
+            upd_input[uin_off + n_node_feat + k] = agg[agg_off + k]
         end
         # dense layer: upd_scratch = w_upd * upd_input + b_upd
         for o = 1:n_node_feat
@@ -108,16 +122,16 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
             # accumulate the dot product sequentially over the input features
             for i_seq_i = 1:n_in_upd
                 widx = (o - 1) * n_in_upd + i_seq_i
-                s = s + w_upd[widx] * upd_input[i_seq_i]
+                s = s + w_upd[widx] * upd_input[uin_off + i_seq_i]
             end
-            upd_scratch[o] = s
+            upd_scratch[node_off + o] = s
         end
         # ReLU activation
         for k = 1:n_node_feat
-            upd_scratch[k] = max(upd_scratch[k], 0.0)
+            upd_scratch[node_off + k] = max(upd_scratch[node_off + k], 0.0)
         end
         for k = 1:n_node_feat
-            node_feat_out[node_off + k] = upd_scratch[zero_off + k]
+            node_feat_out[node_off + k] = upd_scratch[node_off + k]
         end
     end
 

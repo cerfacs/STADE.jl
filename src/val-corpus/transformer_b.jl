@@ -91,6 +91,7 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
         end
         for hh = 1:h
             head_offset = (hh - 1) * dk
+            score_off = (hh - 1) * n * n
             for idx2 = 1:n * n
                 i = div(idx2 - 1, n) + 1
                 j = mod(idx2 - 1, n) + 1
@@ -100,19 +101,19 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                     push!(s_stack, s)
                     s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                 end
-                push!(scores_stack, scores[(i - 1) * n + j])
-                scores[(i - 1) * n + j] = s * inv_sqrt_dk
+                push!(scores_stack, scores[score_off + (i - 1) * n + j])
+                scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
                 push!(s_stack, s)
             end
             for i = 1:n
                 push!(row_max_stack, row_max)
-                row_max = scores[(i - 1) * n + 1]
+                row_max = scores[score_off + (i - 1) * n + 1]
                 for i_seq_j = 2:n
                     push!(row_max_stack, row_max)
-                    row_max = max(row_max, scores[(i - 1) * n + i_seq_j])
+                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     push!(probs_stack, probs[kk])
                     probs[kk] = exp(scores[kk] - row_max)
                 end
@@ -120,10 +121,10 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 row_sum = 0.0
                 for i_seq_j = 1:n
                     push!(row_sum_stack, row_sum)
-                    row_sum = row_sum + probs[(i - 1) * n + i_seq_j]
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     push!(probs_stack, probs[kk])
                     probs[kk] = probs[kk] / row_sum
                 end
@@ -137,7 +138,7 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 s = 0.0
                 for i_seq_j = 1:n
                     push!(s_stack, s)
-                    s = s + probs[(i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                 end
                 push!(ctx_stack, ctx[(i - 1) * d + head_offset + p])
                 ctx[(i - 1) * d + head_offset + p] = s
@@ -450,6 +451,7 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             row_sum = pop!(row_sum_stack)
             s = pop!(s_stack)
             head_offset = (hh - 1) * dk
+            score_off = (hh - 1) * n * n
             for idx3 = n * dk:-1:1
                 s = pop!(s_stack)
                 i = div(idx3 - 1, dk) + 1
@@ -459,8 +461,8 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 ctxb[(i - 1) * d + head_offset + p] = 0.0
                 for i_seq_j = n:-1:1
                     s = pop!(s_stack)
-                    probsb[(i - 1) * n + i_seq_j] = probsb[(i - 1) * n + i_seq_j] + v[(i_seq_j - 1) * d + head_offset + p] * sb
-                    vb[(i_seq_j - 1) * d + head_offset + p] = vb[(i_seq_j - 1) * d + head_offset + p] + probs[(i - 1) * n + i_seq_j] * sb
+                    probsb[score_off + (i - 1) * n + i_seq_j] = probsb[score_off + (i - 1) * n + i_seq_j] + v[(i_seq_j - 1) * d + head_offset + p] * sb
+                    vb[(i_seq_j - 1) * d + head_offset + p] = vb[(i_seq_j - 1) * d + head_offset + p] + probs[score_off + (i - 1) * n + i_seq_j] * sb
                 end
                 s = pop!(s_stack)
                 sb = 0.0
@@ -469,19 +471,19 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 row_max = pop!(row_max_stack)
                 row_sum = pop!(row_sum_stack)
                 for j = n:-1:1
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = pop!(probs_stack)
                     row_sumb = row_sumb + -(probs[kk] / row_sum ^ 2) * probsb[kk]
                     probsb[kk] = (1.0 / row_sum) * probsb[kk]
                 end
                 for i_seq_j = n:-1:1
                     row_sum = pop!(row_sum_stack)
-                    probsb[(i - 1) * n + i_seq_j] = probsb[(i - 1) * n + i_seq_j] + row_sumb
+                    probsb[score_off + (i - 1) * n + i_seq_j] = probsb[score_off + (i - 1) * n + i_seq_j] + row_sumb
                 end
                 row_sum = pop!(row_sum_stack)
                 row_sumb = 0.0
                 for j = n:-1:1
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = pop!(probs_stack)
                     scoresb[kk] = scoresb[kk] + exp(scores[kk] - row_max) * probsb[kk]
                     row_maxb = row_maxb + -(exp(scores[kk] - row_max) * probsb[kk])
@@ -489,20 +491,20 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 end
                 for i_seq_j = n:-1:2
                     row_max = pop!(row_max_stack)
-                    scoresb[(i - 1) * n + i_seq_j] = scoresb[(i - 1) * n + i_seq_j] + (0.5 * (1.0 + sign(scores[(i - 1) * n + i_seq_j] - row_max))) * row_maxb
-                    row_maxb = (0.5 * (1.0 + sign(row_max - scores[(i - 1) * n + i_seq_j]))) * row_maxb
+                    scoresb[score_off + (i - 1) * n + i_seq_j] = scoresb[score_off + (i - 1) * n + i_seq_j] + (0.5 * (1.0 + sign(scores[score_off + (i - 1) * n + i_seq_j] - row_max))) * row_maxb
+                    row_maxb = (0.5 * (1.0 + sign(row_max - scores[score_off + (i - 1) * n + i_seq_j]))) * row_maxb
                 end
                 row_max = pop!(row_max_stack)
-                scoresb[(i - 1) * n + 1] = scoresb[(i - 1) * n + 1] + row_maxb
+                scoresb[score_off + (i - 1) * n + 1] = scoresb[score_off + (i - 1) * n + 1] + row_maxb
                 row_maxb = 0.0
             end
             for idx2 = n * n:-1:1
                 s = pop!(s_stack)
                 i = div(idx2 - 1, n) + 1
                 j = mod(idx2 - 1, n) + 1
-                scores[(i - 1) * n + j] = pop!(scores_stack)
-                sb = sb + inv_sqrt_dk * scoresb[(i - 1) * n + j]
-                scoresb[(i - 1) * n + j] = 0.0
+                scores[score_off + (i - 1) * n + j] = pop!(scores_stack)
+                sb = sb + inv_sqrt_dk * scoresb[score_off + (i - 1) * n + j]
+                scoresb[score_off + (i - 1) * n + j] = 0.0
                 for i_seq_p = dk:-1:1
                     s = pop!(s_stack)
                     qb[(i - 1) * d + head_offset + i_seq_p] = qb[(i - 1) * d + head_offset + i_seq_p] + k[(j - 1) * d + head_offset + i_seq_p] * sb
@@ -607,6 +609,7 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
         end
         for hh = 1:h
             head_offset = (hh - 1) * dk
+            score_off = (hh - 1) * n * n
             for idx2 = 1:n * n
                 i = div(idx2 - 1, n) + 1
                 j = mod(idx2 - 1, n) + 1
@@ -614,23 +617,23 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 for i_seq_p = 1:dk
                     s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                 end
-                scores[(i - 1) * n + j] = s * inv_sqrt_dk
+                scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
             end
             for i = 1:n
-                row_max = scores[(i - 1) * n + 1]
+                row_max = scores[score_off + (i - 1) * n + 1]
                 for i_seq_j = 2:n
-                    row_max = max(row_max, scores[(i - 1) * n + i_seq_j])
+                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = exp(scores[kk] - row_max)
                 end
                 row_sum = 0.0
                 for i_seq_j = 1:n
-                    row_sum = row_sum + probs[(i - 1) * n + i_seq_j]
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                 end
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = probs[kk] / row_sum
                 end
             end
@@ -639,7 +642,7 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 p = mod(idx3 - 1, dk) + 1
                 s = 0.0
                 for i_seq_j = 1:n
-                    s = s + probs[(i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                 end
                 ctx[(i - 1) * d + head_offset + p] = s
             end
