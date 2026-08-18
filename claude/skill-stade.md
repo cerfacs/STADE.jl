@@ -178,31 +178,123 @@ randomly addressable. The corresponding forward-written slot is simply
 never read back — a harmless over-snapshot, the same philosophy `snap_*`
 already applies to its own iteration-independent elision.
 
-**Tier B (detected, not yet implemented):** a loop whose own
+**Tier B (implemented — growable buffer, `sizehint!`'d ahead of time;
+see below for what's still deferred):** a loop whose own
 bound-determining symbol is ever an assignment target inside an
 *ancestor sequential loop* has a trip count that isn't a closed-form
 function of kernel arguments (`mg_vcycle`/`mg_vcycle_multi`, whose inner
 loop bounds derive from `nl`, reassigned once per outer sequential
-`i_seq_level` iteration, are the two confirmed corpus instances).
-`agen_tier_b_offender`/`agen_tier_b_walk` detect this up front and
-`agen_emit`/`stade_hvp` refuse loudly (`error(...)`, naming the
-offending symbol) rather than emit a wrong or under-sized buffer.
-Actual Tier B support (ragged/data-dependent sizing) is a separate,
-not-yet-implemented follow-up.
+`i_seq_level` iteration, are two corpus instances; the dedicated Tier B
+stress corpus below adds three more shapes). `agen_tier_b_offender`/
+`agen_tier_b_walk` still detect this exactly as before, but
+`agen_emit`/`stade_hvp` no longer refuse on it — detection now *feeds*
+`agen_indexed_layout` instead of gating entry to it.
+
+**Taint, not per-occurrence math.** `agen_layout_walk!` threads
+`seq_reassigned`/`in_ragged` through its recursion, mirroring
+`agen_tier_b_walk`'s own recursion via the shared `agen_for_bound_vars`
+helper (factored out specifically so the two can never independently
+drift on what counts as "this loop's bound variables" — they must
+agree exactly, since taint-marking is what implements Tier B support
+for the loops `agen_tier_b_offender` would otherwise have refused on).
+Every *stack* touched by an occurrence recorded while `in_ragged` is
+true gets marked tainted, in `layout.tainted_stacks` — a new field on
+`agen_indexed_layout`'s return shape: `(offsets, sizes, free_vars,
+tainted_stacks::Set{Symbol})`. This is a per-STACK, not per-occurrence,
+decision: if *any* occurrence sharing a stack is ragged, the *whole
+stack* falls back to `:stack` (`push!`/`pop!`) semantics —
+`agen_use_stack_push(ectx, stack_name) = ectx.keep_push_pop ||
+stack_name in ectx.layout.tainted_stacks`, checked first in
+`agen_emit_push`/`agen_emit_pop` — even for that stack's other,
+individually-non-ragged occurrences. This deliberately avoids a much
+larger generalization (mixed static/dynamic regions within one stack)
+the corpus doesn't currently need. A tainted stack gets no `offsets`/
+`sizes` entry at all, so `agen_site_index` is never called for it —
+short-circuited by `agen_use_stack_push` before reaching the
+`:indexed`-mode lookup.
+
+**Ahead-of-time sizing, not a true `:indexed` layout.** Tainted stacks
+stay `push!`/`pop!`-based — this does *not* unlock GPU-splitting for a
+ragged loop's own body (`cgen_contains_stackop` still correctly refuses
+it); it only avoids a growable `Vector`'s own repeated reallocation.
+`agen_tier_b_sizing_stmts`/`agen_tier_b_sizing_walk` build a
+**scalar-only replica** of `kernel.body`: every `:for`/`:if` kept
+verbatim (their headers are real scalar expressions that must actually
+execute to get correct trip counts/branch outcomes), every
+array-touching `:assign` dropped, every scalar `:assign` kept unless
+its RHS reads an array (`agen_expr_reads_array`) — an array's value
+never affects a loop bound or branch condition, by skill-jade's own
+house style, so it's safe to drop the write and never have the array
+in scope at all. At each occurrence landing on a tainted stack, the
+replica emits `__sz_<stack> += 1`; because it actually *executes* the
+real loop nest, occurrence counts fall out for free, with no
+closed-form multiplicity formula needed. `agen_init_emit`/
+`hvp_shadow_stack_inits` prepend these statements and follow each
+tainted stack's allocation with `sizehint!(stack, __sz_stack)`.
+
+Reusing the kernel's own local variable names in the replica (no
+separate renaming pass) is safe *by construction*, not by luck: inside
+`initstacks_*` the replica is the only scalar logic in that function at
+all (no collision possible); inside `hvp_emit` the replica precedes the
+real forward sweep in the *same* function, and a well-formed kernel
+always freshly reassigns a scalar before any read that matters to
+control flow — the real sweep's own faithful replay of those same
+statements overwrites any residual sizing-pass value before it's ever
+read for real. Since `sizehint!` is a pure performance hint
+(`push!`/`pop!` stay correct for *any* hinted size, including 0 or an
+overestimate), this pass also carries no correctness bar of its own —
+only a quality one, which is what makes reusing kernel variable names
+an acceptable risk here.
+
+**Known blocking issue, deliberately left unsolved:** a true
+closed-form (non-`sizehint!`) `:indexed` buffer for a ragged loop — the
+natural next step after the above — was attempted and set aside. Any
+index expression with an embedded mutation (e.g. `stack[cursor += 1]`)
+gets *evaluated twice* by `hvp_double_stmt`'s doubling transform, since
+`hvp_shadow_lvalue` reuses the *same* index sub-`Expr` for both the
+shadow write and the primal write as two separate statements — silently
+double-advancing the cursor. A correct closed-form scheme needs the
+index computed once, as a *pure* expression, with any cursor
+advancement as its own separate statement whose LHS is never a
+`shadow_of` key (confirmed this shape passes through `hvp_double_stmt`
+untouched — its `:(=)` branch only doubles assignments whose LHS var is
+a `shadow_of` key) — but deriving that index closed-form needs
+per-ancestor-loop block totals computed ahead of time via the same kind
+of recurrence replay as the sizing pass above, and even then still
+wouldn't unlock GPU-splitting for the ragged loop's own body (the
+cursor remains a sequential dependency across iterations either way).
+Left as a follow-up given its size/risk relative to `sizehint!`'s
+already-real payoff.
 
 **Validated:** all 19 Tier A corpus kernels pass central
 finite-difference validation under `keep_push_pop=false` for both
 adjoint and HVP generation (`stade_validate_adjoint_against_file`,
-`val_validate_hvp`); the 2 Tier B kernels refuse loudly as designed.
-`keep_push_pop=true` output is provably byte-identical to the
-pre-feature codebase across the full corpus. GPU-split-count regression
-checked via `stade_cuda`: `:indexed` mode never reduces the number of
-loops split into parallel GPU kernels versus `:stack` mode, and often
-increases it (removing the push/pop sequential dependency unlocks
+`val_validate_hvp`). A dedicated 5-kernel Tier B stress corpus
+(`mg_vcycle`, `mg_vcycle_multi`, `cascadic_mg_prolong` — a growing-only
+bound, never exercised alone before — `windowed_relax_retire` — an
+`if`-gated reassignment — and `richardson_substep` — a non-spatial,
+substep-count domain) passes the same central-difference validation for
+tangent/adjoint/HVP generation, across the full `keep_push_pop` ×
+`site_level_tbr` 2×2 matrix (20 adjoint/HVP generations, all passing,
+with error magnitudes identical across all four flag combinations —
+strong evidence the underlying math, not just the code path, is
+unaffected by either flag). `keep_push_pop=true` output is provably
+byte-identical to the pre-feature codebase across the full corpus, Tier
+A and Tier B alike — verified by direct comparison against
+`val-corpus/*_b.jl`/`*_d.jl`/`*_hv.jl` (a tainted stack's `push!`/`pop!`
+path, and everything upstream of it, is completely untouched when
+`keep_push_pop=true`). GPU-split-count regression checked via
+`stade_cuda`: `:indexed` mode never reduces the number of loops split
+into parallel GPU kernels versus `:stack` mode, and often increases it
+for Tier A kernels (removing the push/pop sequential dependency unlocks
 splits `:stack` mode couldn't attempt at all — e.g. `advection` 2→4,
-`matvec_loss`/`relu_field` 0→2).
+`matvec_loss`/`relu_field` 0→2); Tier B kernels' ragged loops are
+unaffected either way (still not GPU-split-eligible under either mode —
+see "Known blocking issue" above for why).
 
-**Known follow-up (not blocking, not yet done):** Tier B ragged sizing.
+**Known follow-up (not blocking, not yet done):** the closed-form
+`:indexed` Tier B buffer described above, which would also be the
+prerequisite for GPU-splitting a ragged loop's own body.
 
 `cgen_device_assign`'s atomic-write detection has already been hardened
 (independent of, but recommended alongside, this feature): it now does
@@ -384,3 +476,10 @@ epistemic status as the rest of `jgen_`'s design notes above.
 - [ ] If touching `site_level_tbr`'s `snap_*`/`agen_*` pair, both copies
       were changed identically and `stade_site_level_tbr_check` still
       passes across the full corpus + stress kernels
+- [ ] If touching Tier B (`agen_layout_walk!`'s taint tracking,
+      `agen_tier_b_sizing_*`), taint stays a per-*stack* decision (never
+      per-occurrence), the sizing-pass replica never references an
+      array, and no index expression passed to `agen_emit_push`/
+      `agen_emit_pop` carries an embedded mutation (see the "Known
+      blocking issue" under Tier B for why that specifically breaks
+      `hvp_double_stmt`)
