@@ -19,16 +19,16 @@ of monoprocessor numerical kernels written using the Julia programming language.
 This is a legitimate question since the Automatic Differentiation (AD) ecosystem in Julia is already rich (see [DifferentiationInterface.jl](https://github.com/JuliaDiff/DifferentiationInterface.jl)). In a nutshell, our motivations lean on obtaining:
 
 - **Auditable** adjoints / tangents / hvp\
-  STADE outputs human-readable Julia source code.
+  STADE outputs human-readable Julia source code. This builds trust around AD tool usage to compute derivatives. It also eases debugging and development of new features.
 
 
 - **Reproducible** gradient-based experiments (e.g., AI models training)\
-  STADE-generated adjoints / tangents / hvp are bundled with your primal source codes, such that your experiments are reproducible regardless of STADE availability or version in the machine they run.
+  STADE-generated adjoints / tangents / hvp are bundled with primal source codes, such that numerical experiments are reproducible regardless of STADE availability or version in the machine they run.
 
 
-- **Accessible** differentiable computing
+- **Accessible** scalable differentiable computing
 
-
+  STADE generates GPU-ported adjoints / tangents / hvp from monoprocessor kernels, which are easy to craft and debug.
 
 
 ## First use
