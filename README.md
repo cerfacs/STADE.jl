@@ -5,7 +5,7 @@
 
 - Adjoints
 - Tangents
-- Hessian-vector products
+- Hessian-vector products (hvp)
 - Primals
 
 of monoprocessor numerical kernels written using the Julia programming language.
@@ -18,16 +18,32 @@ of monoprocessor numerical kernels written using the Julia programming language.
 
 This is a legitimate question since the Automatic Differentiation (AD) ecosystem in Julia is already rich (see [DifferentiationInterface.jl](https://github.com/JuliaDiff/DifferentiationInterface.jl)).
 
+1. Auditable adjoints / tangents / hvp
+
+STADE outputs human-readable Julia source code.
+
+
+2. Reproducible gradient-based experiments (e.g., AI models training)
+
+STADE-generated adjoints / tangents / hvp are bundled with your primal source codes, such that your experiments are reproducible regardless of STADE availability or version in the machine they run.
+
+
+3. Make differentiable computing as approachable as classic scientific computing
+
+
+
+
 ## First use
 
 
 ## Wishlist 💡
 
-- [ ] Common subexpressions wrapping into temporary variables
-- [ ] `bgen_` stage for mini-batch runs via GPU-aware MPI
-- [ ] `:while` statement support
-- [ ] (Binomial) checkpointing support
-- [ ] Fixed-point loops efficient differentiation
+- [ ] Replace reduction-related atomic writes with more performant alternatives
+- [ ] Wrap common subexpressions into temporary variables
+- [ ] Add `bgen_` stage for mini-batch execution code via GPU-aware MPI
+- [ ] Add support to `:while` statement
+- [ ] Add support to (binomial) checkpointing
+- [ ] Add support to efficient differentiation of fixed-point loops 
 
 ### Acknowledgements
 
