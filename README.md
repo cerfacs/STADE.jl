@@ -1,5 +1,5 @@
 # STADE.jl 🏟️
-*Low entry ticket to Scalable Differentiable Programming*
+*Low entry ticket to Scalable Differentiable Computing*
 
 **Source Transformation Automatic Differentiation Engine** (STADE) generates GPU-ported adjoints, tangents, and Hessian-vector products from monoprocessor numerical kernels written using the Julia programming language.
 
@@ -9,7 +9,7 @@
 
 ## Why STADE.jl ?
 
-This is a legitimate question as STADE.jl would stand as yet another Automatic Differentiation (AD) engine in the already rich Julia AD ecosystem (see DifferentiationInterface.jl).
+This is a legitimate question since STADE.jl is yet another Automatic Differentiation (AD) engine in the already rich Julia AD ecosystem (see [DifferentiationInterface.jl](https://github.com/JuliaDiff/DifferentiationInterface.jl)).
 
 ## First use
 
@@ -17,8 +17,8 @@ This is a legitimate question as STADE.jl would stand as yet another Automatic D
 ## Wishlist 💡
 
 - [ ] Common subexpressions wrapping into temporary variables
-- [ ] `:while` statement support
 - [ ] `bgen_` stage for mini-batch runs via GPU-aware MPI
+- [ ] `:while` statement support
 - [ ] (Binomial) checkpointing support
 - [ ] Fixed-point loops efficient differentiation
 
