@@ -16,7 +16,9 @@ This is a legitimate question as STADE.jl would stand as yet another Automatic D
 
 ## Wishlist 💡
 
+- [ ] Common subexpressions wrapping into temporary variables
 - [ ] `:while` statement support
+- [ ] `bgen_` stage for mini-batch runs via GPU-aware MPI
 - [ ] (Binomial) checkpointing support
 - [ ] Fixed-point loops efficient differentiation
 
