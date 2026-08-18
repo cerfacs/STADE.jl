@@ -9,7 +9,7 @@
 
 ## Why STADE.jl ?
 
-This is a legitimate question since STADE.jl is yet another Automatic Differentiation (AD) engine in the already rich Julia AD ecosystem (see [DifferentiationInterface.jl](https://github.com/JuliaDiff/DifferentiationInterface.jl)).
+This is a legitimate question since the Automatic Differentiation (AD) ecosystem in Julia is already rich (see [DifferentiationInterface.jl](https://github.com/JuliaDiff/DifferentiationInterface.jl)).
 
 ## First use
 
