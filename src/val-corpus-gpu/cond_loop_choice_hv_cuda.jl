@@ -1,0 +1,101 @@
+import Pkg
+haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
+using CUDA
+CUDA.allowscalar(false)
+
+function cuda_kernel_cond_loop_choice_hv_1!(i_n, loss, lossd, u, ud)
+    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
+    if __tid > div(i_n - 1, 1) + 1
+        return nothing
+    end
+    i_seq_x = 1 + (__tid - 1)
+    CUDA.@atomic lossd[1] += (2 * u[i_seq_x]) * ud[i_seq_x]
+    CUDA.@atomic loss[1] += u[i_seq_x] ^ 2
+    return nothing
+end
+
+function cuda_kernel_cond_loop_choice_hv_2!(i_n, loss, lossd, v, vd)
+    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
+    if __tid > div(i_n - 1, 1) + 1
+        return nothing
+    end
+    i_seq_x = 1 + (__tid - 1)
+    CUDA.@atomic lossd[1] += (2 * v[i_seq_x]) * vd[i_seq_x]
+    CUDA.@atomic loss[1] += v[i_seq_x] ^ 2
+    return nothing
+end
+
+function cuda_kernel_cond_loop_choice_hv_3!(i_n, lossb, lossbd, u, ub, ubd, ud)
+    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
+    if __tid > div(1 - i_n, -1) + 1
+        return nothing
+    end
+    i_seq_x = i_n + (__tid - 1) * -1
+    ubd[i_seq_x] = ubd[i_seq_x] + (lossb[1] * (2 * ud[i_seq_x]) + (2 * u[i_seq_x]) * lossbd[1])
+    ub[i_seq_x] = ub[i_seq_x] + (2 * u[i_seq_x]) * lossb[1]
+    return nothing
+end
+
+function cuda_kernel_cond_loop_choice_hv_4!(i_n, lossb, lossbd, v, vb, vbd, vd)
+    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
+    if __tid > div(1 - i_n, -1) + 1
+        return nothing
+    end
+    i_seq_x = i_n + (__tid - 1) * -1
+    vbd[i_seq_x] = vbd[i_seq_x] + (lossb[1] * (2 * vd[i_seq_x]) + (2 * v[i_seq_x]) * lossbd[1])
+    vb[i_seq_x] = vb[i_seq_x] + (2 * v[i_seq_x]) * lossb[1]
+    return nothing
+end
+
+function cuda_kernel_cond_loop_choice_1!(i_n, loss, u)
+    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
+    if __tid > div(i_n - 1, 1) + 1
+        return nothing
+    end
+    i_seq_x = 1 + (__tid - 1)
+    CUDA.@atomic loss[1] += u[i_seq_x] ^ 2
+    return nothing
+end
+
+function cuda_kernel_cond_loop_choice_2!(i_n, loss, v)
+    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
+    if __tid > div(i_n - 1, 1) + 1
+        return nothing
+    end
+    i_seq_x = 1 + (__tid - 1)
+    CUDA.@atomic loss[1] += v[i_seq_x] ^ 2
+    return nothing
+end
+
+function initstacks_cond_loop_choice_b_cuda()
+    branch_stack = CuArray{Int64}(undef, 1)
+    return branch_stack
+end
+
+function cond_loop_choice_hv_cuda(loss, lossb, u, ub, v, vb, i_branch, i_n, lossd, lossbd, ud, ubd, vd, vbd, branch_stack)
+    nthread_per_block = 256
+    if i_branch == 1
+        branch_stack[1] = 1
+        @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_loop_choice_hv_1!(i_n, loss, lossd, u, ud)
+    else
+        branch_stack[1] = 0
+        @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_loop_choice_hv_2!(i_n, loss, lossd, v, vd)
+    end
+    __branch = branch_stack[1]
+    if __branch == 1
+        @cuda threads = nthread_per_block blocks = cld(div(1 - i_n, -1) + 1, nthread_per_block) cuda_kernel_cond_loop_choice_hv_3!(i_n, lossb, lossbd, u, ub, ubd, ud)
+    else
+        @cuda threads = nthread_per_block blocks = cld(div(1 - i_n, -1) + 1, nthread_per_block) cuda_kernel_cond_loop_choice_hv_4!(i_n, lossb, lossbd, v, vb, vbd, vd)
+    end
+    return nothing
+end
+
+function cond_loop_choice_cuda(loss, u, v, i_branch, i_n)
+    nthread_per_block = 256
+    if i_branch == 1
+        @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_loop_choice_1!(i_n, loss, u)
+    else
+        @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_loop_choice_2!(i_n, loss, v)
+    end
+    return nothing
+end

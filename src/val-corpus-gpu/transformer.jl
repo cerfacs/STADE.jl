@@ -25,8 +25,8 @@
 #    length n_layers*dff, w2 length n_layers*dff*d, b2 length n_layers*d)
 # ln2_gain, ln2_bias: second layer-norm parameters, length n_layers*d
 # q, k, v: scratch arrays of length n*d for the projected query/key/value
-# scores, probs: scratch arrays of length n*n for one head's raw scores
-#    and attention weights
+# scores, probs: scratch arrays of length h*n*n -- one private n*n slice
+#    per head for that head's raw scores and attention weights
 # ctx: scratch array of length n*d for the concatenated head outputs
 # attn_out: scratch array of length n*d for the attention output projection
 # resid1, normed1: scratch arrays of length n*d for the first residual block
@@ -94,11 +94,15 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
         end
 
         # --- multi-head scaled dot-product attention ---
-        # each head is computed independently of the others; scratch
-        # buffers are fully overwritten each iteration, so reusing them
-        # carries no cross-iteration dependency
+        # each head is computed independently of the others; scores/probs
+        # need their own private n*n slice per head, though -- a single
+        # shared n*n buffer "fully overwritten each iteration" only avoids
+        # a cross-iteration dependency under strictly sequential (CPU)
+        # execution; once this loop is GPU-split (one thread per head),
+        # concurrent heads would race on the same shared slice
         for hh = 1:h
             head_offset = (hh - 1) * dk
+            score_off = (hh - 1) * n * n
 
             # scores = (q_head * k_head^T) / sqrt(dk)
             # every (i, j) score pair is independent, and dk is fixed
@@ -110,30 +114,30 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 for i_seq_p = 1:dk
                     s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                 end
-                scores[(i - 1) * n + j] = s * inv_sqrt_dk
+                scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
             end
 
             # row-wise softmax of scores into probs
             # each row's softmax is independent of the others
             for i = 1:n
-                row_max = scores[(i - 1) * n + 1]
+                row_max = scores[score_off + (i - 1) * n + 1]
                 # running max requires a sequential scan; max() avoids a branch
                 for i_seq_j = 2:n
-                    row_max = max(row_max, scores[(i - 1) * n + i_seq_j])
+                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
                 end
                 # shifted exponentials are independent across columns
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = exp(scores[kk] - row_max)
                 end
                 row_sum = 0.0
                 # normalizing sum requires a running total, so it stays sequential
                 for i_seq_j = 1:n
-                    row_sum = row_sum + probs[(i - 1) * n + i_seq_j]
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                 end
                 # final division is independent across columns
                 for j = 1:n
-                    kk = (i - 1) * n + j
+                    kk = score_off + (i - 1) * n + j
                     probs[kk] = probs[kk] / row_sum
                 end
             end
@@ -146,7 +150,7 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 s = 0.0
                 # summing over the attended tokens is a genuine accumulation
                 for i_seq_j = 1:n
-                    s = s + probs[(i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                 end
                 ctx[(i - 1) * d + head_offset + p] = s
             end
