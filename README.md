@@ -1,7 +1,14 @@
 # STADE.jl 🏟️
 *Low entry ticket to Scalable Differentiable Computing*
 
-**Source Transformation Automatic Differentiation Engine** (STADE) generates source-verifiable GPU-ported adjoints, tangents, Hessian-vector products, and primals of monoprocessor numerical kernels written using the Julia programming language.
+**Source Transformation Automatic Differentiation Engine** (STADE) generates source-verifiable GPU-ported (CUDA, AMDGPU, Metal, JACC)
+
+- Adjoints
+- Tangents
+- Hessian-vector products
+- Primals
+
+of monoprocessor numerical kernels written using the Julia programming language.
 
 [Try STADE.jl out in our website!](https://cerfacs.github.io/STADE.jl)
 
@@ -21,6 +28,10 @@ This is a legitimate question since the Automatic Differentiation (AD) ecosystem
 - [ ] `:while` statement support
 - [ ] (Binomial) checkpointing support
 - [ ] Fixed-point loops efficient differentiation
+
+### Acknowledgements
+
+This project has been mainly inspired by [Inria Tapenade AD engine](https://team.inria.fr/ecuador/en/tapenade/).
 
 #### If you use or build upon this software, please cite us:
 
