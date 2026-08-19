@@ -8,7 +8,7 @@ function initstacks_ttgc_b()
     return (cavgx_stack, vere_stack, re_stack, aerex_stack, aeresk_stack, factor_stack)
 end
 
-function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, sky, skyb, skz, skzb, i_ncell, i_nnode, c, cb, dt, dtb, beta, betab, gamma, gammab, res, resb, up, upb, loss, lossb, ud, ubd, cell_vold, cell_volbd, skxd, skxbd, skyd, skybd, skzd, skzbd, cd, cbd, dtd, dtbd, betad, betabd, gammad, gammabd, resd, resbd, upd, upbd, lossd, lossbd, cavgx_stack, vere_stack, re_stack, aerex_stack, aeresk_stack, factor_stack)
+function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, i_ncell, i_nnode, c, cb, dt, dtb, beta, betab, gamma, gammab, res, resb, up, upb, loss, lossb, ud, ubd, cell_vold, cell_volbd, skxd, skxbd, cd, cbd, dtd, dtbd, betad, betabd, gammad, gammabd, resd, resbd, upd, upbd, lossd, lossbd, cavgx_stack, vere_stack, re_stack, aerex_stack, aeresk_stack, factor_stack)
     cavgx_stack_d = Vector{Float64}()
     vere_stack_d = Vector{Float64}()
     re_stack_d = Vector{Float64}()
@@ -35,10 +35,6 @@ function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, sky, sky
     aereskbd = 0.0
     aerexd = 0.0
     aerexbd = 0.0
-    aereyd = 0.0
-    aereybd = 0.0
-    aerezd = 0.0
-    aerezbd = 0.0
     auxresd = 0.0
     auxresbd = 0.0
     cavgxd = 0.0
@@ -67,8 +63,8 @@ function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, sky, sky
             i_node = i_cell_to_node[i_loc, i_cell]
             push!(vere_stack_d, vered)
             push!(vere_stack, vere)
-            vered = (-(1.0 / 3.0) * (c[1, i_node] * skx[i_loc, i_cell] + c[2, i_node] * sky[i_loc, i_cell] + c[3, i_node] * skz[i_loc, i_cell])) * ud[i_node] + (-(1.0 / 3.0) * u[i_node]) * (((skx[i_loc, i_cell] * cd[1, i_node] + c[1, i_node] * skxd[i_loc, i_cell]) + (sky[i_loc, i_cell] * cd[2, i_node] + c[2, i_node] * skyd[i_loc, i_cell])) + (skz[i_loc, i_cell] * cd[3, i_node] + c[3, i_node] * skzd[i_loc, i_cell]))
-            vere = -(1.0 / 3.0) * u[i_node] * (c[1, i_node] * skx[i_loc, i_cell] + c[2, i_node] * sky[i_loc, i_cell] + c[3, i_node] * skz[i_loc, i_cell])
+            vered = (((-(1.0 / 3.0) * c[1, i_node]) * skx[i_loc, i_cell]) * ud[i_node] + ((-(1.0 / 3.0) * u[i_node]) * skx[i_loc, i_cell]) * cd[1, i_node]) + ((-(1.0 / 3.0) * u[i_node]) * c[1, i_node]) * skxd[i_loc, i_cell]
+            vere = -(1.0 / 3.0) * u[i_node] * c[1, i_node] * skx[i_loc, i_cell]
             push!(re_stack_d, red)
             push!(re_stack, re)
             red = (1.0 / cell_vol[i_cell]) * vered + -(vere / cell_vol[i_cell] ^ 2) * cell_vold[i_cell]
@@ -82,8 +78,8 @@ function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, sky, sky
             for i_k = 1:4
                 push!(aeresk_stack_d, aereskd)
                 push!(aeresk_stack, aeresk)
-                aereskd = ((skx[i_k, i_cell] * aerexd + aerex * skxd[i_k, i_cell]) + (sky[i_k, i_cell] * aereyd + aerey * skyd[i_k, i_cell])) + (skz[i_k, i_cell] * aerezd + aerez * skzd[i_k, i_cell])
-                aeresk = aerex * skx[i_k, i_cell] + aerey * sky[i_k, i_cell] + aerez * skz[i_k, i_cell]
+                aereskd = skx[i_k, i_cell] * aerexd + aerex * skxd[i_k, i_cell]
+                aeresk = aerex * skx[i_k, i_cell]
                 push!(factor_stack_d, factord)
                 push!(factor_stack, factor)
                 factord = dt ^ 2 * aereskd + aeresk * ((2dt) * dtd)
@@ -191,10 +187,6 @@ function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, sky, sky
                 aerexb = aerexb + skx[i_k, i_cell] * aereskb
                 skxbd[i_k, i_cell] = skxbd[i_k, i_cell] + (aereskb * aerexd + aerex * aereskbd)
                 skxb[i_k, i_cell] = skxb[i_k, i_cell] + aerex * aereskb
-                skybd[i_k, i_cell] = skybd[i_k, i_cell] + (aereskb * aereyd + aerey * aereskbd)
-                skyb[i_k, i_cell] = skyb[i_k, i_cell] + aerey * aereskb
-                skzbd[i_k, i_cell] = skzbd[i_k, i_cell] + (aereskb * aerezd + aerez * aereskbd)
-                skzb[i_k, i_cell] = skzb[i_k, i_cell] + aerez * aereskb
                 aereskbd = 0.0
                 aereskb = 0.0
             end
@@ -224,20 +216,12 @@ function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, sky, sky
             reb = 0.0
             vered = pop!(vere_stack_d)
             vere = pop!(vere_stack)
-            ubd[i_node] = ubd[i_node] + (vereb * (-(1.0 / 3.0) * (((skx[i_loc, i_cell] * cd[1, i_node] + c[1, i_node] * skxd[i_loc, i_cell]) + (sky[i_loc, i_cell] * cd[2, i_node] + c[2, i_node] * skyd[i_loc, i_cell])) + (skz[i_loc, i_cell] * cd[3, i_node] + c[3, i_node] * skzd[i_loc, i_cell]))) + (-(1.0 / 3.0) * (c[1, i_node] * skx[i_loc, i_cell] + c[2, i_node] * sky[i_loc, i_cell] + c[3, i_node] * skz[i_loc, i_cell])) * verebd)
-            ub[i_node] = ub[i_node] + (-(1.0 / 3.0) * (c[1, i_node] * skx[i_loc, i_cell] + c[2, i_node] * sky[i_loc, i_cell] + c[3, i_node] * skz[i_loc, i_cell])) * vereb
-            cbd[1, i_node] = cbd[1, i_node] + (((-(1.0 / 3.0) * u[i_node]) * vereb) * skxd[i_loc, i_cell] + skx[i_loc, i_cell] * (vereb * (-(1.0 / 3.0) * ud[i_node]) + (-(1.0 / 3.0) * u[i_node]) * verebd))
-            cb[1, i_node] = cb[1, i_node] + skx[i_loc, i_cell] * ((-(1.0 / 3.0) * u[i_node]) * vereb)
-            skxbd[i_loc, i_cell] = skxbd[i_loc, i_cell] + (((-(1.0 / 3.0) * u[i_node]) * vereb) * cd[1, i_node] + c[1, i_node] * (vereb * (-(1.0 / 3.0) * ud[i_node]) + (-(1.0 / 3.0) * u[i_node]) * verebd))
-            skxb[i_loc, i_cell] = skxb[i_loc, i_cell] + c[1, i_node] * ((-(1.0 / 3.0) * u[i_node]) * vereb)
-            cbd[2, i_node] = cbd[2, i_node] + (((-(1.0 / 3.0) * u[i_node]) * vereb) * skyd[i_loc, i_cell] + sky[i_loc, i_cell] * (vereb * (-(1.0 / 3.0) * ud[i_node]) + (-(1.0 / 3.0) * u[i_node]) * verebd))
-            cb[2, i_node] = cb[2, i_node] + sky[i_loc, i_cell] * ((-(1.0 / 3.0) * u[i_node]) * vereb)
-            skybd[i_loc, i_cell] = skybd[i_loc, i_cell] + (((-(1.0 / 3.0) * u[i_node]) * vereb) * cd[2, i_node] + c[2, i_node] * (vereb * (-(1.0 / 3.0) * ud[i_node]) + (-(1.0 / 3.0) * u[i_node]) * verebd))
-            skyb[i_loc, i_cell] = skyb[i_loc, i_cell] + c[2, i_node] * ((-(1.0 / 3.0) * u[i_node]) * vereb)
-            cbd[3, i_node] = cbd[3, i_node] + (((-(1.0 / 3.0) * u[i_node]) * vereb) * skzd[i_loc, i_cell] + skz[i_loc, i_cell] * (vereb * (-(1.0 / 3.0) * ud[i_node]) + (-(1.0 / 3.0) * u[i_node]) * verebd))
-            cb[3, i_node] = cb[3, i_node] + skz[i_loc, i_cell] * ((-(1.0 / 3.0) * u[i_node]) * vereb)
-            skzbd[i_loc, i_cell] = skzbd[i_loc, i_cell] + (((-(1.0 / 3.0) * u[i_node]) * vereb) * cd[3, i_node] + c[3, i_node] * (vereb * (-(1.0 / 3.0) * ud[i_node]) + (-(1.0 / 3.0) * u[i_node]) * verebd))
-            skzb[i_loc, i_cell] = skzb[i_loc, i_cell] + c[3, i_node] * ((-(1.0 / 3.0) * u[i_node]) * vereb)
+            ubd[i_node] = ubd[i_node] + (vereb * (skx[i_loc, i_cell] * (-(1.0 / 3.0) * cd[1, i_node]) + (-(1.0 / 3.0) * c[1, i_node]) * skxd[i_loc, i_cell]) + ((-(1.0 / 3.0) * c[1, i_node]) * skx[i_loc, i_cell]) * verebd)
+            ub[i_node] = ub[i_node] + ((-(1.0 / 3.0) * c[1, i_node]) * skx[i_loc, i_cell]) * vereb
+            cbd[1, i_node] = cbd[1, i_node] + (vereb * (skx[i_loc, i_cell] * (-(1.0 / 3.0) * ud[i_node]) + (-(1.0 / 3.0) * u[i_node]) * skxd[i_loc, i_cell]) + ((-(1.0 / 3.0) * u[i_node]) * skx[i_loc, i_cell]) * verebd)
+            cb[1, i_node] = cb[1, i_node] + ((-(1.0 / 3.0) * u[i_node]) * skx[i_loc, i_cell]) * vereb
+            skxbd[i_loc, i_cell] = skxbd[i_loc, i_cell] + (vereb * (c[1, i_node] * (-(1.0 / 3.0) * ud[i_node]) + (-(1.0 / 3.0) * u[i_node]) * cd[1, i_node]) + ((-(1.0 / 3.0) * u[i_node]) * c[1, i_node]) * verebd)
+            skxb[i_loc, i_cell] = skxb[i_loc, i_cell] + ((-(1.0 / 3.0) * u[i_node]) * c[1, i_node]) * vereb
             verebd = 0.0
             vereb = 0.0
         end
@@ -256,7 +240,7 @@ function ttgc_hv(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, sky, sky
     return (dtb, dtbd)
 end
 
-function ttgc(u, i_cell_to_node, cell_vol, skx, sky, skz, i_ncell, i_nnode, c, dt, beta, gamma, res, up, loss)
+function ttgc(u, i_cell_to_node, cell_vol, skx, i_ncell, i_nnode, c, dt, beta, gamma, res, up, loss)
     for i_cell = 1:i_ncell
         cavgx = 0.0
         for i_loc = 1:4
@@ -265,12 +249,12 @@ function ttgc(u, i_cell_to_node, cell_vol, skx, sky, skz, i_ncell, i_nnode, c, d
         end
         for i_loc = 1:4
             i_node = i_cell_to_node[i_loc, i_cell]
-            vere = -(1.0 / 3.0) * u[i_node] * (c[1, i_node] * skx[i_loc, i_cell] + c[2, i_node] * sky[i_loc, i_cell] + c[3, i_node] * skz[i_loc, i_cell])
+            vere = -(1.0 / 3.0) * u[i_node] * c[1, i_node] * skx[i_loc, i_cell]
             re = vere / cell_vol[i_cell]
             aerex = cavgx * re
             resi = -(dt / 4) * (0.5 - gamma[i_cell]) * vere
             for i_k = 1:4
-                aeresk = aerex * skx[i_k, i_cell] + aerey * sky[i_k, i_cell] + aerez * skz[i_k, i_cell]
+                aeresk = aerex * skx[i_k, i_cell]
                 factor = aeresk * dt ^ 2
                 auxres = resi + factor * beta[i_cell]
                 i_k_node = i_cell_to_node[i_k, i_cell]
