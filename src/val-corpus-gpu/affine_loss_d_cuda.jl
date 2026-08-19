@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_affine_loss_d_1!(a, ad, b, bd, i_n, u, ud, v, vd)

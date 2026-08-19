@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_clamped_sumsq_hv_1!(branch_stack, i_n, loss, lossd, u, ud)

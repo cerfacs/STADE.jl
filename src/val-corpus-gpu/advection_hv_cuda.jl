@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_advection_hv_1!(du, du_stack, du_stack_d, dud, i_nnode, i_seq_, u, ud)

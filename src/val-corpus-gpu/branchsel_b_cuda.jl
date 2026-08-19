@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function initstacks_branchsel_b_cuda()
@@ -10,30 +11,44 @@ end
 
 function branchsel_b_cuda(loss, lossb, x, xb, y, yb, branch_stack)
     if x > y
-        branch_stack[1] = 1
-        loss[1] = x ^ 2 - y
+        CUDA.@allowscalar begin
+                branch_stack[1] = 1
+                loss[1] = x ^ 2 - y
+            end
     else
-        branch_stack[1] = 0
-        loss[1] = y ^ 2 - x
+        CUDA.@allowscalar begin
+                branch_stack[1] = 0
+                loss[1] = y ^ 2 - x
+            end
     end
-    __branch = branch_stack[1]
+    CUDA.@allowscalar begin
+            __branch = branch_stack[1]
+        end
     if __branch == 1
-        xb = xb + (2x) * lossb[1]
-        yb = yb + -(lossb[1])
-        lossb[1] = 0.0
+        CUDA.@allowscalar begin
+                xb = xb + (2x) * lossb[1]
+                yb = yb + -(lossb[1])
+                lossb[1] = 0.0
+            end
     else
-        yb = yb + (2y) * lossb[1]
-        xb = xb + -(lossb[1])
-        lossb[1] = 0.0
+        CUDA.@allowscalar begin
+                yb = yb + (2y) * lossb[1]
+                xb = xb + -(lossb[1])
+                lossb[1] = 0.0
+            end
     end
     return (xb, yb)
 end
 
 function branchsel_cuda(loss, x, y)
     if x > y
-        loss[1] = x ^ 2 - y
+        CUDA.@allowscalar begin
+                loss[1] = x ^ 2 - y
+            end
     else
-        loss[1] = y ^ 2 - x
+        CUDA.@allowscalar begin
+                loss[1] = y ^ 2 - x
+            end
     end
     return nothing
 end

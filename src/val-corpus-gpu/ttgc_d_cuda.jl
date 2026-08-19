@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_ttgc_d_1!(beta, betad, c, cd, cell_vol, cell_vold, dt, dtd, gamma, gammad, i_cell_to_node, i_ncell, res, res2, res2d, resd, skx, skxd, sky, skyd, skz, skzd, u, ud)

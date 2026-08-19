@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_transformer_d_1!(b_offset, bq, bqd, d, n_d, q, qd, w_offset, wq, wqd, x, xd)

@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_geomrecur_d_1!(i_n, loss, lossd, u, ud)
@@ -27,8 +28,10 @@ end
 function geomrecur_d_cuda(loss, lossd, u, ud, c, cd, i_n)
     nthread_per_block = 256
     for i_seq_x = 2:i_n
-        ud[i_seq_x] = u[i_seq_x - 1] * cd + c * ud[i_seq_x - 1]
-        u[i_seq_x] = c * u[i_seq_x - 1]
+        CUDA.@allowscalar begin
+                ud[i_seq_x] = u[i_seq_x - 1] * cd + c * ud[i_seq_x - 1]
+                u[i_seq_x] = c * u[i_seq_x - 1]
+            end
     end
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_geomrecur_d_1!(i_n, loss, lossd, u, ud)
     return nothing
@@ -37,7 +40,9 @@ end
 function geomrecur_cuda(loss, u, c, i_n)
     nthread_per_block = 256
     for i_seq_x = 2:i_n
-        u[i_seq_x] = c * u[i_seq_x - 1]
+        CUDA.@allowscalar begin
+                u[i_seq_x] = c * u[i_seq_x - 1]
+            end
     end
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_geomrecur_1!(i_n, loss, u)
     return nothing

@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_unet_b_1!(n_xpad0, xpad0, zero_val)
@@ -2629,63 +2630,65 @@ function unet_b_cuda(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a,
     @cuda threads = nthread_per_block blocks = cld(div(c1 * hw - 1, 1) + 1, nthread_per_block) cuda_kernel_unet_b_47!(b_d1b, c1, dec1out, hp1, hw, kh, khkw, kw, t_d1pad, w, w_d1b, wp1)
     @cuda threads = nthread_per_block blocks = cld(div(n_d1_out - 1, 1) + 1, nthread_per_block) cuda_kernel_unet_b_48!(dec1out, dec1out_stack, n_d1_out, zero_val)
     @cuda threads = nthread_per_block blocks = cld(div(c_out * hw - 1, 1) + 1, nthread_per_block) cuda_kernel_unet_b_49!(b_out, c1, c_out, dec1out, hw, kh_out, khkw_out, kw_out, w, w_out, y)
-    a11_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = a11
-    a12_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = a12
-    a21_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = a21
-    a22_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = a22
-    m1_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = m1
-    m2_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = m2
-    a11 = a11_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
-    a12 = a12_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
-    a21 = a21_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
-    a22 = a22_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
-    m1 = m1_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
-    m2 = m2_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
-    two = 2
-    four = 4
-    h2 = div(h, two)
-    w2 = div(w, two)
-    h4 = div(h, four)
-    w4 = div(w, four)
-    hp1 = h + 2
-    wp1 = w + 2
-    hp2 = h2 + 2
-    wp2 = w2 + 2
-    hp4 = h4 + 2
-    wp4 = w4 + 2
-    pad = 1
-    kh = 3
-    kw = 3
-    khkw = kh * kw
-    kh_out = 1
-    kw_out = 1
-    khkw_out = kh_out * kw_out
-    scale = 2
-    c32 = c3 + c2
-    c21 = c2 + c1
-    hw = h * w
-    hw2 = h2 * w2
-    hw4 = h4 * w4
-    n_xpad0 = c_in * hp1 * wp1
-    n_e1_mid = c1 * hw
-    n_e1_midpad = c1 * hp1 * wp1
-    n_e1_out = c1 * hw
-    n_p1pad = c1 * hp2 * wp2
-    n_e2_mid = c2 * hw2
-    n_e2_midpad = c2 * hp2 * wp2
-    n_e2_out = c2 * hw2
-    n_p2pad = c2 * hp4 * wp4
-    n_b_mid = c3 * hw4
-    n_b_midpad = c3 * hp4 * wp4
-    n_b_out = c3 * hw4
-    n_cat2pad = c32 * hp2 * wp2
-    n_d2_mid = c2 * hw2
-    n_d2_midpad = c2 * hp2 * wp2
-    n_d2_out = c2 * hw2
-    n_cat1pad = c21 * hp1 * wp1
-    n_d1_mid = c1 * hw
-    n_d1_midpad = c1 * hp1 * wp1
-    n_d1_out = c1 * hw
+    CUDA.@allowscalar begin
+            a11_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = a11
+            a12_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = a12
+            a21_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = a21
+            a22_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = a22
+            m1_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = m1
+            m2_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1] = m2
+            a11 = a11_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
+            a12 = a12_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
+            a21 = a21_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
+            a22 = a22_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
+            m1 = m1_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
+            m2 = m2_stack[((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1]
+            two = 2
+            four = 4
+            h2 = div(h, two)
+            w2 = div(w, two)
+            h4 = div(h, four)
+            w4 = div(w, four)
+            hp1 = h + 2
+            wp1 = w + 2
+            hp2 = h2 + 2
+            wp2 = w2 + 2
+            hp4 = h4 + 2
+            wp4 = w4 + 2
+            pad = 1
+            kh = 3
+            kw = 3
+            khkw = kh * kw
+            kh_out = 1
+            kw_out = 1
+            khkw_out = kh_out * kw_out
+            scale = 2
+            c32 = c3 + c2
+            c21 = c2 + c1
+            hw = h * w
+            hw2 = h2 * w2
+            hw4 = h4 * w4
+            n_xpad0 = c_in * hp1 * wp1
+            n_e1_mid = c1 * hw
+            n_e1_midpad = c1 * hp1 * wp1
+            n_e1_out = c1 * hw
+            n_p1pad = c1 * hp2 * wp2
+            n_e2_mid = c2 * hw2
+            n_e2_midpad = c2 * hp2 * wp2
+            n_e2_out = c2 * hw2
+            n_p2pad = c2 * hp4 * wp4
+            n_b_mid = c3 * hw4
+            n_b_midpad = c3 * hp4 * wp4
+            n_b_out = c3 * hw4
+            n_cat2pad = c32 * hp2 * wp2
+            n_d2_mid = c2 * hw2
+            n_d2_midpad = c2 * hp2 * wp2
+            n_d2_out = c2 * hw2
+            n_cat1pad = c21 * hp1 * wp1
+            n_d1_mid = c1 * hw
+            n_d1_midpad = c1 * hp1 * wp1
+            n_d1_out = c1 * hw
+        end
     @cuda threads = nthread_per_block blocks = cld(div(c_out * hw - 1, 1) + 1, nthread_per_block) cuda_kernel_unet_b_50!(b_outb, c1, c_out, dec1out, dec1outb, hw, kh_out, khkw_out, kw_out, w, w_out, w_outb, yb)
     @cuda threads = nthread_per_block blocks = cld(div(1 - n_d1_out, -1) + 1, nthread_per_block) cuda_kernel_unet_b_51!(dec1out, dec1out_stack, dec1outb, n_d1_out, zero_val)
     @cuda threads = nthread_per_block blocks = cld(div(c1 * hw - 1, 1) + 1, nthread_per_block) cuda_kernel_unet_b_52!(b_d1bb, c1, dec1outb, hp1, hw, kh, khkw, kw, t_d1pad, t_d1padb, w, w_d1b, w_d1bb, wp1)

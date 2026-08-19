@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_sumsq_shifted_hv_1!(alpha, alphad, beta, betad, i_n, loss, lossd, u, ud)

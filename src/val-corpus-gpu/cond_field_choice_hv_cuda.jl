@@ -1,6 +1,7 @@
 import Pkg
 haskey(Pkg.project().dependencies, "CUDA") || Pkg.add("CUDA")
 using CUDA
+using LinearAlgebra
 CUDA.allowscalar(false)
 
 function cuda_kernel_cond_field_choice_hv_1!(i_n, u, ud, w, wd)
@@ -111,15 +112,21 @@ end
 function cond_field_choice_hv_cuda(loss, lossb, u, ub, v, vb, w, wb, i_branch, i_n, lossd, lossbd, ud, ubd, vd, vbd, wd, wbd, branch_stack)
     nthread_per_block = 256
     if i_branch == 1
-        branch_stack[1] = 1
+        CUDA.@allowscalar begin
+                branch_stack[1] = 1
+            end
         @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_field_choice_hv_1!(i_n, u, ud, w, wd)
     else
-        branch_stack[1] = 0
+        CUDA.@allowscalar begin
+                branch_stack[1] = 0
+            end
         @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_field_choice_hv_2!(i_n, v, vd, w, wd)
     end
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_field_choice_hv_3!(i_n, loss, lossd, w, wd)
     @cuda threads = nthread_per_block blocks = cld(div(1 - i_n, -1) + 1, nthread_per_block) cuda_kernel_cond_field_choice_hv_4!(i_n, lossb, lossbd, wb, wbd)
-    __branch = branch_stack[1]
+    CUDA.@allowscalar begin
+            __branch = branch_stack[1]
+        end
     if __branch == 1
         @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_field_choice_hv_5!(i_n, u, ub, ubd, ud, wb, wbd)
     else
