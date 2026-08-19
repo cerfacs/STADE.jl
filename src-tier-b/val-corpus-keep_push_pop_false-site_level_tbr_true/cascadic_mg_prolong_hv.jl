@@ -1,22 +1,79 @@
-function initstacks_cascadic_mg_prolong_b(nu, num_levels)
-    tripcount_stack = Vector{Int64}(undef, (((div(nu - 1, 1) + 1) + (div(num_levels - 2, 1) + 1)) + (div(num_levels - 2, 1) + 1)) + (div(num_levels - 2, 1) + 1) * (div(nu - 1, 1) + 1))
-    left_stack = Vector{Float64}()
-    branch_stack = Vector{Int64}()
-    right_stack = Vector{Float64}()
-    hl_stack = Vector{Float64}(undef, (div(num_levels - 2, 1) + 1) + 1)
-    hl2_stack = Vector{Float64}(undef, (div(num_levels - 2, 1) + 1) + 1)
-    cl_stack = Vector{Float64}()
-    cr_stack = Vector{Float64}()
-    return (tripcount_stack, left_stack, branch_stack, right_stack, hl_stack, hl2_stack, cl_stack, cr_stack)
+function initstacks_cascadic_mg_prolong_b(h_coarse, nu, num_levels)
+    nl = 2
+    hl = h_coarse
+    nc = nl - 1
+    hl2 = hl * hl
+    for i_seq_k = 1:nu
+        for i_seq_j = 1:nc
+            left = 0.0
+            if i_seq_j > 1
+            end
+            right = 0.0
+            if i_seq_j < nc
+            end
+        end
+    end
+    prefix_branch_stack_1 = Vector{Int}(undef, div(num_levels - 2, 1) + 1)
+    __tot_branch_stack_1 = 0
+    prefix_cl_stack_1 = Vector{Int}(undef, div(num_levels - 2, 1) + 1)
+    __tot_cl_stack_1 = 0
+    prefix_cr_stack_1 = Vector{Int}(undef, div(num_levels - 2, 1) + 1)
+    __tot_cr_stack_1 = 0
+    prefix_hl2_stack_1 = Vector{Int}(undef, div(num_levels - 2, 1) + 1)
+    __tot_hl2_stack_1 = 0
+    prefix_hl_stack_1 = Vector{Int}(undef, div(num_levels - 2, 1) + 1)
+    __tot_hl_stack_1 = 0
+    prefix_left_stack_1 = Vector{Int}(undef, div(num_levels - 2, 1) + 1)
+    __tot_left_stack_1 = 0
+    prefix_right_stack_1 = Vector{Int}(undef, div(num_levels - 2, 1) + 1)
+    __tot_right_stack_1 = 0
+    prefix_tripcount_stack_1 = Vector{Int}(undef, div(num_levels - 2, 1) + 1)
+    __tot_tripcount_stack_1 = 0
+    val_nc_1 = Vector{Int64}(undef, div(num_levels - 2, 1) + 1)
+    val_ncoarse_1 = Vector{Int64}(undef, div(num_levels - 2, 1) + 1)
+    for i_seq_level = 2:num_levels
+        prefix_branch_stack_1[(i_seq_level - 2) + 1] = __tot_branch_stack_1
+        prefix_cl_stack_1[(i_seq_level - 2) + 1] = __tot_cl_stack_1
+        prefix_cr_stack_1[(i_seq_level - 2) + 1] = __tot_cr_stack_1
+        prefix_hl2_stack_1[(i_seq_level - 2) + 1] = __tot_hl2_stack_1
+        prefix_hl_stack_1[(i_seq_level - 2) + 1] = __tot_hl_stack_1
+        prefix_left_stack_1[(i_seq_level - 2) + 1] = __tot_left_stack_1
+        prefix_right_stack_1[(i_seq_level - 2) + 1] = __tot_right_stack_1
+        prefix_tripcount_stack_1[(i_seq_level - 2) + 1] = __tot_tripcount_stack_1
+        nl = nl * 2
+        hl = hl / 2.0
+        nc = nl - 1
+        hl2 = hl * hl
+        ncoarse = div(nl, 2) - 1
+        val_nc_1[(i_seq_level - 2) + 1] = nc
+        val_ncoarse_1[(i_seq_level - 2) + 1] = ncoarse
+        __tot_branch_stack_1 = __tot_branch_stack_1 + ((((div((ncoarse + 1) - 1, 1) + 1) + (div((ncoarse + 1) - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1))
+        __tot_cl_stack_1 = __tot_cl_stack_1 + ((((div((ncoarse + 1) - 1, 1) + 1) + (div((ncoarse + 1) - 1, 1) + 1)) + (div((ncoarse + 1) - 1, 1) + 1)) + 1)
+        __tot_cr_stack_1 = __tot_cr_stack_1 + ((((div((ncoarse + 1) - 1, 1) + 1) + (div((ncoarse + 1) - 1, 1) + 1)) + (div((ncoarse + 1) - 1, 1) + 1)) + 1)
+        __tot_hl2_stack_1 = __tot_hl2_stack_1 + 1
+        __tot_hl_stack_1 = __tot_hl_stack_1 + 1
+        __tot_left_stack_1 = __tot_left_stack_1 + (((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + 1)
+        __tot_right_stack_1 = __tot_right_stack_1 + (((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + 1)
+        __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + ((1 + 1) + (div(nu - 1, 1) + 1))
+    end
+    tripcount_stack = Vector{Int64}(undef, (div(nu - 1, 1) + 1) + __tot_tripcount_stack_1)
+    left_stack = Vector{Float64}(undef, (((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_left_stack_1) + 1)
+    branch_stack = Vector{Int64}(undef, ((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + __tot_branch_stack_1)
+    right_stack = Vector{Float64}(undef, (((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_right_stack_1) + 1)
+    hl_stack = Vector{Float64}(undef, __tot_hl_stack_1 + 1)
+    hl2_stack = Vector{Float64}(undef, __tot_hl2_stack_1 + 1)
+    cl_stack = Vector{Float64}(undef, __tot_cl_stack_1 + 1)
+    cr_stack = Vector{Float64}(undef, __tot_cr_stack_1 + 1)
+    return (tripcount_stack, left_stack, branch_stack, right_stack, hl_stack, hl2_stack, cl_stack, cr_stack, prefix_branch_stack_1, prefix_cl_stack_1, prefix_cr_stack_1, prefix_hl2_stack_1, prefix_hl_stack_1, prefix_left_stack_1, prefix_right_stack_1, prefix_tripcount_stack_1, __tot_branch_stack_1, __tot_cl_stack_1, __tot_cr_stack_1, __tot_hl2_stack_1, __tot_hl_stack_1, __tot_left_stack_1, __tot_right_stack_1, __tot_tripcount_stack_1, val_nc_1, val_ncoarse_1)
 end
 
-function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_levels, ud, ubd, rhsd, rhsbd, h_coarsed, h_coarsebd, tripcount_stack, left_stack, branch_stack, right_stack, hl_stack, hl2_stack, cl_stack, cr_stack)
-    left_stack_d = Vector{Float64}()
-    right_stack_d = Vector{Float64}()
-    hl_stack_d = Vector{Float64}(undef, (div(num_levels - 2, 1) + 1) + 1)
-    hl2_stack_d = Vector{Float64}(undef, (div(num_levels - 2, 1) + 1) + 1)
-    cl_stack_d = Vector{Float64}()
-    cr_stack_d = Vector{Float64}()
+function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_levels, ud, ubd, rhsd, rhsbd, h_coarsed, h_coarsebd, tripcount_stack, left_stack, branch_stack, right_stack, hl_stack, hl2_stack, cl_stack, cr_stack, prefix_branch_stack_1, prefix_cl_stack_1, prefix_cr_stack_1, prefix_hl2_stack_1, prefix_hl_stack_1, prefix_left_stack_1, prefix_right_stack_1, prefix_tripcount_stack_1, __tot_branch_stack_1, __tot_cl_stack_1, __tot_cr_stack_1, __tot_hl2_stack_1, __tot_hl_stack_1, __tot_left_stack_1, __tot_right_stack_1, __tot_tripcount_stack_1, val_nc_1, val_ncoarse_1)
+    left_stack_d = Vector{Float64}(undef, length(left_stack))
+    right_stack_d = Vector{Float64}(undef, length(right_stack))
+    hl_stack_d = Vector{Float64}(undef, length(hl_stack))
+    hl2_stack_d = Vector{Float64}(undef, length(hl2_stack))
+    cl_stack_d = Vector{Float64}(undef, length(cl_stack))
+    cr_stack_d = Vector{Float64}(undef, length(cr_stack))
     cl = 0.0
     cr = 0.0
     hl = 0.0
@@ -50,193 +107,193 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
     for i_seq_k = 1:nu
         tripcount_stack[(i_seq_k - 1) + 1] = nc
         for i_seq_j = 1:nc
-            push!(left_stack_d, leftd)
-            push!(left_stack, left)
+            left_stack_d[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1] = leftd
+            left_stack[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1] = left
             leftd = 0.0
             left = 0.0
             if i_seq_j > 1
-                push!(branch_stack, 1)
-                push!(left_stack_d, leftd)
-                push!(left_stack, left)
+                branch_stack[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1] = 1
+                left_stack_d[(div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                left_stack[(div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
                 leftd = ud[i_seq_j - 1, 1]
                 left = u[i_seq_j - 1, 1]
             else
-                push!(branch_stack, 0)
+                branch_stack[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1] = 0
             end
-            push!(right_stack_d, rightd)
-            push!(right_stack, right)
+            right_stack_d[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1] = rightd
+            right_stack[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1] = right
             rightd = 0.0
             right = 0.0
             if i_seq_j < nc
-                push!(branch_stack, 1)
-                push!(right_stack_d, rightd)
-                push!(right_stack, right)
+                branch_stack[(div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 1
+                right_stack_d[(div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                right_stack[(div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
                 rightd = ud[i_seq_j + 1, 1]
                 right = u[i_seq_j + 1, 1]
             else
-                push!(branch_stack, 0)
+                branch_stack[(div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 0
             end
             ud[i_seq_j, 1] = 0.5 * (((rhs[i_seq_j, 1] * hl2d + hl2 * rhsd[i_seq_j, 1]) + leftd) + rightd)
             u[i_seq_j, 1] = 0.5 * (hl2 * rhs[i_seq_j, 1] + left + right)
-            push!(left_stack_d, leftd)
-            push!(left_stack, left)
-            push!(right_stack_d, rightd)
-            push!(right_stack, right)
+            left_stack_d[((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+            left_stack[((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
+            right_stack_d[((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+            right_stack[((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
         end
-        push!(left_stack_d, leftd)
-        push!(left_stack, left)
-        push!(right_stack_d, rightd)
-        push!(right_stack, right)
+        left_stack_d[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + ((i_seq_k - 1) + 1)] = leftd
+        left_stack[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + ((i_seq_k - 1) + 1)] = left
+        right_stack_d[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + ((i_seq_k - 1) + 1)] = rightd
+        right_stack[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + ((i_seq_k - 1) + 1)] = right
     end
     for i_seq_level = 2:num_levels
         nl = nl * 2
-        hl_stack_d[(i_seq_level - 2) + 1] = hld
-        hl_stack[(i_seq_level - 2) + 1] = hl
+        hl_stack_d[prefix_hl_stack_1[(i_seq_level - 2) + 1] + 1] = hld
+        hl_stack[prefix_hl_stack_1[(i_seq_level - 2) + 1] + 1] = hl
         hld = 0.5hld
         hl = hl / 2.0
         nc = nl - 1
-        hl2_stack_d[(i_seq_level - 2) + 1] = hl2d
-        hl2_stack[(i_seq_level - 2) + 1] = hl2
+        hl2_stack_d[prefix_hl2_stack_1[(i_seq_level - 2) + 1] + 1] = hl2d
+        hl2_stack[prefix_hl2_stack_1[(i_seq_level - 2) + 1] + 1] = hl2
         hl2d = hl * hld + hl * hld
         hl2 = hl * hl
         ncoarse = div(nl, 2) - 1
-        tripcount_stack[(div(nu - 1, 1) + 1) + ((i_seq_level - 2) + 1)] = ncoarse
+        tripcount_stack[((div(nu - 1, 1) + 1) + prefix_tripcount_stack_1[(i_seq_level - 2) + 1]) + 1] = ncoarse
         for j = 1:ncoarse
             jf = j * 2
             ud[jf, i_seq_level] = ud[j, i_seq_level - 1]
             u[jf, i_seq_level] = u[j, i_seq_level - 1]
         end
-        tripcount_stack[((div(nu - 1, 1) + 1) + (div(num_levels - 2, 1) + 1)) + ((i_seq_level - 2) + 1)] = ncoarse
+        tripcount_stack[(((div(nu - 1, 1) + 1) + prefix_tripcount_stack_1[(i_seq_level - 2) + 1]) + 1) + 1] = ncoarse
         for j = 1:ncoarse + 1
             jf = j * 2 - 1
-            push!(cl_stack_d, cld)
-            push!(cl_stack, cl)
+            cl_stack_d[prefix_cl_stack_1[(i_seq_level - 2) + 1] + ((j - 1) + 1)] = cld
+            cl_stack[prefix_cl_stack_1[(i_seq_level - 2) + 1] + ((j - 1) + 1)] = cl
             cld = 0.0
             cl = 0.0
             if j > 1
-                push!(branch_stack, 1)
-                push!(cl_stack_d, cld)
-                push!(cl_stack, cl)
+                branch_stack[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + ((j - 1) + 1)] = 1
+                cl_stack_d[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cld
+                cl_stack[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cl
                 cld = ud[j - 1, i_seq_level - 1]
                 cl = u[j - 1, i_seq_level - 1]
             else
-                push!(branch_stack, 0)
+                branch_stack[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + ((j - 1) + 1)] = 0
             end
-            push!(cr_stack_d, crd)
-            push!(cr_stack, cr)
+            cr_stack_d[prefix_cr_stack_1[(i_seq_level - 2) + 1] + ((j - 1) + 1)] = crd
+            cr_stack[prefix_cr_stack_1[(i_seq_level - 2) + 1] + ((j - 1) + 1)] = cr
             crd = 0.0
             cr = 0.0
             if j <= ncoarse
-                push!(branch_stack, 1)
-                push!(cr_stack_d, crd)
-                push!(cr_stack, cr)
+                branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = 1
+                cr_stack_d[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = crd
+                cr_stack[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cr
                 crd = ud[j, i_seq_level - 1]
                 cr = u[j, i_seq_level - 1]
             else
-                push!(branch_stack, 0)
+                branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = 0
             end
             ud[jf, i_seq_level] = 0.5 * (cld + crd)
             u[jf, i_seq_level] = 0.5 * (cl + cr)
-            push!(cl_stack_d, cld)
-            push!(cl_stack, cl)
-            push!(cr_stack_d, crd)
-            push!(cr_stack, cr)
+            cl_stack_d[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cld
+            cl_stack[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cl
+            cr_stack_d[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = crd
+            cr_stack[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cr
         end
         for i_seq_k = 1:nu
-            tripcount_stack[(((div(nu - 1, 1) + 1) + (div(num_levels - 2, 1) + 1)) + (div(num_levels - 2, 1) + 1)) + (((i_seq_level - 2) * (div(nu - 1, 1) + 1) + (i_seq_k - 1)) + 1)] = nc
+            tripcount_stack[(((div(nu - 1, 1) + 1) + prefix_tripcount_stack_1[(i_seq_level - 2) + 1]) + (1 + 1)) + ((i_seq_k - 1) + 1)] = nc
             for i_seq_j = 1:nc
-                push!(left_stack_d, leftd)
-                push!(left_stack, left)
+                left_stack_d[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                left_stack[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
                 leftd = 0.0
                 left = 0.0
                 if i_seq_j > 1
-                    push!(branch_stack, 1)
-                    push!(left_stack_d, leftd)
-                    push!(left_stack, left)
+                    branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 1
+                    left_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                    left_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
                     leftd = ud[i_seq_j - 1, i_seq_level]
                     left = u[i_seq_j - 1, i_seq_level]
                 else
-                    push!(branch_stack, 0)
+                    branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 0
                 end
-                push!(right_stack_d, rightd)
-                push!(right_stack, right)
+                right_stack_d[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                right_stack[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
                 rightd = 0.0
                 right = 0.0
                 if i_seq_j < nc
-                    push!(branch_stack, 1)
-                    push!(right_stack_d, rightd)
-                    push!(right_stack, right)
+                    branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 1
+                    right_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                    right_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
                     rightd = ud[i_seq_j + 1, i_seq_level]
                     right = u[i_seq_j + 1, i_seq_level]
                 else
-                    push!(branch_stack, 0)
+                    branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 0
                 end
                 ud[i_seq_j, i_seq_level] = 0.5 * (((rhs[i_seq_j, i_seq_level] * hl2d + hl2 * rhsd[i_seq_j, i_seq_level]) + leftd) + rightd)
                 u[i_seq_j, i_seq_level] = 0.5 * (hl2 * rhs[i_seq_j, i_seq_level] + left + right)
-                push!(left_stack_d, leftd)
-                push!(left_stack, left)
-                push!(right_stack_d, rightd)
-                push!(right_stack, right)
+                left_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + ((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                left_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + ((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
+                right_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + ((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                right_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + ((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
             end
-            push!(left_stack_d, leftd)
-            push!(left_stack, left)
-            push!(right_stack_d, rightd)
-            push!(right_stack, right)
+            left_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = leftd
+            left_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = left
+            right_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = rightd
+            right_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = right
         end
-        push!(cl_stack_d, cld)
-        push!(cl_stack, cl)
-        push!(cr_stack_d, crd)
-        push!(cr_stack, cr)
-        push!(left_stack_d, leftd)
-        push!(left_stack, left)
-        push!(right_stack_d, rightd)
-        push!(right_stack, right)
+        cl_stack_d[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + 1] = cld
+        cl_stack[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + 1] = cl
+        cr_stack_d[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + 1] = crd
+        cr_stack[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + 1] = cr
+        left_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + ((((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1))) + 1] = leftd
+        left_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + ((((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1))) + 1] = left
+        right_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + ((((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1))) + 1] = rightd
+        right_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + ((((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1))) + 1] = right
     end
-    push!(cl_stack_d, cld)
-    push!(cl_stack, cl)
-    push!(cr_stack_d, crd)
-    push!(cr_stack, cr)
-    hl_stack_d[(div(num_levels - 2, 1) + 1) + 1] = hld
-    hl_stack[(div(num_levels - 2, 1) + 1) + 1] = hl
-    hl2_stack_d[(div(num_levels - 2, 1) + 1) + 1] = hl2d
-    hl2_stack[(div(num_levels - 2, 1) + 1) + 1] = hl2
-    push!(left_stack_d, leftd)
-    push!(left_stack, left)
-    push!(right_stack_d, rightd)
-    push!(right_stack, right)
-    cld = pop!(cl_stack_d)
-    cl = pop!(cl_stack)
-    crd = pop!(cr_stack_d)
-    cr = pop!(cr_stack)
-    hld = hl_stack_d[(div(num_levels - 2, 1) + 1) + 1]
-    hl = hl_stack[(div(num_levels - 2, 1) + 1) + 1]
-    hl2d = hl2_stack_d[(div(num_levels - 2, 1) + 1) + 1]
-    hl2 = hl2_stack[(div(num_levels - 2, 1) + 1) + 1]
-    leftd = pop!(left_stack_d)
-    left = pop!(left_stack)
-    rightd = pop!(right_stack_d)
-    right = pop!(right_stack)
+    cl_stack_d[__tot_cl_stack_1 + 1] = cld
+    cl_stack[__tot_cl_stack_1 + 1] = cl
+    cr_stack_d[__tot_cr_stack_1 + 1] = crd
+    cr_stack[__tot_cr_stack_1 + 1] = cr
+    hl_stack_d[__tot_hl_stack_1 + 1] = hld
+    hl_stack[__tot_hl_stack_1 + 1] = hl
+    hl2_stack_d[__tot_hl2_stack_1 + 1] = hl2d
+    hl2_stack[__tot_hl2_stack_1 + 1] = hl2
+    left_stack_d[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_left_stack_1) + 1] = leftd
+    left_stack[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_left_stack_1) + 1] = left
+    right_stack_d[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_right_stack_1) + 1] = rightd
+    right_stack[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_right_stack_1) + 1] = right
+    cld = cl_stack_d[__tot_cl_stack_1 + 1]
+    cl = cl_stack[__tot_cl_stack_1 + 1]
+    crd = cr_stack_d[__tot_cr_stack_1 + 1]
+    cr = cr_stack[__tot_cr_stack_1 + 1]
+    hld = hl_stack_d[__tot_hl_stack_1 + 1]
+    hl = hl_stack[__tot_hl_stack_1 + 1]
+    hl2d = hl2_stack_d[__tot_hl2_stack_1 + 1]
+    hl2 = hl2_stack[__tot_hl2_stack_1 + 1]
+    leftd = left_stack_d[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_left_stack_1) + 1]
+    left = left_stack[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_left_stack_1) + 1]
+    rightd = right_stack_d[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_right_stack_1) + 1]
+    right = right_stack[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + __tot_right_stack_1) + 1]
     for i_seq_level = num_levels:-1:2
-        cld = pop!(cl_stack_d)
-        cl = pop!(cl_stack)
-        crd = pop!(cr_stack_d)
-        cr = pop!(cr_stack)
-        leftd = pop!(left_stack_d)
-        left = pop!(left_stack)
-        rightd = pop!(right_stack_d)
-        right = pop!(right_stack)
+        cld = cl_stack_d[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + 1]
+        cl = cl_stack[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + 1]
+        crd = cr_stack_d[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + 1]
+        cr = cr_stack[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + 1]
+        leftd = left_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + ((((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1))) + 1]
+        left = left_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + ((((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1))) + 1]
+        rightd = right_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + ((((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1))) + 1]
+        right = right_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + ((((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1))) + 1]
         for i_seq_k = nu:-1:1
-            leftd = pop!(left_stack_d)
-            left = pop!(left_stack)
-            rightd = pop!(right_stack_d)
-            right = pop!(right_stack)
-            nc = tripcount_stack[(((div(nu - 1, 1) + 1) + (div(num_levels - 2, 1) + 1)) + (div(num_levels - 2, 1) + 1)) + (((i_seq_level - 2) * (div(nu - 1, 1) + 1) + (i_seq_k - 1)) + 1)]
+            leftd = left_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            left = left_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            rightd = right_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            right = right_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            nc = tripcount_stack[(((div(nu - 1, 1) + 1) + prefix_tripcount_stack_1[(i_seq_level - 2) + 1]) + (1 + 1)) + ((i_seq_k - 1) + 1)]
             for i_seq_j = nc:-1:1
-                leftd = pop!(left_stack_d)
-                left = pop!(left_stack)
-                rightd = pop!(right_stack_d)
-                right = pop!(right_stack)
-                __branch_pre_4 = pop!(branch_stack)
+                leftd = left_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + ((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                left = left_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + ((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                rightd = right_stack_d[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + ((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                right = right_stack[((((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + ((div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                __branch_pre_4 = branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + (((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 rightd = 0.0
                 right = 0.0
                 if __branch_pre_4 == 1
@@ -246,7 +303,7 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                     rightd = 0.0
                     right = 0.0
                 end
-                __branch_pre_2 = pop!(branch_stack)
+                __branch_pre_2 = branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 leftd = 0.0
                 left = 0.0
                 if __branch_pre_2 == 1
@@ -272,8 +329,8 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                     rightbd = 0.0
                     rightb = 0.0
                 end
-                rightd = pop!(right_stack_d)
-                right = pop!(right_stack)
+                rightd = right_stack_d[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                right = right_stack[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_right_stack_1[(i_seq_level - 2) + 1]) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 rightbd = 0.0
                 rightb = 0.0
                 if __branch_pre_2 == 1
@@ -282,20 +339,20 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                     leftbd = 0.0
                     leftb = 0.0
                 end
-                leftd = pop!(left_stack_d)
-                left = pop!(left_stack)
+                leftd = left_stack_d[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                left = left_stack[(((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1)) + prefix_left_stack_1[(i_seq_level - 2) + 1]) + (((i_seq_k - 1) * (div(val_nc_1[(i_seq_level - 2) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 leftbd = 0.0
                 leftb = 0.0
             end
         end
-        ncoarse = tripcount_stack[((div(nu - 1, 1) + 1) + (div(num_levels - 2, 1) + 1)) + ((i_seq_level - 2) + 1)]
+        ncoarse = tripcount_stack[(((div(nu - 1, 1) + 1) + prefix_tripcount_stack_1[(i_seq_level - 2) + 1]) + 1) + 1]
         for j = ncoarse + 1:-1:1
-            cld = pop!(cl_stack_d)
-            cl = pop!(cl_stack)
-            crd = pop!(cr_stack_d)
-            cr = pop!(cr_stack)
+            cld = cl_stack_d[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
+            cl = cl_stack[(prefix_cl_stack_1[(i_seq_level - 2) + 1] + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
+            crd = cr_stack_d[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
+            cr = cr_stack[(prefix_cr_stack_1[(i_seq_level - 2) + 1] + ((div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
             jf = j * 2 - 1
-            __branch_pre_5 = pop!(branch_stack)
+            __branch_pre_5 = branch_stack[((((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + (div((val_ncoarse_1[(i_seq_level - 2) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)]
             crd = 0.0
             cr = 0.0
             if __branch_pre_5 == 1
@@ -305,7 +362,7 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 crd = 0.0
                 cr = 0.0
             end
-            __branch_pre_3 = pop!(branch_stack)
+            __branch_pre_3 = branch_stack[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_seq_level - 2) + 1]) + ((j - 1) + 1)]
             cld = 0.0
             cl = 0.0
             if __branch_pre_3 == 1
@@ -327,8 +384,8 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 crbd = 0.0
                 crb = 0.0
             end
-            crd = pop!(cr_stack_d)
-            cr = pop!(cr_stack)
+            crd = cr_stack_d[prefix_cr_stack_1[(i_seq_level - 2) + 1] + ((j - 1) + 1)]
+            cr = cr_stack[prefix_cr_stack_1[(i_seq_level - 2) + 1] + ((j - 1) + 1)]
             crbd = 0.0
             crb = 0.0
             if __branch_pre_3 == 1
@@ -337,12 +394,12 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 clbd = 0.0
                 clb = 0.0
             end
-            cld = pop!(cl_stack_d)
-            cl = pop!(cl_stack)
+            cld = cl_stack_d[prefix_cl_stack_1[(i_seq_level - 2) + 1] + ((j - 1) + 1)]
+            cl = cl_stack[prefix_cl_stack_1[(i_seq_level - 2) + 1] + ((j - 1) + 1)]
             clbd = 0.0
             clb = 0.0
         end
-        ncoarse = tripcount_stack[(div(nu - 1, 1) + 1) + ((i_seq_level - 2) + 1)]
+        ncoarse = tripcount_stack[((div(nu - 1, 1) + 1) + prefix_tripcount_stack_1[(i_seq_level - 2) + 1]) + 1]
         for j = 1:ncoarse
             jf = j * 2
             ubd[j, i_seq_level - 1] = ubd[j, i_seq_level - 1] + ubd[jf, i_seq_level]
@@ -350,31 +407,31 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
             ubd[jf, i_seq_level] = 0.0
             ub[jf, i_seq_level] = 0.0
         end
-        hl2d = hl2_stack_d[(i_seq_level - 2) + 1]
-        hl2 = hl2_stack[(i_seq_level - 2) + 1]
+        hl2d = hl2_stack_d[prefix_hl2_stack_1[(i_seq_level - 2) + 1] + 1]
+        hl2 = hl2_stack[prefix_hl2_stack_1[(i_seq_level - 2) + 1] + 1]
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
         hlb = hlb + hl * hl2b
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
         hlb = hlb + hl * hl2b
         hl2bd = 0.0
         hl2b = 0.0
-        hld = hl_stack_d[(i_seq_level - 2) + 1]
-        hl = hl_stack[(i_seq_level - 2) + 1]
+        hld = hl_stack_d[prefix_hl_stack_1[(i_seq_level - 2) + 1] + 1]
+        hl = hl_stack[prefix_hl_stack_1[(i_seq_level - 2) + 1] + 1]
         hlbd = 0.5hlbd
         hlb = 0.5hlb
     end
     for i_seq_k = nu:-1:1
-        leftd = pop!(left_stack_d)
-        left = pop!(left_stack)
-        rightd = pop!(right_stack_d)
-        right = pop!(right_stack)
+        leftd = left_stack_d[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + ((i_seq_k - 1) + 1)]
+        left = left_stack[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + ((i_seq_k - 1) + 1)]
+        rightd = right_stack_d[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + ((i_seq_k - 1) + 1)]
+        right = right_stack[(((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + ((i_seq_k - 1) + 1)]
         nc = tripcount_stack[(i_seq_k - 1) + 1]
         for i_seq_j = nc:-1:1
-            leftd = pop!(left_stack_d)
-            left = pop!(left_stack)
-            rightd = pop!(right_stack_d)
-            right = pop!(right_stack)
-            __branch_pre_4 = pop!(branch_stack)
+            leftd = left_stack_d[((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+            left = left_stack[((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+            rightd = right_stack_d[((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+            right = right_stack[((div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1)) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+            __branch_pre_4 = branch_stack[(div(nu - 1, 1) + 1) * (div(nc - 1, 1) + 1) + (((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
             rightd = 0.0
             right = 0.0
             if __branch_pre_4 == 1
@@ -384,7 +441,7 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 rightd = 0.0
                 right = 0.0
             end
-            __branch_pre_2 = pop!(branch_stack)
+            __branch_pre_2 = branch_stack[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1]
             leftd = 0.0
             left = 0.0
             if __branch_pre_2 == 1
@@ -410,8 +467,8 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 rightbd = 0.0
                 rightb = 0.0
             end
-            rightd = pop!(right_stack_d)
-            right = pop!(right_stack)
+            rightd = right_stack_d[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1]
+            right = right_stack[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1]
             rightbd = 0.0
             rightb = 0.0
             if __branch_pre_2 == 1
@@ -420,8 +477,8 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 leftbd = 0.0
                 leftb = 0.0
             end
-            leftd = pop!(left_stack_d)
-            left = pop!(left_stack)
+            leftd = left_stack_d[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1]
+            left = left_stack[((i_seq_k - 1) * (div(nc - 1, 1) + 1) + (i_seq_j - 1)) + 1]
             leftbd = 0.0
             leftb = 0.0
         end

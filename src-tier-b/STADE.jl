@@ -2348,21 +2348,28 @@ end
 function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, push_pop = nothing)
     active_map = act_analyze(kernel)
     layout = nothing
+    value_needed = exempt = stacks = nothing
     if !keep_push_pop
         # Tier B kernels (a ragged/data-dependent loop bound --
-        # agen_tier_b_offender) are no longer refused here: they flow
-        # through the same agen_indexed_layout call as any other
-        # kernel, which taints the stacks that need it and falls those
-        # back to :stack semantics -- see the "Tier B (implemented...)"
-        # comment above agen_local_position.
+        # agen_tier_b_offender) are no longer refused here: agen_layout
+        # (Phase A-D) resolves as much as it can into closed-form,
+        # GPU-eligible ragged-block tables, falling back to plain
+        # :stack semantics (agen_indexed_layout's own tainted_stacks,
+        # reused as agen_layout's sub-engine) only for whatever a
+        # block genuinely can't resolve -- see the "Tier B
+        # (implemented...)" comment above agen_local_position and
+        # agen_layout's own docstring.
         value_needed = agen_value_needed_vars(kernel)
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
         stacks = agen_stack_map(snapshot_plan)
-        layout = agen_indexed_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = push_pop)
+        layout = agen_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = push_pop)
     end
-    adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = push_pop)
-    initstacks_expr = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout)
+    (initstacks_expr, table_names, tot_names, val_names) = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout,
+                                      active_map = active_map, value_needed = value_needed, exempt = exempt, stacks = stacks, push_pop = push_pop)
+    tier_b_extra_args = vcat(table_names, tot_names, val_names)
+    adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = push_pop,
+                                      tier_b_extra_args = tier_b_extra_args)
     return (adjoint = adjoint_expr, initstacks = initstacks_expr)
 end
 
@@ -2390,10 +2397,18 @@ function agen_signature_args(sig)
     return fargs
 end
 
-function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing)
+function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing,
+                            tier_b_extra_args::Vector{Symbol} = Symbol[])
     fname = agen_fname(kernel.sig.name)
     stacks = agen_stack_map(sites)
-    fargs = vcat(agen_signature_args(kernel.sig), agen_stack_names(sites))
+    # `tier_b_extra_args` (Phase D) is the SAME table/total/value-table
+    # name list agen_init_emit returned for this kernel, appended here
+    # in that exact order so it lines up with initstacks_*'s own
+    # return tuple -- see agen_init_emit's own docstring for why this
+    # keeps val_init_stacks' generic splat-the-whole-tuple convention
+    # working unmodified. Empty under keep_push_pop=true or a kernel
+    # with no ragged block.
+    fargs = vcat(agen_signature_args(kernel.sig), agen_stack_names(sites), tier_b_extra_args)
 
     value_needed = agen_value_needed_vars(kernel)
     reassigned = agen_collect_reassigned(kernel.body)
@@ -2523,16 +2538,33 @@ end
 
 # ---- initstacks_ generator ---------------------------------------
 
-# one `nm = Vector{T}(...)` init statement, growable for `keep_push_pop`
-# or a tainted (Tier B) stack, presized from layout.sizes otherwise --
-# factored out of agen_init_emit purely to keep that function's own
+# one `nm = Vector{T}(...)` init statement -- growable for
+# `keep_push_pop` or a genuinely-tainted (Tier B fallback) stack;
+# presized from `layout.sizes` for a pure Tier A stack; presized from
+# `layout.block_totals` for a stack resolved into one or more Tier B
+# ragged-block tables (Phase D) -- see agen_layout's own docs for what
+# populates each of these three, mutually exclusive, dicts. Factored
+# out of agen_init_emit purely to keep that function's own
 # comprehension a plain one-call-per-element form.
 function agen_init_alloc_stmt(nm, kind, keep_push_pop::Bool, layout)
-    grow = keep_push_pop || (layout !== nothing && nm in layout.tainted_stacks)
-    return Expr(:(=), nm, agen_stack_alloc_expr(kind, grow, grow ? nothing : get(layout.sizes, nm, 0)))
+    tainted = layout !== nothing && nm in layout.tainted_stacks
+    grow = keep_push_pop || tainted
+    size_expr = grow ? nothing : (haskey(layout.sizes, nm) ? layout.sizes[nm] : layout.block_totals[nm])
+    return Expr(:(=), nm, agen_stack_alloc_expr(kind, grow, size_expr))
 end
 
-function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = nothing)
+# Returns `(expr, table_names, tot_names, val_names)`: the extra three
+# are empty under keep_push_pop=true or a kernel with no ragged block
+# at all (`layout.blocks` empty), and otherwise name every extra
+# per-stack table/total/value-table `agen_tier_b_kernel_skeleton`
+# (Phase B) builds -- callers (agen_emit/stade_hvp) append these to
+# both `initstacks_*`'s own return AND `<name>_b`/`<name>_hv`'s
+# argument list, in the SAME order, so val_init_stacks' generic
+# splat-the-whole-tuple convention keeps working unmodified: Phase D
+# adds no special-cased plumbing to the validation/calling machinery,
+# only more return values and more parameters, kept in lockstep here.
+function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = nothing,
+                         active_map = nothing, value_needed = nothing, exempt = nothing, stacks = nothing, push_pop = nothing)
     fname = agen_init_fname(kernel.sig.name)
     names = agen_stack_names(sites)
     kind_of = Dict{Symbol,Symbol}()
@@ -2545,13 +2577,60 @@ function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = noth
     # keep_push_pop entry for why the minimal set (rather than the
     # kernel's full argument list) was chosen
     fargs = keep_push_pop ? Symbol[] : layout.free_vars
+    sizing_stmts = Any[]
+    total_of = Dict{Symbol,Symbol}()
+    if !keep_push_pop && !isempty(layout.tainted_stacks)
+        (sizing_stmts, total_of) = agen_tier_b_sizing_stmts(kernel, active_map, value_needed, exempt, stacks, layout.tainted_stacks; push_pop = push_pop)
+        # the sizing skeleton may reference kernel arguments the Tier A
+        # size formulas alone never would (e.g. nu1/nu2 in mg_vcycle,
+        # never part of any closed-form offset) -- widen the signature
+        # to match, same free-vars-of-what-we-actually-reference
+        # principle as the plain Tier A case above
+        sizing_free = Set{Symbol}()
+        for s in sizing_stmts
+            agen_collect_expr_vars!(s, sizing_free)
+        end
+        fargs = sort(union(fargs, intersect(sizing_free, kernel.sig.args)); by = string)
+    end
+    # Tier B ragged-block tables (Phase D): built once here, exactly
+    # like the fallback sizing pass above but for stacks that resolved
+    # into one or more agen_layout blocks instead of falling back
+    # entirely. agen_tier_b_kernel_skeleton already interleaves every
+    # block's own table-construction loop with whatever scalar prelude
+    # surrounds it in the kernel body (Phase B) -- nothing more is
+    # needed here beyond widening the signature the same way.
+    table_stmts = Any[]
+    table_names = Symbol[]; tot_names = Symbol[]; val_names = Symbol[]
+    if !keep_push_pop && !isempty(layout.blocks)
+        table_stmts = agen_tier_b_kernel_skeleton(kernel.body, kernel.sig.kinds, layout)
+        for bid in sort(collect(keys(layout.blocks)))
+            blk = layout.blocks[bid]
+            for s in sort(collect(keys(blk.local_sizes)); by = string)
+                push!(table_names, Symbol("prefix_" * string(s) * "_" * string(bid)))
+                push!(tot_names, blk.total_sym[s])
+            end
+            for v in sort(collect(blk.value_vars); by = string)
+                push!(val_names, Symbol("val_" * string(v) * "_" * string(bid)))
+            end
+        end
+        fargs = sort(union(fargs, Set(agen_tier_b_skeleton_free_vars(table_stmts, kernel.sig.args))); by = string)
+    end
     # Tier B: a tainted stack (see agen_use_stack_push) has no size
-    # formula at all -- layout.sizes deliberately has no entry for it
-    # -- so it always allocates growable, exactly like keep_push_pop's
-    # own true-case, regardless of the kernel-wide flag.
-    body = Any[agen_init_alloc_stmt(nm, kind_of[nm], keep_push_pop, layout) for nm in names]
-    push!(body, emit_return_scalars(names))
-    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
+    # formula at all -- layout.sizes/layout.block_totals deliberately
+    # have no entry for it -- so it always allocates growable, exactly
+    # like keep_push_pop's own true-case, regardless of the
+    # kernel-wide flag; a computed __sz_* total (from the fallback
+    # sizing pass above) additionally gets it a sizehint! right after,
+    # to avoid push!'s own repeated reallocation as it grows -- see
+    # agen_tier_b_sizing_stmts.
+    alloc_stmts = Any[]
+    for nm in names
+        push!(alloc_stmts, agen_init_alloc_stmt(nm, kind_of[nm], keep_push_pop, layout))
+        haskey(total_of, nm) && push!(alloc_stmts, Expr(:call, :sizehint!, nm, total_of[nm]))
+    end
+    body = vcat(sizing_stmts, table_stmts, alloc_stmts)
+    push!(body, emit_return_scalars(vcat(names, table_names, tot_names, val_names)))
+    return (Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...)), table_names, tot_names, val_names)
 end
 
 # :array/:value stacks hold the popped Float64 scalar itself (every
@@ -2829,6 +2908,21 @@ function agen_for_bound_vars(stmt)
     return bound_vars
 end
 
+# true if `expr` contains a ref (`arr[...]`) to any array-kinded var --
+# used by the Tier B sizing pass (agen_tier_b_sizing_stmts) to decide
+# whether a scalar assign is safe to replicate into a data-free
+# skeleton: an array-free RHS is exactly the set of assigns that can
+# possibly matter to a loop bound or branch condition downstream,
+# since skill-jade's own house style never lets a bound/condition
+# reference an array directly.
+function agen_expr_reads_array(expr, kinds)
+    if expr isa Expr
+        expr.head == :ref && get(kinds, expr.args[1], nothing) in (:array_float, :array_int) && return true
+        return any(a -> agen_expr_reads_array(a, kinds), expr.args)
+    end
+    return false
+end
+
 function agen_negate_step(step)
     step isa Number && return -step
     return Expr(:call, :-, step)
@@ -3059,12 +3153,22 @@ end
 # push-gating order/conditions, recording each occurrence's stack,
 # key, and local multiplicity; then folds those into per-stack
 # running-sum base offsets and total sizes.
-function agen_indexed_layout(kernel, kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = nothing)
+#
+# `seq0`/`in_ragged0` seed the walk's `seq_reassigned`/`in_ragged`
+# state instead of starting fresh -- defaults preserve every existing
+# caller's exact behavior unchanged. Used by `agen_ragged_block` (see
+# below) to reuse this ENTIRE function, verbatim, as the "AL-scoped,
+# single-owner" sub-engine for one ragged block's own body: seeding
+# `seq0` with AL's own newly-introduced reassignments makes any
+# doubly-nested raggedness within AL surface in THIS call's own
+# `tainted_stacks`, rather than needing a second table-building
+# mechanism to handle AL-within-AL.
+function agen_indexed_layout(kernel, kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = nothing, seq0 = Set{Symbol}(), in_ragged0 = false)
     occ_mult = Dict{Symbol,Vector{Any}}()
     key_order = Dict{Symbol,Vector{Any}}()
     tainted_stacks = Set{Symbol}()
     loop_ctx = Any[]
-    agen_layout_walk!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, tainted_stacks, Set{Symbol}(), false, push_pop)
+    agen_layout_walk!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, tainted_stacks, seq0, in_ragged0, push_pop)
     offsets = Dict{Any,Any}()
     sizes = Dict{Symbol,Any}()
     for (stack, mults) in occ_mult
@@ -3158,6 +3262,529 @@ function agen_layout_record!(occ_mult, key_order, tainted_stacks, stack_name, lo
     return nothing
 end
 
+# ---- Tier B ragged-block layout (closed-form, GPU-eligible) ----------
+# One "ragged block" = one ancestor sequential loop AL whose body
+# contains a ragged descendant it ALONE governs -- see skill-stade.md's
+# Tier B section. `stmt` must already be a `:for`; returns `nothing` if
+# it isn't a genuine AL (no descendant it alone governs -- an ordinary
+# sequential loop with no raggedness inside just gets walked normally
+# by `agen_layout` below, no block needed).
+#
+# AL's OWN body is laid out via the EXISTING, unmodified
+# agen_indexed_layout (steps 1/2's boolean in_ragged/tainted_stacks
+# machinery) -- reused verbatim as the "AL-scoped, single-owner"
+# sub-engine. Critically, the sub-call's `seq0` seed is the INCOMING
+# `seq_reassigned` (from OUTSIDE AL) alone, NOT unioned with
+# `own_reassigned`: a var reassigned as a TOP-LEVEL statement of
+# `stmt.body` itself (e.g. mg_vcycle's `n = nl - 1`, right in
+# `i_seq_level`'s own body) is fixed for the entire duration of ONE AL
+# iteration -- from the sub-call's own perspective (which treats
+# `stmt.body` as a fresh top-level body, loop_ctx starting at `[]`),
+# that assignment sits OUTSIDE every loop `stmt.body` itself contains,
+# so it must NOT count as "reassigned inside an ancestor sequential
+# loop" for the sub-call's own detection. Only a reassignment that's
+# itself nested inside a FURTHER `:for` within `stmt.body` (a genuine
+# AL-within-AL) should register there -- and `own_reassigned` was
+# deliberately computed with `in_loop=true` from the start specifically
+# so the PRE-CHECK just below sees `stmt.body`'s top-level assignments
+# as "ancestor-reassigned" (correct for "is this AL genuine" purposes,
+# treating AL itself as the ancestor) -- reusing it as the sub-call's
+# own seed would incorrectly make the sub-call see its OWN top-level
+# assignments as already-ragged, wrongly tainting every stack touched
+# anywhere inside AL rather than just the truly-nested-deeper ones.
+#
+# `reassigned` (for :tripcount_stack site detection, a different,
+# whole-kernel-wide concept -- see agen_tripcount_bound_vars) is passed
+# straight through unchanged: it's already computed once, globally, by
+# the caller (agen_collect_reassigned(kernel.body)), and always already
+# a superset of `own_reassigned` (agen_collect_reassigned's own
+# recursion computes the exact same thing for this same `:for`
+# subtree when walking from the top), so no extra union is needed.
+#
+# Returns `(header, local_offsets, local_sizes, ineligible_stacks)` --
+# `header` is AL's own (necessarily closed-form, since AL itself isn't
+# ragged) loop header; `local_offsets`/`local_sizes` are exactly
+# agen_indexed_layout's own `offsets`/`sizes` fields, scoped to
+# `stmt.body` alone (i.e. relative to AL's own frame, NOT including
+# it); `ineligible_stacks` is that same call's own `tainted_stacks` --
+# stacks genuinely governed by a DIFFERENT or DEEPER owner within AL
+# (true AL-within-AL), which `agen_layout` routes to the old
+# whole-kernel push!/pop! fallback instead of attempting a nested
+# block for them (Phase A's single-level scope restriction).
+function agen_ragged_block(stmt, kinds, active_map, value_needed, reassigned, exempt, stacks, seq_reassigned; push_pop = nothing)
+    stmt.sequential || return nothing
+    own_reassigned = agen_collect_reassigned(stmt.body, true)
+    agen_tier_b_walk(stmt.body, own_reassigned) === nothing && return nothing
+    sub = agen_indexed_layout((body = stmt.body,), kinds, active_map, value_needed, reassigned, exempt, stacks;
+                               push_pop = push_pop, seq0 = seq_reassigned, in_ragged0 = false)
+    return (header = (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step), body = stmt.body,
+            local_offsets = sub.offsets, local_sizes = sub.sizes, ineligible_stacks = sub.tainted_stacks)
+end
+
+# ---- Tier B: top-level layout with ragged blocks (Phase A) -----------
+# NEW top-level counterpart to agen_indexed_layout -- not yet called by
+# agen_emit/stade_hvp (see skill-stade.md's Tier B section for the
+# phased rollout this belongs to). Walks kernel.body ONCE, in program
+# order, maintaining a per-stack `current` running offset expression
+# exactly like agen_indexed_layout's own `running` variable -- except
+# `current[stack]` is allowed to become a runtime expression
+# (referencing a ragged block's own computed total -- a `__tot_*`
+# symbol Phase B's table-building code will define) rather than
+# staying closed-form throughout. That's what lets a stack have
+# MULTIPLE ragged blocks in sequence (e.g. mg_vcycle's descend AND
+# ascend passes both writing `left_stack`) chain correctly: block 2's
+# own `base` is block 1's `base + total_sym`, read back out of
+# `current` exactly the way a plain Tier A occurrence's base already
+# works today.
+#
+# A `:for` with `stmt.sequential` is tested via agen_ragged_block: if
+# it's a genuine ragged block, its body is NOT walked by this
+# recursion at all -- entirely delegated to the sub-engine, and only
+# the block's own result (per-stack local_offsets/local_sizes,
+# ineligible_stacks) feeds back in. Otherwise it's walked exactly like
+# any other loop -- unchanged from agen_layout_walk!'s own behavior
+# for a non-ragged loop.
+#
+# Returns `(offsets, sizes, blocks, block_totals, tainted_stacks,
+# free_vars)`:
+# - `offsets[key]` is either `(stack, expr)` (static Tier A -- same
+#   shape agen_indexed_layout already returns) or `(:ragged, stack,
+#   block_id, local_offset_expr)` for an occurrence inside a block.
+# - `sizes[stack]` only exists for a stack untouched by ANY block
+#   (pure Tier A, same as today) -- a block-touched stack's total
+#   needs its `__tot_*` symbols defined first (Phase B), so it can't
+#   be a plain closed-form size yet; see `block_totals` instead.
+# - `blocks[block_id] = (header, body, base::Dict{Symbol,Any},
+#   local_sizes::Dict{Symbol,Any}, total_sym::Dict{Symbol,Symbol},
+#   depth::Int)` -- `base[stack]` is the (possibly runtime) offset
+#   expression in effect when this block begins; `total_sym[stack]` is
+#   the symbol Phase B's codegen must define, holding this block's own
+#   computed total contribution to that stack; `depth` is how many
+#   loop_ctx frames were already open when AL's OWN :for was reached
+#   (i.e. every outer, non-AL loop enclosing it, but not AL's own
+#   frame) -- Phase C's agen_site_index uses it to know which prefix
+#   of `ectx.loop_ctx` (built by the real forward/backward body walk,
+#   which -- unlike this layout's own loop_ctx -- DOES push a frame
+#   for AL itself) to skip: `ectx.loop_ctx[depth+2:end]` is exactly
+#   the "inside AL, relative to AL's own frame" slice this block's
+#   `local_offsets`/`local_sizes` were computed against.
+# - `block_totals[stack]` is the FINAL running total expression for a
+#   block-touched stack (its eventual allocation size, once Phase B
+#   defines every `__tot_*` symbol it references) -- the block-touched
+#   counterpart to `sizes`.
+# - `tainted_stacks` is exactly the OLD (steps 1/2) fallback set --
+#   stacks that must stay on push!/pop! entirely, because
+#   agen_ragged_block found a deeper/different owner inside one of
+#   their blocks (`ineligible_stacks`). Per-stack, not per-occurrence,
+#   exactly like steps 1/2's own tainting: if ANY occurrence sharing a
+#   stack is ineligible, the WHOLE stack falls back, even its other
+#   occurrences that individually resolved fine.
+function agen_layout(kernel, kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = nothing)
+    offsets = Dict{Any,Any}()
+    current = Dict{Symbol,Any}()
+    blocks = Dict{Any,Any}()
+    block_of = Dict{Any,Int}()
+    block_touched = Set{Symbol}()
+    ineligible = Set{Symbol}()
+    block_counter = Ref(0)
+    agen_layout_walk_top!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, Any[], offsets, current, blocks, block_of, block_touched, ineligible, Set{Symbol}(), block_counter, push_pop)
+    # a block-local scalar (n, nc, ...) referenced by a local_offset/
+    # local_size formula is NOT safe to read as a bare in-scope
+    # variable at an arbitrary push/pop site: unlike agen_forward_body
+    # (which always preserves original program order, so a scalar
+    # like `nc` is guaranteed already (re)computed by the time
+    # anything downstream reads it), agen_backward_body reverses
+    # PER-STATEMENT order too -- a block-boundary occurrence whose
+    # forward statement came LAST in the block's body becomes the
+    # FIRST thing the reversed loop executes, potentially before any
+    # of the scalar recompute/tripcount-pop machinery that (in
+    # forward order) preceded it. See agen_tier_b_value_tables_stmts
+    # below for the fix: every block-local scalar a formula depends on
+    # gets its OWN per-iteration value table too (built alongside the
+    # prefix/total tables, Phase B), and agen_site_index (Phase C)
+    # substitutes a bare reference to it with a lookup into that
+    # table -- removing the dependency on program order entirely, the
+    # same way the prefix/total tables already removed it for offsets.
+    #
+    # A variable that's a kernel ARGUMENT is normally safe to exclude
+    # (always available, unchanged, everywhere) -- EXCEPT when it's
+    # also in `reassigned` (mg_vcycle's own `n` is exactly this: an
+    # argument whose role is just an initial placeholder, immediately
+    # overwritten -- `n = n * 2` is its own kernel body's first
+    # statement). Such an argument is really just a pre-declared LOCAL
+    # by the time any ragged block reads it, with the identical
+    # program-order hazard as any other block-local scalar -- so it
+    # must stay a value_var too, not be filtered out as "always safe."
+    safe_args = setdiff(Set(kernel.sig.args), reassigned)
+    offset_exprs_by_block = Dict{Int,Vector{Any}}()
+    for (_, entry) in offsets
+        entry[1] === :ragged || continue
+        (_, _, block_id, off) = entry
+        push!(get!(() -> Any[], offset_exprs_by_block, block_id), off)
+    end
+    blocks2 = Dict{Any,Any}()
+    for (block_id, blk) in blocks
+        free = Set{Symbol}()
+        for (_, sz) in blk.local_sizes
+            agen_collect_expr_vars!(sz, free)
+        end
+        for off in get(offset_exprs_by_block, block_id, Any[])
+            agen_collect_expr_vars!(off, free)
+        end
+        value_vars = setdiff(free, safe_args)
+        blocks2[block_id] = merge(blk, (value_vars = value_vars,))
+    end
+    blocks = blocks2
+    sizes = Dict{Symbol,Any}()
+    block_totals = Dict{Symbol,Any}()
+    for (stack, expr) in current
+        stack in ineligible && continue
+        if stack in block_touched
+            block_totals[stack] = expr
+        else
+            sizes[stack] = expr
+        end
+    end
+    free = Set{Symbol}()
+    for (_, sz) in sizes
+        agen_collect_expr_vars!(sz, free)
+    end
+    for (_, blk) in blocks
+        for (stack, sz) in blk.local_sizes
+            stack in ineligible && continue
+            agen_collect_expr_vars!(sz, free)
+        end
+        # a block's own header (lo/hi/step) is what Phase B's table
+        # allocation (`Vector{Int}(undef, <AL's own trip count>)`) and
+        # its own `for <header>` loop need -- e.g. mg_vcycle's
+        # `num_levels` never appears in any local_size formula (only
+        # in the loop bound itself), so it would otherwise be silently
+        # missing from initstacks_*'s eventual signature (Phase D).
+        agen_collect_expr_vars!(blk.header.lo, free)
+        agen_collect_expr_vars!(blk.header.hi, free)
+        agen_collect_expr_vars!(blk.header.step, free)
+    end
+    # a block's own local_size formula legitimately references
+    # internal, ragged-controlling locals (n, nc, ...) that are only
+    # ever valid INSIDE code that has already run the sizing/table
+    # pass defining them (Phase B) -- never real kernel arguments, so
+    # never valid as a signature parameter (unlike a pure Tier A
+    # size, which by construction only ever references true kernel
+    # arguments already). Filtered here, once, rather than trusting
+    # every future caller to filter it themselves.
+    free = intersect(free, Set(kernel.sig.args))
+    return (offsets = offsets, sizes = sizes, blocks = blocks, block_of = block_of, block_totals = block_totals,
+            tainted_stacks = ineligible, free_vars = sort(collect(free); by = string))
+end
+
+function agen_layout_walk_top!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop)
+    for (idx, stmt) in enumerate(body)
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            site_source = push_pop === nothing ? value_needed : push_pop
+            if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) &&
+               agen_needs_snapshot(stmt.lhs, stmt.rhs, var, site_source, agen_site_key(body, idx)) && !(var in exempt)
+                nm = agen_site_stack_name((kind = agen_snapshot_kind(stmt.lhs), array = var, at = 0))
+                agen_layout_static_record!(offsets, current, nm, loop_ctx, agen_site_key(body, idx))
+            end
+        elseif stmt.kind == :for
+            for bv in agen_tripcount_bound_vars(stmt, reassigned)
+                agen_layout_static_record!(offsets, current, :tripcount_stack, loop_ctx, agen_site_key(body, idx, bv))
+            end
+            blk = agen_ragged_block(stmt, kinds, active_map, value_needed, reassigned, exempt, stacks, seq_reassigned; push_pop = push_pop)
+            if blk === nothing
+                inner_seq = stmt.sequential ? union(seq_reassigned, agen_collect_reassigned(stmt.body, true)) : seq_reassigned
+                push!(loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
+                agen_layout_walk_top!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, inner_seq, block_counter, push_pop)
+                pop!(loop_ctx)
+            else
+                union!(ineligible, blk.ineligible_stacks)
+                block_counter[] += 1
+                block_id = block_counter[]
+                block_of[agen_site_key(body, idx)] = block_id
+                base = Dict{Symbol,Any}()
+                total_sym = Dict{Symbol,Symbol}()
+                for (stack, _) in blk.local_sizes
+                    stack in blk.ineligible_stacks && continue
+                    push!(block_touched, stack)
+                    base[stack] = get(current, stack, 0)
+                    total_sym[stack] = Symbol("__tot_" * string(stack) * "_" * string(block_id))
+                    for (key, (s, off)) in blk.local_offsets
+                        s == stack || continue
+                        offsets[key] = (:ragged, stack, block_id, off)
+                    end
+                    current[stack] = agen_add_exprs(base[stack], total_sym[stack])
+                end
+                blocks[block_id] = (header = blk.header, body = blk.body, base = base, local_sizes = blk.local_sizes, total_sym = total_sym, depth = length(loop_ctx))
+            end
+        elseif stmt.kind == :if
+            agen_layout_static_record!(offsets, current, :branch_stack, loop_ctx, agen_site_key(body, idx))
+            agen_layout_walk_top!(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop)
+            agen_layout_walk_top!(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop)
+        end
+    end
+    for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)
+        agen_layout_static_record!(offsets, current, stacks[(:value, var)], loop_ctx, agen_site_key(body, 0, var))
+    end
+    return nothing
+end
+
+# exactly agen_layout_record!'s own base/advance split, just without
+# the occ_mult/key_order two-pass deferral -- `current[stack]` IS the
+# running sum, updated in place as we go, so a ragged block's own
+# entry (agen_layout in the caller above) can read the right "so far"
+# value out of it directly instead of needing a second folding pass.
+function agen_layout_static_record!(offsets, current, stack_name, loop_ctx, key)
+    base = get(current, stack_name, 0)
+    offsets[key] = (stack_name, base)
+    current[stack_name] = agen_add_exprs(base, agen_local_multiplicity(loop_ctx))
+    return nothing
+end
+
+# Tier B sizing pass -- see the "Tier B (implemented..." comment above
+# agen_local_position. A tainted stack's buffer stays push!/pop!-based
+# (agen_use_stack_push is unchanged by this), so this does NOT presize
+# a true :indexed buffer or unlock GPU-splitting -- it only lets
+# `initstacks_*`/hvp's shadow-stack init `sizehint!` the buffer ahead
+# of time, avoiding push!'s own repeated reallocation as a growable
+# Vector grows. Because sizehint! is a pure performance hint (Vector's
+# push!/pop! semantics are correct for ANY hinted size, including 0 or
+# an overestimate), this pass has no correctness bar to clear -- it
+# only needs to be a REASONABLE estimate, which is why it's safe to
+# build via a fresh, independently-scoped walk (agen_tier_b_sizing_walk)
+# rather than reusing agen_layout_walk!'s own bookkeeping.
+#
+# Returns (stmts, total_of) where `stmts` is a self-contained,
+# data-free replica of kernel.body: every :for/:if kept verbatim
+# (their headers are themselves scalar expressions that must actually
+# execute to get real trip counts/branch outcomes), every array
+# :assign dropped, every scalar :assign kept unless its RHS reads an
+# array (see agen_expr_reads_array) -- and at each occurrence site
+# landing on a tainted stack, `__sz_<stack> += 1`. `total_of` maps
+# stack name -> the local variable holding its final count.
+function agen_tier_b_sizing_stmts(kernel, active_map, value_needed, exempt, stacks, tainted_stacks; push_pop = nothing)
+    isempty(tainted_stacks) && return (Any[], Dict{Symbol,Symbol}())
+    total_of = Dict(nm => Symbol("__sz_" * string(nm)) for nm in tainted_stacks)
+    decls = Any[Expr(:(=), total_of[nm], 0) for nm in sort(collect(tainted_stacks); by = string)]
+    reassigned = agen_collect_reassigned(kernel.body)
+    body = agen_tier_b_sizing_walk(kernel.body, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
+    return (vcat(decls, body), total_of)
+end
+
+function agen_tier_b_sizing_walk(body, kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
+    out = Any[]
+    for (idx, stmt) in enumerate(body)
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            site_source = push_pop === nothing ? value_needed : push_pop
+            if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) &&
+               agen_needs_snapshot(stmt.lhs, stmt.rhs, var, site_source, agen_site_key(body, idx)) && !(var in exempt)
+                nm = agen_site_stack_name((kind = agen_snapshot_kind(stmt.lhs), array = var, at = 0))
+                haskey(total_of, nm) && push!(out, Expr(:(+=), total_of[nm], 1))
+            end
+            if kinds[var] in (:scalar_float, :scalar_int) && !agen_expr_reads_array(stmt.rhs, kinds)
+                push!(out, Expr(:(=), var, stmt.rhs))
+            end
+        elseif stmt.kind == :for
+            for bv in agen_tripcount_bound_vars(stmt, reassigned)
+                haskey(total_of, :tripcount_stack) && push!(out, Expr(:(+=), total_of[:tripcount_stack], 1))
+            end
+            inner = agen_tier_b_sizing_walk(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
+            push!(out, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
+        elseif stmt.kind == :if
+            haskey(total_of, :branch_stack) && push!(out, Expr(:(+=), total_of[:branch_stack], 1))
+            then_inner = agen_tier_b_sizing_walk(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
+            els_inner = agen_tier_b_sizing_walk(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
+            push!(out, emit_if(stmt.cond, then_inner, els_inner))
+        end
+    end
+    for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)
+        nm = stacks[(:value, var)]
+        haskey(total_of, nm) && push!(out, Expr(:(+=), total_of[nm], 1))
+    end
+    return out
+end
+
+# ---- Tier B ragged-block table construction (Phase B) ----------------
+# NEW, not yet wired into initstacks_*/hvp_shadow_stack_inits (see
+# skill-stade.md's Tier B section for the phased rollout). Builds the
+# actual code that computes, for one ragged block (Phase A's
+# `agen_layout`/`agen_ragged_block` output), a per-stack prefix TABLE
+# -- one entry per AL iteration, holding the cumulative offset BEFORE
+# that iteration -- plus the block's own final total contribution.
+#
+# Replicates AL's own SCALAR control state (the reassignment
+# recurrence that varies per-AL-iteration -- e.g. mg_vcycle's
+# `n = nl - 1; ncg = div(nl,2); nc = ncg - 1`) via
+# `agen_tier_b_block_skeleton`, below -- but UNLIKE step 2's
+# agen_tier_b_sizing_walk (which replicates a WHOLE kernel body,
+# occurrence-counting one increment at a time by actually iterating
+# every ragged loop for real), this stops at any nested `:for`
+# entirely: everything inside a ragged loop's own body is already
+# captured by Phase A's closed-form `local_size` formula -- a function
+# of the CURRENT scalar state this skeleton produces -- so
+# re-iterating it here would be redundant, genuinely-O(n)-per-block-
+# iteration work for no additional information. That's the entire
+# payoff of Phase A's table design: sizing no longer needs to touch
+# the ragged loops themselves at all, only replicate the handful of
+# scalar reassignment statements that govern their bounds.
+#
+# Recurses through :if (a reassignment can be gated -- e.g.
+# windowed_relax_retire's `w -= 1`), keeps a scalar :assign unless its
+# RHS reads an array (agen_expr_reads_array -- same rationale as step
+# 2: an array's value never affects a loop bound or a local_size
+# formula, by skill-jade's own house style), drops every array
+# :assign, and drops a nested :for's STRUCTURE entirely (not even an
+# empty loop -- there is deliberately no recursive case for :for here).
+function agen_tier_b_block_skeleton(body, kinds)
+    out = Any[]
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            if kinds[var] in (:scalar_float, :scalar_int) && !agen_expr_reads_array(stmt.rhs, kinds)
+                push!(out, Expr(:(=), var, stmt.rhs))
+            end
+        elseif stmt.kind == :if
+            then_inner = agen_tier_b_block_skeleton(stmt.then, kinds)
+            els_inner = agen_tier_b_block_skeleton(stmt.els, kinds)
+            push!(out, emit_if(stmt.cond, then_inner, els_inner))
+        end
+    end
+    return out
+end
+
+# One block's own table-construction statements -- `blk` is one entry
+# of `agen_layout(...).blocks` (carries `header`, `body`, `local_sizes`,
+# `total_sym`; `base` is used elsewhere, by whatever eventually reads
+# `agen_layout`'s `offsets`/`block_totals`, not needed here). Emits,
+# for every stack this block touches, in one shared loop over AL's own
+# header (so the skeleton replica -- and any branch it takes -- is
+# built exactly once per iteration, not once per stack):
+#
+#   prefix_<stack>_<block_id> = Vector{Int}(undef, <AL's own trip count>)
+#   __tot_<stack>_<block_id> = 0
+#   for <AL's own header>
+#       prefix_<stack>_<block_id>[pos0+1] = __tot_<stack>_<block_id>   # BEFORE this iteration's own contribution
+#       ... <AL's own scalar skeleton, shared across every stack> ...
+#       __tot_<stack>_<block_id> = __tot_<stack>_<block_id> + <local_size[stack]>
+#   end
+#
+# `agen_pos0(header)+1` as the table WRITE index is deliberately the
+# exact same formula Phase C's table READ (at a push/pop site inside
+# this block) will use -- both come from agen_local_position's own
+# 0-based agen_pos0, so a write at real iteration k and a later read
+# at that same iteration k are guaranteed to agree, the same
+# guarantee Tier A's own pos0/stride formulas already rely on (see the
+# "Tier A (implemented)" note: recomputed fresh from loop structure at
+# each site, never cached, so both directions can't independently
+# drift).
+# Builds one block's table-construction statements: the offset/total
+# tables described above (unchanged), PLUS -- for every block-local
+# scalar a local_offset/local_size formula depends on
+# (`blk.value_vars`, computed in agen_layout) -- a per-iteration VALUE
+# table (`val_<var>_<block_id>`), written every iteration right after
+# the scalar skeleton updates it. This is what lets agen_site_index
+# (Phase C) resolve such a variable via a table lookup instead of a
+# bare in-scope reference, which is NOT safe at an arbitrary push/pop
+# site under agen_backward_body's per-statement reversal -- see the
+# comment in agen_layout above where `value_vars` is computed for why.
+function agen_tier_b_block_stmts(block_id, blk, kinds)
+    header = blk.header
+    tripcount_expr = cgen_trip_count(header.lo, header.step, header.hi)
+    stack_names = sort(collect(keys(blk.local_sizes)); by = string)
+    value_vars = sort(collect(blk.value_vars); by = string)
+    table_name(s) = Symbol("prefix_" * string(s) * "_" * string(block_id))
+    value_table_name(v) = Symbol("val_" * string(v) * "_" * string(block_id))
+    decls = Any[]
+    for s in stack_names
+        push!(decls, Expr(:(=), table_name(s), Expr(:call, Expr(:curly, :Vector, :Int), :undef, tripcount_expr)))
+        push!(decls, Expr(:(=), blk.total_sym[s], 0))
+    end
+    for v in value_vars
+        vt = kinds[v] == :scalar_int ? :Int64 : :Float64
+        push!(decls, Expr(:(=), value_table_name(v), Expr(:call, Expr(:curly, :Vector, vt), :undef, tripcount_expr)))
+    end
+    idx_expr = agen_add_exprs(agen_pos0(header), 1)
+    loop_body = Any[Expr(:(=), Expr(:ref, table_name(s), idx_expr), blk.total_sym[s]) for s in stack_names]
+    append!(loop_body, agen_tier_b_block_skeleton(blk.body, kinds))
+    for v in value_vars
+        push!(loop_body, Expr(:(=), Expr(:ref, value_table_name(v), idx_expr), v))
+    end
+    for s in stack_names
+        push!(loop_body, Expr(:(=), blk.total_sym[s], agen_add_exprs(blk.total_sym[s], blk.local_sizes[s])))
+    end
+    push!(decls, emit_forloop(header.var, header.lo, header.hi, header.step, loop_body))
+    return decls
+end
+
+# Full-kernel scalar skeleton with ragged blocks spliced in. This is
+# THE actual Phase B deliverable (not agen_tier_b_block_stmts alone --
+# that only covers one block's own loop; a kernel's static prelude
+# before/between/after blocks -- e.g. mg_vcycle's own `n = n * 2;
+# nl = nfine; hl = h1` before its first block -- still has to run to
+# get `nl`/`hl` initialized correctly before any block's own skeleton
+# first reads them). Mirrors agen_layout_walk_top!'s OWN top-level
+# traversal decisions EXACTLY (same agen_ragged_block-classified `:for`
+# statements, at the same points, via `layout.block_of`) so this
+# skeleton's structure can never drift from what agen_layout used to
+# build `blocks`/`offsets` in the first place -- a mismatch here would
+# silently corrupt which block's table-construction code runs where.
+#
+# Where agen_layout_walk_top! delegated an entire `:for` to
+# agen_ragged_block and stopped recursing into it, this emits that
+# block's own table-construction statements (agen_tier_b_block_stmts)
+# in its place -- looked up via `layout.block_of[key]`, so this walker
+# never needs to re-run agen_ragged_block's (non-trivial) detection
+# itself. Everywhere else -- ordinary scalar prelude between/around
+# blocks, any non-AL loop's own structure -- follows the same
+# keep-scalar/drop-array rule as agen_tier_b_block_skeleton, except a
+# non-AL `:for`'s own structure is KEPT (recursed into, since scalar
+# state can still evolve inside it) -- unlike a `:for` nested INSIDE a
+# block, which agen_tier_b_block_skeleton already drops outright (that
+# case never reaches this function at all: it's inside `blk.body`,
+# walked separately, once, by agen_tier_b_block_stmts).
+function agen_tier_b_kernel_skeleton(body, kinds, layout)
+    out = Any[]
+    for (idx, stmt) in enumerate(body)
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            if kinds[var] in (:scalar_float, :scalar_int) && !agen_expr_reads_array(stmt.rhs, kinds)
+                push!(out, Expr(:(=), var, stmt.rhs))
+            end
+        elseif stmt.kind == :for
+            key = agen_site_key(body, idx)
+            if haskey(layout.block_of, key)
+                block_id = layout.block_of[key]
+                append!(out, agen_tier_b_block_stmts(block_id, layout.blocks[block_id], kinds))
+            else
+                inner = agen_tier_b_kernel_skeleton(stmt.body, kinds, layout)
+                push!(out, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
+            end
+        elseif stmt.kind == :if
+            then_inner = agen_tier_b_kernel_skeleton(stmt.then, kinds, layout)
+            els_inner = agen_tier_b_kernel_skeleton(stmt.els, kinds, layout)
+            push!(out, emit_if(stmt.cond, then_inner, els_inner))
+        end
+    end
+    return out
+end
+
+# the correct, complete way to get initstacks_*'s eventual Tier B
+# argument list (Phase D): every kernel argument referenced ANYWHERE
+# in the actual skeleton code that will run, INCLUDING prelude
+# statements outside any block (e.g. mg_vcycle's `nl = nfine`) that
+# `agen_layout`'s own `free_vars` field can't see, since it's built
+# before the skeleton exists. Computed from the skeleton itself rather
+# than enumerated case-by-case, so it can't silently miss a kernel arg
+# that only ever appears in an unblocked prelude statement.
+function agen_tier_b_skeleton_free_vars(skeleton_stmts, kernel_args)
+    free = Set{Symbol}()
+    for s in skeleton_stmts
+        agen_collect_expr_vars!(s, free)
+    end
+    return sort(collect(intersect(free, Set(kernel_args))); by = string)
+end
+
 # ---- push/pop emission strategy --------------------------------------
 # `ectx` is the small thread-through-the-recursion value described
 # above -- exactly analogous to cgen_body's own owner/kernels
@@ -3177,19 +3804,94 @@ agen_ectx_stack() = (keep_push_pop = true, loop_ctx = Any[], layout = nothing, p
 # question site-level TBR doesn't cover yet.
 agen_push_pop_source(value_needed, ectx) = ectx.push_pop === nothing ? value_needed : ectx.push_pop
 
+# pure AST substitution -- replaces every occurrence of a Symbol key
+# in `subst` with its mapped replacement Expr, leaving everything else
+# (including OTHER symbols, numbers, and the overall structure)
+# unchanged. Used by agen_site_index (Phase C) to swap a block-local
+# scalar reference for a table lookup -- see its own comment for why.
+function agen_substitute_vars(expr, subst::Dict{Symbol,Any})
+    if expr isa Symbol
+        return get(subst, expr, expr)
+    elseif expr isa Expr
+        return Expr(expr.head, [agen_substitute_vars(a, subst) for a in expr.args]...)
+    end
+    return expr
+end
+
 function agen_site_index(ectx, key)
-    (_, offset) = ectx.layout.offsets[key]
+    entry = ectx.layout.offsets[key]
+    if entry[1] === :ragged
+        # Tier B (Phase C): a ragged-block occurrence -- see the
+        # "Tier B ragged-block layout" note above agen_ragged_block,
+        # and blocks[block_id]'s own depth field for why the
+        # loop_ctx slice below is `depth+2:end`, not `depth+1:end`.
+        # All three terms are PURE expressions (table lookups keyed
+        # by the current loop variable, plus an ordinary position
+        # formula) -- deliberately never a mutating index (see
+        # skill-stade.md's Tier B "Known blocking issue" note: an
+        # index with an embedded mutation gets evaluated twice by
+        # hvp_double_stmt, since it reuses the same index sub-Expr for
+        # both the shadow and primal writes as two separate
+        # statements).
+        (_, stack, block_id, local_offset) = entry
+        blk = ectx.layout.blocks[block_id]
+        table_name = Symbol("prefix_" * string(stack) * "_" * string(block_id))
+        table_idx = agen_add_exprs(agen_pos0(blk.header), 1)
+        # `local_offset` may reference a block-local scalar (n, nc,
+        # ...) -- unsafe to read as a bare in-scope variable here: see
+        # the value_vars comment in agen_layout for why
+        # agen_backward_body's per-statement reversal can reach a
+        # push/pop before that scalar's own recompute/tripcount-pop,
+        # for a ragged occurrence specifically (this dependency never
+        # existed under plain push!/pop!). Substituting a table lookup
+        # for each one removes the dependency on program order
+        # entirely -- the same `table_idx` as the offset table itself,
+        # since agen_tier_b_block_stmts writes both at the identical
+        # point in the same per-iteration loop (Phase B).
+        subst = Dict{Symbol,Any}(v => Expr(:ref, Symbol("val_" * string(v) * "_" * string(block_id)), table_idx) for v in blk.value_vars)
+        local_offset = agen_substitute_vars(local_offset, subst)
+        inner_ctx = ectx.loop_ctx[(blk.depth + 2):end]
+        # agen_local_position's own formula can ALSO reference a
+        # block-local scalar directly -- an inner frame's `hi` is
+        # literally the loop bound symbol (e.g. n, for `for
+        # i_seq_j = 1:n`) -- so it needs the identical substitution,
+        # not just `local_offset` above.
+        local_position = agen_substitute_vars(agen_local_position(inner_ctx), subst)
+        # `blk.base[stack]` is the offset this whole block starts at
+        # (0, or a prior block's/static prefix's own total, for a
+        # stack touched by more than one block -- e.g. mg_vcycle's
+        # branch_stack, touched by both descend and ascend). The
+        # prefix table itself is only ever relative to "within this
+        # block alone" (Phase B always starts each block's own
+        # __tot_* at 0) -- omitting `base` here would make every
+        # multi-block stack's later blocks silently overlap its
+        # earlier ones' index range instead of continuing after them.
+        # `base` is always a plain symbol/kernel-arg expression (never
+        # a block-local scalar), since it's built from `current`,
+        # which only ever holds closed-form/kernel-arg/`__tot_*`
+        # terms -- see agen_layout_static_record!/agen_layout_walk_top!
+        # -- so it needs no substitution of its own.
+        return agen_add_exprs(agen_add_exprs(agen_add_exprs(get(blk.base, stack, 0), Expr(:ref, table_name, table_idx)), local_offset), local_position)
+    end
+    (_, offset) = entry
     return agen_add_exprs(offset, agen_local_position(ectx.loop_ctx))
 end
 
 # true whenever `stack_name` should use plain push!/pop! rather than
-# an :indexed direct write/read -- either the whole kernel is in
-# :stack mode, or (Tier B) this specific stack was tainted by
-# agen_indexed_layout because some occurrence on it sits inside a
-# ragged loop (see the "Tier B (implemented...)" comment above
-# agen_local_position). `ectx.layout` is only ever `nothing` when
-# `ectx.keep_push_pop` is already true (see agen_ectx_stack/agen_emit/
-# stade_hvp), so the `!== nothing` guard is just defensive.
+# an :indexed direct write/read (formula-based Tier A, or Phase C's
+# table-based Tier B ragged block) -- either the whole kernel is in
+# :stack mode, or this specific stack is in `ectx.layout.tainted_stacks`
+# because some occurrence on it couldn't be resolved into either
+# (agen_indexed_layout's plain Tier A math, or agen_layout's Tier B
+# ragged-block tables -- see the "Tier B ragged-block layout" note
+# above agen_ragged_block for what lands here: genuine AL-within-AL,
+# Phase A's single-level scope restriction). `ectx.layout` is only
+# ever `nothing` when `ectx.keep_push_pop` is already true (see
+# agen_ectx_stack/agen_emit/stade_hvp), so the `!== nothing` guard is
+# just defensive. Works unchanged whichever layout function built
+# `ectx.layout` -- agen_indexed_layout (Tier A only) or agen_layout
+# (Tier A + Tier B ragged blocks) both expose `tainted_stacks` in the
+# same shape.
 agen_use_stack_push(ectx, stack_name) = ectx.keep_push_pop ||
     (ectx.layout !== nothing && stack_name in ectx.layout.tainted_stacks)
 
@@ -3674,7 +4376,8 @@ end
 # unchanged; only the NEW shadow stacks are this stage's concern, and
 # they never need to outlive one call.
 
-function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing)
+function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing,
+                   tier_b_extra_args::Vector{Symbol} = Symbol[])
     sig = kernel.sig
     stacks = agen_stack_map(sites)
     value_needed = agen_value_needed_vars(kernel)
@@ -3696,10 +4399,16 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
         push!(seed_args, tgen_shadow(a))
         push!(seed_args, tgen_shadow(agen_shadow(a)))
     end
-    fargs = vcat(agen_signature_args(sig), seed_args, agen_stack_names(sites))
+    fargs = vcat(agen_signature_args(sig), seed_args, agen_stack_names(sites), tier_b_extra_args)
 
     body = Any[]
-    append!(body, hvp_shadow_stack_inits(sites, shadow_of, keep_push_pop, layout))
+    sizing_stmts = Any[]
+    total_of = Dict{Symbol,Symbol}()
+    if !keep_push_pop && layout !== nothing && !isempty(layout.tainted_stacks)
+        (sizing_stmts, total_of) = agen_tier_b_sizing_stmts(kernel, active_map, value_needed, exempt, stacks, layout.tainted_stacks; push_pop = push_pop)
+    end
+    append!(body, sizing_stmts)
+    append!(body, hvp_shadow_stack_inits(sites, shadow_of, keep_push_pop, layout, total_of))
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
     append!(body, hvp_local_second_inits(kernel, shadow_of))
@@ -3745,7 +4454,7 @@ function hvp_shadow_map(kernel, sites)
     return m
 end
 
-function hvp_shadow_stack_inits(sites, shadow_of, keep_push_pop::Bool = true, layout = nothing)
+function hvp_shadow_stack_inits(sites, shadow_of, keep_push_pop::Bool = true, layout = nothing, total_of = Dict{Symbol,Symbol}())
     exprs = Any[]
     seen = Set{Symbol}()
     for s in sites
@@ -3753,20 +4462,26 @@ function hvp_shadow_stack_inits(sites, shadow_of, keep_push_pop::Bool = true, la
         nm = agen_site_stack_name(s)
         nm in seen && continue
         push!(seen, nm)
-        # a shadow stack is exactly as large as its primal counterpart
-        # -- same Tier A size expression, reused rather than
-        # recomputed (see skill-stade.md's keep_push_pop entry, §7).
+        # a shadow stack is exactly as large as its primal counterpart.
         # Lands folded directly into this `_hv` function's own body
-        # (never a separate initstacks_*_hv), so no signature change
-        # is needed here even though it's now runtime-sized: every
-        # kernel argument any size expression could reference is
-        # already in `_hv`'s own parameter list via agen_signature_args.
-        # Tier B: a tainted primal stack has no size formula (see
-        # agen_init_emit's matching comment) -- its shadow stack
-        # allocates growable right alongside it.
+        # (never a separate initstacks_*_hv). Uses `length(nm)` on the
+        # PRIMAL stack -- which `initstacks_*` already allocated with
+        # the correct size and passed in as `_hv`'s own argument --
+        # rather than re-evaluating `layout.sizes`/`layout.block_totals`
+        # itself: a Tier B size formula can legitimately reference a
+        # block-local scalar (e.g. cascadic_mg_prolong's `nc`, reused
+        # both before its ancestor loop, where it's a plain Tier A
+        # constant, and inside it, where it's ragged) that's only ever
+        # safe to read AT THE POINT the real forward sweep or Phase B's
+        # own skeleton would compute it -- never at this function's
+        # very top, before anything has run. `length(nm)` sidesteps
+        # that entirely: it needs nothing but the already-built primal
+        # stack, so it's correct regardless of which kind of size
+        # formula (or none, for a tainted/growable stack) produced it.
         grow = keep_push_pop || (layout !== nothing && nm in layout.tainted_stacks)
-        alloc = agen_stack_alloc_expr(:value, grow, grow ? nothing : get(layout.sizes, nm, 0))
+        alloc = agen_stack_alloc_expr(:value, grow, grow ? nothing : Expr(:call, :length, nm))
         push!(exprs, Expr(:(=), shadow_of[nm], alloc))
+        haskey(total_of, nm) && push!(exprs, Expr(:call, :sizehint!, shadow_of[nm], total_of[nm]))
     end
     return exprs
 end
@@ -6116,16 +6831,20 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
     layout = nothing
+    value_needed = exempt = stacks = nothing
     if !keep_push_pop
         # Tier B: see the matching comment in agen_emit above.
         value_needed = agen_value_needed_vars(kernel)
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
         stacks = agen_stack_map(snapshot_plan)
-        layout = agen_indexed_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = agen_sites)
+        layout = agen_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = agen_sites)
     end
-    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites)
-    initstacks_expr = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout)
+    (initstacks_expr, table_names, tot_names, val_names) = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout,
+                                      active_map = active_map, value_needed = value_needed, exempt = exempt, stacks = stacks, push_pop = agen_sites)
+    tier_b_extra_args = vcat(table_names, tot_names, val_names)
+    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites,
+                         tier_b_extra_args = tier_b_extra_args)
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
 
@@ -6282,7 +7001,8 @@ end
 # the function that reads a baseline YAML and performs the check --
 # usable directly by a caller pointing at their own hand-written file.
 function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::String;
-                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
+                                       keep_push_pop::Bool = true, site_level_tbr::Bool = false)
     mode in (:tangent, :adjoint, :hvp) ||
         error("stade_validate_from_baseline: mode must be :tangent, :adjoint, or :hvp, got $mode")
     primal_expr = io_read_corpus_entry(in_path)
@@ -6290,18 +7010,26 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
     baseline = io_read_baseline_yaml(yaml_path)
     val_coerce_int_arrays!(kernel, baseline.values)
     if mode == :tangent
-        tangent_expr = stade_tangent(primal_expr)
+        tangent_expr = stade_tangent(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
         return val_validate_tangent(kernel, primal_expr, tangent_expr, baseline;
                                      trials = trials, epsilon = epsilon, rtol = rtol)
     elseif mode == :adjoint
-        adjoint_out = stade_adjoint(primal_expr)
+        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        # under keep_push_pop=false, `initstacks_*`'s own signature is
+        # whatever agen_emit actually built it with (a minimal free-var
+        # set for Tier A, extended with Phase D's table/total/value
+        # args for a Tier B ragged block) -- read it back from the
+        # GENERATED Expr itself rather than recomputing it here, so
+        # this can never drift from whatever agen_init_emit decided.
+        stack_arg_names = keep_push_pop ? Symbol[] : Symbol.(adjoint_out.initstacks.args[1].args[2:end])
         return val_validate_adjoint(kernel, primal_expr, adjoint_out, baseline;
-                                     trials = trials, epsilon = epsilon, rtol = rtol)
+                                     trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
     else
-        adjoint_out = stade_adjoint(primal_expr)
-        hvp_out = stade_hvp(primal_expr)
+        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        hvp_out = stade_hvp(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        stack_arg_names = keep_push_pop ? Symbol[] : Symbol.(adjoint_out.initstacks.args[1].args[2:end])
         return val_validate_hvp(kernel, primal_expr, adjoint_out, hvp_out, baseline;
-                                 trials = trials, epsilon = epsilon, rtol = rtol)
+                                 trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
     end
 end
 
@@ -6324,28 +7052,31 @@ end
 function stade_validate_tangent_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                      self_check::Bool = true)
+                                      self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
-    return stade_validate_from_baseline(:tangent, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+    return stade_validate_from_baseline(:tangent, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
+                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
 end
 
 function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                      self_check::Bool = true)
+                                      self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
-    return stade_validate_from_baseline(:adjoint, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+    return stade_validate_from_baseline(:adjoint, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
+                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
 end
 
 function stade_validate_hvp_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                   scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                   trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                  self_check::Bool = true)
+                                  self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
-    return stade_validate_from_baseline(:hvp, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+    return stade_validate_from_baseline(:hvp, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
+                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
 end
 
 # Sibling to stade_validate_adjoint_file for a third-party (not

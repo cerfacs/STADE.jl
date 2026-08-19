@@ -1,28 +1,128 @@
-function initstacks_mg_vcycle_b(nu1, nu2, num_levels)
-    hl2_stack = Vector{Float64}(undef, (((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1)
-    tripcount_stack = Vector{Int64}(undef, ((((((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div(1 - (num_levels - 1), -1) + 1)) + (div(1 - (num_levels - 1), -1) + 1)) + (div(1 - (num_levels - 1), -1) + 1) * (div(nu2 - 1, 1) + 1))
-    left_stack = Vector{Float64}()
-    branch_stack = Vector{Int64}()
-    right_stack = Vector{Float64}()
-    u_stack = Vector{Float64}()
-    r_stack = Vector{Float64}()
-    f_stack = Vector{Float64}()
-    hl_stack = Vector{Float64}(undef, ((div((num_levels - 1) - 1, 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1)
-    cl_stack = Vector{Float64}()
-    cr_stack = Vector{Float64}()
-    return (hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, u_stack, r_stack, f_stack, hl_stack, cl_stack, cr_stack)
+function initstacks_mg_vcycle_b(h1, n, nfine, nu1, nu2, num_levels)
+    n = n * 2
+    nl = nfine
+    hl = h1
+    prefix_branch_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_branch_stack_1 = 0
+    prefix_f_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_f_stack_1 = 0
+    prefix_hl2_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_hl2_stack_1 = 0
+    prefix_hl_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_hl_stack_1 = 0
+    prefix_left_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_left_stack_1 = 0
+    prefix_r_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_r_stack_1 = 0
+    prefix_right_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_right_stack_1 = 0
+    prefix_tripcount_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_tripcount_stack_1 = 0
+    prefix_u_stack_1 = Vector{Int}(undef, div((num_levels - 1) - 1, 1) + 1)
+    __tot_u_stack_1 = 0
+    val_n_1 = Vector{Int64}(undef, div((num_levels - 1) - 1, 1) + 1)
+    val_nc_1 = Vector{Int64}(undef, div((num_levels - 1) - 1, 1) + 1)
+    for i_seq_level = 1:num_levels - 1
+        prefix_branch_stack_1[(i_seq_level - 1) + 1] = __tot_branch_stack_1
+        prefix_f_stack_1[(i_seq_level - 1) + 1] = __tot_f_stack_1
+        prefix_hl2_stack_1[(i_seq_level - 1) + 1] = __tot_hl2_stack_1
+        prefix_hl_stack_1[(i_seq_level - 1) + 1] = __tot_hl_stack_1
+        prefix_left_stack_1[(i_seq_level - 1) + 1] = __tot_left_stack_1
+        prefix_r_stack_1[(i_seq_level - 1) + 1] = __tot_r_stack_1
+        prefix_right_stack_1[(i_seq_level - 1) + 1] = __tot_right_stack_1
+        prefix_tripcount_stack_1[(i_seq_level - 1) + 1] = __tot_tripcount_stack_1
+        prefix_u_stack_1[(i_seq_level - 1) + 1] = __tot_u_stack_1
+        n = nl - 1
+        hl2 = hl * hl
+        ncg = div(nl, 2)
+        nc = ncg - 1
+        nl = ncg
+        hl = hl * 2.0
+        val_n_1[(i_seq_level - 1) + 1] = n
+        val_nc_1[(i_seq_level - 1) + 1] = nc
+        __tot_branch_stack_1 = __tot_branch_stack_1 + ((((div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n - 1, 1) + 1)) + (div(n - 1, 1) + 1))
+        __tot_f_stack_1 = __tot_f_stack_1 + (div(nc - 1, 1) + 1)
+        __tot_hl2_stack_1 = __tot_hl2_stack_1 + 1
+        __tot_hl_stack_1 = __tot_hl_stack_1 + 1
+        __tot_left_stack_1 = __tot_left_stack_1 + ((((((((div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(n - 1, 1) + 1)) + (div(n - 1, 1) + 1)) + (div(n - 1, 1) + 1)) + 1)
+        __tot_r_stack_1 = __tot_r_stack_1 + (div(n - 1, 1) + 1)
+        __tot_right_stack_1 = __tot_right_stack_1 + ((((((((div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(n - 1, 1) + 1)) + (div(n - 1, 1) + 1)) + (div(n - 1, 1) + 1)) + 1)
+        __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + ((((div(nu1 - 1, 1) + 1) + 1) + 1) + 1)
+        __tot_u_stack_1 = __tot_u_stack_1 + ((div(nu1 - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(nc - 1, 1) + 1))
+    end
+    hl2 = hl * hl
+    prefix_branch_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_branch_stack_2 = 0
+    prefix_cl_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_cl_stack_2 = 0
+    prefix_cr_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_cr_stack_2 = 0
+    prefix_hl2_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_hl2_stack_2 = 0
+    prefix_hl_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_hl_stack_2 = 0
+    prefix_left_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_left_stack_2 = 0
+    prefix_right_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_right_stack_2 = 0
+    prefix_tripcount_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_tripcount_stack_2 = 0
+    prefix_u_stack_2 = Vector{Int}(undef, div(1 - (num_levels - 1), -1) + 1)
+    __tot_u_stack_2 = 0
+    val_n_2 = Vector{Int64}(undef, div(1 - (num_levels - 1), -1) + 1)
+    val_nc_2 = Vector{Int64}(undef, div(1 - (num_levels - 1), -1) + 1)
+    for i_seq_level = num_levels - 1:-1:1
+        prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_branch_stack_2
+        prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_cl_stack_2
+        prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_cr_stack_2
+        prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_hl2_stack_2
+        prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_hl_stack_2
+        prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_left_stack_2
+        prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_right_stack_2
+        prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_tripcount_stack_2
+        prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] = __tot_u_stack_2
+        nl = nl * 2
+        hl = hl / 2.0
+        n = nl - 1
+        ncg = div(nl, 2)
+        nc = ncg - 1
+        hl2 = hl * hl
+        val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] = n
+        val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] = nc
+        __tot_branch_stack_2 = __tot_branch_stack_2 + ((((div((nc + 1) - 1, 1) + 1) + (div((nc + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1))
+        __tot_cl_stack_2 = __tot_cl_stack_2 + ((((div((nc + 1) - 1, 1) + 1) + (div((nc + 1) - 1, 1) + 1)) + (div((nc + 1) - 1, 1) + 1)) + 1)
+        __tot_cr_stack_2 = __tot_cr_stack_2 + ((((div((nc + 1) - 1, 1) + 1) + (div((nc + 1) - 1, 1) + 1)) + (div((nc + 1) - 1, 1) + 1)) + 1)
+        __tot_hl2_stack_2 = __tot_hl2_stack_2 + 1
+        __tot_hl_stack_2 = __tot_hl_stack_2 + 1
+        __tot_left_stack_2 = __tot_left_stack_2 + (((((div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1)) + 1)
+        __tot_right_stack_2 = __tot_right_stack_2 + (((((div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1)) + 1)
+        __tot_tripcount_stack_2 = __tot_tripcount_stack_2 + ((1 + 1) + (div(nu2 - 1, 1) + 1))
+        __tot_u_stack_2 = __tot_u_stack_2 + (((div(nc - 1, 1) + 1) + (div((nc + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(n - 1, 1) + 1))
+    end
+    hl2_stack = Vector{Float64}(undef, ((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1)
+    tripcount_stack = Vector{Int64}(undef, __tot_tripcount_stack_1 + __tot_tripcount_stack_2)
+    left_stack = Vector{Float64}(undef, (__tot_left_stack_1 + __tot_left_stack_2) + 1)
+    branch_stack = Vector{Int64}(undef, __tot_branch_stack_1 + __tot_branch_stack_2)
+    right_stack = Vector{Float64}(undef, (__tot_right_stack_1 + __tot_right_stack_2) + 1)
+    u_stack = Vector{Float64}(undef, (__tot_u_stack_1 + 1) + __tot_u_stack_2)
+    r_stack = Vector{Float64}(undef, __tot_r_stack_1)
+    f_stack = Vector{Float64}(undef, __tot_f_stack_1)
+    hl_stack = Vector{Float64}(undef, (__tot_hl_stack_1 + __tot_hl_stack_2) + 1)
+    cl_stack = Vector{Float64}(undef, __tot_cl_stack_2 + 1)
+    cr_stack = Vector{Float64}(undef, __tot_cr_stack_2 + 1)
+    return (hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, u_stack, r_stack, f_stack, hl_stack, cl_stack, cr_stack, prefix_branch_stack_1, prefix_f_stack_1, prefix_hl2_stack_1, prefix_hl_stack_1, prefix_left_stack_1, prefix_r_stack_1, prefix_right_stack_1, prefix_tripcount_stack_1, prefix_u_stack_1, prefix_branch_stack_2, prefix_cl_stack_2, prefix_cr_stack_2, prefix_hl2_stack_2, prefix_hl_stack_2, prefix_left_stack_2, prefix_right_stack_2, prefix_tripcount_stack_2, prefix_u_stack_2, __tot_branch_stack_1, __tot_f_stack_1, __tot_hl2_stack_1, __tot_hl_stack_1, __tot_left_stack_1, __tot_r_stack_1, __tot_right_stack_1, __tot_tripcount_stack_1, __tot_u_stack_1, __tot_branch_stack_2, __tot_cl_stack_2, __tot_cr_stack_2, __tot_hl2_stack_2, __tot_hl_stack_2, __tot_left_stack_2, __tot_right_stack_2, __tot_tripcount_stack_2, __tot_u_stack_2, val_n_1, val_nc_1, val_n_2, val_nc_2)
 end
 
-function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, n, ud, ubd, fd, fbd, rd, rbd, h1d, h1bd, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, u_stack, r_stack, f_stack, hl_stack, cl_stack, cr_stack)
-    hl2_stack_d = Vector{Float64}(undef, (((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1)
-    left_stack_d = Vector{Float64}()
-    right_stack_d = Vector{Float64}()
-    u_stack_d = Vector{Float64}()
-    r_stack_d = Vector{Float64}()
-    f_stack_d = Vector{Float64}()
-    hl_stack_d = Vector{Float64}(undef, ((div((num_levels - 1) - 1, 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1)
-    cl_stack_d = Vector{Float64}()
-    cr_stack_d = Vector{Float64}()
+function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, n, ud, ubd, fd, fbd, rd, rbd, h1d, h1bd, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, u_stack, r_stack, f_stack, hl_stack, cl_stack, cr_stack, prefix_branch_stack_1, prefix_f_stack_1, prefix_hl2_stack_1, prefix_hl_stack_1, prefix_left_stack_1, prefix_r_stack_1, prefix_right_stack_1, prefix_tripcount_stack_1, prefix_u_stack_1, prefix_branch_stack_2, prefix_cl_stack_2, prefix_cr_stack_2, prefix_hl2_stack_2, prefix_hl_stack_2, prefix_left_stack_2, prefix_right_stack_2, prefix_tripcount_stack_2, prefix_u_stack_2, __tot_branch_stack_1, __tot_f_stack_1, __tot_hl2_stack_1, __tot_hl_stack_1, __tot_left_stack_1, __tot_r_stack_1, __tot_right_stack_1, __tot_tripcount_stack_1, __tot_u_stack_1, __tot_branch_stack_2, __tot_cl_stack_2, __tot_cr_stack_2, __tot_hl2_stack_2, __tot_hl_stack_2, __tot_left_stack_2, __tot_right_stack_2, __tot_tripcount_stack_2, __tot_u_stack_2, val_n_1, val_nc_1, val_n_2, val_nc_2)
+    hl2_stack_d = Vector{Float64}(undef, length(hl2_stack))
+    left_stack_d = Vector{Float64}(undef, length(left_stack))
+    right_stack_d = Vector{Float64}(undef, length(right_stack))
+    u_stack_d = Vector{Float64}(undef, length(u_stack))
+    r_stack_d = Vector{Float64}(undef, length(r_stack))
+    f_stack_d = Vector{Float64}(undef, length(f_stack))
+    hl_stack_d = Vector{Float64}(undef, length(hl_stack))
+    cl_stack_d = Vector{Float64}(undef, length(cl_stack))
+    cr_stack_d = Vector{Float64}(undef, length(cr_stack))
     cl = 0.0
     cr = 0.0
     hl = 0.0
@@ -53,281 +153,281 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
     hl = h1
     for i_seq_level = 1:num_levels - 1
         n = nl - 1
-        hl2_stack_d[(i_seq_level - 1) + 1] = hl2d
-        hl2_stack[(i_seq_level - 1) + 1] = hl2
+        hl2_stack_d[prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1] = hl2d
+        hl2_stack[prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1] = hl2
         hl2d = hl * hld + hl * hld
         hl2 = hl * hl
         for i_seq_k = 1:nu1
-            tripcount_stack[((i_seq_level - 1) * (div(nu1 - 1, 1) + 1) + (i_seq_k - 1)) + 1] = n
+            tripcount_stack[prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((i_seq_k - 1) + 1)] = n
             for i_seq_j = 1:n
-                push!(left_stack_d, leftd)
-                push!(left_stack, left)
+                left_stack_d[prefix_left_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                left_stack[prefix_left_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
                 leftd = 0.0
                 left = 0.0
                 if i_seq_j > 1
-                    push!(branch_stack, 1)
-                    push!(left_stack_d, leftd)
-                    push!(left_stack, left)
+                    branch_stack[prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 1
+                    left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                    left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
                     leftd = ud[i_seq_j - 1, i_seq_level]
                     left = u[i_seq_j - 1, i_seq_level]
                 else
-                    push!(branch_stack, 0)
+                    branch_stack[prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 0
                 end
-                push!(right_stack_d, rightd)
-                push!(right_stack, right)
+                right_stack_d[prefix_right_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                right_stack[prefix_right_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
                 rightd = 0.0
                 right = 0.0
                 if i_seq_j < n
-                    push!(branch_stack, 1)
-                    push!(right_stack_d, rightd)
-                    push!(right_stack, right)
+                    branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 1
+                    right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                    right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
                     rightd = ud[i_seq_j + 1, i_seq_level]
                     right = u[i_seq_j + 1, i_seq_level]
                 else
-                    push!(branch_stack, 0)
+                    branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 0
                 end
-                push!(u_stack_d, ud[i_seq_j, i_seq_level])
-                push!(u_stack, u[i_seq_j, i_seq_level])
+                u_stack_d[prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = ud[i_seq_j, i_seq_level]
+                u_stack[prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = u[i_seq_j, i_seq_level]
                 ud[i_seq_j, i_seq_level] = 0.5 * (((f[i_seq_j, i_seq_level] * hl2d + hl2 * fd[i_seq_j, i_seq_level]) + leftd) + rightd)
                 u[i_seq_j, i_seq_level] = 0.5 * (hl2 * f[i_seq_j, i_seq_level] + left + right)
-                push!(left_stack_d, leftd)
-                push!(left_stack, left)
-                push!(right_stack_d, rightd)
-                push!(right_stack, right)
+                left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
+                right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
             end
-            push!(left_stack_d, leftd)
-            push!(left_stack, left)
-            push!(right_stack_d, rightd)
-            push!(right_stack, right)
+            left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = leftd
+            left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = left
+            right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = rightd
+            right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = right
         end
-        tripcount_stack[(div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + ((i_seq_level - 1) + 1)] = n
+        tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1)) + 1] = n
         for j = 1:n
-            push!(left_stack_d, leftd)
-            push!(left_stack, left)
+            left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + ((j - 1) + 1)] = leftd
+            left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + ((j - 1) + 1)] = left
             leftd = 0.0
             left = 0.0
             if j > 1
-                push!(branch_stack, 1)
-                push!(left_stack_d, leftd)
-                push!(left_stack, left)
+                branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = 1
+                left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = leftd
+                left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = left
                 leftd = ud[j - 1, i_seq_level]
                 left = u[j - 1, i_seq_level]
             else
-                push!(branch_stack, 0)
+                branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = 0
             end
-            push!(right_stack_d, rightd)
-            push!(right_stack, right)
+            right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + ((j - 1) + 1)] = rightd
+            right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + ((j - 1) + 1)] = right
             rightd = 0.0
             right = 0.0
             if j < n
-                push!(branch_stack, 1)
-                push!(right_stack_d, rightd)
-                push!(right_stack, right)
+                branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = 1
+                right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = rightd
+                right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = right
                 rightd = ud[j + 1, i_seq_level]
                 right = u[j + 1, i_seq_level]
             else
-                push!(branch_stack, 0)
+                branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = 0
             end
-            push!(r_stack_d, rd[j, i_seq_level])
-            push!(r_stack, r[j, i_seq_level])
+            r_stack_d[prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = rd[j, i_seq_level]
+            r_stack[prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = r[j, i_seq_level]
             rd[j, i_seq_level] = fd[j, i_seq_level] + -(((1.0 / hl2) * ((2.0 * ud[j, i_seq_level] + -leftd) + -rightd) + -(((2.0 * u[j, i_seq_level] - left) - right) / hl2 ^ 2) * hl2d))
             r[j, i_seq_level] = f[j, i_seq_level] - ((2.0 * u[j, i_seq_level] - left) - right) / hl2
-            push!(left_stack_d, leftd)
-            push!(left_stack, left)
-            push!(right_stack_d, rightd)
-            push!(right_stack, right)
+            left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = leftd
+            left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = left
+            right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = rightd
+            right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = right
         end
         ncg = div(nl, 2)
         nc = ncg - 1
-        tripcount_stack[((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + ((i_seq_level - 1) + 1)] = nc
+        tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) + 1)) + 1] = nc
         for j = 1:nc
             jf = j * 2
-            push!(f_stack_d, fd[j, i_seq_level + 1])
-            push!(f_stack, f[j, i_seq_level + 1])
+            f_stack_d[prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = fd[j, i_seq_level + 1]
+            f_stack[prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = f[j, i_seq_level + 1]
             fd[j, i_seq_level + 1] = (0.25 * rd[jf - 1, i_seq_level] + 0.5 * rd[jf, i_seq_level]) + 0.25 * rd[jf + 1, i_seq_level]
             f[j, i_seq_level + 1] = 0.25 * r[jf - 1, i_seq_level] + 0.5 * r[jf, i_seq_level] + 0.25 * r[jf + 1, i_seq_level]
         end
-        tripcount_stack[(((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + ((i_seq_level - 1) + 1)] = nc
+        tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) + 1) + 1)) + 1] = nc
         for j = 1:nc
-            push!(u_stack_d, ud[j, i_seq_level + 1])
-            push!(u_stack, u[j, i_seq_level + 1])
+            u_stack_d[(prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = ud[j, i_seq_level + 1]
+            u_stack[(prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = u[j, i_seq_level + 1]
             ud[j, i_seq_level + 1] = 0.0
             u[j, i_seq_level + 1] = 0.0
         end
         nl = ncg
-        hl_stack_d[(i_seq_level - 1) + 1] = hld
-        hl_stack[(i_seq_level - 1) + 1] = hl
+        hl_stack_d[prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1] = hld
+        hl_stack[prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1] = hl
         hld = 2.0hld
         hl = hl * 2.0
-        push!(left_stack_d, leftd)
-        push!(left_stack, left)
-        push!(right_stack_d, rightd)
-        push!(right_stack, right)
+        left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1] = leftd
+        left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1] = left
+        right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1] = rightd
+        right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1] = right
     end
-    hl2_stack_d[(div((num_levels - 1) - 1, 1) + 1) + 1] = hl2d
-    hl2_stack[(div((num_levels - 1) - 1, 1) + 1) + 1] = hl2
+    hl2_stack_d[__tot_hl2_stack_1 + 1] = hl2d
+    hl2_stack[__tot_hl2_stack_1 + 1] = hl2
     hl2d = hl * hld + hl * hld
     hl2 = hl * hl
-    push!(u_stack_d, ud[1, num_levels])
-    push!(u_stack, u[1, num_levels])
+    u_stack_d[__tot_u_stack_1 + 1] = ud[1, num_levels]
+    u_stack[__tot_u_stack_1 + 1] = u[1, num_levels]
     ud[1, num_levels] = (0.5 * f[1, num_levels]) * hl2d + (0.5hl2) * fd[1, num_levels]
     u[1, num_levels] = 0.5 * hl2 * f[1, num_levels]
     for i_seq_level = num_levels - 1:-1:1
         nl = nl * 2
-        hl_stack_d[(div((num_levels - 1) - 1, 1) + 1) + (div(i_seq_level - (num_levels - 1), -1) + 1)] = hld
-        hl_stack[(div((num_levels - 1) - 1, 1) + 1) + (div(i_seq_level - (num_levels - 1), -1) + 1)] = hl
+        hl_stack_d[(__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = hld
+        hl_stack[(__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = hl
         hld = 0.5hld
         hl = hl / 2.0
         n = nl - 1
         ncg = div(nl, 2)
         nc = ncg - 1
-        hl2_stack_d[((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(i_seq_level - (num_levels - 1), -1) + 1)] = hl2d
-        hl2_stack[((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(i_seq_level - (num_levels - 1), -1) + 1)] = hl2
+        hl2_stack_d[((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = hl2d
+        hl2_stack[((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = hl2
         hl2d = hl * hld + hl * hld
         hl2 = hl * hl
-        tripcount_stack[((((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div(i_seq_level - (num_levels - 1), -1) + 1)] = nc
+        tripcount_stack[(__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = nc
         for j = 1:nc
             jf = j * 2
-            push!(u_stack_d, ud[jf, i_seq_level])
-            push!(u_stack, u[jf, i_seq_level])
+            u_stack_d[((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)] = ud[jf, i_seq_level]
+            u_stack[((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)] = u[jf, i_seq_level]
             ud[jf, i_seq_level] = ud[jf, i_seq_level] + ud[j, i_seq_level + 1]
             u[jf, i_seq_level] = u[jf, i_seq_level] + u[j, i_seq_level + 1]
         end
-        tripcount_stack[(((((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div(1 - (num_levels - 1), -1) + 1)) + (div(i_seq_level - (num_levels - 1), -1) + 1)] = nc
+        tripcount_stack[((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1) + 1] = nc
         for j = 1:nc + 1
             jf = j * 2 - 1
-            push!(cl_stack_d, cld)
-            push!(cl_stack, cl)
+            cl_stack_d[prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)] = cld
+            cl_stack[prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)] = cl
             cld = 0.0
             cl = 0.0
             if j > 1
-                push!(branch_stack, 1)
-                push!(cl_stack_d, cld)
-                push!(cl_stack, cl)
+                branch_stack[(__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)] = 1
+                cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cld
+                cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cl
                 cld = ud[j - 1, i_seq_level + 1]
                 cl = u[j - 1, i_seq_level + 1]
             else
-                push!(branch_stack, 0)
+                branch_stack[(__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)] = 0
             end
-            push!(cr_stack_d, crd)
-            push!(cr_stack, cr)
+            cr_stack_d[prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)] = crd
+            cr_stack[prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)] = cr
             crd = 0.0
             cr = 0.0
             if j <= nc
-                push!(branch_stack, 1)
-                push!(cr_stack_d, crd)
-                push!(cr_stack, cr)
+                branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = 1
+                cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = crd
+                cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cr
                 crd = ud[j, i_seq_level + 1]
                 cr = u[j, i_seq_level + 1]
             else
-                push!(branch_stack, 0)
+                branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = 0
             end
-            push!(u_stack_d, ud[jf, i_seq_level])
-            push!(u_stack, u[jf, i_seq_level])
+            u_stack_d[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = ud[jf, i_seq_level]
+            u_stack[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = u[jf, i_seq_level]
             ud[jf, i_seq_level] = ud[jf, i_seq_level] + 0.5 * (cld + crd)
             u[jf, i_seq_level] = u[jf, i_seq_level] + 0.5 * (cl + cr)
-            push!(cl_stack_d, cld)
-            push!(cl_stack, cl)
-            push!(cr_stack_d, crd)
-            push!(cr_stack, cr)
+            cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cld
+            cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cl
+            cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = crd
+            cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cr
         end
         for i_seq_k = 1:nu2
-            tripcount_stack[((((((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div(1 - (num_levels - 1), -1) + 1)) + (div(1 - (num_levels - 1), -1) + 1)) + ((div(i_seq_level - (num_levels - 1), -1) * (div(nu2 - 1, 1) + 1) + (i_seq_k - 1)) + 1)] = n
+            tripcount_stack[((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (1 + 1)) + ((i_seq_k - 1) + 1)] = n
             for i_seq_j = 1:n
-                push!(left_stack_d, leftd)
-                push!(left_stack, left)
+                left_stack_d[(__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                left_stack[(__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
                 leftd = 0.0
                 left = 0.0
                 if i_seq_j > 1
-                    push!(branch_stack, 1)
-                    push!(left_stack_d, leftd)
-                    push!(left_stack, left)
+                    branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 1
+                    left_stack_d[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                    left_stack[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
                     leftd = ud[i_seq_j - 1, i_seq_level]
                     left = u[i_seq_j - 1, i_seq_level]
                 else
-                    push!(branch_stack, 0)
+                    branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 0
                 end
-                push!(right_stack_d, rightd)
-                push!(right_stack, right)
+                right_stack_d[(__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                right_stack[(__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
                 rightd = 0.0
                 right = 0.0
                 if i_seq_j < n
-                    push!(branch_stack, 1)
-                    push!(right_stack_d, rightd)
-                    push!(right_stack, right)
+                    branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 1
+                    right_stack_d[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                    right_stack[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
                     rightd = ud[i_seq_j + 1, i_seq_level]
                     right = u[i_seq_j + 1, i_seq_level]
                 else
-                    push!(branch_stack, 0)
+                    branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = 0
                 end
-                push!(u_stack_d, ud[i_seq_j, i_seq_level])
-                push!(u_stack, u[i_seq_j, i_seq_level])
+                u_stack_d[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = ud[i_seq_j, i_seq_level]
+                u_stack[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = u[i_seq_j, i_seq_level]
                 ud[i_seq_j, i_seq_level] = 0.5 * (((f[i_seq_j, i_seq_level] * hl2d + hl2 * fd[i_seq_j, i_seq_level]) + leftd) + rightd)
                 u[i_seq_j, i_seq_level] = 0.5 * (hl2 * f[i_seq_j, i_seq_level] + left + right)
-                push!(left_stack_d, leftd)
-                push!(left_stack, left)
-                push!(right_stack_d, rightd)
-                push!(right_stack, right)
+                left_stack_d[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = leftd
+                left_stack[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = left
+                right_stack_d[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = rightd
+                right_stack[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)] = right
             end
-            push!(left_stack_d, leftd)
-            push!(left_stack, left)
-            push!(right_stack_d, rightd)
-            push!(right_stack, right)
+            left_stack_d[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = leftd
+            left_stack[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = left
+            right_stack_d[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = rightd
+            right_stack[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)] = right
         end
-        push!(cl_stack_d, cld)
-        push!(cl_stack, cl)
-        push!(cr_stack_d, crd)
-        push!(cr_stack, cr)
-        push!(left_stack_d, leftd)
-        push!(left_stack, left)
-        push!(right_stack_d, rightd)
-        push!(right_stack, right)
+        cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1] = cld
+        cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1] = cl
+        cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1] = crd
+        cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1] = cr
+        left_stack_d[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1] = leftd
+        left_stack[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1] = left
+        right_stack_d[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1] = rightd
+        right_stack[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1] = right
     end
-    push!(cl_stack_d, cld)
-    push!(cl_stack, cl)
-    push!(cr_stack_d, crd)
-    push!(cr_stack, cr)
-    hl_stack_d[((div((num_levels - 1) - 1, 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1] = hld
-    hl_stack[((div((num_levels - 1) - 1, 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1] = hl
-    hl2_stack_d[(((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1] = hl2d
-    hl2_stack[(((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1] = hl2
-    push!(left_stack_d, leftd)
-    push!(left_stack, left)
-    push!(right_stack_d, rightd)
-    push!(right_stack, right)
-    cld = pop!(cl_stack_d)
-    cl = pop!(cl_stack)
-    crd = pop!(cr_stack_d)
-    cr = pop!(cr_stack)
-    hld = hl_stack_d[((div((num_levels - 1) - 1, 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1]
-    hl = hl_stack[((div((num_levels - 1) - 1, 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1]
-    hl2d = hl2_stack_d[(((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1]
-    hl2 = hl2_stack[(((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(1 - (num_levels - 1), -1) + 1)) + 1]
-    leftd = pop!(left_stack_d)
-    left = pop!(left_stack)
-    rightd = pop!(right_stack_d)
-    right = pop!(right_stack)
+    cl_stack_d[__tot_cl_stack_2 + 1] = cld
+    cl_stack[__tot_cl_stack_2 + 1] = cl
+    cr_stack_d[__tot_cr_stack_2 + 1] = crd
+    cr_stack[__tot_cr_stack_2 + 1] = cr
+    hl_stack_d[(__tot_hl_stack_1 + __tot_hl_stack_2) + 1] = hld
+    hl_stack[(__tot_hl_stack_1 + __tot_hl_stack_2) + 1] = hl
+    hl2_stack_d[((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1] = hl2d
+    hl2_stack[((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1] = hl2
+    left_stack_d[(__tot_left_stack_1 + __tot_left_stack_2) + 1] = leftd
+    left_stack[(__tot_left_stack_1 + __tot_left_stack_2) + 1] = left
+    right_stack_d[(__tot_right_stack_1 + __tot_right_stack_2) + 1] = rightd
+    right_stack[(__tot_right_stack_1 + __tot_right_stack_2) + 1] = right
+    cld = cl_stack_d[__tot_cl_stack_2 + 1]
+    cl = cl_stack[__tot_cl_stack_2 + 1]
+    crd = cr_stack_d[__tot_cr_stack_2 + 1]
+    cr = cr_stack[__tot_cr_stack_2 + 1]
+    hld = hl_stack_d[(__tot_hl_stack_1 + __tot_hl_stack_2) + 1]
+    hl = hl_stack[(__tot_hl_stack_1 + __tot_hl_stack_2) + 1]
+    hl2d = hl2_stack_d[((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1]
+    hl2 = hl2_stack[((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1]
+    leftd = left_stack_d[(__tot_left_stack_1 + __tot_left_stack_2) + 1]
+    left = left_stack[(__tot_left_stack_1 + __tot_left_stack_2) + 1]
+    rightd = right_stack_d[(__tot_right_stack_1 + __tot_right_stack_2) + 1]
+    right = right_stack[(__tot_right_stack_1 + __tot_right_stack_2) + 1]
     for i_seq_level = 1:num_levels - 1
-        cld = pop!(cl_stack_d)
-        cl = pop!(cl_stack)
-        crd = pop!(cr_stack_d)
-        cr = pop!(cr_stack)
-        leftd = pop!(left_stack_d)
-        left = pop!(left_stack)
-        rightd = pop!(right_stack_d)
-        right = pop!(right_stack)
+        cld = cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1]
+        cl = cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1]
+        crd = cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1]
+        cr = cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1]
+        leftd = left_stack_d[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1]
+        left = left_stack[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1]
+        rightd = right_stack_d[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1]
+        right = right_stack[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1]
         for i_seq_k = nu2:-1:1
-            leftd = pop!(left_stack_d)
-            left = pop!(left_stack)
-            rightd = pop!(right_stack_d)
-            right = pop!(right_stack)
-            n = tripcount_stack[((((((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div(1 - (num_levels - 1), -1) + 1)) + (div(1 - (num_levels - 1), -1) + 1)) + ((div(i_seq_level - (num_levels - 1), -1) * (div(nu2 - 1, 1) + 1) + (i_seq_k - 1)) + 1)]
+            leftd = left_stack_d[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            left = left_stack[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            rightd = right_stack_d[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            right = right_stack[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            n = tripcount_stack[((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (1 + 1)) + ((i_seq_k - 1) + 1)]
             for i_seq_j = n:-1:1
-                leftd = pop!(left_stack_d)
-                left = pop!(left_stack)
-                rightd = pop!(right_stack_d)
-                right = pop!(right_stack)
-                __branch_pre_4 = pop!(branch_stack)
+                leftd = left_stack_d[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                left = left_stack[((__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                rightd = right_stack_d[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                right = right_stack[((__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                __branch_pre_4 = branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 rightd = 0.0
                 right = 0.0
                 if __branch_pre_4 == 1
@@ -337,7 +437,7 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     rightd = 0.0
                     right = 0.0
                 end
-                __branch_pre_2 = pop!(branch_stack)
+                __branch_pre_2 = branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 leftd = 0.0
                 left = 0.0
                 if __branch_pre_2 == 1
@@ -347,8 +447,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     leftd = 0.0
                     left = 0.0
                 end
-                ud[i_seq_j, i_seq_level] = pop!(u_stack_d)
-                u[i_seq_j, i_seq_level] = pop!(u_stack)
+                ud[i_seq_j, i_seq_level] = u_stack_d[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                u[i_seq_j, i_seq_level] = u_stack[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 hl2bd = hl2bd + ((0.5 * ub[i_seq_j, i_seq_level]) * fd[i_seq_j, i_seq_level] + f[i_seq_j, i_seq_level] * (0.5 * ubd[i_seq_j, i_seq_level]))
                 hl2b = hl2b + f[i_seq_j, i_seq_level] * (0.5 * ub[i_seq_j, i_seq_level])
                 fbd[i_seq_j, i_seq_level] = fbd[i_seq_j, i_seq_level] + ((0.5 * ub[i_seq_j, i_seq_level]) * hl2d + hl2 * (0.5 * ubd[i_seq_j, i_seq_level]))
@@ -365,8 +465,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     rightbd = 0.0
                     rightb = 0.0
                 end
-                rightd = pop!(right_stack_d)
-                right = pop!(right_stack)
+                rightd = right_stack_d[(__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                right = right_stack[(__tot_right_stack_1 + prefix_right_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 rightbd = 0.0
                 rightb = 0.0
                 if __branch_pre_2 == 1
@@ -375,20 +475,20 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     leftbd = 0.0
                     leftb = 0.0
                 end
-                leftd = pop!(left_stack_d)
-                left = pop!(left_stack)
+                leftd = left_stack_d[(__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                left = left_stack[(__tot_left_stack_1 + prefix_left_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((i_seq_k - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 leftbd = 0.0
                 leftb = 0.0
             end
         end
-        nc = tripcount_stack[(((((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div(1 - (num_levels - 1), -1) + 1)) + (div(i_seq_level - (num_levels - 1), -1) + 1)]
+        nc = tripcount_stack[((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1) + 1]
         for j = nc + 1:-1:1
-            cld = pop!(cl_stack_d)
-            cl = pop!(cl_stack)
-            crd = pop!(cr_stack_d)
-            cr = pop!(cr_stack)
+            cld = cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
+            cl = cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
+            crd = cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
+            cr = cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
             jf = j * 2 - 1
-            __branch_pre_5 = pop!(branch_stack)
+            __branch_pre_5 = branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)]
             crd = 0.0
             cr = 0.0
             if __branch_pre_5 == 1
@@ -398,7 +498,7 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 crd = 0.0
                 cr = 0.0
             end
-            __branch_pre_3 = pop!(branch_stack)
+            __branch_pre_3 = branch_stack[(__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)]
             cld = 0.0
             cl = 0.0
             if __branch_pre_3 == 1
@@ -408,8 +508,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 cld = 0.0
                 cl = 0.0
             end
-            ud[jf, i_seq_level] = pop!(u_stack_d)
-            u[jf, i_seq_level] = pop!(u_stack)
+            ud[jf, i_seq_level] = u_stack_d[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)]
+            u[jf, i_seq_level] = u_stack[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)]
             clbd = clbd + 0.5 * ubd[jf, i_seq_level]
             clb = clb + 0.5 * ub[jf, i_seq_level]
             crbd = crbd + 0.5 * ubd[jf, i_seq_level]
@@ -420,8 +520,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 crbd = 0.0
                 crb = 0.0
             end
-            crd = pop!(cr_stack_d)
-            cr = pop!(cr_stack)
+            crd = cr_stack_d[prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)]
+            cr = cr_stack[prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)]
             crbd = 0.0
             crb = 0.0
             if __branch_pre_3 == 1
@@ -430,42 +530,42 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 clbd = 0.0
                 clb = 0.0
             end
-            cld = pop!(cl_stack_d)
-            cl = pop!(cl_stack)
+            cld = cl_stack_d[prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)]
+            cl = cl_stack[prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)]
             clbd = 0.0
             clb = 0.0
         end
-        nc = tripcount_stack[((((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + (div(i_seq_level - (num_levels - 1), -1) + 1)]
+        nc = tripcount_stack[(__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
         for j = nc:-1:1
             jf = j * 2
-            ud[jf, i_seq_level] = pop!(u_stack_d)
-            u[jf, i_seq_level] = pop!(u_stack)
+            ud[jf, i_seq_level] = u_stack_d[((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)]
+            u[jf, i_seq_level] = u_stack[((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)]
             ubd[j, i_seq_level + 1] = ubd[j, i_seq_level + 1] + ubd[jf, i_seq_level]
             ub[j, i_seq_level + 1] = ub[j, i_seq_level + 1] + ub[jf, i_seq_level]
         end
-        hl2d = hl2_stack_d[((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(i_seq_level - (num_levels - 1), -1) + 1)]
-        hl2 = hl2_stack[((div((num_levels - 1) - 1, 1) + 1) + 1) + (div(i_seq_level - (num_levels - 1), -1) + 1)]
+        hl2d = hl2_stack_d[((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
+        hl2 = hl2_stack[((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
         hlb = hlb + hl * hl2b
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
         hlb = hlb + hl * hl2b
         hl2bd = 0.0
         hl2b = 0.0
-        hld = hl_stack_d[(div((num_levels - 1) - 1, 1) + 1) + (div(i_seq_level - (num_levels - 1), -1) + 1)]
-        hl = hl_stack[(div((num_levels - 1) - 1, 1) + 1) + (div(i_seq_level - (num_levels - 1), -1) + 1)]
+        hld = hl_stack_d[(__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
+        hl = hl_stack[(__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
         hlbd = 0.5hlbd
         hlb = 0.5hlb
     end
-    ud[1, num_levels] = pop!(u_stack_d)
-    u[1, num_levels] = pop!(u_stack)
+    ud[1, num_levels] = u_stack_d[__tot_u_stack_1 + 1]
+    u[1, num_levels] = u_stack[__tot_u_stack_1 + 1]
     hl2bd = hl2bd + (ub[1, num_levels] * (0.5 * fd[1, num_levels]) + (0.5 * f[1, num_levels]) * ubd[1, num_levels])
     hl2b = hl2b + (0.5 * f[1, num_levels]) * ub[1, num_levels]
     fbd[1, num_levels] = fbd[1, num_levels] + (ub[1, num_levels] * (0.5hl2d) + (0.5hl2) * ubd[1, num_levels])
     fb[1, num_levels] = fb[1, num_levels] + (0.5hl2) * ub[1, num_levels]
     ubd[1, num_levels] = 0.0
     ub[1, num_levels] = 0.0
-    hl2d = hl2_stack_d[(div((num_levels - 1) - 1, 1) + 1) + 1]
-    hl2 = hl2_stack[(div((num_levels - 1) - 1, 1) + 1) + 1]
+    hl2d = hl2_stack_d[__tot_hl2_stack_1 + 1]
+    hl2 = hl2_stack[__tot_hl2_stack_1 + 1]
     hlbd = hlbd + (hl2b * hld + hl * hl2bd)
     hlb = hlb + hl * hl2b
     hlbd = hlbd + (hl2b * hld + hl * hl2bd)
@@ -473,26 +573,26 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
     hl2bd = 0.0
     hl2b = 0.0
     for i_seq_level = num_levels - 1:-1:1
-        leftd = pop!(left_stack_d)
-        left = pop!(left_stack)
-        rightd = pop!(right_stack_d)
-        right = pop!(right_stack)
-        hld = hl_stack_d[(i_seq_level - 1) + 1]
-        hl = hl_stack[(i_seq_level - 1) + 1]
+        leftd = left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1]
+        left = left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1]
+        rightd = right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1]
+        right = right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1]
+        hld = hl_stack_d[prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1]
+        hl = hl_stack[prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1]
         hlbd = 2.0hlbd
         hlb = 2.0hlb
-        nc = tripcount_stack[(((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + (div((num_levels - 1) - 1, 1) + 1)) + ((i_seq_level - 1) + 1)]
+        nc = tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) + 1) + 1)) + 1]
         for j = nc:-1:1
-            ud[j, i_seq_level + 1] = pop!(u_stack_d)
-            u[j, i_seq_level + 1] = pop!(u_stack)
+            ud[j, i_seq_level + 1] = u_stack_d[(prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)]
+            u[j, i_seq_level + 1] = u_stack[(prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)]
             ubd[j, i_seq_level + 1] = 0.0
             ub[j, i_seq_level + 1] = 0.0
         end
-        nc = tripcount_stack[((div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + (div((num_levels - 1) - 1, 1) + 1)) + ((i_seq_level - 1) + 1)]
+        nc = tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) + 1)) + 1]
         for j = nc:-1:1
             jf = j * 2
-            fd[j, i_seq_level + 1] = pop!(f_stack_d)
-            f[j, i_seq_level + 1] = pop!(f_stack)
+            fd[j, i_seq_level + 1] = f_stack_d[prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
+            f[j, i_seq_level + 1] = f_stack[prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
             rbd[jf - 1, i_seq_level] = rbd[jf - 1, i_seq_level] + 0.25 * fbd[j, i_seq_level + 1]
             rb[jf - 1, i_seq_level] = rb[jf - 1, i_seq_level] + 0.25 * fb[j, i_seq_level + 1]
             rbd[jf, i_seq_level] = rbd[jf, i_seq_level] + 0.5 * fbd[j, i_seq_level + 1]
@@ -502,13 +602,13 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             fbd[j, i_seq_level + 1] = 0.0
             fb[j, i_seq_level + 1] = 0.0
         end
-        n = tripcount_stack[(div((num_levels - 1) - 1, 1) + 1) * (div(nu1 - 1, 1) + 1) + ((i_seq_level - 1) + 1)]
+        n = tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1)) + 1]
         for j = n:-1:1
-            leftd = pop!(left_stack_d)
-            left = pop!(left_stack)
-            rightd = pop!(right_stack_d)
-            right = pop!(right_stack)
-            __branch_pre_4 = pop!(branch_stack)
+            leftd = left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
+            left = left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
+            rightd = right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
+            right = right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
+            __branch_pre_4 = branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
             rightd = 0.0
             right = 0.0
             if __branch_pre_4 == 1
@@ -518,7 +618,7 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 rightd = 0.0
                 right = 0.0
             end
-            __branch_pre_2 = pop!(branch_stack)
+            __branch_pre_2 = branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
             leftd = 0.0
             left = 0.0
             if __branch_pre_2 == 1
@@ -528,8 +628,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 leftd = 0.0
                 left = 0.0
             end
-            rd[j, i_seq_level] = pop!(r_stack_d)
-            r[j, i_seq_level] = pop!(r_stack)
+            rd[j, i_seq_level] = r_stack_d[prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
+            r[j, i_seq_level] = r_stack[prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
             fbd[j, i_seq_level] = fbd[j, i_seq_level] + rbd[j, i_seq_level]
             fb[j, i_seq_level] = fb[j, i_seq_level] + rb[j, i_seq_level]
             ubd[j, i_seq_level] = ubd[j, i_seq_level] + 2.0 * (-(rb[j, i_seq_level]) * (-(1.0 / hl2 ^ 2) * hl2d) + (1.0 / hl2) * -(rbd[j, i_seq_level]))
@@ -548,8 +648,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 rightbd = 0.0
                 rightb = 0.0
             end
-            rightd = pop!(right_stack_d)
-            right = pop!(right_stack)
+            rightd = right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + ((j - 1) + 1)]
+            right = right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + ((j - 1) + 1)]
             rightbd = 0.0
             rightb = 0.0
             if __branch_pre_2 == 1
@@ -558,23 +658,23 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 leftbd = 0.0
                 leftb = 0.0
             end
-            leftd = pop!(left_stack_d)
-            left = pop!(left_stack)
+            leftd = left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + ((j - 1) + 1)]
+            left = left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + ((j - 1) + 1)]
             leftbd = 0.0
             leftb = 0.0
         end
         for i_seq_k = nu1:-1:1
-            leftd = pop!(left_stack_d)
-            left = pop!(left_stack)
-            rightd = pop!(right_stack_d)
-            right = pop!(right_stack)
-            n = tripcount_stack[((i_seq_level - 1) * (div(nu1 - 1, 1) + 1) + (i_seq_k - 1)) + 1]
+            leftd = left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            left = left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            rightd = right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            right = right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k - 1) + 1)]
+            n = tripcount_stack[prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((i_seq_k - 1) + 1)]
             for i_seq_j = n:-1:1
-                leftd = pop!(left_stack_d)
-                left = pop!(left_stack)
-                rightd = pop!(right_stack_d)
-                right = pop!(right_stack)
-                __branch_pre_4 = pop!(branch_stack)
+                leftd = left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                left = left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                rightd = right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                right = right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                __branch_pre_4 = branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 rightd = 0.0
                 right = 0.0
                 if __branch_pre_4 == 1
@@ -584,7 +684,7 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     rightd = 0.0
                     right = 0.0
                 end
-                __branch_pre_2 = pop!(branch_stack)
+                __branch_pre_2 = branch_stack[prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 leftd = 0.0
                 left = 0.0
                 if __branch_pre_2 == 1
@@ -594,8 +694,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     leftd = 0.0
                     left = 0.0
                 end
-                ud[i_seq_j, i_seq_level] = pop!(u_stack_d)
-                u[i_seq_j, i_seq_level] = pop!(u_stack)
+                ud[i_seq_j, i_seq_level] = u_stack_d[prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                u[i_seq_j, i_seq_level] = u_stack[prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 hl2bd = hl2bd + ((0.5 * ub[i_seq_j, i_seq_level]) * fd[i_seq_j, i_seq_level] + f[i_seq_j, i_seq_level] * (0.5 * ubd[i_seq_j, i_seq_level]))
                 hl2b = hl2b + f[i_seq_j, i_seq_level] * (0.5 * ub[i_seq_j, i_seq_level])
                 fbd[i_seq_j, i_seq_level] = fbd[i_seq_j, i_seq_level] + ((0.5 * ub[i_seq_j, i_seq_level]) * hl2d + hl2 * (0.5 * ubd[i_seq_j, i_seq_level]))
@@ -612,8 +712,8 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     rightbd = 0.0
                     rightb = 0.0
                 end
-                rightd = pop!(right_stack_d)
-                right = pop!(right_stack)
+                rightd = right_stack_d[prefix_right_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                right = right_stack[prefix_right_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 rightbd = 0.0
                 rightb = 0.0
                 if __branch_pre_2 == 1
@@ -622,14 +722,14 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                     leftbd = 0.0
                     leftb = 0.0
                 end
-                leftd = pop!(left_stack_d)
-                left = pop!(left_stack)
+                leftd = left_stack_d[prefix_left_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
+                left = left_stack[prefix_left_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j - 1)) + 1)]
                 leftbd = 0.0
                 leftb = 0.0
             end
         end
-        hl2d = hl2_stack_d[(i_seq_level - 1) + 1]
-        hl2 = hl2_stack[(i_seq_level - 1) + 1]
+        hl2d = hl2_stack_d[prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1]
+        hl2 = hl2_stack[prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1]
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
         hlb = hlb + hl * hl2b
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
