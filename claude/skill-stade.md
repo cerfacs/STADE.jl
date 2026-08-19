@@ -178,123 +178,246 @@ randomly addressable. The corresponding forward-written slot is simply
 never read back — a harmless over-snapshot, the same philosophy `snap_*`
 already applies to its own iteration-independent elision.
 
-**Tier B (implemented — growable buffer, `sizehint!`'d ahead of time;
-see below for what's still deferred):** a loop whose own
-bound-determining symbol is ever an assignment target inside an
-*ancestor sequential loop* has a trip count that isn't a closed-form
-function of kernel arguments (`mg_vcycle`/`mg_vcycle_multi`, whose inner
-loop bounds derive from `nl`, reassigned once per outer sequential
-`i_seq_level` iteration, are two corpus instances; the dedicated Tier B
-stress corpus below adds three more shapes). `agen_tier_b_offender`/
-`agen_tier_b_walk` still detect this exactly as before, but
-`agen_emit`/`stade_hvp` no longer refuse on it — detection now *feeds*
-`agen_indexed_layout` instead of gating entry to it.
+**Tier B (implemented — closed-form, GPU-eligible ragged-block tables,
+with a narrow `push!`/`pop!` fallback for what still can't resolve):**
+a loop whose own bound-determining symbol is ever an assignment target
+inside an *ancestor sequential loop* has a trip count that isn't a
+closed-form function of kernel arguments (`mg_vcycle`/`mg_vcycle_multi`,
+whose inner loop bounds derive from `nl`, reassigned once per outer
+sequential `i_seq_level` iteration, are two corpus instances; the
+dedicated Tier B stress corpus below adds three more shapes).
+`agen_tier_b_offender`/`agen_tier_b_walk` still detect this exactly as
+before, but `agen_emit`/`stade_hvp` no longer refuse on it, and no
+longer fall every ragged occurrence back to `push!`/`pop!` either:
+`agen_layout` resolves each ragged loop into a **ragged block** — a
+per-ancestor-iteration table pair that keeps the occurrence indexed and
+mutation-free, the same as a closed-form Tier A site, just addressed
+through one extra table lookup instead of a static formula. This
+happened in five sub-stages, kept distinct below since each one's own
+design rationale matters for anyone touching this code:
 
-**Taint, not per-occurrence math.** `agen_layout_walk!` threads
-`seq_reassigned`/`in_ragged` through its recursion, mirroring
-`agen_tier_b_walk`'s own recursion via the shared `agen_for_bound_vars`
-helper (factored out specifically so the two can never independently
-drift on what counts as "this loop's bound variables" — they must
-agree exactly, since taint-marking is what implements Tier B support
-for the loops `agen_tier_b_offender` would otherwise have refused on).
-Every *stack* touched by an occurrence recorded while `in_ragged` is
-true gets marked tainted, in `layout.tainted_stacks` — a new field on
-`agen_indexed_layout`'s return shape: `(offsets, sizes, free_vars,
-tainted_stacks::Set{Symbol})`. This is a per-STACK, not per-occurrence,
-decision: if *any* occurrence sharing a stack is ragged, the *whole
-stack* falls back to `:stack` (`push!`/`pop!`) semantics —
-`agen_use_stack_push(ectx, stack_name) = ectx.keep_push_pop ||
-stack_name in ectx.layout.tainted_stacks`, checked first in
-`agen_emit_push`/`agen_emit_pop` — even for that stack's other,
-individually-non-ragged occurrences. This deliberately avoids a much
-larger generalization (mixed static/dynamic regions within one stack)
-the corpus doesn't currently need. A tainted stack gets no `offsets`/
-`sizes` entry at all, so `agen_site_index` is never called for it —
-short-circuited by `agen_use_stack_push` before reaching the
-`:indexed`-mode lookup.
+**Ragged-block layout (identifying ancestor loops as layout elements).**
+`agen_ragged_block(stmt, ...)` recognizes a genuine ancestor loop AL — a
+sequential loop whose body contains a descendant loop it alone governs
+(`agen_tier_b_walk(stmt.body, own_reassigned)` finds an offender) — and
+lays out AL's *own* body via the **existing, unmodified**
+`agen_indexed_layout` (the boolean in_ragged/tainted_stacks machinery
+from before), reused verbatim as an "AL-scoped, single-owner"
+sub-engine: `loop_ctx` resets to `[]` at AL's own frame, so AL's body
+is laid out exactly as if it were a fresh top-level kernel. Critically,
+the sub-call's own `seq_reassigned` seed is the *incoming* set from
+*outside* AL only, **not** unioned with AL's own newly-introduced
+reassignments: a var reassigned as a top-level statement of `stmt.body`
+itself (e.g. mg_vcycle's `n = nl - 1`, sitting directly in
+`i_seq_level`'s own body) is fixed for the whole of one AL iteration,
+so from the sub-call's perspective it must not read as "reassigned
+inside an ancestor sequential loop" — getting this backwards was the
+first bug found while building this (see `agen_ragged_block`'s own
+comment): it tainted every stack touched anywhere inside AL, including
+ones with no raggedness of their own.
 
-**Ahead-of-time sizing, not a true `:indexed` layout.** Tainted stacks
-stay `push!`/`pop!`-based — this does *not* unlock GPU-splitting for a
-ragged loop's own body (`cgen_contains_stackop` still correctly refuses
-it); it only avoids a growable `Vector`'s own repeated reallocation.
-`agen_tier_b_sizing_stmts`/`agen_tier_b_sizing_walk` build a
-**scalar-only replica** of `kernel.body`: every `:for`/`:if` kept
-verbatim (their headers are real scalar expressions that must actually
-execute to get correct trip counts/branch outcomes), every
-array-touching `:assign` dropped, every scalar `:assign` kept unless
-its RHS reads an array (`agen_expr_reads_array`) — an array's value
-never affects a loop bound or branch condition, by skill-jade's own
-house style, so it's safe to drop the write and never have the array
-in scope at all. At each occurrence landing on a tainted stack, the
-replica emits `__sz_<stack> += 1`; because it actually *executes* the
-real loop nest, occurrence counts fall out for free, with no
-closed-form multiplicity formula needed. `agen_init_emit`/
-`hvp_shadow_stack_inits` prepend these statements and follow each
-tainted stack's allocation with `sizehint!(stack, __sz_stack)`.
+`agen_layout` (the new top-level entry, replacing `agen_indexed_layout`
+for `keep_push_pop=false`) walks `kernel.body` once, maintaining a
+per-stack running offset exactly like `agen_indexed_layout`'s own
+`running` — except this one is allowed to become a runtime expression
+(referencing a block's own computed total) rather than staying
+closed-form throughout. That's what lets a stack have **multiple**
+ragged blocks in sequence — e.g. mg_vcycle's `branch_stack`, written by
+both the descend and ascend passes — chain correctly: block 2's own
+`base` is block 1's `base + total_sym`, read back out of the same
+`current` dict a plain Tier A occurrence's base already uses. Single-
+level raggedness only (deliberate scope restriction, matching what the
+whole corpus needs): a genuine AL-within-AL surfaces in the sub-call's
+*own* `tainted_stacks` rather than a second, recursive table-building
+attempt, and `agen_layout` routes exactly those stacks — nowhere else —
+to the old whole-kernel `push!`/`pop!` fallback (`layout.tainted_stacks`,
+same per-*stack*-not-per-occurrence granularity as before). For the
+whole current corpus this fallback is empty: every stack in all five
+Tier B stress kernels resolves into a table.
 
-Reusing the kernel's own local variable names in the replica (no
-separate renaming pass) is safe *by construction*, not by luck: inside
-`initstacks_*` the replica is the only scalar logic in that function at
-all (no collision possible); inside `hvp_emit` the replica precedes the
-real forward sweep in the *same* function, and a well-formed kernel
-always freshly reassigns a scalar before any read that matters to
-control flow — the real sweep's own faithful replay of those same
-statements overwrites any residual sizing-pass value before it's ever
-read for real. Since `sizehint!` is a pure performance hint
-(`push!`/`pop!` stay correct for *any* hinted size, including 0 or an
-overestimate), this pass also carries no correctness bar of its own —
-only a quality one, which is what makes reusing kernel variable names
-an acceptable risk here.
+**Table-construction codegen.** `agen_tier_b_block_stmts` emits, for one
+block and every stack it touches, a `prefix_<stack>_<block_id>` table
+(one entry per AL iteration, the cumulative offset *before* that
+iteration) and a `__tot_<stack>_<block_id>` running total, built inside
+a real loop over AL's own header — `agen_pos0(header)+1` as the write
+index is deliberately the *same formula* the read side
+(`agen_site_index`) will use, so a write at iteration k and a later
+read at iteration k can't independently drift (the same guarantee
+Tier A's own `pos0`/`stride` formulas already rely on). `agen_tier_b_block_skeleton` supplies the scalar state (`n`,
+`nc`, ...) this needs by replicating AL's own top-level scalar
+reassignments (dropping every array-touching statement, same
+`agen_expr_reads_array` filter step 2's sizing pass already used) —
+but unlike step 2's whole-kernel replica, it **stops at any nested
+`:for` entirely**, not even an empty loop: everything inside a ragged
+loop's own body is already captured by the closed-form `local_size`
+formula the layout step above computed, so re-executing it here would
+be redundant O(n)-per-block-iteration work for zero new information.
+That's the actual payoff of the closed-form design over step 2's
+sizing pass: sizing no longer touches the ragged loops themselves at
+all, only the handful of scalar statements that govern their bounds.
+`agen_tier_b_kernel_skeleton` is the real integration point — splices
+each block's own table-construction loop into the right point of a
+full walk of `kernel.body`, so a kernel's static prelude
+before/between/after blocks (mg_vcycle's own `n = n * 2; nl = nfine;
+hl = h1`, needed before block 1's own skeleton first reads `nl`/`hl`)
+still runs in the right order.
 
-**Known blocking issue, deliberately left unsolved:** a true
-closed-form (non-`sizehint!`) `:indexed` buffer for a ragged loop — the
-natural next step after the above — was attempted and set aside. Any
-index expression with an embedded mutation (e.g. `stack[cursor += 1]`)
-gets *evaluated twice* by `hvp_double_stmt`'s doubling transform, since
-`hvp_shadow_lvalue` reuses the *same* index sub-`Expr` for both the
-shadow write and the primal write as two separate statements — silently
-double-advancing the cursor. A correct closed-form scheme needs the
-index computed once, as a *pure* expression, with any cursor
-advancement as its own separate statement whose LHS is never a
-`shadow_of` key (confirmed this shape passes through `hvp_double_stmt`
-untouched — its `:(=)` branch only doubles assignments whose LHS var is
-a `shadow_of` key) — but deriving that index closed-form needs
-per-ancestor-loop block totals computed ahead of time via the same kind
-of recurrence replay as the sizing pass above, and even then still
-wouldn't unlock GPU-splitting for the ragged loop's own body (the
-cursor remains a sequential dependency across iterations either way).
-Left as a follow-up given its size/risk relative to `sizehint!`'s
-already-real payoff.
+**`agen_site_index`'s `:ragged` offset kind.** A resolved occurrence's
+key maps to `(:ragged, stack, block_id, local_offset)` rather than the
+Tier A `(stack, offset)` shape; the final index is
+`base[stack] + prefix_table[pos0(header)+1] + local_offset +
+local_position` — the *whole-stack* base (0, or a prior block's/static
+prefix's own total), a runtime table lookup keyed by the current AL
+iteration, the block-local static offset (from the AL-scoped sub-call,
+unchanged Tier A math), and the ordinary within-iteration position.
+Missing `base[stack]` here was the first real bug: every ragged
+block's own table is relative to "within this block alone" (it always
+starts its own `__tot_*` at 0), so a second block touching the same
+stack silently overlapped the first block's index range rather than
+continuing after it — found by tracing a `BoundsError` down to a
+forward-sweep-only content comparison against the proven `:stack`-mode
+pipeline (a corrupted 131-vs-248 vote split on `branch_stack`'s 0/1
+flags, restored to an exact match once `base` was added).
+
+A `local_offset`/`local_position` formula can legitimately reference a
+block-local scalar directly (e.g. `nc`, or even a kernel *argument*
+that's immediately reassigned inside the kernel body — mg_vcycle's `n`
+is exactly this, `n = n * 2` being its own first statement, so it's
+really just a pre-declared local by the time any ragged block reads
+it). Reading such a variable as a bare in-scope reference is **not**
+safe at an arbitrary push/pop site: `agen_forward_body` always
+preserves program order, so this was never a problem for it, but
+`agen_backward_body` reverses per-*statement* order too — a
+block-boundary occurrence whose forward statement came last in the
+block's body becomes the *first* thing the reversed loop executes,
+potentially before the scalar-recompute/tripcount-pop machinery that
+preceded it in forward order. This dependency on program order never
+existed under plain `push!`/`pop!` (no index formula at all) — it's
+new, and specific to closed-form Tier B indexing. The fix: every
+block-local scalar a formula depends on (`blk.value_vars`, computed in
+`agen_layout`) gets its *own* per-iteration value table too
+(`val_<var>_<block_id>`, built alongside the offset/total tables in
+Phase B), and `agen_site_index` substitutes a bare reference to it
+with a table lookup (`agen_substitute_vars`, a pure AST substitution)
+— removing the dependency on program order entirely, the same way the
+prefix/total tables already removed it for offsets. The safety filter
+for *which* variables need this treatment must also catch a reassigned
+kernel argument like `n` above, not just genuine locals — trusting
+"it's a kernel argument, always safe" was the second bug found here.
+
+Both fixes are deliberately mutation-free: every index is a pure
+expression (a table lookup plus ordinary position formulas), never an
+embedded mutation like `stack[cursor += 1]` — the scheme originally
+considered and set aside (see the *former* "Known blocking issue" this
+entry replaces): `hvp_double_stmt`'s doubling transform reuses the same
+index sub-`Expr` for both the shadow and primal writes as two separate
+statements, so any embedded mutation gets evaluated twice.
+
+**Wiring (`agen_init_emit`/`agen_adjoint_emit`/`hvp_emit`/`agen_emit`/
+`stade_hvp`).** `agen_init_emit` now builds Tier B's table-construction
+code (via `agen_tier_b_kernel_skeleton`) alongside the existing Tier A
+and `push!`/`pop!`-fallback logic, and returns `(expr, table_names,
+tot_names, val_names)` instead of a bare `Expr` — the three extra name
+lists get appended, in that exact order, to both `initstacks_*`'s own
+return tuple and `_b`/`_hv`'s argument list (`tier_b_extra_args`), so
+`val_init_stacks`' generic splat-the-whole-tuple convention keeps
+working unmodified; Phase D adds no special-cased calling convention,
+only more return values and more parameters kept in lockstep by
+construction. `agen_emit`/`stade_hvp` call `agen_layout` instead of
+`agen_indexed_layout` at the top level (`agen_indexed_layout` remains,
+unchanged, as the sub-engine `agen_ragged_block` calls internally).
+`hvp_shadow_stack_inits` had its own bug in the same family as the
+`value_vars` one above: it re-evaluated `layout.block_totals`
+formulas (which can legitimately reference a block-local scalar) at
+the very top of `_hv`, before anything establishes that scalar's
+value. Fixed by allocating the shadow stack via `length()` of the
+already-built primal stack (itself passed in as `_hv`'s own argument)
+instead of re-deriving any size formula — simpler and more robust for
+Tier A too, not just Tier B, since it needs nothing but the primal
+stack that's already there.
+
+**HVP shadow reuse needed no new code.** A shadow stack is exactly the
+same shape as its primal counterpart, and `hvp_shadow_lvalue`/
+`hvp_tangent_expr` were already general enough (predating this work
+entirely) to copy an index sub-`Expr` verbatim into the shadow
+statement, whatever it looks like — Tier B's `:ragged` index is just
+another opaque expression from their point of view. Once the index is
+pure (the fix two paragraphs up) and the tables are real function
+arguments (the wiring paragraph above), reuse follows for free: no
+second table, no shadow-specific codegen. Verified by inspecting a
+generated `_hv` signature directly (one `prefix_*`/`__tot_*`/`val_*`
+per block, no `_d`-suffixed duplicates) and by a dedicated HVP stress
+pass (below).
+
+**A pre-existing validation-infrastructure gap, found and fixed along
+the way.** `stade_validate_adjoint_file`/`stade_validate_hvp_file`/
+`stade_validate_tangent_file` never threaded `keep_push_pop`/
+`site_level_tbr` through to the `stade_adjoint`/`stade_hvp`/
+`stade_tangent` calls inside `stade_validate_from_baseline` — they
+always validated the `keep_push_pop=true` math regardless of what flags
+generated the file being tested moments earlier. This means finite-
+difference correctness of `keep_push_pop=false` specifically was never
+actually exercised by this convenience path in *any* earlier phase of
+this feature, Tier A included — the missing-`base` bug above could not
+possibly have been caught by it. Fixed by threading both flags through
+`stade_validate_from_baseline` and its three `_file` wrappers, and
+deriving `stack_arg_names` directly from the generated `initstacks`
+Expr's own argument list (`adjoint_out.initstacks.args[1].args[2:end]`)
+rather than recomputing it separately — so it can never drift from
+whatever `agen_init_emit` actually built. This is a general fix, not
+Tier-B-specific: it's what makes `keep_push_pop=false` validation
+trustworthy for Tier A kernels too, going forward.
 
 **Validated:** all 19 Tier A corpus kernels pass central
 finite-difference validation under `keep_push_pop=false` for both
-adjoint and HVP generation (`stade_validate_adjoint_against_file`,
-`val_validate_hvp`). A dedicated 5-kernel Tier B stress corpus
+adjoint and HVP generation. The 5-kernel Tier B stress corpus
 (`mg_vcycle`, `mg_vcycle_multi`, `cascadic_mg_prolong` — a growing-only
-bound, never exercised alone before — `windowed_relax_retire` — an
-`if`-gated reassignment — and `richardson_substep` — a non-spatial,
-substep-count domain) passes the same central-difference validation for
-tangent/adjoint/HVP generation, across the full `keep_push_pop` ×
-`site_level_tbr` 2×2 matrix (20 adjoint/HVP generations, all passing,
-with error magnitudes identical across all four flag combinations —
-strong evidence the underlying math, not just the code path, is
-unaffected by either flag). `keep_push_pop=true` output is provably
+bound — `windowed_relax_retire` — an `if`-gated reassignment — and
+`richardson_substep` — a non-spatial, substep-count domain) passes
+tangent/adjoint/HVP validation across the full `keep_push_pop` ×
+`site_level_tbr` 2×2 matrix, now via the *fixed* validation
+infrastructure with real random seeding — 30/30 combinations, genuine
+nonzero max relative errors in the 1e-8–1e-10 range (not the trivial
+all-zero results a seed-less test would trivially "pass" with). A
+dedicated HVP stress pass — 5 kernels × 5 random baselines × 10 trials
+— adds 250 more finite-difference checks, all passing, specifically
+targeting the multi-block stacks (`branch_stack`, `left_stack`, etc.)
+most likely to reveal a table-chaining or cross-derivative ordering
+bug if one existed. `keep_push_pop=true` output is provably
 byte-identical to the pre-feature codebase across the full corpus, Tier
-A and Tier B alike — verified by direct comparison against
-`val-corpus/*_b.jl`/`*_d.jl`/`*_hv.jl` (a tainted stack's `push!`/`pop!`
-path, and everything upstream of it, is completely untouched when
-`keep_push_pop=true`). GPU-split-count regression checked via
-`stade_cuda`: `:indexed` mode never reduces the number of loops split
-into parallel GPU kernels versus `:stack` mode, and often increases it
-for Tier A kernels (removing the push/pop sequential dependency unlocks
-splits `:stack` mode couldn't attempt at all — e.g. `advection` 2→4,
-`matvec_loss`/`relu_field` 0→2); Tier B kernels' ragged loops are
-unaffected either way (still not GPU-split-eligible under either mode —
-see "Known blocking issue" above for why).
+A and Tier B alike, at every checkpoint of this work. GPU-split-count
+regression checked via `stade_cuda`: `:indexed` mode never reduces the
+number of loops split versus `:stack` mode, and often increases it for
+Tier A kernels (e.g. `advection` 2→4, `matvec_loss`/`relu_field` 0→2);
+Tier B's own ragged loops are **still** not GPU-split-eligible under
+either mode (see the follow-up below) — this closed-form design gets
+Tier B off `push!`/`pop!` and onto real indexing, which is the
+prerequisite, but doesn't by itself change `cgen_contains_stackop`'s
+verdict on the loop.
 
-**Known follow-up (not blocking, not yet done):** the closed-form
-`:indexed` Tier B buffer described above, which would also be the
-prerequisite for GPU-splitting a ragged loop's own body.
+One test-setup wrinkle worth recording, not a code bug: mg_vcycle's
+random baseline generator can pick `nfine`/`num_levels` combinations
+that are mathematically incompatible with the multigrid hierarchy
+(e.g. `nfine=3, num_levels=5`, forcing a coarse-grid point count
+negative partway through). `:stack` mode tolerated this silently (a
+negative-length Julia range is just empty, not an error); closed-form
+ahead-of-time sizing correctly surfaces it as an immediate allocation
+error instead. Worked around by pinning a compatible baseline for
+testing; the baseline generator itself has no per-argument constraint
+mechanism to fix this properly, which would be a reasonable follow-up
+independent of Tier B.
+
+**Known follow-up (not blocking, not yet done):** GPU-launch plumbing
+for a resolved ragged block's own loop body. The loop is index-based
+now, same shape as any Tier A GPU-split candidate, but its trip count
+is a *runtime* value (the current AL iteration's `n`, not a kernel
+argument), and the launch itself needs to happen *inside* the
+still-host-side ancestor sequential loop, once per iteration, with a
+freshly-read trip count each time — `cgen_launch_expr`'s range argument
+already accepts an arbitrary expression, but whether `cgen_device_body`
+and friends handle a runtime-scalar range correctly needs to be
+verified, not assumed, before `cgen_contains_stackop`'s refusal is
+lifted for these loops.
 
 `cgen_device_assign`'s atomic-write detection has already been hardened
 (independent of, but recommended alongside, this feature): it now does
@@ -476,10 +599,18 @@ epistemic status as the rest of `jgen_`'s design notes above.
 - [ ] If touching `site_level_tbr`'s `snap_*`/`agen_*` pair, both copies
       were changed identically and `stade_site_level_tbr_check` still
       passes across the full corpus + stress kernels
-- [ ] If touching Tier B (`agen_layout_walk!`'s taint tracking,
-      `agen_tier_b_sizing_*`), taint stays a per-*stack* decision (never
-      per-occurrence), the sizing-pass replica never references an
-      array, and no index expression passed to `agen_emit_push`/
-      `agen_emit_pop` carries an embedded mutation (see the "Known
-      blocking issue" under Tier B for why that specifically breaks
-      `hvp_double_stmt`)
+- [ ] If touching Tier B (`agen_ragged_block`/`agen_layout`'s block
+      resolution, `agen_tier_b_block_stmts`/`agen_tier_b_kernel_skeleton`'s
+      table codegen, or `agen_site_index`'s `:ragged` branch), every
+      index built stays a *pure* expression — never one with an
+      embedded mutation (see the Tier B entry's `hvp_double_stmt`
+      double-evaluation note for why that specifically breaks HVP);
+      any block-local scalar (or reassigned kernel argument) a formula
+      depends on is in `value_vars` and gets substituted via its own
+      value table, not read as a bare in-scope reference; the
+      remaining `push!`/`pop!` fallback (`layout.tainted_stacks`)
+      stays a per-*stack*, not per-occurrence, decision; and a
+      `keep_push_pop=false` validation claim is only trustworthy if it
+      went through `stade_validate_*_file` with `keep_push_pop`/
+      `site_level_tbr` explicitly passed (the defaults validate
+      `:stack` mode's math regardless of what was generated)
