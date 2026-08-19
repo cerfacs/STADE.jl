@@ -96,7 +96,7 @@
 #     support but the shape is vendor-neutral).
 # gpu_backend   :: (suffix, kernel_tag, launch_macro::Symbol,
 #     threads_kw::Symbol, blocks_kw::Symbol, tid_rhs::Expr,
-#     atomic_macro::Expr, preamble::String,
+#     atomic_macro::Expr, allowscalar_macro::Expr, preamble::String,
 #     default_precision::Type{<:AbstractFloat}, precision_locked::Bool,
 #     precision_lock_reason::String) -- see cgen_backend_cuda/
 #     cgen_backend_amdgpu/cgen_backend_metal.
@@ -4493,7 +4493,7 @@ end
 # ---- GPU backend descriptor ----------------------------------------
 # gpu_backend :: (suffix, kernel_tag, launch_macro::Symbol,
 #                 threads_kw::Symbol, blocks_kw::Symbol, tid_rhs::Expr,
-#                 atomic_macro::Expr, preamble::String,
+#                 atomic_macro::Expr, allowscalar_macro::Expr, preamble::String,
 #                 default_precision::Type{<:AbstractFloat},
 #                 precision_locked::Bool, precision_lock_reason::String)
 #
@@ -4509,7 +4509,11 @@ end
 # `thread_position_in_grid().x` is already the global index -- simpler
 # than CUDA/AMDGPU's two-intrinsic affine combination, but still just
 # an Expr for the same tid_rhs slot), the atomic macro's owning module,
-# and the `using` preamble. Adding a further backend (oneAPI.jl, ...)
+# the allowscalar macro's owning module (cgen_body wraps any host-side
+# statement run that touches a device array element-wise -- i.e. never
+# made it into a split-off kernel -- in one of these; see the comment
+# above cgen_body), and the `using` preamble. Adding a further backend
+# (oneAPI.jl, ...)
 # should only ever mean adding one more of these constructors -- if it
 # turns out to need a change anywhere else in this section, that's a
 # sign the new backend isn't actually the same programming model and
@@ -4536,8 +4540,9 @@ function cgen_backend_cuda()
         blocks_kw = :blocks,
         tid_rhs = :((blockIdx().x - 1) * blockDim().x + threadIdx().x),
         atomic_macro = Expr(:., :CUDA, QuoteNode(Symbol("@atomic"))),
+        allowscalar_macro = Expr(:., :CUDA, QuoteNode(Symbol("@allowscalar"))),
         arrtype = :CuArray,
-        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"CUDA\") || Pkg.add(\"CUDA\")\nusing CUDA\nCUDA.allowscalar(false)\n",
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"CUDA\") || Pkg.add(\"CUDA\")\nusing CUDA\nusing LinearAlgebra\nCUDA.allowscalar(false)\n",
         default_precision = Float64,
         precision_locked = false,
         precision_lock_reason = "",
@@ -4553,8 +4558,9 @@ function cgen_backend_amdgpu()
         blocks_kw = :gridsize,
         tid_rhs = :(workitemIdx().x + (workgroupIdx().x - 1) * workgroupDim().x),
         atomic_macro = Expr(:., :AMDGPU, QuoteNode(Symbol("@atomic"))),
+        allowscalar_macro = Expr(:., :AMDGPU, QuoteNode(Symbol("@allowscalar"))),
         arrtype = :ROCArray,
-        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"AMDGPU\") || Pkg.add(\"AMDGPU\")\nusing AMDGPU\nAMDGPU.allowscalar(false)\n",
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"AMDGPU\") || Pkg.add(\"AMDGPU\")\nusing AMDGPU\nusing LinearAlgebra\nAMDGPU.allowscalar(false)\n",
         default_precision = Float64,
         precision_locked = false,
         precision_lock_reason = "",
@@ -4589,8 +4595,9 @@ function cgen_backend_metal()
         blocks_kw = :groups,
         tid_rhs = :(thread_position_in_grid().x),
         atomic_macro = Expr(:., :Metal, QuoteNode(Symbol("@atomic"))),
+        allowscalar_macro = Expr(:., :Metal, QuoteNode(Symbol("@allowscalar"))),
         arrtype = :MtlArray,
-        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"Metal\") || Pkg.add(\"Metal\")\nusing Metal\nMetal.allowscalar(false)\n",
+        preamble = "import Pkg\nhaskey(Pkg.project().dependencies, \"Metal\") || Pkg.add(\"Metal\")\nusing Metal\nusing LinearAlgebra\nMetal.allowscalar(false)\n",
         default_precision = Float32,
         precision_locked = true,
         precision_lock_reason = "Apple GPUs have no FP64 hardware -- Metal.jl disallows constructing Float64 arrays at all, and any kernel whose arithmetic touches a Float64 fails to compile",
@@ -4617,15 +4624,211 @@ function cgen_stack_device_expr(rhs::Expr, backend)
     return Expr(:call, Expr(:curly, backend.arrtype, T), :undef, size_expr)
 end
 
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol})
+# ---- idiomatic scalar-reduction detection (keep_all_atomic=false) --
+# Recognizes the narrow, syntactically-exact shape
+#     target = target ± f(arr_1[loopvar], arr_2[loopvar], ..., free scalars)
+# as the WHOLE and ONLY statement in a loop body already proven safe to
+# split by cgen_reduction_only_loop -- i.e. dotprod's
+# `loss[1]=loss[1]+u[i]*v[i]`, NOT clamped_sumsq's (an :if picking the
+# per-iteration term is a SECOND statement, so length(body)==1 fails
+# and this correctly declines -- same "prove a narrow case, refuse
+# otherwise" discipline as cgen_reduction_only_loop itself, and the
+# caller falls back to today's atomic-kernel codegen unchanged, exactly
+# as if keep_all_atomic had been true). Returns
+# (target::Expr, op::Symbol, arrs::Vector{Symbol}, term) or `nothing`;
+# the caller decides how to turn (arrs, term, loopvar) into an actual
+# replacement expression, since that differs by target (see
+# cgen_idiomatic_reduction_value / jgen_idiomatic_reduction_value).
+function cgen_idiomatic_scalar_reduction(body::Vector{NamedTuple}, loopvar::Symbol)
+    length(body) == 1 || return nothing
+    stmt = body[1]
+    stmt.kind == :assign || return nothing
+    target = stmt.lhs
+    target isa Expr && target.head == :ref || return nothing
+    cgen_expr_contains(target, loopvar) && return nothing   # target must be thread-invariant
+    rhs = stmt.rhs
+    rhs isa Expr && rhs.head == :call && length(rhs.args) == 3 || return nothing
+    op = rhs.args[1]
+    op in (:+, :-) || return nothing
+    a, b = rhs.args[2], rhs.args[3]
+    if a == target
+        term = b
+    elseif b == target && op == :+   # b - a with a==target would mean `target - term`, not `term - target` -- only the `+` (commutative) form is safe to read this way
+        term = a
+    else
+        return nothing
+    end
+    refs = Dict{Any,Vector{Any}}()
+    cgen_collect_refs!(term, refs)
+    isempty(refs) && return nothing
+    arrs = Symbol[]
+    for (arr, idxs) in refs
+        arr isa Symbol || return nothing
+        for idx in idxs
+            length(idx) == 1 && idx[1] === loopvar || return nothing
+        end
+        push!(arrs, arr)
+    end
+    cgen_bare_var_outside_index(term, loopvar) && return nothing
+    sort!(arrs; by = string)   # deterministic output only, doesn't affect correctness
+    return (target, op, arrs, term)
+end
+
+# True iff `loopvar` occurs anywhere in `e` OUTSIDE of a :ref's index
+# position -- i.e. the per-iteration term uses the loop variable itself
+# for something other than indexing one of the arrays it reads
+# (cgen_idiomatic_scalar_reduction already verified every :ref's index
+# IS exactly loopvar; this only needs to rule out a bare use elsewhere,
+# e.g. a hypothetical `u[i] + i`).
+function cgen_bare_var_outside_index(e, loopvar::Symbol)
+    if e isa Symbol
+        return e === loopvar
+    elseif e isa Expr
+        e.head == :ref && return false
+        return any(a -> cgen_bare_var_outside_index(a, loopvar), e.args)
+    end
+    return false
+end
+
+# Rewrites every `arr[loopvar]` occurrence in `e` (arr a key of subst)
+# to the corresponding closure-argument symbol, leaving everything else
+# untouched -- used to turn a proven idiomatic-reduction term into a
+# mapreduce closure body operating on plain scalar values rather than
+# array elements.
+function cgen_substitute_indexed_refs(e, subst::Dict{Symbol,Symbol}, loopvar::Symbol)
+    if e isa Expr && e.head == :ref && length(e.args) == 2 &&
+       e.args[1] isa Symbol && e.args[2] === loopvar && haskey(subst, e.args[1])
+        return subst[e.args[1]]
+    elseif e isa Expr
+        return Expr(e.head, [cgen_substitute_indexed_refs(a, subst, loopvar) for a in e.args]...)
+    else
+        return e
+    end
+end
+
+# CUDA/AMDGPU/Metal: `dot`/`sum(abs2, ·)` and `mapreduce` all dispatch
+# on the array TYPE of their argument (GPUArrays.jl's generic
+# mapreduce/reduce machinery, or -- for CUDA.jl/AMDGPU.jl specifically
+# -- a vendor cuBLAS/rocBLAS dot method when one exists), so the same
+# call works correctly on every one of these backends: `dot`/`sum` pick
+# whichever underlying implementation is fastest for that array type at
+# RUNTIME, with no backend-conditional codegen needed here. `dot` and
+# `sum` both come from `using LinearAlgebra`/Base, present in every GPU
+# backend's preamble.
+function cgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Symbol)
+    if length(arrs) == 2 &&
+       term.head == :call && term.args[1] == :* && length(term.args) == 3 &&
+       Set(Any[term.args[2], term.args[3]]) == Set(Any[Expr(:ref, arrs[1], loopvar), Expr(:ref, arrs[2], loopvar)])
+        return Expr(:call, :dot, arrs[1], arrs[2])
+    elseif length(arrs) == 1 && term == Expr(:call, :^, Expr(:ref, arrs[1], loopvar), 2)
+        return Expr(:call, :sum, :abs2, arrs[1])
+    else
+        closure_args = [Symbol(:__mr_, i) for i in eachindex(arrs)]
+        subst = Dict(arrs[i] => closure_args[i] for i in eachindex(arrs))
+        closure_body = cgen_substitute_indexed_refs(term, subst, loopvar)
+        return Expr(:call, :mapreduce, Expr(:->, Expr(:tuple, closure_args...), closure_body), :+, arrs...)
+    end
+end
+
+# JACC: no confirmed BLAS-level dot/sum acceleration to special-case
+# for, so every matched shape (dot-shaped or not) goes through the same
+# `JACC.@parallel_reduce range=N f(args...)` primitive -- JACC's own
+# portable, atomic-free reduction abstraction, replacing the
+# `@parallel_for` + `Atomix.@atomic` kernel this loop would otherwise
+# get. Unlike the CUDA/AMDGPU/Metal path, `term` needs no substitution:
+# JACC's own convention is a closure whose first parameter IS the loop
+# index (see the range=N example in JACC's docs), so reusing loopvar's
+# own name as that parameter and leaving every `arr[loopvar]` in `term`
+# exactly as written is already the correct closure body.
+function jgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Symbol, n_iter)
+    closure = Expr(:->, Expr(:tuple, loopvar, arrs...), term)
+    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_reduce"))), nothing,
+                Expr(:(=), :range, n_iter), Expr(:call, closure, arrs...))
+end
+
+
+# True iff `e` contains an `Expr(:ref, ...)` anywhere -- i.e. an
+# element-wise array index -- at any depth. Used by cgen_body to spot
+# host-side statements that touch what may be a device array; scalar
+# kernel arguments and local scalar temporaries never appear as the
+# base of a :ref (skill-jade's grammar only ever indexes an array or a
+# stack), so this is exactly the "is this legal under allowscalar(false)"
+# test, no kind/type lookup needed.
+function cgen_expr_has_ref(e)
+    e isa Expr || return false
+    e.head == :ref && return true
+    return any(cgen_expr_has_ref, e.args)
+end
+
+# ---- host-side body walk: splits off one device kernel per eligible
+#      iteration-independent loop. Anything left over -- a statement
+#      with no enclosing loop at all (quadloss, branchsel), or one
+#      whose enclosing loop stayed host-sequential because splitting it
+#      would be unsound (a genuine recurrence, e.g. geomrecur) -- runs
+#      as ordinary host-side Julia. If that statement touches a device
+#      array element-wise (cgen_expr_has_ref on its lhs/rhs), it's
+#      exactly the pattern CUDA.allowscalar(false) in this file's own
+#      preamble is designed to reject: confirmed as a live-GPU crash
+#      for the unsplit-loop case (see the note a few hundred lines up),
+#      and true by the same argument for the zero-loop case, which
+#      never even reaches a loop to fail to split.
+#
+# Fix: buffer up each maximal run of consecutive :assign statements at
+# a given nesting level: if any statement in the run touches an array,
+# emit the whole run inside one backend.allowscalar_macro block; if
+# none do (e.g. mpnn's `n_in_msg = 2*n_node_feat + ...` scalar prelude)
+# emit the run exactly as before, unwrapped. A run is flushed (in
+# order) whenever a :stackpush/:if/:for statement is reached, and
+# once more at the end of the body, so statement order is preserved
+# exactly -- the wrapping never reorders anything, it only brackets
+# spans that were already going to run sequentially on the host.
+# Grouping into runs (rather than wrapping each statement in its own
+# block) doesn't change how many host<->device transfers happen --
+# @allowscalar only lifts a task-local check around whatever runs
+# inside it, each individual scalar getindex!/setindex! still pays its
+# own transfer -- it just avoids emitting one macro block per line.
+#
+# Not handled: an :if condition itself indexing a device array with no
+# enclosing loop (e.g. a hypothetical top-level `if u[1] > 0.0`).
+# cond_field_choice/cond_loop_choice branch on a scalar kernel argument
+# (i_branch), never an array read, and no corpus kernel exercises the
+# array-condition shape, so it's flagged here rather than guessed at.
+#
+# keep_all_atomic (default true): when false, a splittable loop is
+# first offered to cgen_idiomatic_scalar_reduction -- if it matches the
+# narrow single-statement pure-scalar-reduction shape, the whole
+# loop+kernel+launch is replaced by one `dot`/`sum(abs2,·)`/`mapreduce`
+# call (see cgen_idiomatic_reduction_value) instead of a synthesized
+# atomic-accumulate kernel. Anything that doesn't match that shape
+# (clamped_sumsq's branching accumulator, any gather-indexed scatter-
+# add) is completely unaffected either way -- this flag only ever
+# changes which of two ALREADY-equivalent primal computations gets
+# emitted for a provably pure scalar reduction, never what a kernel
+# computes.
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}; keep_all_atomic::Bool = true)
     exprs = Any[]
     known_consts = Dict{Symbol,Any}()
+    pending = Any[]
+    pending_has_array = false
+    flush_pending! = () -> begin
+        if !isempty(pending)
+            if pending_has_array
+                push!(exprs, Expr(:macrocall, backend.allowscalar_macro, nothing, Expr(:block, pending...)))
+            else
+                append!(exprs, pending)
+            end
+            empty!(pending)
+            pending_has_array = false
+        end
+    end
     for stmt in body
         if stmt.kind == :stackpush
+            flush_pending!()
             push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? cgen_stack_device_expr(stmt.rhs, backend) : stmt.rhs
-            push!(exprs, Expr(:(=), stmt.lhs, rhs))
+            push!(pending, Expr(:(=), stmt.lhs, rhs))
+            pending_has_array = pending_has_array || cgen_expr_has_ref(stmt.lhs) || cgen_expr_has_ref(rhs)
             # tracked purely so a LATER sequential loop in this same
             # body can prove a locally-assigned scalar's true entering
             # value (cgen_reduction_only_loop's convergent-constant
@@ -4641,25 +4844,37 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 end
             end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars), cgen_body(stmt.els, kernels, owner, backend, reduce_vars)))
+            flush_pending!()
+            cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars; keep_all_atomic), cgen_body(stmt.els, kernels, owner, backend, reduce_vars; keep_all_atomic)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
         elseif stmt.kind == :for
+            flush_pending!()
             synth = !stmt.sequential ? Dict{Symbol,Any}() : cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
             if synth !== nothing && !cgen_contains_stackop(stmt.body)
-                idx = length(kernels) + 1
-                fargs = cgen_free_vars(stmt, stmt.var)
-                loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
-                union!(reduce_vars, loop_reduce_vars)
-                push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth))
-                push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
+                red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
+                if red !== nothing
+                    target, op, arrs, term = red
+                    value = cgen_idiomatic_reduction_value(arrs, term, stmt.var)
+                    push!(pending, Expr(:(=), target, Expr(:call, op, target, value)))
+                    pending_has_array = true
+                else
+                    idx = length(kernels) + 1
+                    fargs = cgen_free_vars(stmt, stmt.var)
+                    loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
+                    union!(reduce_vars, loop_reduce_vars)
+                    push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth))
+                    push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
+                end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars; keep_all_atomic)))
             end
             delete!(known_consts, stmt.var)
         end
     end
+    flush_pending!()
     return exprs
 end
 
@@ -4896,10 +5111,10 @@ end
 
 cgen_host_fname(name::Symbol, backend) = Symbol(string(name) * backend.suffix)
 
-function cgen_emit(gk, backend)
+function cgen_emit(gk, backend; keep_all_atomic::Bool = true)
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
-    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars)
+    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars; keep_all_atomic)
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     # Every scalar cross-thread reduction free var (see
     # cgen_scalar_reduction_vars) must already be a 1-element device
@@ -5060,7 +5275,15 @@ function jgen_stack_device_expr(rhs::Expr)
     return Expr(:call, Expr(:., :JACC, QuoteNode(:zeros)), T, size_expr)
 end
 
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol})
+# keep_all_atomic: same meaning and same detector as cgen_body's (see
+# its doc comment) -- a matched loop is replaced by one
+# `JACC.@parallel_reduce` call (jgen_idiomatic_reduction_value) instead
+# of a synthesized `@parallel_for` + `Atomix.@atomic` kernel. No
+# allowscalar-style buffering is needed here the way cgen_body needs
+# it for CUDA/AMDGPU/Metal -- JACC's own host<->device array interface
+# (JACC.array/JACC.to_host, already used a few lines down in jgen_emit)
+# is a separate, pre-existing question this change doesn't touch.
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}; keep_all_atomic::Bool = true)
     exprs = Any[]
     known_consts = Dict{Symbol,Any}()
     for stmt in body
@@ -5077,21 +5300,29 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 end
             end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars), jgen_body(stmt.els, kernels, owner, reduce_vars)))
+            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars; keep_all_atomic), jgen_body(stmt.els, kernels, owner, reduce_vars; keep_all_atomic)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
         elseif stmt.kind == :for
             synth = !stmt.sequential ? Dict{Symbol,Any}() : cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
             if synth !== nothing && !cgen_contains_stackop(stmt.body)
-                idx = length(kernels) + 1
-                fargs = cgen_free_vars(stmt, stmt.var)
-                loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
-                union!(reduce_vars, loop_reduce_vars)
-                push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth))
-                push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
+                red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
+                if red !== nothing
+                    target, op, arrs, term = red
+                    n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+                    value = jgen_idiomatic_reduction_value(arrs, term, stmt.var, n_iter)
+                    push!(exprs, Expr(:(=), target, Expr(:call, op, target, value)))
+                else
+                    idx = length(kernels) + 1
+                    fargs = cgen_free_vars(stmt, stmt.var)
+                    loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
+                    union!(reduce_vars, loop_reduce_vars)
+                    push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth))
+                    push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
+                end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars; keep_all_atomic)))
             end
             delete!(known_consts, stmt.var)
         end
@@ -5205,10 +5436,10 @@ end
 
 jgen_host_fname(name::Symbol) = Symbol(string(name) * "_jacc")
 
-function jgen_emit(gk)
+function jgen_emit(gk; keep_all_atomic::Bool = true)
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
-    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars)
+    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars; keep_all_atomic)
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the
     # reverse -- see the "JACC v1.x API" section of
@@ -6365,23 +6596,23 @@ end
 # backend, where anything but its own default_precision is a hard
 # error at generation time rather than a silent guarantee that'll only
 # surface as a failure once the caller tries to compile/run the result.
-function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true)
     p = precision === nothing ? backend.default_precision : precision
     if backend.precision_locked && p !== backend.default_precision
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
-    plan = cgen_emit(cgen_ingest(expr), backend)
+    plan = cgen_emit(cgen_ingest(expr), backend; keep_all_atomic)
     p === Float64 && return plan
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
-    stade_gpu(expr, cgen_backend_cuda(); precision = precision)
-stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
-    stade_gpu(expr, cgen_backend_amdgpu(); precision = precision)
-stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
-    stade_gpu(expr, cgen_backend_metal(); precision = precision)
+stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, keep_all_atomic)
+stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true) =
+    stade_gpu(expr, cgen_backend_amdgpu(); precision, keep_all_atomic)
+stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true) =
+    stade_gpu(expr, cgen_backend_metal(); precision, keep_all_atomic)
 
 # path in, path out. Reads every function def in in_path (a plain
 # kernel file, or a stade_tangent_file/stade_adjoint_file output) and
@@ -6392,12 +6623,20 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # call stade_gpu directly on each def instead. The input file on disk
 # is only ever read, never rewritten, so precision=nothing is always
 # available again on the next call with nothing to reset.
-function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+#
+# keep_all_atomic (default true, unchanged behavior): pass false to
+# let a provably pure scalar reduction (see cgen_idiomatic_scalar_
+# reduction/cgen_body's doc comment) generate as a `dot`/`sum(abs2,·)`/
+# `mapreduce` call instead of a hand-rolled atomic-accumulate kernel.
+# Left at its default, every reduction generates exactly as before --
+# useful when stepping through a generated kernel's atomics is itself
+# what you're debugging.
+function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision = precision)
+        plan = stade_gpu(expr, backend; precision, keep_all_atomic)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
@@ -6405,32 +6644,36 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
     return out_path
 end
 
-stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision = precision)
-stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
-    stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision = precision)
-stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing) =
-    stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision = precision)
+stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, keep_all_atomic)
+stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, keep_all_atomic)
+stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision, keep_all_atomic)
 
 # JACC has no gpu_backend value at all -- there's only one JACC target
 # from cgen_/jgen_'s point of view, since which vendor it actually
 # runs on is chosen later, outside this call entirely. precision has
 # no locked default here for the same reason (see jgen_* section
 # comment): Float64 unless the caller explicitly asks otherwise.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
-    plan = jgen_emit(cgen_ingest(expr))
+# keep_all_atomic: same meaning as stade_gpu_file's (see its doc
+# comment); on the JACC target a matched reduction becomes one
+# `JACC.@parallel_reduce` call instead of `@parallel_for` +
+# `Atomix.@atomic` -- see jgen_body's doc comment.
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true)
+    plan = jgen_emit(cgen_ingest(expr); keep_all_atomic)
     p = precision === nothing ? Float64 : precision
     p === Float64 && return plan
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_jacc(expr; precision = precision)
+        plan = stade_jacc(expr; precision, keep_all_atomic)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
