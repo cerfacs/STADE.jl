@@ -24,17 +24,7 @@ function cuda_kernel_pipeline_b_2!(i_n, u, v, w)
     return nothing
 end
 
-function cuda_kernel_pipeline_b_3!(i_n, loss, w)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += w[i_seq_x]
-    return nothing
-end
-
-function cuda_kernel_pipeline_b_4!(i_n, lossb, wb)
+function cuda_kernel_pipeline_b_3!(i_n, lossb, wb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_n, -1) + 1
         return nothing
@@ -44,7 +34,7 @@ function cuda_kernel_pipeline_b_4!(i_n, lossb, wb)
     return nothing
 end
 
-function cuda_kernel_pipeline_b_5!(i_n, u, ub, v, vb, wb)
+function cuda_kernel_pipeline_b_4!(i_n, u, ub, v, vb, wb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(i_n - 1, 1) + 1
         return nothing
@@ -56,7 +46,7 @@ function cuda_kernel_pipeline_b_5!(i_n, u, ub, v, vb, wb)
     return nothing
 end
 
-function cuda_kernel_pipeline_b_6!(i_n, u, ub, vb)
+function cuda_kernel_pipeline_b_5!(i_n, u, ub, vb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(i_n - 1, 1) + 1
         return nothing
@@ -87,16 +77,6 @@ function cuda_kernel_pipeline_2!(i_n, u, v, w)
     return nothing
 end
 
-function cuda_kernel_pipeline_3!(i_n, loss, w)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += w[i_seq_x]
-    return nothing
-end
-
 function initstacks_pipeline_b_cuda()
     return nothing
 end
@@ -105,10 +85,12 @@ function pipeline_b_cuda(loss, lossb, u, ub, v, vb, w, wb, i_n)
     nthread_per_block = 256
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_b_1!(i_n, u, v)
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_b_2!(i_n, u, v, w)
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_b_3!(i_n, loss, w)
-    @cuda threads = nthread_per_block blocks = cld(div(1 - i_n, -1) + 1, nthread_per_block) cuda_kernel_pipeline_b_4!(i_n, lossb, wb)
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_b_5!(i_n, u, ub, v, vb, wb)
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_b_6!(i_n, u, ub, vb)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + mapreduce(((__mr_1,)->__mr_1), +, w)
+        end
+    @cuda threads = nthread_per_block blocks = cld(div(1 - i_n, -1) + 1, nthread_per_block) cuda_kernel_pipeline_b_3!(i_n, lossb, wb)
+    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_b_4!(i_n, u, ub, v, vb, wb)
+    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_b_5!(i_n, u, ub, vb)
     return nothing
 end
 
@@ -116,6 +98,8 @@ function pipeline_cuda(loss, u, v, w, i_n)
     nthread_per_block = 256
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_1!(i_n, u, v)
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_2!(i_n, u, v, w)
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_pipeline_3!(i_n, loss, w)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + mapreduce(((__mr_1,)->__mr_1), +, w)
+        end
     return nothing
 end

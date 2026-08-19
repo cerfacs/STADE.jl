@@ -5,23 +5,11 @@ import JACC
 import Atomix
 JACC.@init_backend
 
-function jacc_kernel_sumsq_shifted_b_1!(__jacc_i, alpha, beta, i_n, loss, u)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += (alpha * u[i_seq_x] + beta) ^ 2
-    return nothing
-end
-
-function jacc_kernel_sumsq_shifted_b_2!(__jacc_i, alpha, alphab, beta, betab, i_n, lossb, u, ub)
+function jacc_kernel_sumsq_shifted_b_1!(__jacc_i, alpha, alphab, beta, betab, i_n, lossb, u, ub)
     i_seq_x = i_n + (__jacc_i - 1) * -1
     Atomix.@atomic alphab[1] += u[i_seq_x] * ((2 * (alpha * u[i_seq_x] + beta)) * lossb[1])
     ub[i_seq_x] = ub[i_seq_x] + alpha * ((2 * (alpha * u[i_seq_x] + beta)) * lossb[1])
     Atomix.@atomic betab[1] += (2 * (alpha * u[i_seq_x] + beta)) * lossb[1]
-    return nothing
-end
-
-function jacc_kernel_sumsq_shifted_1!(__jacc_i, alpha, beta, i_n, loss, u)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += (alpha * u[i_seq_x] + beta) ^ 2
     return nothing
 end
 
@@ -32,14 +20,14 @@ end
 function sumsq_shifted_b_jacc(loss, lossb, u, ub, alpha, alphab, beta, betab, i_n)
     alphab = JACC.array([alphab])
     betab = JACC.array([betab])
-    JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_sumsq_shifted_b_1!(alpha, beta, i_n, loss, u)
-    JACC.@parallel_for range = div(1 - i_n, -1) + 1 jacc_kernel_sumsq_shifted_b_2!(alpha, alphab, beta, betab, i_n, lossb, u, ub)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u)->(alpha * u[i_seq_x] + beta) ^ 2))(u))
+    JACC.@parallel_for range = div(1 - i_n, -1) + 1 jacc_kernel_sumsq_shifted_b_1!(alpha, alphab, beta, betab, i_n, lossb, u, ub)
     alphab = (JACC.to_host(alphab))[1]
     betab = (JACC.to_host(betab))[1]
     return (alphab, betab)
 end
 
 function sumsq_shifted_jacc(loss, u, alpha, beta, i_n)
-    JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_sumsq_shifted_1!(alpha, beta, i_n, loss, u)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u)->(alpha * u[i_seq_x] + beta) ^ 2))(u))
     return nothing
 end

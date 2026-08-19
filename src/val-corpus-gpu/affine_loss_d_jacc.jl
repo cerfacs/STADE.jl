@@ -25,12 +25,6 @@ function jacc_kernel_affine_loss_1!(__jacc_i, a, b, i_n, u, v)
     return nothing
 end
 
-function jacc_kernel_affine_loss_2!(__jacc_i, i_n, loss, v)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += v[i_seq_x] ^ 2
-    return nothing
-end
-
 function affine_loss_d_jacc(loss, lossd, u, ud, a, ad, b, bd, v, vd, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_affine_loss_d_1!(a, ad, b, bd, i_n, u, ud, v, vd)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_affine_loss_d_2!(i_n, loss, lossd, v, vd)
@@ -39,6 +33,6 @@ end
 
 function affine_loss_jacc(loss, u, a, b, v, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_affine_loss_1!(a, b, i_n, u, v)
-    JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_affine_loss_2!(i_n, loss, v)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, v)->v[i_seq_x] ^ 2))(v))
     return nothing
 end

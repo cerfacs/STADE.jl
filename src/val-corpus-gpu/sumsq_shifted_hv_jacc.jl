@@ -23,12 +23,6 @@ function jacc_kernel_sumsq_shifted_hv_2!(__jacc_i, alpha, alphab, alphabd, alpha
     return nothing
 end
 
-function jacc_kernel_sumsq_shifted_1!(__jacc_i, alpha, beta, i_n, loss, u)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += (alpha * u[i_seq_x] + beta) ^ 2
-    return nothing
-end
-
 function initstacks_sumsq_shifted_b_jacc()
     return nothing
 end
@@ -48,6 +42,6 @@ function sumsq_shifted_hv_jacc(loss, lossb, u, ub, alpha, alphab, beta, betab, i
 end
 
 function sumsq_shifted_jacc(loss, u, alpha, beta, i_n)
-    JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_sumsq_shifted_1!(alpha, beta, i_n, loss, u)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u)->(alpha * u[i_seq_x] + beta) ^ 2))(u))
     return nothing
 end

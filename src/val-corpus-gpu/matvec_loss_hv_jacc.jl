@@ -47,12 +47,6 @@ function jacc_kernel_matvec_loss_1!(__jacc_i, a, i_m, i_n, u, v)
     return nothing
 end
 
-function jacc_kernel_matvec_loss_2!(__jacc_i, i_m, loss, v)
-    i_seq_i = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += v[i_seq_i] ^ 2
-    return nothing
-end
-
 function initstacks_matvec_loss_b_jacc()
     return nothing
 end
@@ -67,6 +61,6 @@ end
 
 function matvec_loss_jacc(loss, a, u, v, i_m, i_n)
     JACC.@parallel_for range = div(i_m - 1, 1) + 1 jacc_kernel_matvec_loss_1!(a, i_m, i_n, u, v)
-    JACC.@parallel_for range = div(i_m - 1, 1) + 1 jacc_kernel_matvec_loss_2!(i_m, loss, v)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_m - 1, 1) + 1, (((i_seq_i, v)->v[i_seq_i] ^ 2))(v))
     return nothing
 end

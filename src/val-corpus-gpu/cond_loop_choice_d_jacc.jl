@@ -19,18 +19,6 @@ function jacc_kernel_cond_loop_choice_d_2!(__jacc_i, i_n, loss, lossd, v, vd)
     return nothing
 end
 
-function jacc_kernel_cond_loop_choice_1!(__jacc_i, i_n, loss, u)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += u[i_seq_x] ^ 2
-    return nothing
-end
-
-function jacc_kernel_cond_loop_choice_2!(__jacc_i, i_n, loss, v)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += v[i_seq_x] ^ 2
-    return nothing
-end
-
 function cond_loop_choice_d_jacc(loss, lossd, u, ud, v, vd, i_branch, i_n)
     if i_branch == 1
         JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_cond_loop_choice_d_1!(i_n, loss, lossd, u, ud)
@@ -42,9 +30,9 @@ end
 
 function cond_loop_choice_jacc(loss, u, v, i_branch, i_n)
     if i_branch == 1
-        JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_cond_loop_choice_1!(i_n, loss, u)
+        loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u)->u[i_seq_x] ^ 2))(u))
     else
-        JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_cond_loop_choice_2!(i_n, loss, v)
+        loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, v)->v[i_seq_x] ^ 2))(v))
     end
     return nothing
 end

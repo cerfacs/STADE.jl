@@ -605,16 +605,6 @@ function cuda_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     return nothing
 end
 
-function cuda_kernel_ttgc_19!(i_nnode, loss, u, up, uref)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_nnode - 1, 1) + 1
-        return nothing
-    end
-    i_seq_node = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2
-    return nothing
-end
-
 function ttgc_d_cuda(u, ud, uref, urefd, i_cell_to_node, cell_vol, cell_vold, node_vol, node_vold, skx, skxd, sky, skyd, skz, skzd, i_ncell, i_nnode, c, cd, dt, dtd, beta, betad, gamma, gammad, i_njac, res, resd, res2, res2d, up, upd, mup, mupd, npernode_half, resperio, resperiod, i_node_perio, loss, lossd)
     nthread_per_block = 256
     @cuda threads = nthread_per_block blocks = cld(div(i_ncell - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_d_1!(beta, betad, c, cd, cell_vol, cell_vold, dt, dtd, gamma, gammad, i_cell_to_node, i_ncell, res, res2, res2d, resd, skx, skxd, sky, skyd, skz, skzd, u, ud)
@@ -667,6 +657,8 @@ function ttgc_cuda(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i
         @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_17!(i_node_perio, mup, npernode_half, resperio)
         @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     end
-    @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_19!(i_nnode, loss, u, up, uref)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + mapreduce(((__mr_1, __mr_2, __mr_3)->((__mr_1 + __mr_2) - __mr_3) ^ 2), +, u, up, uref)
+        end
     return nothing
 end

@@ -233,13 +233,7 @@ function jacc_kernel_ttgc_b_18!(__jacc_i, i_njac, i_nnode, i_seq_, mup, node_vol
     return nothing
 end
 
-function jacc_kernel_ttgc_b_19!(__jacc_i, i_nnode, loss, u, up, uref)
-    i_seq_node = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2
-    return nothing
-end
-
-function jacc_kernel_ttgc_b_20!(__jacc_i, i_nnode, lossb, u, ub, up, upb, uref, urefb)
+function jacc_kernel_ttgc_b_19!(__jacc_i, i_nnode, lossb, u, ub, up, upb, uref, urefb)
     i_seq_node = i_nnode + (__jacc_i - 1) * -1
     ub[i_seq_node] = ub[i_seq_node] + (2 * ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node])) * lossb[1]
     upb[i_seq_node] = upb[i_seq_node] + (2 * ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node])) * lossb[1]
@@ -247,7 +241,7 @@ function jacc_kernel_ttgc_b_20!(__jacc_i, i_nnode, lossb, u, ub, up, upb, uref, 
     return nothing
 end
 
-function jacc_kernel_ttgc_b_21!(__jacc_i, i_njac, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+function jacc_kernel_ttgc_b_20!(__jacc_i, i_njac, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res2, res2b, up, up_stack, upb)
     i_node = i_nnode + (__jacc_i - 1) * -1
     up[i_node] = up_stack[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)]
     res2b[i_node] = res2b[i_node] + (1.0 / node_vol[i_node]) * upb[i_node]
@@ -256,7 +250,7 @@ function jacc_kernel_ttgc_b_21!(__jacc_i, i_njac, i_nnode, i_seq_, mup, mupb, no
     return nothing
 end
 
-function jacc_kernel_ttgc_b_22!(__jacc_i, i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
+function jacc_kernel_ttgc_b_21!(__jacc_i, i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
     k = npernode_half + (__jacc_i - 1) * -1
     i1 = i_node_perio[k, 1]
     i2 = i_node_perio[k, 2]
@@ -267,7 +261,7 @@ function jacc_kernel_ttgc_b_22!(__jacc_i, i_ncell, i_njac, i_nnode, i_node_perio
     return nothing
 end
 
-function jacc_kernel_ttgc_b_23!(__jacc_i, i_node_perio, mupb, npernode_half, resperiob)
+function jacc_kernel_ttgc_b_22!(__jacc_i, i_node_perio, mupb, npernode_half, resperiob)
     k = 1 + (__jacc_i - 1)
     i1 = i_node_perio[k, 1]
     i2 = i_node_perio[k, 2]
@@ -278,7 +272,7 @@ function jacc_kernel_ttgc_b_23!(__jacc_i, i_node_perio, mupb, npernode_half, res
     return nothing
 end
 
-function jacc_kernel_ttgc_b_24!(__jacc_i, auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half, up, upb)
+function jacc_kernel_ttgc_b_23!(__jacc_i, auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half, up, upb)
     i_cell = i_ncell + (__jacc_i - 1) * -1
     i_node1 = i_cell_to_node[1, i_cell]
     i_node2 = i_cell_to_node[2, i_cell]
@@ -309,14 +303,14 @@ function jacc_kernel_ttgc_b_24!(__jacc_i, auxu_stack, cell_vol, cell_volb, i_cel
     return nothing
 end
 
-function jacc_kernel_ttgc_b_25!(__jacc_i, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half)
+function jacc_kernel_ttgc_b_24!(__jacc_i, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half)
     i_node = i_nnode + (__jacc_i - 1) * -1
     mup[i_node] = mup_stack[(((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(npernode_half - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(npernode_half - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)]
     mupb[i_node] = 0.0
     return nothing
 end
 
-function jacc_kernel_ttgc_b_26!(__jacc_i, i_njac, i_nnode, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+function jacc_kernel_ttgc_b_25!(__jacc_i, i_njac, i_nnode, node_vol, node_volb, res2, res2b, up, up_stack, upb)
     i_node = i_nnode + (__jacc_i - 1) * -1
     up[i_node] = up_stack[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + ((i_node - 1) + 1)]
     res2b[i_node] = res2b[i_node] + (1.0 / node_vol[i_node]) * upb[i_node]
@@ -325,7 +319,7 @@ function jacc_kernel_ttgc_b_26!(__jacc_i, i_njac, i_nnode, node_vol, node_volb, 
     return nothing
 end
 
-function jacc_kernel_ttgc_b_27!(__jacc_i, i_node_perio, npernode_half, res2b, resperiob)
+function jacc_kernel_ttgc_b_26!(__jacc_i, i_node_perio, npernode_half, res2b, resperiob)
     k = 1 + (__jacc_i - 1)
     i1 = i_node_perio[k, 1]
     i2 = i_node_perio[k, 2]
@@ -334,7 +328,7 @@ function jacc_kernel_ttgc_b_27!(__jacc_i, i_node_perio, npernode_half, res2b, re
     return nothing
 end
 
-function jacc_kernel_ttgc_b_28!(__jacc_i, i_node_perio, npernode_half, res2b, resperiob)
+function jacc_kernel_ttgc_b_27!(__jacc_i, i_node_perio, npernode_half, res2b, resperiob)
     k = 1 + (__jacc_i - 1)
     i1 = i_node_perio[k, 1]
     i2 = i_node_perio[k, 2]
@@ -345,7 +339,7 @@ function jacc_kernel_ttgc_b_28!(__jacc_i, i_node_perio, npernode_half, res2b, re
     return nothing
 end
 
-function jacc_kernel_ttgc_b_29!(__jacc_i, c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, skx, skxb, sky, skyb, u, ub, up, upb, vere_stack)
+function jacc_kernel_ttgc_b_28!(__jacc_i, c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, skx, skxb, sky, skyb, u, ub, up, upb, vere_stack)
     i_cell = i_ncell + (__jacc_i - 1) * -1
     vere = vere_stack[(((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + ((i_cell - 1) + 1)]
     for i_loc = 4:-1:1
@@ -369,7 +363,7 @@ function jacc_kernel_ttgc_b_29!(__jacc_i, c, cb, dt, dtb, i_cell_to_node, i_ncel
     return nothing
 end
 
-function jacc_kernel_ttgc_b_30!(__jacc_i, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res, resb, up, up_stack, upb)
+function jacc_kernel_ttgc_b_29!(__jacc_i, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res, resb, up, up_stack, upb)
     i_node = i_nnode + (__jacc_i - 1) * -1
     up[i_node] = up_stack[((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1]
     resb[i_node] = resb[i_node] + (1.0 / node_vol[i_node]) * upb[i_node]
@@ -378,7 +372,7 @@ function jacc_kernel_ttgc_b_30!(__jacc_i, i_nnode, i_seq_, mup, mupb, node_vol, 
     return nothing
 end
 
-function jacc_kernel_ttgc_b_31!(__jacc_i, i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
+function jacc_kernel_ttgc_b_30!(__jacc_i, i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
     k = npernode_half + (__jacc_i - 1) * -1
     i1 = i_node_perio[k, 1]
     i2 = i_node_perio[k, 2]
@@ -389,7 +383,7 @@ function jacc_kernel_ttgc_b_31!(__jacc_i, i_ncell, i_njac, i_nnode, i_node_perio
     return nothing
 end
 
-function jacc_kernel_ttgc_b_32!(__jacc_i, i_node_perio, mupb, npernode_half, resperiob)
+function jacc_kernel_ttgc_b_31!(__jacc_i, i_node_perio, mupb, npernode_half, resperiob)
     k = 1 + (__jacc_i - 1)
     i1 = i_node_perio[k, 1]
     i2 = i_node_perio[k, 2]
@@ -400,7 +394,7 @@ function jacc_kernel_ttgc_b_32!(__jacc_i, i_node_perio, mupb, npernode_half, res
     return nothing
 end
 
-function jacc_kernel_ttgc_b_33!(__jacc_i, auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, up, upb)
+function jacc_kernel_ttgc_b_32!(__jacc_i, auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, up, upb)
     i_cell = i_ncell + (__jacc_i - 1) * -1
     i_node1 = i_cell_to_node[1, i_cell]
     i_node2 = i_cell_to_node[2, i_cell]
@@ -431,14 +425,14 @@ function jacc_kernel_ttgc_b_33!(__jacc_i, auxu_stack, cell_vol, cell_volb, i_cel
     return nothing
 end
 
-function jacc_kernel_ttgc_b_34!(__jacc_i, i_nnode, i_seq_, mup, mup_stack, mupb)
+function jacc_kernel_ttgc_b_33!(__jacc_i, i_nnode, i_seq_, mup, mup_stack, mupb)
     i_node = i_nnode + (__jacc_i - 1) * -1
     mup[i_node] = mup_stack[((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1]
     mupb[i_node] = 0.0
     return nothing
 end
 
-function jacc_kernel_ttgc_b_35!(__jacc_i, i_nnode, node_vol, node_volb, res, resb, upb)
+function jacc_kernel_ttgc_b_34!(__jacc_i, i_nnode, node_vol, node_volb, res, resb, upb)
     i_node = 1 + (__jacc_i - 1)
     resb[i_node] = resb[i_node] + (1.0 / node_vol[i_node]) * upb[i_node]
     node_volb[i_node] = node_volb[i_node] + -(res[i_node] / node_vol[i_node] ^ 2) * upb[i_node]
@@ -446,7 +440,7 @@ function jacc_kernel_ttgc_b_35!(__jacc_i, i_nnode, node_vol, node_volb, res, res
     return nothing
 end
 
-function jacc_kernel_ttgc_b_36!(__jacc_i, i_node_perio, npernode_half, resb, resperiob)
+function jacc_kernel_ttgc_b_35!(__jacc_i, i_node_perio, npernode_half, resb, resperiob)
     k = 1 + (__jacc_i - 1)
     i1 = i_node_perio[k, 1]
     i2 = i_node_perio[k, 2]
@@ -455,7 +449,7 @@ function jacc_kernel_ttgc_b_36!(__jacc_i, i_node_perio, npernode_half, resb, res
     return nothing
 end
 
-function jacc_kernel_ttgc_b_37!(__jacc_i, i_node_perio, npernode_half, resb, resperiob)
+function jacc_kernel_ttgc_b_36!(__jacc_i, i_node_perio, npernode_half, resb, resperiob)
     k = 1 + (__jacc_i - 1)
     i1 = i_node_perio[k, 1]
     i2 = i_node_perio[k, 2]
@@ -466,7 +460,7 @@ function jacc_kernel_ttgc_b_37!(__jacc_i, i_node_perio, npernode_half, resb, res
     return nothing
 end
 
-function jacc_kernel_ttgc_b_38!(__jacc_i, aeresk_stack, aerex_stack, aerey_stack, aerez_stack, beta, betab, c, cavgx_stack, cavgy_stack, cavgz_stack, cb, cell_vol, cell_volb, dt, dtb, factor_stack, gamma, gammab, i_cell_to_node, i_ncell, re_stack, res2b, resb, skx, skxb, sky, skyb, skz, skzb, u, ub, vere_stack)
+function jacc_kernel_ttgc_b_37!(__jacc_i, aeresk_stack, aerex_stack, aerey_stack, aerez_stack, beta, betab, c, cavgx_stack, cavgy_stack, cavgz_stack, cb, cell_vol, cell_volb, dt, dtb, factor_stack, gamma, gammab, i_cell_to_node, i_ncell, re_stack, res2b, resb, skx, skxb, sky, skyb, skz, skzb, u, ub, vere_stack)
     i_cell = i_ncell + (__jacc_i - 1) * -1
     aeresk = aeresk_stack[((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + ((i_cell - 1) + 1)]
     aerex = aerex_stack[(div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + ((i_cell - 1) + 1)]
@@ -736,12 +730,6 @@ function jacc_kernel_ttgc_18!(__jacc_i, i_nnode, mup, node_vol, res2, up)
     return nothing
 end
 
-function jacc_kernel_ttgc_19!(__jacc_i, i_nnode, loss, u, up, uref)
-    i_seq_node = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2
-    return nothing
-end
-
 function initstacks_ttgc_b_jacc(i_ncell, i_njac, i_nnode, npernode_half)
     cavgx_stack = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
     cavgy_stack = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
@@ -813,7 +801,7 @@ function ttgc_b_jacc(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, no
         JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_b_18!(i_njac, i_nnode, i_seq_, mup, node_vol, res2, up, up_stack)
         auxu_stack[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)] = auxu
     end
-    JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_b_19!(i_nnode, loss, u, up, uref)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_nnode - 1, 1) + 1, (((i_seq_node, u, up, uref)->((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2))(u, up, uref))
     aeresk_stack[(((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1] = aeresk
     aerex_stack[((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1] = aerex
     aerey_stack[((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1] = aerey
@@ -836,31 +824,31 @@ function ttgc_b_jacc(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, no
     factor = factor_stack[(((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1]
     re = re_stack[((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1]
     vere = vere_stack[((((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1]
-    JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_20!(i_nnode, lossb, u, ub, up, upb, uref, urefb)
+    JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_19!(i_nnode, lossb, u, ub, up, upb, uref, urefb)
     for i_seq_ = i_njac:-1:1
         auxu = auxu_stack[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)]
-        JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_21!(i_njac, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res2, res2b, up, up_stack, upb)
-        JACC.@parallel_for range = div(1 - npernode_half, -1) + 1 jacc_kernel_ttgc_b_22!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
-        JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_23!(i_node_perio, mupb, npernode_half, resperiob)
-        JACC.@parallel_for range = div(1 - i_ncell, -1) + 1 jacc_kernel_ttgc_b_24!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half, up, upb)
-        JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_25!(i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half)
+        JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_20!(i_njac, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+        JACC.@parallel_for range = div(1 - npernode_half, -1) + 1 jacc_kernel_ttgc_b_21!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
+        JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_22!(i_node_perio, mupb, npernode_half, resperiob)
+        JACC.@parallel_for range = div(1 - i_ncell, -1) + 1 jacc_kernel_ttgc_b_23!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half, up, upb)
+        JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_24!(i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half)
     end
-    JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_26!(i_njac, i_nnode, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+    JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_25!(i_njac, i_nnode, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+    JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_26!(i_node_perio, npernode_half, res2b, resperiob)
     JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_27!(i_node_perio, npernode_half, res2b, resperiob)
-    JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_28!(i_node_perio, npernode_half, res2b, resperiob)
-    JACC.@parallel_for range = div(1 - i_ncell, -1) + 1 jacc_kernel_ttgc_b_29!(c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, skx, skxb, sky, skyb, u, ub, up, upb, vere_stack)
+    JACC.@parallel_for range = div(1 - i_ncell, -1) + 1 jacc_kernel_ttgc_b_28!(c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, skx, skxb, sky, skyb, u, ub, up, upb, vere_stack)
     for i_seq_ = i_njac:-1:1
         auxu = auxu_stack[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_seq_ - 1) + 1)]
-        JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_30!(i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res, resb, up, up_stack, upb)
-        JACC.@parallel_for range = div(1 - npernode_half, -1) + 1 jacc_kernel_ttgc_b_31!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
-        JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_32!(i_node_perio, mupb, npernode_half, resperiob)
-        JACC.@parallel_for range = div(1 - i_ncell, -1) + 1 jacc_kernel_ttgc_b_33!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, up, upb)
-        JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_34!(i_nnode, i_seq_, mup, mup_stack, mupb)
+        JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_29!(i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res, resb, up, up_stack, upb)
+        JACC.@parallel_for range = div(1 - npernode_half, -1) + 1 jacc_kernel_ttgc_b_30!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
+        JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_31!(i_node_perio, mupb, npernode_half, resperiob)
+        JACC.@parallel_for range = div(1 - i_ncell, -1) + 1 jacc_kernel_ttgc_b_32!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, up, upb)
+        JACC.@parallel_for range = div(1 - i_nnode, -1) + 1 jacc_kernel_ttgc_b_33!(i_nnode, i_seq_, mup, mup_stack, mupb)
     end
-    JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_b_35!(i_nnode, node_vol, node_volb, res, resb, upb)
+    JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_b_34!(i_nnode, node_vol, node_volb, res, resb, upb)
+    JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_35!(i_node_perio, npernode_half, resb, resperiob)
     JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_36!(i_node_perio, npernode_half, resb, resperiob)
-    JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_b_37!(i_node_perio, npernode_half, resb, resperiob)
-    JACC.@parallel_for range = div(1 - i_ncell, -1) + 1 jacc_kernel_ttgc_b_38!(aeresk_stack, aerex_stack, aerey_stack, aerez_stack, beta, betab, c, cavgx_stack, cavgy_stack, cavgz_stack, cb, cell_vol, cell_volb, dt, dtb, factor_stack, gamma, gammab, i_cell_to_node, i_ncell, re_stack, res2b, resb, skx, skxb, sky, skyb, skz, skzb, u, ub, vere_stack)
+    JACC.@parallel_for range = div(1 - i_ncell, -1) + 1 jacc_kernel_ttgc_b_37!(aeresk_stack, aerex_stack, aerey_stack, aerez_stack, beta, betab, c, cavgx_stack, cavgy_stack, cavgz_stack, cb, cell_vol, cell_volb, dt, dtb, factor_stack, gamma, gammab, i_cell_to_node, i_ncell, re_stack, res2b, resb, skx, skxb, sky, skyb, skz, skzb, u, ub, vere_stack)
     dtb = (JACC.to_host(dtb))[1]
     return dtb
 end
@@ -888,6 +876,6 @@ function ttgc_jacc(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i
         JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_17!(i_node_perio, mup, npernode_half, resperio)
         JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     end
-    JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_19!(i_nnode, loss, u, up, uref)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_nnode - 1, 1) + 1, (((i_seq_node, u, up, uref)->((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2))(u, up, uref))
     return nothing
 end

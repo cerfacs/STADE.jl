@@ -1017,12 +1017,6 @@ function jacc_kernel_ttgc_18!(__jacc_i, i_nnode, mup, node_vol, res2, up)
     return nothing
 end
 
-function jacc_kernel_ttgc_19!(__jacc_i, i_nnode, loss, u, up, uref)
-    i_seq_node = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2
-    return nothing
-end
-
 function initstacks_ttgc_b_jacc(i_ncell, i_njac, i_nnode, npernode_half)
     cavgx_stack = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
     cavgy_stack = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
@@ -1238,6 +1232,6 @@ function ttgc_jacc(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i
         JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_17!(i_node_perio, mup, npernode_half, resperio)
         JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     end
-    JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_19!(i_nnode, loss, u, up, uref)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_nnode - 1, 1) + 1, (((i_seq_node, u, up, uref)->((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2))(u, up, uref))
     return nothing
 end

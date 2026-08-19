@@ -13,19 +13,13 @@ function jacc_kernel_matvec_loss_b_1!(__jacc_i, a, i_m, i_n, u, v)
     return nothing
 end
 
-function jacc_kernel_matvec_loss_b_2!(__jacc_i, i_m, loss, v)
-    i_seq_i = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += v[i_seq_i] ^ 2
-    return nothing
-end
-
-function jacc_kernel_matvec_loss_b_3!(__jacc_i, i_m, lossb, v, vb)
+function jacc_kernel_matvec_loss_b_2!(__jacc_i, i_m, lossb, v, vb)
     i_seq_i = i_m + (__jacc_i - 1) * -1
     vb[i_seq_i] = vb[i_seq_i] + (2 * v[i_seq_i]) * lossb[1]
     return nothing
 end
 
-function jacc_kernel_matvec_loss_b_4!(__jacc_i, a, ab, i_m, i_n, u, ub, vb)
+function jacc_kernel_matvec_loss_b_3!(__jacc_i, a, ab, i_m, i_n, u, ub, vb)
     i_i = 1 + (__jacc_i - 1)
     for i_seq_j = i_n:-1:1
         ab[i_i, i_seq_j] = ab[i_i, i_seq_j] + u[i_seq_j] * vb[i_i]
@@ -42,26 +36,20 @@ function jacc_kernel_matvec_loss_1!(__jacc_i, a, i_m, i_n, u, v)
     return nothing
 end
 
-function jacc_kernel_matvec_loss_2!(__jacc_i, i_m, loss, v)
-    i_seq_i = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += v[i_seq_i] ^ 2
-    return nothing
-end
-
 function initstacks_matvec_loss_b_jacc()
     return nothing
 end
 
 function matvec_loss_b_jacc(loss, lossb, a, ab, u, ub, v, vb, i_m, i_n)
     JACC.@parallel_for range = div(i_m - 1, 1) + 1 jacc_kernel_matvec_loss_b_1!(a, i_m, i_n, u, v)
-    JACC.@parallel_for range = div(i_m - 1, 1) + 1 jacc_kernel_matvec_loss_b_2!(i_m, loss, v)
-    JACC.@parallel_for range = div(1 - i_m, -1) + 1 jacc_kernel_matvec_loss_b_3!(i_m, lossb, v, vb)
-    JACC.@parallel_for range = div(i_m - 1, 1) + 1 jacc_kernel_matvec_loss_b_4!(a, ab, i_m, i_n, u, ub, vb)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_m - 1, 1) + 1, (((i_seq_i, v)->v[i_seq_i] ^ 2))(v))
+    JACC.@parallel_for range = div(1 - i_m, -1) + 1 jacc_kernel_matvec_loss_b_2!(i_m, lossb, v, vb)
+    JACC.@parallel_for range = div(i_m - 1, 1) + 1 jacc_kernel_matvec_loss_b_3!(a, ab, i_m, i_n, u, ub, vb)
     return nothing
 end
 
 function matvec_loss_jacc(loss, a, u, v, i_m, i_n)
     JACC.@parallel_for range = div(i_m - 1, 1) + 1 jacc_kernel_matvec_loss_1!(a, i_m, i_n, u, v)
-    JACC.@parallel_for range = div(i_m - 1, 1) + 1 jacc_kernel_matvec_loss_2!(i_m, loss, v)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_m - 1, 1) + 1, (((i_seq_i, v)->v[i_seq_i] ^ 2))(v))
     return nothing
 end

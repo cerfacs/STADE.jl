@@ -28,16 +28,6 @@ function cuda_kernel_dotprod_hv_2!(i_n, lossb, lossbd, u, ub, ubd, ud, v, vb, vb
     return nothing
 end
 
-function cuda_kernel_dotprod_1!(i_n, loss, u, v)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += u[i_seq_x] * v[i_seq_x]
-    return nothing
-end
-
 function initstacks_dotprod_b_cuda()
     return nothing
 end
@@ -50,7 +40,8 @@ function dotprod_hv_cuda(loss, lossb, u, ub, v, vb, i_n, lossd, lossbd, ud, ubd,
 end
 
 function dotprod_cuda(loss, u, v, i_n)
-    nthread_per_block = 256
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_dotprod_1!(i_n, loss, u, v)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + dot(u, v)
+        end
     return nothing
 end

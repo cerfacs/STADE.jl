@@ -94,16 +94,6 @@ function cuda_kernel_cond_field_choice_2!(i_n, v, w)
     return nothing
 end
 
-function cuda_kernel_cond_field_choice_3!(i_n, loss, w)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += w[i_seq_x]
-    return nothing
-end
-
 function initstacks_cond_field_choice_b_cuda()
     branch_stack = CuArray{Int64}(undef, 1)
     return branch_stack
@@ -142,6 +132,8 @@ function cond_field_choice_cuda(loss, u, v, w, i_branch, i_n)
     else
         @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_field_choice_2!(i_n, v, w)
     end
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_field_choice_3!(i_n, loss, w)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + mapreduce(((__mr_1,)->__mr_1), +, w)
+        end
     return nothing
 end

@@ -38,12 +38,6 @@ function jacc_kernel_pipeline_2!(__jacc_i, i_n, u, v, w)
     return nothing
 end
 
-function jacc_kernel_pipeline_3!(__jacc_i, i_n, loss, w)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += w[i_seq_x]
-    return nothing
-end
-
 function pipeline_d_jacc(loss, lossd, u, ud, v, vd, w, wd, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_pipeline_d_1!(i_n, u, ud, v, vd)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_pipeline_d_2!(i_n, u, ud, v, vd, w, wd)
@@ -54,6 +48,6 @@ end
 function pipeline_jacc(loss, u, v, w, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_pipeline_1!(i_n, u, v)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_pipeline_2!(i_n, u, v, w)
-    JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_pipeline_3!(i_n, loss, w)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, w)->w[i_seq_x]))(w))
     return nothing
 end

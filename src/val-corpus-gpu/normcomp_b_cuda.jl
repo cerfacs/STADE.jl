@@ -14,17 +14,7 @@ function cuda_kernel_normcomp_b_1!(i_n, u, v, w)
     return nothing
 end
 
-function cuda_kernel_normcomp_b_2!(i_n, loss, w)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += w[i_seq_x] ^ 2
-    return nothing
-end
-
-function cuda_kernel_normcomp_b_3!(i_n, lossb, w, wb)
+function cuda_kernel_normcomp_b_2!(i_n, lossb, w, wb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_n, -1) + 1
         return nothing
@@ -34,7 +24,7 @@ function cuda_kernel_normcomp_b_3!(i_n, lossb, w, wb)
     return nothing
 end
 
-function cuda_kernel_normcomp_b_4!(i_n, ub, vb, wb)
+function cuda_kernel_normcomp_b_3!(i_n, ub, vb, wb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(i_n - 1, 1) + 1
         return nothing
@@ -56,16 +46,6 @@ function cuda_kernel_normcomp_1!(i_n, u, v, w)
     return nothing
 end
 
-function cuda_kernel_normcomp_2!(i_n, loss, w)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += w[i_seq_x] ^ 2
-    return nothing
-end
-
 function initstacks_normcomp_b_cuda()
     return nothing
 end
@@ -73,15 +53,19 @@ end
 function normcomp_b_cuda(loss, lossb, u, ub, v, vb, w, wb, i_n)
     nthread_per_block = 256
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_normcomp_b_1!(i_n, u, v, w)
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_normcomp_b_2!(i_n, loss, w)
-    @cuda threads = nthread_per_block blocks = cld(div(1 - i_n, -1) + 1, nthread_per_block) cuda_kernel_normcomp_b_3!(i_n, lossb, w, wb)
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_normcomp_b_4!(i_n, ub, vb, wb)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + sum(abs2, w)
+        end
+    @cuda threads = nthread_per_block blocks = cld(div(1 - i_n, -1) + 1, nthread_per_block) cuda_kernel_normcomp_b_2!(i_n, lossb, w, wb)
+    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_normcomp_b_3!(i_n, ub, vb, wb)
     return nothing
 end
 
 function normcomp_cuda(loss, u, v, w, i_n)
     nthread_per_block = 256
     @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_normcomp_1!(i_n, u, v, w)
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_normcomp_2!(i_n, loss, w)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + sum(abs2, w)
+        end
     return nothing
 end

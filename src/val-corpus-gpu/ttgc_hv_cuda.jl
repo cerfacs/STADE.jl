@@ -1240,16 +1240,6 @@ function cuda_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     return nothing
 end
 
-function cuda_kernel_ttgc_19!(i_nnode, loss, u, up, uref)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_nnode - 1, 1) + 1
-        return nothing
-    end
-    i_seq_node = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2
-    return nothing
-end
-
 function initstacks_ttgc_b_cuda(i_ncell, i_njac, i_nnode, npernode_half)
     cavgx_stack = CuArray{Float64}(undef, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
     cavgy_stack = CuArray{Float64}(undef, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
@@ -1477,6 +1467,8 @@ function ttgc_cuda(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i
         @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_17!(i_node_perio, mup, npernode_half, resperio)
         @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     end
-    @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_19!(i_nnode, loss, u, up, uref)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + mapreduce(((__mr_1, __mr_2, __mr_3)->((__mr_1 + __mr_2) - __mr_3) ^ 2), +, u, up, uref)
+        end
     return nothing
 end

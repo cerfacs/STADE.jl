@@ -48,26 +48,6 @@ function cuda_kernel_cond_loop_choice_hv_4!(i_n, lossb, lossbd, v, vb, vbd, vd)
     return nothing
 end
 
-function cuda_kernel_cond_loop_choice_1!(i_n, loss, u)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += u[i_seq_x] ^ 2
-    return nothing
-end
-
-function cuda_kernel_cond_loop_choice_2!(i_n, loss, v)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += v[i_seq_x] ^ 2
-    return nothing
-end
-
 function initstacks_cond_loop_choice_b_cuda()
     branch_stack = CuArray{Int64}(undef, 1)
     return branch_stack
@@ -98,11 +78,14 @@ function cond_loop_choice_hv_cuda(loss, lossb, u, ub, v, vb, i_branch, i_n, loss
 end
 
 function cond_loop_choice_cuda(loss, u, v, i_branch, i_n)
-    nthread_per_block = 256
     if i_branch == 1
-        @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_loop_choice_1!(i_n, loss, u)
+        CUDA.@allowscalar begin
+                loss[1] = loss[1] + sum(abs2, u)
+            end
     else
-        @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_cond_loop_choice_2!(i_n, loss, v)
+        CUDA.@allowscalar begin
+                loss[1] = loss[1] + sum(abs2, v)
+            end
     end
     return nothing
 end

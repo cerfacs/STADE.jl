@@ -38,12 +38,6 @@ function jacc_kernel_cond_field_choice_2!(__jacc_i, i_n, v, w)
     return nothing
 end
 
-function jacc_kernel_cond_field_choice_3!(__jacc_i, i_n, loss, w)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += w[i_seq_x]
-    return nothing
-end
-
 function cond_field_choice_d_jacc(loss, lossd, u, ud, v, vd, w, wd, i_branch, i_n)
     if i_branch == 1
         JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_cond_field_choice_d_1!(i_n, u, ud, w, wd)
@@ -60,6 +54,6 @@ function cond_field_choice_jacc(loss, u, v, w, i_branch, i_n)
     else
         JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_cond_field_choice_2!(i_n, v, w)
     end
-    JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_cond_field_choice_3!(i_n, loss, w)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, w)->w[i_seq_x]))(w))
     return nothing
 end

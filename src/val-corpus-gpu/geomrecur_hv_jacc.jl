@@ -19,12 +19,6 @@ function jacc_kernel_geomrecur_hv_2!(__jacc_i, i_n, lossb, lossbd, u, ub, ubd, u
     return nothing
 end
 
-function jacc_kernel_geomrecur_1!(__jacc_i, i_n, loss, u)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += u[i_seq_x] ^ 2
-    return nothing
-end
-
 function initstacks_geomrecur_b_jacc(i_n)
     u_stack = JACC.zeros(Float64, div(i_n - 2, 1) + 1)
     return u_stack
@@ -57,6 +51,6 @@ function geomrecur_jacc(loss, u, c, i_n)
     for i_seq_x = 2:i_n
         u[i_seq_x] = c * u[i_seq_x - 1]
     end
-    JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_geomrecur_1!(i_n, loss, u)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u)->u[i_seq_x] ^ 2))(u))
     return nothing
 end

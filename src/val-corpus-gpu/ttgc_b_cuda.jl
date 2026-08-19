@@ -304,17 +304,7 @@ function cuda_kernel_ttgc_b_18!(i_njac, i_nnode, i_seq_, mup, node_vol, res2, up
     return nothing
 end
 
-function cuda_kernel_ttgc_b_19!(i_nnode, loss, u, up, uref)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_nnode - 1, 1) + 1
-        return nothing
-    end
-    i_seq_node = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2
-    return nothing
-end
-
-function cuda_kernel_ttgc_b_20!(i_nnode, lossb, u, ub, up, upb, uref, urefb)
+function cuda_kernel_ttgc_b_19!(i_nnode, lossb, u, ub, up, upb, uref, urefb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_nnode, -1) + 1
         return nothing
@@ -326,7 +316,7 @@ function cuda_kernel_ttgc_b_20!(i_nnode, lossb, u, ub, up, upb, uref, urefb)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_21!(i_njac, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+function cuda_kernel_ttgc_b_20!(i_njac, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res2, res2b, up, up_stack, upb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_nnode, -1) + 1
         return nothing
@@ -339,7 +329,7 @@ function cuda_kernel_ttgc_b_21!(i_njac, i_nnode, i_seq_, mup, mupb, node_vol, no
     return nothing
 end
 
-function cuda_kernel_ttgc_b_22!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
+function cuda_kernel_ttgc_b_21!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - npernode_half, -1) + 1
         return nothing
@@ -354,7 +344,7 @@ function cuda_kernel_ttgc_b_22!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, 
     return nothing
 end
 
-function cuda_kernel_ttgc_b_23!(i_node_perio, mupb, npernode_half, resperiob)
+function cuda_kernel_ttgc_b_22!(i_node_perio, mupb, npernode_half, resperiob)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(npernode_half - 1, 1) + 1
         return nothing
@@ -369,7 +359,7 @@ function cuda_kernel_ttgc_b_23!(i_node_perio, mupb, npernode_half, resperiob)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_24!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half, up, upb)
+function cuda_kernel_ttgc_b_23!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half, up, upb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_ncell, -1) + 1
         return nothing
@@ -404,7 +394,7 @@ function cuda_kernel_ttgc_b_24!(auxu_stack, cell_vol, cell_volb, i_cell_to_node,
     return nothing
 end
 
-function cuda_kernel_ttgc_b_25!(i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half)
+function cuda_kernel_ttgc_b_24!(i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_nnode, -1) + 1
         return nothing
@@ -415,7 +405,7 @@ function cuda_kernel_ttgc_b_25!(i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack
     return nothing
 end
 
-function cuda_kernel_ttgc_b_26!(i_njac, i_nnode, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+function cuda_kernel_ttgc_b_25!(i_njac, i_nnode, node_vol, node_volb, res2, res2b, up, up_stack, upb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_nnode, -1) + 1
         return nothing
@@ -428,7 +418,7 @@ function cuda_kernel_ttgc_b_26!(i_njac, i_nnode, node_vol, node_volb, res2, res2
     return nothing
 end
 
-function cuda_kernel_ttgc_b_27!(i_node_perio, npernode_half, res2b, resperiob)
+function cuda_kernel_ttgc_b_26!(i_node_perio, npernode_half, res2b, resperiob)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(npernode_half - 1, 1) + 1
         return nothing
@@ -441,7 +431,7 @@ function cuda_kernel_ttgc_b_27!(i_node_perio, npernode_half, res2b, resperiob)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_28!(i_node_perio, npernode_half, res2b, resperiob)
+function cuda_kernel_ttgc_b_27!(i_node_perio, npernode_half, res2b, resperiob)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(npernode_half - 1, 1) + 1
         return nothing
@@ -456,7 +446,7 @@ function cuda_kernel_ttgc_b_28!(i_node_perio, npernode_half, res2b, resperiob)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_29!(c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, skx, skxb, sky, skyb, u, ub, up, upb, vere_stack)
+function cuda_kernel_ttgc_b_28!(c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, skx, skxb, sky, skyb, u, ub, up, upb, vere_stack)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_ncell, -1) + 1
         return nothing
@@ -484,7 +474,7 @@ function cuda_kernel_ttgc_b_29!(c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, 
     return nothing
 end
 
-function cuda_kernel_ttgc_b_30!(i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res, resb, up, up_stack, upb)
+function cuda_kernel_ttgc_b_29!(i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res, resb, up, up_stack, upb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_nnode, -1) + 1
         return nothing
@@ -497,7 +487,7 @@ function cuda_kernel_ttgc_b_30!(i_nnode, i_seq_, mup, mupb, node_vol, node_volb,
     return nothing
 end
 
-function cuda_kernel_ttgc_b_31!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
+function cuda_kernel_ttgc_b_30!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - npernode_half, -1) + 1
         return nothing
@@ -512,7 +502,7 @@ function cuda_kernel_ttgc_b_31!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, 
     return nothing
 end
 
-function cuda_kernel_ttgc_b_32!(i_node_perio, mupb, npernode_half, resperiob)
+function cuda_kernel_ttgc_b_31!(i_node_perio, mupb, npernode_half, resperiob)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(npernode_half - 1, 1) + 1
         return nothing
@@ -527,7 +517,7 @@ function cuda_kernel_ttgc_b_32!(i_node_perio, mupb, npernode_half, resperiob)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_33!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, up, upb)
+function cuda_kernel_ttgc_b_32!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, up, upb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_ncell, -1) + 1
         return nothing
@@ -562,7 +552,7 @@ function cuda_kernel_ttgc_b_33!(auxu_stack, cell_vol, cell_volb, i_cell_to_node,
     return nothing
 end
 
-function cuda_kernel_ttgc_b_34!(i_nnode, i_seq_, mup, mup_stack, mupb)
+function cuda_kernel_ttgc_b_33!(i_nnode, i_seq_, mup, mup_stack, mupb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_nnode, -1) + 1
         return nothing
@@ -573,7 +563,7 @@ function cuda_kernel_ttgc_b_34!(i_nnode, i_seq_, mup, mup_stack, mupb)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_35!(i_nnode, node_vol, node_volb, res, resb, upb)
+function cuda_kernel_ttgc_b_34!(i_nnode, node_vol, node_volb, res, resb, upb)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(i_nnode - 1, 1) + 1
         return nothing
@@ -585,7 +575,7 @@ function cuda_kernel_ttgc_b_35!(i_nnode, node_vol, node_volb, res, resb, upb)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_36!(i_node_perio, npernode_half, resb, resperiob)
+function cuda_kernel_ttgc_b_35!(i_node_perio, npernode_half, resb, resperiob)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(npernode_half - 1, 1) + 1
         return nothing
@@ -598,7 +588,7 @@ function cuda_kernel_ttgc_b_36!(i_node_perio, npernode_half, resb, resperiob)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_37!(i_node_perio, npernode_half, resb, resperiob)
+function cuda_kernel_ttgc_b_36!(i_node_perio, npernode_half, resb, resperiob)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(npernode_half - 1, 1) + 1
         return nothing
@@ -613,7 +603,7 @@ function cuda_kernel_ttgc_b_37!(i_node_perio, npernode_half, resb, resperiob)
     return nothing
 end
 
-function cuda_kernel_ttgc_b_38!(aeresk_stack, aerex_stack, aerey_stack, aerez_stack, beta, betab, c, cavgx_stack, cavgy_stack, cavgz_stack, cb, cell_vol, cell_volb, dt, dtb, factor_stack, gamma, gammab, i_cell_to_node, i_ncell, re_stack, res2b, resb, skx, skxb, sky, skyb, skz, skzb, u, ub, vere_stack)
+function cuda_kernel_ttgc_b_37!(aeresk_stack, aerex_stack, aerey_stack, aerez_stack, beta, betab, c, cavgx_stack, cavgy_stack, cavgz_stack, cb, cell_vol, cell_volb, dt, dtb, factor_stack, gamma, gammab, i_cell_to_node, i_ncell, re_stack, res2b, resb, skx, skxb, sky, skyb, skz, skzb, u, ub, vere_stack)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(1 - i_ncell, -1) + 1
         return nothing
@@ -959,16 +949,6 @@ function cuda_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     return nothing
 end
 
-function cuda_kernel_ttgc_19!(i_nnode, loss, u, up, uref)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_nnode - 1, 1) + 1
-        return nothing
-    end
-    i_seq_node = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2
-    return nothing
-end
-
 function initstacks_ttgc_b_cuda(i_ncell, i_njac, i_nnode, npernode_half)
     cavgx_stack = CuArray{Float64}(undef, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
     cavgy_stack = CuArray{Float64}(undef, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
@@ -1045,8 +1025,8 @@ function ttgc_b_cuda(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, no
                 auxu_stack[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)] = auxu
             end
     end
-    @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_19!(i_nnode, loss, u, up, uref)
     CUDA.@allowscalar begin
+            loss[1] = loss[1] + mapreduce(((__mr_1, __mr_2, __mr_3)->((__mr_1 + __mr_2) - __mr_3) ^ 2), +, u, up, uref)
             aeresk_stack[(((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1] = aeresk
             aerex_stack[((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1] = aerex
             aerey_stack[((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1] = aerey
@@ -1070,35 +1050,35 @@ function ttgc_b_cuda(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, no
             re = re_stack[((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1]
             vere = vere_stack[((((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1]
         end
-    @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_20!(i_nnode, lossb, u, ub, up, upb, uref, urefb)
+    @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_19!(i_nnode, lossb, u, ub, up, upb, uref, urefb)
     for i_seq_ = i_njac:-1:1
         CUDA.@allowscalar begin
                 auxu = auxu_stack[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)]
             end
-        @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_21!(i_njac, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res2, res2b, up, up_stack, upb)
-        @cuda threads = nthread_per_block blocks = cld(div(1 - npernode_half, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_22!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
-        @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_23!(i_node_perio, mupb, npernode_half, resperiob)
-        @cuda threads = nthread_per_block blocks = cld(div(1 - i_ncell, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_24!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half, up, upb)
-        @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_25!(i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half)
+        @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_20!(i_njac, i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+        @cuda threads = nthread_per_block blocks = cld(div(1 - npernode_half, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_21!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
+        @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_22!(i_node_perio, mupb, npernode_half, resperiob)
+        @cuda threads = nthread_per_block blocks = cld(div(1 - i_ncell, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_23!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half, up, upb)
+        @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_24!(i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, npernode_half)
     end
-    @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_26!(i_njac, i_nnode, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+    @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_25!(i_njac, i_nnode, node_vol, node_volb, res2, res2b, up, up_stack, upb)
+    @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_26!(i_node_perio, npernode_half, res2b, resperiob)
     @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_27!(i_node_perio, npernode_half, res2b, resperiob)
-    @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_28!(i_node_perio, npernode_half, res2b, resperiob)
-    @cuda threads = nthread_per_block blocks = cld(div(1 - i_ncell, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_29!(c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, skx, skxb, sky, skyb, u, ub, up, upb, vere_stack)
+    @cuda threads = nthread_per_block blocks = cld(div(1 - i_ncell, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_28!(c, cb, dt, dtb, i_cell_to_node, i_ncell, res2b, skx, skxb, sky, skyb, u, ub, up, upb, vere_stack)
     for i_seq_ = i_njac:-1:1
         CUDA.@allowscalar begin
                 auxu = auxu_stack[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_seq_ - 1) + 1)]
             end
-        @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_30!(i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res, resb, up, up_stack, upb)
-        @cuda threads = nthread_per_block blocks = cld(div(1 - npernode_half, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_31!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
-        @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_32!(i_node_perio, mupb, npernode_half, resperiob)
-        @cuda threads = nthread_per_block blocks = cld(div(1 - i_ncell, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_33!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, up, upb)
-        @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_34!(i_nnode, i_seq_, mup, mup_stack, mupb)
+        @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_29!(i_nnode, i_seq_, mup, mupb, node_vol, node_volb, res, resb, up, up_stack, upb)
+        @cuda threads = nthread_per_block blocks = cld(div(1 - npernode_half, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_30!(i_ncell, i_njac, i_nnode, i_node_perio, i_seq_, mup, mup_stack, mupb, npernode_half, resperiob)
+        @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_31!(i_node_perio, mupb, npernode_half, resperiob)
+        @cuda threads = nthread_per_block blocks = cld(div(1 - i_ncell, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_32!(auxu_stack, cell_vol, cell_volb, i_cell_to_node, i_ncell, i_njac, i_nnode, i_seq_, mup, mup_stack, mupb, up, upb)
+        @cuda threads = nthread_per_block blocks = cld(div(1 - i_nnode, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_33!(i_nnode, i_seq_, mup, mup_stack, mupb)
     end
-    @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_35!(i_nnode, node_vol, node_volb, res, resb, upb)
+    @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_34!(i_nnode, node_vol, node_volb, res, resb, upb)
+    @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_35!(i_node_perio, npernode_half, resb, resperiob)
     @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_36!(i_node_perio, npernode_half, resb, resperiob)
-    @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_b_37!(i_node_perio, npernode_half, resb, resperiob)
-    @cuda threads = nthread_per_block blocks = cld(div(1 - i_ncell, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_38!(aeresk_stack, aerex_stack, aerey_stack, aerez_stack, beta, betab, c, cavgx_stack, cavgy_stack, cavgz_stack, cb, cell_vol, cell_volb, dt, dtb, factor_stack, gamma, gammab, i_cell_to_node, i_ncell, re_stack, res2b, resb, skx, skxb, sky, skyb, skz, skzb, u, ub, vere_stack)
+    @cuda threads = nthread_per_block blocks = cld(div(1 - i_ncell, -1) + 1, nthread_per_block) cuda_kernel_ttgc_b_37!(aeresk_stack, aerex_stack, aerey_stack, aerez_stack, beta, betab, c, cavgx_stack, cavgy_stack, cavgz_stack, cb, cell_vol, cell_volb, dt, dtb, factor_stack, gamma, gammab, i_cell_to_node, i_ncell, re_stack, res2b, resb, skx, skxb, sky, skyb, skz, skzb, u, ub, vere_stack)
     dtb = (Array(dtb))[1]
     return dtb
 end
@@ -1127,6 +1107,8 @@ function ttgc_cuda(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i
         @cuda threads = nthread_per_block blocks = cld(div(npernode_half - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_17!(i_node_perio, mup, npernode_half, resperio)
         @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     end
-    @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 1, 1) + 1, nthread_per_block) cuda_kernel_ttgc_19!(i_nnode, loss, u, up, uref)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + mapreduce(((__mr_1, __mr_2, __mr_3)->((__mr_1 + __mr_2) - __mr_3) ^ 2), +, u, up, uref)
+        end
     return nothing
 end

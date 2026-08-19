@@ -15,7 +15,7 @@ const GPU_BACKEND_SPECS = Dict(
 """
     validate_corpus_gpu_gen_only(dir="val-corpus-gpu";
                          backends=(:cuda, :jacc), keep_push_pop=false,
-                         site_level_tbr=true)
+                         site_level_tbr=true, keep_all_atomic=false)
 
 GPU-porting counterpart to `validate_corpus_keep_push_pop_false_site_level_tbr_true`.
 Same corpus dir and generation flags by default -- `keep_push_pop=false`'s
@@ -44,7 +44,7 @@ CPU-side or the backend port -- threw).
 """
 function validate_corpus_gpu_gen_only(dir::String = "val-corpus-gpu";
                               backends::Tuple = (:cuda, :jacc),
-                              keep_push_pop::Bool = false, site_level_tbr::Bool = true)
+                              keep_push_pop::Bool = false, site_level_tbr::Bool = true, keep_all_atomic::Bool = false)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") ||
            occursin("_cuda.jl", f) || occursin("_jacc.jl", f)
@@ -91,7 +91,7 @@ function validate_corpus_gpu_gen_only(dir::String = "val-corpus-gpu";
                 cpu_path = joinpath(dir, name * suffix)
                 gpu_path = joinpath(dir, name * suffix[1:end-3] * spec.suffix * ".jl")
                 try
-                    spec.genfile(cpu_path, gpu_path)
+                    spec.genfile(cpu_path, gpu_path; keep_all_atomic = keep_all_atomic)
                     push!(results, (kernel = name, mode = mode, backend = b, status = :gen_ok))
                 catch e
                     push!(results, (kernel = name, mode = mode, backend = b, status = :gen_error, errmsg = gen_errmsg(e)))

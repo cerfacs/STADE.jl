@@ -21,12 +21,6 @@ function jacc_kernel_dotprod_hv_2!(__jacc_i, i_n, lossb, lossbd, u, ub, ubd, ud,
     return nothing
 end
 
-function jacc_kernel_dotprod_1!(__jacc_i, i_n, loss, u, v)
-    i_seq_x = 1 + (__jacc_i - 1)
-    Atomix.@atomic loss[1] += u[i_seq_x] * v[i_seq_x]
-    return nothing
-end
-
 function initstacks_dotprod_b_jacc()
     return nothing
 end
@@ -38,6 +32,6 @@ function dotprod_hv_jacc(loss, lossb, u, ub, v, vb, i_n, lossd, lossbd, ud, ubd,
 end
 
 function dotprod_jacc(loss, u, v, i_n)
-    JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_dotprod_1!(i_n, loss, u, v)
+    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u, v)->u[i_seq_x] * v[i_seq_x]))(u, v))
     return nothing
 end

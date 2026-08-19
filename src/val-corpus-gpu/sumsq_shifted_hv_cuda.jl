@@ -30,16 +30,6 @@ function cuda_kernel_sumsq_shifted_hv_2!(alpha, alphab, alphabd, alphad, beta, b
     return nothing
 end
 
-function cuda_kernel_sumsq_shifted_1!(alpha, beta, i_n, loss, u)
-    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
-    if __tid > div(i_n - 1, 1) + 1
-        return nothing
-    end
-    i_seq_x = 1 + (__tid - 1)
-    CUDA.@atomic loss[1] += (alpha * u[i_seq_x] + beta) ^ 2
-    return nothing
-end
-
 function initstacks_sumsq_shifted_b_cuda()
     return nothing
 end
@@ -60,7 +50,8 @@ function sumsq_shifted_hv_cuda(loss, lossb, u, ub, alpha, alphab, beta, betab, i
 end
 
 function sumsq_shifted_cuda(loss, u, alpha, beta, i_n)
-    nthread_per_block = 256
-    @cuda threads = nthread_per_block blocks = cld(div(i_n - 1, 1) + 1, nthread_per_block) cuda_kernel_sumsq_shifted_1!(alpha, beta, i_n, loss, u)
+    CUDA.@allowscalar begin
+            loss[1] = loss[1] + mapreduce(((__mr_1,)->(alpha * __mr_1 + beta) ^ 2), +, u)
+        end
     return nothing
 end
