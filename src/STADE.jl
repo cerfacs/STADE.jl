@@ -4746,6 +4746,42 @@ function jgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Sym
                 Expr(:(=), :range, n_iter), Expr(:call, closure, arrs...))
 end
 
+# ---- JACC idiomatic-reduction write-back (keep_all_atomic=false) ---
+# `target` (an `arr[idx...]` ref -- see cgen_idiomatic_scalar_reduction)
+# must never be read or written from the host once `arr` may be a JACC
+# device array (see jgen_body's doc comment for the live-GPU failure
+# this fixes). This performs the `target += value` accumulate inside a
+# trivial one-thread device kernel instead, reusing the exact
+# `Atomix.@atomic target += ...` shape jgen_device_assign already emits
+# for reduce_vars. `value` is always pre-signed by the caller (see
+# jgen_body) so this only ever needs `+=`, matching jgen_device_assign's
+# own convention. `wfargs` (from cgen_collect_expr_vars! on `target`)
+# already includes `target`'s own array symbol plus every free var used
+# in its index expression(s) -- nothing else is touched by the kernel.
+# `__jgen_redval` is a synthetic parameter name for the reduction
+# result. It's passed straight through as a `CuArray{Float64,1}` --
+# `JACC.@parallel_reduce` already returns one directly (confirmed via a
+# live GPU diagnostic; it is NOT a host Float64 despite reading like one
+# in the original code's `loss[1] = loss[1] + JACC.@parallel_reduce(...)`)
+# -- and read via `[1]` here, on-device, exactly like every other kernel
+# in this file that reads a boxed scalar (e.g. `loss[1]`, `lossd[1]`).
+function jgen_reduction_writeback_kernel(owner::Symbol, idx::Int, target::Expr, wfargs::Vector{Symbol})
+    jidx = :__jacc_i   # unused (range=1), but every JACC kernel takes the index as its first param -- see jgen_kernel_def's comment
+    redval = :__jgen_redval
+    body = Any[
+        Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
+             Expr(:(+=), target, Expr(:ref, redval, 1))),
+        emit_return_nothing(),
+    ]
+    return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, wfargs..., redval), Expr(:block, body...))
+end
+
+function jgen_reduction_writeback_launch(owner::Symbol, idx::Int, wfargs::Vector{Symbol}, value)
+    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_for"))), nothing,
+                Expr(:(=), :range, 1),
+                Expr(:call, jgen_kernel_fname(owner, idx), wfargs..., value))
+end
+
 
 # True iff `e` contains an `Expr(:ref, ...)` anywhere -- i.e. an
 # element-wise array index -- at any depth. Used by cgen_body to spot
@@ -5278,11 +5314,29 @@ end
 # keep_all_atomic: same meaning and same detector as cgen_body's (see
 # its doc comment) -- a matched loop is replaced by one
 # `JACC.@parallel_reduce` call (jgen_idiomatic_reduction_value) instead
-# of a synthesized `@parallel_for` + `Atomix.@atomic` kernel. No
-# allowscalar-style buffering is needed here the way cgen_body needs
-# it for CUDA/AMDGPU/Metal -- JACC's own host<->device array interface
-# (JACC.array/JACC.to_host, already used a few lines down in jgen_emit)
-# is a separate, pre-existing question this change doesn't touch.
+# of a synthesized `@parallel_for` + `Atomix.@atomic` per-element kernel.
+#
+# CORRECTED (was wrong): an earlier version of this comment claimed no
+# allowscalar-style handling was needed here, unlike cgen_body's
+# CUDA/AMDGPU/Metal path. A live GPU run (validate_corpus_gpu on
+# affine_loss, JACC backend, keep_all_atomic=false) proved that false:
+# `JACC.@parallel_reduce` itself returns a plain host scalar (safe to
+# read), but WRITING that scalar back into `target` (an `arr[idx]`
+# ref whose `arr` is, at runtime, a JACC-device-backed array for any
+# scalar_float argument -- see validate_corpus_gpu.jl's
+# GPU_BACKEND_SPECS) via a bare host-side `target = target op value`
+# is a host getindex/setindex! against a device array. Unlike
+# CUDA.jl/AMDGPU.jl/Metal.jl (which cgen_body wraps in
+# backend.allowscalar_macro), JACC has no such escape hatch, so this
+# raised "Scalar indexing is disallowed" for affine_loss's
+# adjoint/jacc (and, as a cascade, hvp/jacc). Fix: never write `target`
+# from the host at all -- perform the accumulate itself on-device via a
+# synthesized range=1 kernel (jgen_reduction_writeback_kernel /
+# jgen_reduction_writeback_launch below), reusing the exact
+# `Atomix.@atomic target += value` shape jgen_device_assign already
+# uses for reduce_vars accumulation -- the same shape keep_all_atomic=
+# true independently reaches (via its per-element atomic kernel) and
+# which the live GPU run confirmed works.
 function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}; keep_all_atomic::Bool = true)
     exprs = Any[]
     known_consts = Dict{Symbol,Any}()
@@ -5312,7 +5366,61 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     target, op, arrs, term = red
                     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
                     value = jgen_idiomatic_reduction_value(arrs, term, stmt.var, n_iter)
-                    push!(exprs, Expr(:(=), target, Expr(:call, op, target, value)))
+                    # `target - value` (op==:-) is normalized to a signed
+                    # additive term here, matching cgen_flatten_sum's/
+                    # jgen_device_assign's own convention of only ever
+                    # emitting `Atomix.@atomic ... += ...` (never `-=`) --
+                    # see jgen_reduction_writeback_kernel's comment.
+                    signed_value = op == :+ ? value : Expr(:call, :-, value)
+                    widx = length(kernels) + 1
+                    wvars = Set{Symbol}()
+                    cgen_collect_expr_vars!(target, wvars)   # arr + any free vars inside target's index expr(s)
+                    wfargs = sort(collect(wvars); by = string)
+                    # `JACC.@parallel_reduce(...)` must be evaluated as its
+                    # own top-level host statement -- never nested inside
+                    # another JACC launch macro's call-argument list.
+                    # `JACC.@parallel_for` parses `f(args...)` syntactically
+                    # and forwards `args...` into its own device-launch/
+                    # compile machinery; it does not guarantee host-side
+                    # pre-evaluation of a macro-call argument the way a
+                    # plain function call would. Nesting the reduce directly
+                    # in the launch call (an earlier version of this fix)
+                    # produced `GPUCompiler.InvalidIRError` compiling
+                    # `_parallel_for_cuda(...)` on a live GPU run -- a
+                    # nested kernel-launch-and-synchronize construct
+                    # reachable from device-compiled code. The shape used
+                    # everywhere else in this file (including the original
+                    # working code and the passing tangent/jacc path) is:
+                    # `@parallel_reduce` only ever as the RHS of a plain
+                    # host statement. `widx` is unique per write-back site
+                    # within this owner's kernel list, so the temp name
+                    # can't collide with another reduction in the same body.
+                    redvar = Symbol("__jgen_redval_", widx)
+                    push!(exprs, Expr(:(=), redvar, signed_value))
+                    # NOT boxed via JACC.array here, despite that being
+                    # jgen_emit's own reduce_vars convention for a genuine
+                    # host scalar: a live GPU diagnostic
+                    # (`typeof(JACC.@parallel_reduce(...))`) confirmed
+                    # `JACC.@parallel_reduce` already returns a
+                    # device-resident `CuArray{Float64,1}` directly, NOT a
+                    # host Float64 -- despite reading naturally as one in
+                    # the original (pre-fix) code's
+                    # `loss[1] = loss[1] + JACC.@parallel_reduce(...)`,
+                    # which only worked because Julia dispatches `+` on
+                    # mixed scalar/array types via broadcasting-adjacent
+                    # promotion in that specific host-arithmetic context.
+                    # Wrapping it again via `JACC.array([redvar])` (an
+                    # earlier version of this fix) tried to build a
+                    # `CuArray` whose element type is itself a `CuArray`
+                    # -- illegal ("CuArray only supports element types
+                    # that are allocated inline"), confirmed by a live
+                    # run. `redvar` is passed straight through as the
+                    # kernel argument; the kernel indexes `[1]` on it
+                    # on-device (see jgen_reduction_writeback_kernel),
+                    # exactly like reading any other boxed scalar
+                    # (`loss[1]`, `lossd[1]`) elsewhere in this file.
+                    push!(kernels, jgen_reduction_writeback_kernel(owner, widx, target, wfargs))
+                    push!(exprs, jgen_reduction_writeback_launch(owner, widx, wfargs, redvar))
                 else
                     idx = length(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
