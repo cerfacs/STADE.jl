@@ -23,14 +23,14 @@ function ttgc_b(u, ub, i_cell_to_node, cell_vol, cell_volb, skx, skxb, sky, skyb
             aerexb = 0.0
             for i_k = 1:4
                 aeresk = aerex * skx[i_k, i_cell] + aerey * sky[i_k, i_cell] + aerez * skz[i_k, i_cell]
-                factor = dt ^ div(2, 3) * aeresk
+                factor = aeresk * dt ^ 2
                 i_k_node = i_cell_to_node[i_k, i_cell]
                 auxresb = resb[i_k_node]
                 resib = resib + auxresb
                 factorb = beta[i_cell] * auxresb
                 betab[i_cell] = betab[i_cell] + factor * auxresb
-                dtb = dtb + (2 * dt * aeresk * factorb) / 3
-                aereskb = (dt ^ 2 * factorb) / 3
+                aereskb = dt ^ 2 * factorb
+                dtb = dtb + 2 * dt * aeresk * factorb
                 aerexb = aerexb + skx[i_k, i_cell] * aereskb
                 skxb[i_k, i_cell] = skxb[i_k, i_cell] + aerex * aereskb
                 skyb[i_k, i_cell] = skyb[i_k, i_cell] + aerey * aereskb
@@ -76,7 +76,7 @@ function ttgc(u, i_cell_to_node, cell_vol, skx, sky, skz, i_ncell, i_nnode, c, d
             resi = -((dt / 4) * (0.5 - gamma[i_cell]) * vere)
             for i_k = 1:4
                 aeresk = aerex * skx[i_k, i_cell] + aerey * sky[i_k, i_cell] + aerez * skz[i_k, i_cell]
-                factor = dt ^ div(2, 3) * aeresk
+                factor = aeresk * dt ^ 2
                 auxres = resi + factor * beta[i_cell]
                 i_k_node = i_cell_to_node[i_k, i_cell]
                 res[i_k_node] = res[i_k_node] + auxres

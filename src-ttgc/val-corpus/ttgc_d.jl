@@ -22,8 +22,8 @@ function ttgc_d(u, ud, i_cell_to_node, cell_vol, cell_vold, skx, skxd, sky, skyd
             for i_k = 1:4
                 aereskd = ((skx[i_k, i_cell] * aerexd + aerex * skxd[i_k, i_cell]) + aerey * skyd[i_k, i_cell]) + aerez * skzd[i_k, i_cell]
                 aeresk = aerex * skx[i_k, i_cell] + aerey * sky[i_k, i_cell] + aerez * skz[i_k, i_cell]
-                factord = aeresk * (0.3333333333333333 * ((2dt) * dtd)) + (dt ^ 2 / 3) * aereskd
-                factor = (dt ^ 2 / 3) * aeresk
+                factord = dt ^ 2 * aereskd + aeresk * ((2dt) * dtd)
+                factor = aeresk * dt ^ 2
                 auxresd = resid + (beta[i_cell] * factord + factor * betad[i_cell])
                 auxres = resi + factor * beta[i_cell]
                 i_k_noded = 0.0
@@ -55,7 +55,7 @@ function ttgc(u, i_cell_to_node, cell_vol, skx, sky, skz, i_ncell, i_nnode, c, d
             resi = -(dt / 4) * (0.5 - gamma[i_cell]) * vere
             for i_k = 1:4
                 aeresk = aerex * skx[i_k, i_cell] + aerey * sky[i_k, i_cell] + aerez * skz[i_k, i_cell]
-                factor = (dt ^ 2 / 3) * aeresk
+                factor = aeresk * dt ^ 2
                 auxres = resi + factor * beta[i_cell]
                 i_k_node = i_cell_to_node[i_k, i_cell]
                 res[i_k_node] = res[i_k_node] + auxres
