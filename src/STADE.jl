@@ -7412,17 +7412,20 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
     layout = nothing
+    value_needed = exempt = stacks = nothing
     if !keep_push_pop
-        offender = agen_tier_b_offender(kernel)
-        offender === nothing || error("stade_hvp: keep_push_pop=false does not yet support a ragged/data-dependent loop bound (found on `$offender`) -- see mg_vcycle in skill-stade.md's Tier B section")
+        # Tier B: see the matching comment in agen_emit above.
         value_needed = agen_value_needed_vars(kernel)
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
         stacks = agen_stack_map(snapshot_plan)
-        layout = agen_indexed_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = agen_sites)
+        layout = agen_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = agen_sites)
     end
-    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites)
-    initstacks_expr = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout)
+    (initstacks_expr, table_names, tot_names, val_names) = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout,
+                                      active_map = active_map, value_needed = value_needed, exempt = exempt, stacks = stacks, push_pop = agen_sites)
+    tier_b_extra_args = vcat(table_names, tot_names, val_names)
+    hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites,
+                         tier_b_extra_args = tier_b_extra_args)
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
 
@@ -7591,7 +7594,8 @@ end
 # the function that reads a baseline YAML and performs the check --
 # usable directly by a caller pointing at their own hand-written file.
 function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::String;
-                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
+                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
+                                       keep_push_pop::Bool = true, site_level_tbr::Bool = false)
     mode in (:tangent, :adjoint, :hvp) ||
         error("stade_validate_from_baseline: mode must be :tangent, :adjoint, or :hvp, got $mode")
     primal_expr = io_read_corpus_entry(in_path)
@@ -7599,18 +7603,26 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
     baseline = io_read_baseline_yaml(yaml_path)
     val_coerce_int_arrays!(kernel, baseline.values)
     if mode == :tangent
-        tangent_expr = stade_tangent(primal_expr)
+        tangent_expr = stade_tangent(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
         return val_validate_tangent(kernel, primal_expr, tangent_expr, baseline;
                                      trials = trials, epsilon = epsilon, rtol = rtol)
     elseif mode == :adjoint
-        adjoint_out = stade_adjoint(primal_expr)
+        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        # under keep_push_pop=false, `initstacks_*`'s own signature is
+        # whatever agen_emit actually built it with (a minimal free-var
+        # set for Tier A, extended with Phase D's table/total/value
+        # args for a Tier B ragged block) -- read it back from the
+        # GENERATED Expr itself rather than recomputing it here, so
+        # this can never drift from whatever agen_init_emit decided.
+        stack_arg_names = keep_push_pop ? Symbol[] : Symbol.(adjoint_out.initstacks.args[1].args[2:end])
         return val_validate_adjoint(kernel, primal_expr, adjoint_out, baseline;
-                                     trials = trials, epsilon = epsilon, rtol = rtol)
+                                     trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
     else
-        adjoint_out = stade_adjoint(primal_expr)
-        hvp_out = stade_hvp(primal_expr)
+        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        hvp_out = stade_hvp(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        stack_arg_names = keep_push_pop ? Symbol[] : Symbol.(adjoint_out.initstacks.args[1].args[2:end])
         return val_validate_hvp(kernel, primal_expr, adjoint_out, hvp_out, baseline;
-                                 trials = trials, epsilon = epsilon, rtol = rtol)
+                                 trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
     end
 end
 
@@ -7633,28 +7645,31 @@ end
 function stade_validate_tangent_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                      self_check::Bool = true)
+                                      self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
-    return stade_validate_from_baseline(:tangent, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+    return stade_validate_from_baseline(:tangent, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
+                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
 end
 
 function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                      self_check::Bool = true)
+                                      self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
-    return stade_validate_from_baseline(:adjoint, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+    return stade_validate_from_baseline(:adjoint, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
+                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
 end
 
 function stade_validate_hvp_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                   scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                   trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                  self_check::Bool = true)
+                                  self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
-    return stade_validate_from_baseline(:hvp, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol)
+    return stade_validate_from_baseline(:hvp, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
+                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
 end
 
 # Sibling to stade_validate_adjoint_file for a third-party (not

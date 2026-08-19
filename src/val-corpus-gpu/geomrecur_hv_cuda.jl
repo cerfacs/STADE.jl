@@ -33,7 +33,7 @@ end
 
 function geomrecur_hv_cuda(loss, lossb, u, ub, c, cb, i_n, lossd, lossbd, ud, ubd, cd, cbd, u_stack)
     nthread_per_block = 256
-    u_stack_d = CuArray{Float64}(undef, div(i_n - 2, 1) + 1)
+    u_stack_d = CuArray{Float64}(undef, length(u_stack))
     for i_seq_x = 2:i_n
         CUDA.@allowscalar begin
                 u_stack_d[(i_seq_x - 2) + 1] = ud[i_seq_x]

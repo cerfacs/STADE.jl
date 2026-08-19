@@ -4,7 +4,7 @@ function initstacks_stencil_loss_b(i_n)
 end
 
 function stencil_loss_hv(loss, lossb, u, ub, w, wb, i_n, lossd, lossbd, ud, ubd, wd, wbd, w_stack)
-    w_stack_d = Vector{Float64}(undef, div((i_n - 1) - 2, 1) + 1)
+    w_stack_d = Vector{Float64}(undef, length(w_stack))
     for i_x = 2:i_n - 1
         w_stack_d[(i_x - 2) + 1] = wd[i_x]
         w_stack[(i_x - 2) + 1] = w[i_x]

@@ -4,7 +4,7 @@ function initstacks_normcomp_b(i_n)
 end
 
 function normcomp_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, ubd, vd, vbd, wd, wbd, w_stack)
-    w_stack_d = Vector{Float64}(undef, div(i_n - 1, 1) + 1)
+    w_stack_d = Vector{Float64}(undef, length(w_stack))
     for i_x = 1:i_n
         w_stack_d[(i_x - 1) + 1] = wd[i_x]
         w_stack[(i_x - 1) + 1] = w[i_x]

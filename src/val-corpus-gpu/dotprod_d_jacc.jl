@@ -12,12 +12,18 @@ function jacc_kernel_dotprod_d_1!(__jacc_i, i_n, loss, lossd, u, ud, v, vd)
     return nothing
 end
 
+function jacc_kernel_dotprod_1!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function dotprod_d_jacc(loss, lossd, u, ud, v, vd, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_dotprod_d_1!(i_n, loss, lossd, u, ud, v, vd)
     return nothing
 end
 
 function dotprod_jacc(loss, u, v, i_n)
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u, v)->u[i_seq_x] * v[i_seq_x]))(u, v))
+    __jgen_redval_1 = JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u, v)->u[i_seq_x] * v[i_seq_x]))(u, v))
+    JACC.@parallel_for range = 1 jacc_kernel_dotprod_1!(loss, __jgen_redval_1)
     return nothing
 end

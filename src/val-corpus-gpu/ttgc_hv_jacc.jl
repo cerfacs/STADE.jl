@@ -1017,6 +1017,11 @@ function jacc_kernel_ttgc_18!(__jacc_i, i_nnode, mup, node_vol, res2, up)
     return nothing
 end
 
+function jacc_kernel_ttgc_19!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function initstacks_ttgc_b_jacc(i_ncell, i_njac, i_nnode, npernode_half)
     cavgx_stack = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
     cavgy_stack = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
@@ -1037,19 +1042,19 @@ end
 function ttgc_hv_jacc(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_vol, node_volb, skx, skxb, sky, skyb, skz, skzb, i_ncell, i_nnode, c, cb, dt, dtb, beta, betab, gamma, gammab, i_njac, res, resb, res2, res2b, up, upb, mup, mupb, npernode_half, resperio, resperiob, i_node_perio, loss, lossb, ud, ubd, urefd, urefbd, cell_vold, cell_volbd, node_vold, node_volbd, skxd, skxbd, skyd, skybd, skzd, skzbd, cd, cbd, dtd, dtbd, betad, betabd, gammad, gammabd, resd, resbd, res2d, res2bd, upd, upbd, mupd, mupbd, resperiod, resperiobd, lossd, lossbd, cavgx_stack, cavgy_stack, cavgz_stack, vere_stack, re_stack, aerex_stack, aerey_stack, aerez_stack, aeresk_stack, factor_stack, mup_stack, auxu_stack, up_stack)
     dtb = JACC.array([dtb])
     dtbd = JACC.array([dtbd])
-    cavgx_stack_d = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
-    cavgy_stack_d = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
-    cavgz_stack_d = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
-    vere_stack_d = JACC.zeros(Float64, ((((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
-    re_stack_d = JACC.zeros(Float64, ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1)
-    aerex_stack_d = JACC.zeros(Float64, ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1)
-    aerey_stack_d = JACC.zeros(Float64, ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1)
-    aerez_stack_d = JACC.zeros(Float64, ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1)
-    aeresk_stack_d = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
-    factor_stack_d = JACC.zeros(Float64, (((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
-    mup_stack_d = JACC.zeros(Float64, (((((((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(npernode_half - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(npernode_half - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(npernode_half - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(npernode_half - 1, 1) + 1))
-    auxu_stack_d = JACC.zeros(Float64, ((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1)
-    up_stack_d = JACC.zeros(Float64, ((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1))
+    cavgx_stack_d = JACC.zeros(Float64, length(cavgx_stack))
+    cavgy_stack_d = JACC.zeros(Float64, length(cavgy_stack))
+    cavgz_stack_d = JACC.zeros(Float64, length(cavgz_stack))
+    vere_stack_d = JACC.zeros(Float64, length(vere_stack))
+    re_stack_d = JACC.zeros(Float64, length(re_stack))
+    aerex_stack_d = JACC.zeros(Float64, length(aerex_stack))
+    aerey_stack_d = JACC.zeros(Float64, length(aerey_stack))
+    aerez_stack_d = JACC.zeros(Float64, length(aerez_stack))
+    aeresk_stack_d = JACC.zeros(Float64, length(aeresk_stack))
+    factor_stack_d = JACC.zeros(Float64, length(factor_stack))
+    mup_stack_d = JACC.zeros(Float64, length(mup_stack))
+    auxu_stack_d = JACC.zeros(Float64, length(auxu_stack))
+    up_stack_d = JACC.zeros(Float64, length(up_stack))
     aeresk = 0.0
     aerex = 0.0
     aerey = 0.0
@@ -1232,6 +1237,7 @@ function ttgc_jacc(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i
         JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_17!(i_node_perio, mup, npernode_half, resperio)
         JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     end
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_nnode - 1, 1) + 1, (((i_seq_node, u, up, uref)->((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2))(u, up, uref))
+    __jgen_redval_19 = JACC.@parallel_reduce(range = div(i_nnode - 1, 1) + 1, (((i_seq_node, u, up, uref)->((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2))(u, up, uref))
+    JACC.@parallel_for range = 1 jacc_kernel_ttgc_19!(loss, __jgen_redval_19)
     return nothing
 end

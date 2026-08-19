@@ -4,7 +4,7 @@ function initstacks_advection_multi_b(i_nnode, i_nstep)
 end
 
 function advection_multi_hv(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode, ud, ubd, dud, dubd, cd, cbd, dxd, dxbd, dtd, dtbd, du_stack)
-    du_stack_d = Vector{Float64}(undef, (div(i_nstep - 1, 1) + 1) * (div(i_nnode - 2, 1) + 1))
+    du_stack_d = Vector{Float64}(undef, length(du_stack))
     for i_seq_ = 1:i_nstep
         for i_x_advection_diff_c1 = 2:i_nnode
             du_stack_d[((i_seq_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x_advection_diff_c1 - 2)) + 1] = dud[i_x_advection_diff_c1]

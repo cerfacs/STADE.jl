@@ -95,7 +95,7 @@ function advection_hv_cuda(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_n
     dxb = CuArray([dxb])
     dxbd = CuArray([dxbd])
     nthread_per_block = 256
-    du_stack_d = CuArray{Float64}(undef, (div(i_nstep - 1, 1) + 1) * (div(i_nnode - 2, 1) + 1))
+    du_stack_d = CuArray{Float64}(undef, length(du_stack))
     for i_seq_ = 1:i_nstep
         @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 2, 1) + 1, nthread_per_block) cuda_kernel_advection_hv_1!(du, du_stack, du_stack_d, dud, i_nnode, i_seq_, u, ud)
         @cuda threads = nthread_per_block blocks = cld(div(i_nnode - 2, 1) + 1, nthread_per_block) cuda_kernel_advection_hv_2!(c, cd, dt, dtd, du, dud, dx, dxd, i_nnode, u, ud)

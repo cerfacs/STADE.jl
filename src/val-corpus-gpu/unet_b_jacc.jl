@@ -1912,7 +1912,7 @@ function jacc_kernel_unet_49!(__jacc_i, b_out, c1, c_out, dec1out, hw, kh_out, k
     return nothing
 end
 
-function initstacks_unet_b_jacc(c1, c2, hw2, hw4, n_b_mid, n_b_out, n_d1_mid, n_d1_out, n_d2_mid, n_d2_out, n_e1_mid, n_e1_out, n_e2_mid, n_e2_out)
+function initstacks_unet_b_jacc(c1, c2)
     t_e1_stack = JACC.zeros(Float64, div(n_e1_mid - 1, 1) + 1)
     skip1_stack = JACC.zeros(Float64, div(n_e1_out - 1, 1) + 1)
     a11_stack = JACC.zeros(Float64, ((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1)

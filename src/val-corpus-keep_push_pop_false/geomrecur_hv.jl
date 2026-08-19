@@ -4,7 +4,7 @@ function initstacks_geomrecur_b(i_n)
 end
 
 function geomrecur_hv(loss, lossb, u, ub, c, cb, i_n, lossd, lossbd, ud, ubd, cd, cbd, u_stack)
-    u_stack_d = Vector{Float64}(undef, div(i_n - 2, 1) + 1)
+    u_stack_d = Vector{Float64}(undef, length(u_stack))
     for i_seq_x = 2:i_n
         u_stack_d[(i_seq_x - 2) + 1] = ud[i_seq_x]
         u_stack[(i_seq_x - 2) + 1] = u[i_seq_x]

@@ -25,6 +25,11 @@ function jacc_kernel_normcomp_1!(__jacc_i, i_n, u, v, w)
     return nothing
 end
 
+function jacc_kernel_normcomp_2!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function normcomp_d_jacc(loss, lossd, u, ud, v, vd, w, wd, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_normcomp_d_1!(i_n, u, ud, v, vd, w, wd)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_normcomp_d_2!(i_n, loss, lossd, w, wd)
@@ -33,6 +38,7 @@ end
 
 function normcomp_jacc(loss, u, v, w, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_normcomp_1!(i_n, u, v, w)
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, w)->w[i_seq_x] ^ 2))(w))
+    __jgen_redval_2 = JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, w)->w[i_seq_x] ^ 2))(w))
+    JACC.@parallel_for range = 1 jacc_kernel_normcomp_2!(loss, __jgen_redval_2)
     return nothing
 end

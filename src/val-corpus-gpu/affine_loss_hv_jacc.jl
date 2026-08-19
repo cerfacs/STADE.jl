@@ -45,6 +45,11 @@ function jacc_kernel_affine_loss_1!(__jacc_i, a, b, i_n, u, v)
     return nothing
 end
 
+function jacc_kernel_affine_loss_2!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function initstacks_affine_loss_b_jacc()
     return nothing
 end
@@ -59,6 +64,7 @@ end
 
 function affine_loss_jacc(loss, u, a, b, v, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_affine_loss_1!(a, b, i_n, u, v)
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, v)->v[i_seq_x] ^ 2))(v))
+    __jgen_redval_2 = JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, v)->v[i_seq_x] ^ 2))(v))
+    JACC.@parallel_for range = 1 jacc_kernel_affine_loss_2!(loss, __jgen_redval_2)
     return nothing
 end

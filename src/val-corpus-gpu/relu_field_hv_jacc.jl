@@ -58,6 +58,11 @@ function jacc_kernel_relu_field_1!(__jacc_i, i_n, u, v)
     return nothing
 end
 
+function jacc_kernel_relu_field_2!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function initstacks_relu_field_b_jacc(i_n)
     branch_stack = JACC.zeros(Int64, div(i_n - 1, 1) + 1)
     return branch_stack
@@ -73,6 +78,7 @@ end
 
 function relu_field_jacc(loss, u, v, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_relu_field_1!(i_n, u, v)
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, v)->v[i_seq_x]))(v))
+    __jgen_redval_2 = JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, v)->v[i_seq_x]))(v))
+    JACC.@parallel_for range = 1 jacc_kernel_relu_field_2!(loss, __jgen_redval_2)
     return nothing
 end

@@ -12,6 +12,11 @@ function jacc_kernel_geomrecur_d_1!(__jacc_i, i_n, loss, lossd, u, ud)
     return nothing
 end
 
+function jacc_kernel_geomrecur_1!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function geomrecur_d_jacc(loss, lossd, u, ud, c, cd, i_n)
     for i_seq_x = 2:i_n
         ud[i_seq_x] = u[i_seq_x - 1] * cd + c * ud[i_seq_x - 1]
@@ -25,6 +30,7 @@ function geomrecur_jacc(loss, u, c, i_n)
     for i_seq_x = 2:i_n
         u[i_seq_x] = c * u[i_seq_x - 1]
     end
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u)->u[i_seq_x] ^ 2))(u))
+    __jgen_redval_1 = JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u)->u[i_seq_x] ^ 2))(u))
+    JACC.@parallel_for range = 1 jacc_kernel_geomrecur_1!(loss, __jgen_redval_1)
     return nothing
 end

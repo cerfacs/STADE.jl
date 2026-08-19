@@ -71,7 +71,7 @@ function advection_multi_hv_jacc(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nste
     dtbd = JACC.array([dtbd])
     dxb = JACC.array([dxb])
     dxbd = JACC.array([dxbd])
-    du_stack_d = JACC.zeros(Float64, (div(i_nstep - 1, 1) + 1) * (div(i_nnode - 2, 1) + 1))
+    du_stack_d = JACC.zeros(Float64, length(du_stack))
     for i_seq_ = 1:i_nstep
         JACC.@parallel_for range = div(i_nnode - 2, 1) + 1 jacc_kernel_advection_multi_hv_1!(du, du_stack, du_stack_d, dud, i_nnode, i_seq_, u, ud)
         JACC.@parallel_for range = div(i_nnode - 2, 1) + 1 jacc_kernel_advection_multi_hv_2!(c, cd, dt, dtd, du, dud, dx, dxd, i_nnode, u, ud)

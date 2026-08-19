@@ -65,6 +65,11 @@ function jacc_kernel_pipeline_2!(__jacc_i, i_n, u, v, w)
     return nothing
 end
 
+function jacc_kernel_pipeline_3!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function initstacks_pipeline_b_jacc()
     return nothing
 end
@@ -82,6 +87,7 @@ end
 function pipeline_jacc(loss, u, v, w, i_n)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_pipeline_1!(i_n, u, v)
     JACC.@parallel_for range = div(i_n - 1, 1) + 1 jacc_kernel_pipeline_2!(i_n, u, v, w)
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, w)->w[i_seq_x]))(w))
+    __jgen_redval_3 = JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, w)->w[i_seq_x]))(w))
+    JACC.@parallel_for range = 1 jacc_kernel_pipeline_3!(loss, __jgen_redval_3)
     return nothing
 end

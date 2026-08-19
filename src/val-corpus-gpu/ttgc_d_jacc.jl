@@ -458,6 +458,11 @@ function jacc_kernel_ttgc_18!(__jacc_i, i_nnode, mup, node_vol, res2, up)
     return nothing
 end
 
+function jacc_kernel_ttgc_19!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function ttgc_d_jacc(u, ud, uref, urefd, i_cell_to_node, cell_vol, cell_vold, node_vol, node_vold, skx, skxd, sky, skyd, skz, skzd, i_ncell, i_nnode, c, cd, dt, dtd, beta, betad, gamma, gammad, i_njac, res, resd, res2, res2d, up, upd, mup, mupd, npernode_half, resperio, resperiod, i_node_perio, loss, lossd)
     JACC.@parallel_for range = div(i_ncell - 1, 1) + 1 jacc_kernel_ttgc_d_1!(beta, betad, c, cd, cell_vol, cell_vold, dt, dtd, gamma, gammad, i_cell_to_node, i_ncell, res, res2, res2d, resd, skx, skxd, sky, skyd, skz, skzd, u, ud)
     JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_d_2!(i_node_perio, npernode_half, res, resd, resperio, resperiod)
@@ -508,6 +513,7 @@ function ttgc_jacc(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i
         JACC.@parallel_for range = div(npernode_half - 1, 1) + 1 jacc_kernel_ttgc_17!(i_node_perio, mup, npernode_half, resperio)
         JACC.@parallel_for range = div(i_nnode - 1, 1) + 1 jacc_kernel_ttgc_18!(i_nnode, mup, node_vol, res2, up)
     end
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_nnode - 1, 1) + 1, (((i_seq_node, u, up, uref)->((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2))(u, up, uref))
+    __jgen_redval_19 = JACC.@parallel_reduce(range = div(i_nnode - 1, 1) + 1, (((i_seq_node, u, up, uref)->((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2))(u, up, uref))
+    JACC.@parallel_for range = 1 jacc_kernel_ttgc_19!(loss, __jgen_redval_19)
     return nothing
 end

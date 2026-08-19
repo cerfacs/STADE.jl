@@ -1,4 +1,4 @@
-function initstacks_unet_b(c1, c2, c21, c3, c32, c_in, hw, hw2, hw4, n_b_mid, n_b_midpad, n_b_out, n_cat1pad, n_cat2pad, n_d1_mid, n_d1_midpad, n_d1_out, n_d2_mid, n_d2_midpad, n_d2_out, n_e1_mid, n_e1_midpad, n_e1_out, n_e2_mid, n_e2_midpad, n_e2_out, n_p1pad, n_p2pad, n_xpad0)
+function initstacks_unet_b(c1, c2, c3, c_in)
     xpad0_stack = Vector{Float64}(undef, (div(n_xpad0 - 1, 1) + 1) + (div(c_in * hw - 1, 1) + 1))
     t_e1_stack = Vector{Float64}(undef, (div(c1 * hw - 1, 1) + 1) + (div(n_e1_mid - 1, 1) + 1))
     t_e1pad_stack = Vector{Float64}(undef, (div(n_e1_midpad - 1, 1) + 1) + (div(c1 * hw - 1, 1) + 1))

@@ -21,6 +21,11 @@ function jacc_kernel_weightedsumsq_hv_2!(__jacc_i, i_n, lossb, lossbd, u, ub, ub
     return nothing
 end
 
+function jacc_kernel_weightedsumsq_1!(__jacc_i, loss, __jgen_redval)
+    Atomix.@atomic loss[1] += __jgen_redval[1]
+    return nothing
+end
+
 function initstacks_weightedsumsq_b_jacc()
     return nothing
 end
@@ -32,6 +37,7 @@ function weightedsumsq_hv_jacc(loss, lossb, u, ub, w, wb, i_n, lossd, lossbd, ud
 end
 
 function weightedsumsq_jacc(loss, u, w, i_n)
-    loss[1] = loss[1] + JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u, w)->w[i_seq_x] * u[i_seq_x] ^ 2))(u, w))
+    __jgen_redval_1 = JACC.@parallel_reduce(range = div(i_n - 1, 1) + 1, (((i_seq_x, u, w)->w[i_seq_x] * u[i_seq_x] ^ 2))(u, w))
+    JACC.@parallel_for range = 1 jacc_kernel_weightedsumsq_1!(loss, __jgen_redval_1)
     return nothing
 end

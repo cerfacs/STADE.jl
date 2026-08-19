@@ -4,7 +4,7 @@ function initstacks_pipeline_b(i_n)
 end
 
 function pipeline_hv(loss, lossb, u, ub, v, vb, w, wb, i_n, lossd, lossbd, ud, ubd, vd, vbd, wd, wbd, v_stack)
-    v_stack_d = Vector{Float64}(undef, div(i_n - 1, 1) + 1)
+    v_stack_d = Vector{Float64}(undef, length(v_stack))
     for i_x = 1:i_n
         v_stack_d[(i_x - 1) + 1] = vd[i_x]
         v_stack[(i_x - 1) + 1] = v[i_x]

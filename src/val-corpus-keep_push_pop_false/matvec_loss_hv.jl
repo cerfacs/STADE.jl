@@ -4,7 +4,7 @@ function initstacks_matvec_loss_b(i_m, i_n)
 end
 
 function matvec_loss_hv(loss, lossb, a, ab, u, ub, v, vb, i_m, i_n, lossd, lossbd, ad, abd, ud, ubd, vd, vbd, v_stack)
-    v_stack_d = Vector{Float64}(undef, (div(i_m - 1, 1) + 1) * (div(i_n - 1, 1) + 1))
+    v_stack_d = Vector{Float64}(undef, length(v_stack))
     for i_i = 1:i_m
         for i_seq_j = 1:i_n
             v_stack_d[((i_i - 1) * (div(i_n - 1, 1) + 1) + (i_seq_j - 1)) + 1] = vd[i_i]
