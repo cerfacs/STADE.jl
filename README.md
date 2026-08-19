@@ -12,8 +12,6 @@ of monoprocessor numerical kernels written using the Julia programming language.
 
 [Try STADE.jl out in our website!](https://cerfacs.github.io/STADE.jl)
 
-[Here](https://github.com/cerfacs/STADE.jl/blob/main/claude/skill-stade-kernels.md) are defined STADE-differentiable kernels.
-
 ## Why STADE.jl ?
 
 This is a legitimate question since the Automatic Differentiation (AD) ecosystem in Julia is already rich (see [DifferentiationInterface.jl](https://github.com/JuliaDiff/DifferentiationInterface.jl)). In a nutshell, our motivations lean on obtaining:
@@ -29,6 +27,8 @@ This is a legitimate question since the Automatic Differentiation (AD) ecosystem
 - **Accessible** scalable differentiable computing\
   STADE generates GPU-ported adjoints / tangents / hvp from monoprocessor kernels, which are easy to craft and debug.
 
+
+For now, the aforementioned goals come at the cost of supporting only a subset of the language abstractions. STADE focuses on differentiable computing which is a subset of differentiable programming. [Here are defined STADE-differentiable kernels.](https://github.com/cerfacs/STADE.jl/blob/main/claude/skill-stade-kernels.md)
 
 ## First use
 
