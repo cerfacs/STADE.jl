@@ -203,7 +203,7 @@ const GPU_BACKEND_SPECS = Dict(
 """
     validate_corpus_gpu(dir="val-corpus-gpu";
                          backends=(:cuda, :jacc), keep_push_pop=false,
-                         site_level_tbr=true, rtol=1e-6)
+                         site_level_tbr=true, keep_all_atomic=false, rtol=1e-6)
 
 GPU-porting counterpart to `validate_corpus_keep_push_pop_false_site_level_tbr_true`.
 Same corpus dir and generation flags by default -- `keep_push_pop=false`'s
@@ -247,7 +247,7 @@ not something to silently work around here).
 """
 function validate_corpus_gpu(dir::String = "val-corpus-gpu";
                               backends::Tuple = (:cuda, :jacc),
-                              keep_push_pop::Bool = false, site_level_tbr::Bool = true,
+                              keep_push_pop::Bool = false, site_level_tbr::Bool = true, keep_all_atomic=false,
                               rtol::Float64 = 1e-6)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") || endswith(f, ".yaml") ||
@@ -310,7 +310,7 @@ function validate_corpus_gpu(dir::String = "val-corpus-gpu";
                 cpu_path = joinpath(dir, name * suffix)
                 gpu_path = joinpath(dir, name * suffix[1:end-3] * spec.suffix * ".jl")
                 try
-                    spec.genfile(cpu_path, gpu_path)
+                    spec.genfile(cpu_path, gpu_path; keep_all_atomic = keep_all_atomic)
                     include(gpu_path)
                     gpu_ok[mode] = true
                 catch e
