@@ -10494,3 +10494,91 @@ let
     @assert isempty(plan2) "ii_recomp_reads_own_write: expected refusal (recomputed scalar reads an array the body writes), got $plan2"
     println("ii_plan backward-recompute array-corruption regression suite (2 cases) OK")
 end
+
+# ---- :recompute end-to-end + footprint regression -----------------
+# The array-escape suites above assert only that no FUSING kind is
+# chosen; `all(v -> v == :recompute, ...)` is vacuously true on an
+# empty plan, so they prove nothing about the code :recompute actually
+# generates. E1 closes that: an escaping array write whose consumer
+# reads it NONLINEARLY after the loop, validated numerically in both
+# flag states -- and compared on ARRAY STATE too, since a recompute
+# defect can leave gradients bit-perfect while the primal diverges
+# (see the backward-recompute suite above).
+#
+# E2 is the footprint guard. Nothing else in this file fails if a
+# future change silently re-blocks classification, and the cost of
+# that is invisible: correct gradients, quietly more memory. It uses
+# a synthetic kernel of the shape this kind targets (a scalar chain
+# feeding a scatter-accumulate consumed by a later loop), not a corpus
+# kernel.
+
+let
+    mktempdir() do dir
+        path1 = joinpath(dir, "ii_recompute_e2e.jl")
+        write(path1, """
+        function ii_recompute_e2e(x, r, y, n, out)
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+                r[i] = t
+            end
+            out[1] = r[1] * r[1]
+            return nothing
+        end
+        """)
+        k1 = parse_kernel(io_read_corpus_entry(path1))
+        plan1 = stade_ii_plan_check(k1)
+        @assert length(plan1) == 1 && only(values(plan1)) == :recompute "ii_recompute_e2e: expected one :recompute site (r escapes to a nonlinear read), got $plan1"
+        for (mode, fn) in ((:adjoint, stade_validate_adjoint_file), (:hvp, stade_validate_hvp_file))
+            ru = fn(path1; trials = 10, fuse_ii_loops = false)
+            rf = fn(path1; trials = 10, fuse_ii_loops = true)
+            @assert ru.ok "ii_recompute_e2e [$mode]: unfused baseline failed, max_rel_err=$(ru.max_rel_err)"
+            @assert rf.ok "ii_recompute_e2e [$mode]: :recompute failed (max_rel_err=$(rf.max_rel_err)) -- the loop's scalars are rebuilt at the backward position while the escaping array write stays put"
+        end
+
+        # E2: footprint. The scalar chain's stacks must all disappear
+        # under fusion, and all be present without it.
+        path2 = joinpath(dir, "ii_recompute_footprint.jl")
+        write(path2, """
+        function ii_recompute_footprint(u, c, sk, cell_vol, node_vol, i_c2n, i_ncell, i_nnode, res, up)
+            for i_cell = 1:i_ncell
+                cavg = 0.0
+                for i_seq_loc = 1:4
+                    i_node = i_c2n[i_seq_loc, i_cell]
+                    cavg = cavg + c[i_node] / 4
+                end
+                for i_seq_loc = 1:4
+                    i_node = i_c2n[i_seq_loc, i_cell]
+                    vere = u[i_node] * sk[i_seq_loc, i_cell]
+                    re = vere / cell_vol[i_cell]
+                    aere = cavg * re
+                    for i_seq_k = 1:4
+                        aeresk = aere * sk[i_seq_k, i_cell]
+                        factor = aeresk * aeresk
+                        i_kn = i_c2n[i_seq_k, i_cell]
+                        res[i_kn] = res[i_kn] + factor
+                    end
+                end
+            end
+            for i_node = 1:i_nnode
+                up[i_node] = res[i_node] / node_vol[i_node]
+            end
+            return nothing
+        end
+        """)
+        # `factor` is read only linearly (`res += factor`), so it is
+        # never value-needed and never had a stack -- listing it would
+        # make this guard assert something vacuous.
+        chain = ["cavg_stack", "vere_stack", "re_stack", "aere_stack", "aeresk_stack"]
+        sig_off = string(stade_adjoint(io_read_corpus_entry(path2); fuse_ii_loops = false).adjoint.args[1])
+        sig_on  = string(stade_adjoint(io_read_corpus_entry(path2); fuse_ii_loops = true).adjoint.args[1])
+        missing_off = [nm for nm in chain if !occursin(nm, sig_off)]
+        @assert isempty(missing_off) "ii_recompute_footprint: the unfused baseline should carry every chain stack; $missing_off absent -- this guard is measuring the wrong thing"
+        still_on = [nm for nm in chain if occursin(nm, sig_on)]
+        @assert isempty(still_on) "ii_recompute_footprint: $still_on survived fusion -- classification has silently re-blocked and the memory saving is gone (gradients stay correct, so nothing else here would notice)"
+        rf2 = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = true)
+        @assert rf2.ok "ii_recompute_footprint: fused adjoint failed, max_rel_err=$(rf2.max_rel_err)"
+    end
+    println("ii_plan :recompute end-to-end + footprint regression suite (2 cases) OK")
+end
