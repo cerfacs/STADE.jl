@@ -1041,3 +1041,42 @@ this file combining both flags end to end.
 
 **Full validation sweep after this fix**, all clean: same 84/84 × 3,
 232/20 GPU as every round before it.
+
+## `site_level_tbr` removed as an opt-in flag — now always on
+
+Per direct request: `site_level_tbr::Bool` is gone from every function
+signature in `STADE.jl` (`stade_tangent`, `stade_adjoint`, `stade_hvp`,
+their `_corpus`/`_file` wrappers, `stade_validate_from_baseline`, and the
+three `stade_validate_*_file` functions). Site-level TBR is no longer a
+choice — `stade_site_level_tbr_check(kernel)` (the cross-checked snap_*/
+agen_* computation, unchanged) now runs unconditionally inside
+`stade_adjoint`/`stade_hvp`, the same way it previously only ran when the
+flag was `true`.
+
+**One regression test needed updating for more than cosmetic reasons.**
+The `agen_ii_override_ectx` interaction test (added last round, after the
+`site_level_tbr=true` + `fuse_ii_loops=true` stack-imbalance bug) used to
+compare `site_level_tbr=false` against `site_level_tbr=true` explicitly.
+With the flag gone there's only one mode to test — updated to a single
+validation call, keeping the same kernel shape that originally caught the
+bug, so a regression of `agen_ii_override_ectx` itself would still be
+caught.
+
+**External validation scripts weren't touched** (`validate_corpus_keep_
+push_pop_false_site_level_tbr_true.jl`, `validate_corpus_gpu.jl`), since
+they're outside `STADE.jl` and weren't part of the request — but both
+explicitly pass `site_level_tbr` as a kwarg and would now error unmodified.
+Verified the underlying change is sound by running locally-adjusted copies
+(the kwarg simply removed from each call, since it's the only behavior now)
+rather than skipping this check: 84/84 `ok` and 232 `gen_ok`/20 `gen_error`
+(the same pre-existing, unrelated class flagged from the start), both
+unchanged from before this round. Worth noting for whoever maintains those
+scripts going forward: `validate_corpus_keep_push_pop_false_site_level_tbr_
+true.jl` and `validate_corpus_keep_push_pop_false.jl` now test the exact
+same thing (site-level TBR is no longer a variable between them) and could
+reasonably be merged or one retired.
+
+**Full validation sweep**, all clean: `validate_corpus.jl` and
+`validate_corpus_keep_push_pop_false.jl` unmodified and still 84/84 `ok`
+(neither ever referenced the flag); the two scripts that did, run via
+locally-adjusted copies, matched their pre-change results exactly.

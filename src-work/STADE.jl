@@ -7749,7 +7749,7 @@ end
 
 function stade_tangent(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
-                        keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+                        keep_push_pop::Bool=true)
     # accepted, documented, and otherwise ignored -- tgen_* never
     # emits push!/pop! at all (every active statement gets a shadow
     # line directly, no stacks), so this is a pure interface-
@@ -7771,6 +7771,8 @@ end
 # consumes its own, agen_emit/hvp_emit consume theirs, keeping each
 # stage's own duplicate as its sole input per the stage-purity
 # convention -- this function is the one place allowed to compare them.
+# Always run -- site-level TBR is no longer an opt-in flag, it's how
+# every snapshot decision in this file is made, unconditionally.
 function stade_site_level_tbr_check(kernel)
     snap_sites = snap_value_needed_sites(kernel)
     agen_sites = agen_value_needed_sites(kernel)
@@ -7781,10 +7783,10 @@ end
 
 function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
-                        keep_push_pop::Bool=true, site_level_tbr::Bool=false, fuse_ii_loops::Bool=false)
+                        keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
     active_map = act_analyze(kernel)
-    snap_sites, agen_sites = site_level_tbr ? stade_site_level_tbr_check(kernel) : (nothing, nothing)
+    snap_sites, agen_sites = stade_site_level_tbr_check(kernel)
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
     ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
@@ -7793,10 +7795,10 @@ end
 
 function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                     dependents::Union{Vector{Symbol},Nothing}=nothing,
-                    keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+                    keep_push_pop::Bool=true)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
     active_map = act_analyze(kernel)
-    snap_sites, agen_sites = site_level_tbr ? stade_site_level_tbr_check(kernel) : (nothing, nothing)
+    snap_sites, agen_sites = stade_site_level_tbr_check(kernel)
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
     layout = nothing
@@ -7823,19 +7825,19 @@ end
 # overrides still don't belong here -- a caller who needs them can run
 # inl_inline_calls directly and call stade_tangent/stade_adjoint/
 # stade_hvp per kernel.
-function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr) for (name, expr) in inlined)
+    return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop) for (name, expr) in inlined)
 end
 
-function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false, fuse_ii_loops::Bool=false)
+function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
+    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
 end
 
-function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_hvp(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr) for (name, expr) in inlined)
+    return Dict(name => stade_hvp(expr; keep_push_pop = keep_push_pop) for (name, expr) in inlined)
 end
 
 # reads any number of kernels from one file (a lone kernel, or a
@@ -7850,29 +7852,29 @@ end
 # handles both: a single-kernel file is just a one-entry corpus, where
 # inlining is a no-op and this reduces to differentiating that lone
 # kernel exactly as before.
-function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_tangent(inlined[entry_name]; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+    generated = stade_tangent(inlined[entry_name]; keep_push_pop = keep_push_pop)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated]))
     return out_path
 end
 
-function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true, site_level_tbr::Bool=false, fuse_ii_loops::Bool=false)
+function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr, fuse_ii_loops = fuse_ii_loops)
+    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.adjoint]))
     return out_path
 end
 
-function stade_hvp_file(in_path::String, out_path::String; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+function stade_hvp_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_hvp(inlined[entry_name]; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+    generated = stade_hvp(inlined[entry_name]; keep_push_pop = keep_push_pop)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.hvp]))
     return out_path
 end
@@ -7983,7 +7985,7 @@ end
 # usable directly by a caller pointing at their own hand-written file.
 function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::String;
                                        trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                       keep_push_pop::Bool = true, site_level_tbr::Bool = false, fuse_ii_loops::Bool = false)
+                                       keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
     mode in (:tangent, :adjoint, :hvp) ||
         error("stade_validate_from_baseline: mode must be :tangent, :adjoint, or :hvp, got $mode")
     primal_expr = io_read_corpus_entry(in_path)
@@ -7991,11 +7993,11 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
     baseline = io_read_baseline_yaml(yaml_path)
     val_coerce_int_arrays!(kernel, baseline.values)
     if mode == :tangent
-        tangent_expr = stade_tangent(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        tangent_expr = stade_tangent(primal_expr; keep_push_pop = keep_push_pop)
         return val_validate_tangent(kernel, primal_expr, tangent_expr, baseline;
                                      trials = trials, epsilon = epsilon, rtol = rtol)
     elseif mode == :adjoint
-        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr, fuse_ii_loops = fuse_ii_loops)
+        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
         # under keep_push_pop=false, `initstacks_*`'s own signature is
         # whatever agen_emit actually built it with (a minimal free-var
         # set for Tier A, extended with Phase D's table/total/value
@@ -8006,8 +8008,8 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
         return val_validate_adjoint(kernel, primal_expr, adjoint_out, baseline;
                                      trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
     else
-        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
-        hvp_out = stade_hvp(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop)
+        hvp_out = stade_hvp(primal_expr; keep_push_pop = keep_push_pop)
         stack_arg_names = keep_push_pop ? Symbol[] : Symbol.(adjoint_out.initstacks.args[1].args[2:end])
         return val_validate_hvp(kernel, primal_expr, adjoint_out, hvp_out, baseline;
                                  trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
@@ -8033,31 +8035,31 @@ end
 function stade_validate_tangent_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                      self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
+                                      self_check::Bool = true, keep_push_pop::Bool = true)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:tangent, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
-                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+                                         keep_push_pop = keep_push_pop)
 end
 
 function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                      self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false, fuse_ii_loops::Bool = false)
+                                      self_check::Bool = true, keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:adjoint, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
-                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr, fuse_ii_loops = fuse_ii_loops)
+                                         keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
 end
 
 function stade_validate_hvp_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                   scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                   trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                  self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
+                                  self_check::Bool = true, keep_push_pop::Bool = true)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:hvp, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
-                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+                                         keep_push_pop = keep_push_pop)
 end
 
 # Sibling to stade_validate_adjoint_file for a third-party (not
@@ -9953,24 +9955,24 @@ let
     println("ii_plan Phase 3 :mixed end-to-end numerical regression (2 cases) OK")
 end
 
-# ---- ii_* site_level_tbr interaction regression test ---------------
-# Found by direct user report, not internal testing: fuse_ii_loops=true
-# combined with site_level_tbr=true produced genuinely WRONG gradients
-# on ttgc.jl (max_rel_err ~0.17), not just a missed optimization.
-# Root cause: agen_push_pop_source ignores `value_needed` entirely once
-# ectx.push_pop is set (site_level_tbr's own, ii_plan-unaware per-site
-# Dict takes over completely for the push/pop DECISION) -- so excluding
-# a var from value_needed, this file's only mechanism for suppressing
-# a push/pop pair everywhere else, had zero effect under site_level_tbr.
-# For `:reduction` specifically this left a genuinely unmatched push at
-# the forward position (site_level_tbr's stale decision still said to
-# push cavgx et al., but fusion's whole design assumes nothing there
-# ever needs popping), permanently growing the stack and corrupting
-# every later, unrelated pop. This is the ONE test in this file
-# combining site_level_tbr=true with fuse_ii_loops=true end to end --
-# every other fuse_ii_loops regression here only ever exercised the
-# default site_level_tbr=false path, which is exactly why this gap
-# went unnoticed through several rounds of otherwise-careful testing.
+# ---- ii_* site-level TBR + fuse_ii_loops interaction regression ----
+# Found by direct user report, not internal testing, back when
+# site_level_tbr was still an opt-in flag: fuse_ii_loops=true combined
+# with site_level_tbr=true produced genuinely WRONG gradients on
+# ttgc.jl (max_rel_err ~0.17), not just a missed optimization. Root
+# cause: agen_push_pop_source ignores `value_needed` entirely once
+# ectx.push_pop is set (site-level TBR's own, ii_plan-unaware per-site
+# Dict takes over completely for the push/pop DECISION) -- so
+# excluding a var from value_needed, this file's only mechanism for
+# suppressing a push/pop pair everywhere else, had zero effect once
+# site-level TBR was active. For `:reduction` specifically this left a
+# genuinely unmatched push at the forward position (the stale decision
+# still said to push cavgx et al., but fusion's whole design assumes
+# nothing there ever needs popping), permanently growing the stack and
+# corrupting every later, unrelated pop. Now that site-level TBR is
+# always on (no more opt-in flag -- see agen_ii_override_ectx, which
+# is what actually fixes this), this test locks in that fuse_ii_loops
+# still works correctly under the ONLY mode that now exists.
 
 let
     mktempdir() do dir
@@ -9985,10 +9987,8 @@ let
             return nothing
         end
         """)
-        r_false = stade_validate_adjoint_file(path; trials = 10, fuse_ii_loops = true, site_level_tbr = false)
-        r_true  = stade_validate_adjoint_file(path; trials = 10, fuse_ii_loops = true, site_level_tbr = true)
-        @assert r_false.ok "ii_tbr_interaction: fuse_ii_loops=true, site_level_tbr=false failed, max_rel_err=$(r_false.max_rel_err)"
-        @assert r_true.ok "ii_tbr_interaction: fuse_ii_loops=true, site_level_tbr=true failed (max_rel_err=$(r_true.max_rel_err)) -- this is exactly the stack-imbalance shape that produced wrong gradients before agen_ii_override_ectx existed"
+        r = stade_validate_adjoint_file(path; trials = 10, fuse_ii_loops = true)
+        @assert r.ok "ii_tbr_interaction: fuse_ii_loops=true failed (max_rel_err=$(r.max_rel_err)) -- this is exactly the stack-imbalance shape that produced wrong gradients before agen_ii_override_ectx existed"
     end
-    println("ii_plan Phase 3 site_level_tbr interaction regression OK")
+    println("ii_plan Phase 3 site-level TBR interaction regression OK")
 end
