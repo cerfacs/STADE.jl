@@ -2345,7 +2345,7 @@ end
 # into the exact lhs location as the very first thing its backward
 # code does, before any contribution is computed.
 
-function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, push_pop = nothing)
+function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, push_pop = nothing, ii_plan = nothing)
     active_map = act_analyze(kernel)
     layout = nothing
     value_needed = exempt = stacks = nothing
@@ -2359,6 +2359,14 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
         # block genuinely can't resolve -- see the "Tier B
         # (implemented...)" comment above agen_local_position and
         # agen_layout's own docstring.
+        # NOTE: ii_plan/fuse_ii_loops has not been validated in
+        # combination with keep_push_pop=false. agen_layout/
+        # agen_stack_map are not ii_plan-aware, so a fused var's stack
+        # would still be sized and allocated here as if unfused; it
+        # would simply never be written to or read from (since
+        # agen_emit_ii_loop never calls push/pop for it), which should
+        # be harmless but is untested -- treat this combination as
+        # unsupported until it's actually exercised.
         value_needed = agen_value_needed_vars(kernel)
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
@@ -2369,7 +2377,22 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
                                       active_map = active_map, value_needed = value_needed, exempt = exempt, stacks = stacks, push_pop = push_pop)
     tier_b_extra_args = vcat(table_names, tot_names, val_names)
     adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = push_pop,
-                                      tier_b_extra_args = tier_b_extra_args)
+                                      tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan)
+    # fuse_ii_loops can leave a stack with zero remaining push!/pop!
+    # calls anywhere in the generated body (every write-site that
+    # would have used it got fused away) -- checked from the actual
+    # generated code, never predicted ahead of time, since a var's
+    # ii_plan coverage does NOT by itself guarantee its stack is fully
+    # unused (see agen_drop_unused_stack_args's own comment). Scoped
+    # to keep_push_pop=true, matching fuse_ii_loops's existing scope.
+    if keep_push_pop && ii_plan !== nothing
+        used = agen_used_stack_names(adjoint_expr)
+        unused_stacks = Set(nm for nm in agen_stack_names(snapshot_plan) if !(nm in used))
+        if !isempty(unused_stacks)
+            adjoint_expr = agen_drop_unused_stack_args(adjoint_expr, unused_stacks)
+            initstacks_expr = agen_drop_unused_stack_allocs(initstacks_expr, unused_stacks)
+        end
+    end
     return (adjoint = adjoint_expr, initstacks = initstacks_expr)
 end
 
@@ -2398,7 +2421,7 @@ function agen_signature_args(sig)
 end
 
 function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing,
-                            tier_b_extra_args::Vector{Symbol} = Symbol[])
+                            tier_b_extra_args::Vector{Symbol} = Symbol[], ii_plan = nothing)
     fname = agen_fname(kernel.sig.name)
     stacks = agen_stack_map(sites)
     # `tier_b_extra_args` (Phase D) is the SAME table/total/value-table
@@ -2415,12 +2438,12 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
     unsafe = agen_unsafe_int_vars(kernel)
     exempt = agen_exempt_vars(kernel, value_needed)
 
-    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop)
+    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan)
 
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map))
     append!(body, agen_local_shadow_inits(kernel, active_map))
-    append!(body, agen_forward_body(kernel.body, kernel.sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx))
+    append!(body, agen_forward_body(kernel.body, kernel.sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, lin_body = lin_plan, unsafe = unsafe))
     append!(body, agen_backward_body(lin_plan, kernel.body, kernel.sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx))
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
@@ -2707,6 +2730,32 @@ function agen_nested_write_vars(body, kinds)
     return Set(v for v in vars if kinds[v] == :scalar_float)
 end
 
+# True iff EVERY assignment to `var` within `body` (recursively) sits
+# inside an ii_plan-covered (:independent or :reduction) loop. Once
+# inside such a loop, everything nested further inside it counts as
+# covered too, regardless of depth -- matches how ii_plan's own
+# classification already covers a whole stmt.body recursively (e.g.
+# cgen_locally_assigned_scalars/ii_escapes_nested), so a var written
+# only within nested :for/:if structure inside an already-covered
+# loop needs no separate re-proof here.
+function agen_ii_covered_write_check(body, var, ii_plan, in_covered)
+    for (idx, stmt) in enumerate(body)
+        if stmt.kind == :assign
+            if stmt.lhs isa Symbol && stmt.lhs == var
+                in_covered || return false
+            end
+        elseif stmt.kind == :for
+            key = agen_site_key(body, idx)
+            covered_here = in_covered || get(ii_plan, key, nothing) in (:independent, :reduction, :mixed)
+            agen_ii_covered_write_check(stmt.body, var, ii_plan, covered_here) || return false
+        elseif stmt.kind == :if
+            agen_ii_covered_write_check(stmt.then, var, ii_plan, in_covered) || return false
+            agen_ii_covered_write_check(stmt.els, var, ii_plan, in_covered) || return false
+        end
+    end
+    return true
+end
+
 # The subset that actually needs an extra push (at the end of `body`,
 # forward) and matching pop (at the start of `body`'s own backward
 # processing): value-needed, not already exempt from snapshotting
@@ -2715,9 +2764,29 @@ end
 # (order among distinct vars doesn't matter for correctness -- each
 # has its own independent stack -- but must match so the SAME var
 # lines up, and determinism keeps generated output reproducible).
-function agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)
+#
+# `ii_plan` (nothing by default -- every existing caller stays
+# unaffected) excludes a var whenever agen_ii_covered_write_check
+# proves EVERY write-site of it is inside an ii_plan-covered loop.
+# Found necessary (not assumed) by checking generated code directly:
+# without this, a fully-contained fused var (e.g. the minimal
+# stub_indep test kernel's `t`/`s`) still got an unconditional push/
+# pop here regardless of ii_plan already having proven it never
+# escapes anywhere -- this function's own criterion (written only
+# inside SOME nested sub-structure of `body`, value-needed) doesn't
+# know about ii_plan's own, strictly more precise proof at all,
+# so it re-protected something already proven safe. A var with
+# MULTIPLE write-sites where only SOME are ii_plan-covered (e.g.
+# ttgc's own cavgx, whose `cavgx = 0.0` reset sits OUTSIDE the
+# classified accumulation loop, as a sibling statement) correctly
+# stays a candidate -- agen_ii_covered_write_check requires ALL
+# write-sites covered, not just one, which is exactly why ttgc's own
+# stacks were correctly found to still be needed when this was
+# checked directly before implementing this fix.
+function agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = nothing)
     cand = agen_nested_write_vars(body, kinds)
-    return sort(collect(v for v in cand if v in value_needed && !(v in exempt) && haskey(stacks, (:value, v))); by = string)
+    return sort(collect(v for v in cand if v in value_needed && !(v in exempt) && haskey(stacks, (:value, v)) &&
+                          !(ii_plan !== nothing && agen_ii_covered_write_check(body, v, ii_plan, false))); by = string)
 end
 
 function agen_collect_expr_vars!(expr, vars)
@@ -3792,7 +3861,7 @@ end
 # :for's own recursion, in both agen_forward_body and
 # agen_backward_body. Under keep_push_pop=true, `layout` is never
 # consulted (ectx.keep_push_pop short-circuits first).
-agen_ectx_stack() = (keep_push_pop = true, loop_ctx = Any[], layout = nothing, push_pop = nothing)
+agen_ectx_stack() = (keep_push_pop = true, loop_ctx = Any[], layout = nothing, push_pop = nothing, ii_plan = nothing)
 
 # resolves which value_needed-like info the per-statement push/pop
 # gate should consult: the site-level Dict (ectx.push_pop) when one
@@ -3911,9 +3980,196 @@ function agen_emit_pop(stack_name::Symbol, ectx, key)
     return Expr(:ref, stack_name, agen_site_index(ectx, key))
 end
 
-# ---- forward sweep (walks the raw primal `statement_list`) ---------
+# ---- Phase 3 cleanup: drop stack args left unused by fusion --------
+# Found necessary (not assumed) by checking generated code directly:
+# a var covered by an ii_plan site does NOT always mean its stack
+# becomes fully unused -- e.g. ttgc's own cavgx still needs its stack
+# for agen_block_boundary_vars's OWN, entirely separate purpose
+# (threading cavgx's value correctly across the OUTER i_cell loop's
+# own repeated, reversed iterations), unrelated to whether the
+# specific accumulation write-site inside the classified loop still
+# pushes. A blanket "drop every ii_plan-covered var's stack" would
+# have been a real bug (an undefined-variable error at best). The
+# safe approach: generate the adjoint body FIRST (unchanged), then
+# check what it ACTUALLY still references, and only drop what
+# provably has zero remaining push!/pop! calls anywhere in the
+# output -- correct by construction, since it's reading the
+# already-correct generated code rather than trying to predict it.
+#
+# Scoped to keep_push_pop=true only (matching fuse_ii_loops's own
+# existing scope limitation) -- under keep_push_pop=false, a stack
+# push/pop is `Expr(:ref, stack_name, idx)`, not `push!`/`pop!` calls,
+# and interacts with Tier A/B layout sizing this doesn't attempt to
+# handle.
+function agen_collect_used_stacks!(expr, used)
+    if expr isa Expr
+        if expr.head == :call && length(expr.args) >= 2 && expr.args[1] in (:push!, :pop!) && expr.args[2] isa Symbol
+            push!(used, expr.args[2])
+        end
+        for a in expr.args
+            agen_collect_used_stacks!(a, used)
+        end
+    end
+    return nothing
+end
 
-function agen_forward_body(body, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = agen_ectx_stack())
+function agen_used_stack_names(expr)
+    used = Set{Symbol}()
+    agen_collect_used_stacks!(expr, used)
+    return used
+end
+
+# drops `unused` symbols from a `function f(args...)` Expr's own call
+# signature, leaving the body untouched (it was already correct --
+# these names simply never appear in it any more).
+function agen_drop_unused_stack_args(fn_expr, unused)
+    call_expr = fn_expr.args[1]
+    new_args = filter(a -> !(a isa Symbol && a in unused), call_expr.args)
+    return Expr(:function, Expr(:call, new_args...), fn_expr.args[2])
+end
+
+# drops each unused stack's own `nm = Vector{T}()` allocation
+# statement from initstacks_*'s body, and drops it from the returned
+# tuple, re-deriving the correct emit_return_scalars shape (bare
+# return, single-value return, or tuple return) for whatever remains.
+function agen_drop_unused_stack_allocs(initstacks_expr, unused)
+    body_block = initstacks_expr.args[2]
+    new_stmts = Any[]
+    for stmt in body_block.args
+        if stmt isa Expr && stmt.head == :(=) && stmt.args[1] isa Symbol && stmt.args[1] in unused
+            continue
+        elseif stmt isa Expr && stmt.head == :call && stmt.args[1] == :sizehint! && stmt.args[2] isa Symbol && stmt.args[2] in unused
+            continue
+        elseif stmt isa Expr && stmt.head == :return
+            ret_val = stmt.args[1]
+            remaining = ret_val isa Expr && ret_val.head == :tuple ? Symbol[a for a in ret_val.args if !(a isa Symbol && a in unused)] :
+                        (ret_val isa Symbol && ret_val in unused ? Symbol[] : Symbol[ret_val])
+            push!(new_stmts, emit_return_scalars(remaining))
+        else
+            push!(new_stmts, stmt)
+        end
+    end
+    return Expr(:function, initstacks_expr.args[1], Expr(:block, new_stmts...))
+end
+
+# ---- ii_* Phase 3 codegen: :independent fusion only ----------------
+# Builds ONE un-reversed loop (same header as the primal -- never
+# reversed; a fused loop only ever traverses its own range once, at
+# the same point in program order the primal always did, confirmed
+# during Phase 1+2's own adversarial testing -- ii_adv_unstable_
+# tripcount's regression test is exactly the case this invariant would
+# break if violated) whose body is: the primal recompute of stmt.body
+# (via a recursive agen_forward_body call -- itself able to nest
+# further agen_emit_ii_loop calls, or ordinary push/pop handling for
+# anything this specific fusion doesn't cover), immediately followed
+# by that SAME body's own backward differentiation (via
+# agen_backward_body, called directly on stmt.body's own lin_plan
+# sub-list) -- in REVERSE STATEMENT order within stmt.body, but with
+# the loop itself never reversed.
+#
+# The vars this fuses (vn_local) are recomputed here independently,
+# the same way agen_ii_classify computed them, rather than threaded in
+# from Phase 1+2's own bookkeeping -- this function has no dependency
+# on anything beyond the ii_plan Dict itself. They're removed from
+# value_needed for BOTH nested calls, which is what suppresses their
+# push/pop. Doing this via a LOCALLY-SCOPED value_needed Set (not a
+# kernel-wide exempt Set) is deliberate: the same variable name can be
+# reused, entirely unrelated, by a different loop elsewhere in the
+# kernel (ttgc's own `vere`, confirmed during Phase 1+2's own
+# testing), and a kernel-wide name-based exemption would incorrectly
+# suppress protection for that other, unrelated usage. Scoping the
+# modified value_needed to this call -- which only ever visits
+# statements inside stmt.body -- avoids that entirely.
+#
+# `:reduction` and `:mixed` sites are DELIBERATELY not handled here.
+# A standalone reduction's adjoint total isn't fully accumulated until
+# AFTER its downstream consumer's own (logically later, hence
+# backward-sweep-earlier) code has run; fusing the reduction loop's
+# own forward+backward per-iteration, the same way :independent does,
+# would read that total too early -- before its real contributor has
+# even executed in reverse-sweep order -- silently producing a wrong
+# (understated) result rather than erroring. `agen_forward_body`/
+# `agen_backward_body` both only ever dispatch here for `:independent`
+# sites; `:reduction`/`:mixed` fall through to their ordinary, unfused
+# handling -- safe, just not yet optimized. (ttgc's own `cavgx` does
+# NOT need this separate treatment: at the classification granularity
+# this analysis actually uses -- outermost loop first -- `cavgx`'s
+# accumulation and its consumer `aerex = cavgx * re` are both inside
+# the SAME classified `i_cell` loop, so agen_backward_body's own
+# reverse-statement-order walk over that one fused loop's body already
+# accumulates `cavgxb` from the later sibling statement before
+# reaching the earlier one, exactly matching normal, correct adjoint
+# ordering. The problem case is a reduction whose consumer sits
+# outside the candidate loop entirely, e.g. a dotprod-style loop
+# followed by `out[1] = s`.)
+#
+# Known, deliberate scope limitation for this first Phase 3 pass:
+# `stacks`/`agen_stack_map`/`agen_init_emit` are untouched, so a
+# fused var's stack is still DECLARED in `initstacks_*` (an unused
+# argument/local) even though nothing here ever pushes or pops it --
+# harmless for correctness, just not yet cleaned up. Actually removing
+# it from the generated signature is future work, not attempted here.
+#
+# `agen_ii_override_ectx` -- REQUIRED for correctness whenever
+# site_level_tbr=true (ectx.push_pop set), not just a nicety. Found
+# via a direct report and confirmed by central-difference validation:
+# fuse_ii_loops=true combined with site_level_tbr=true produced WRONG
+# gradients on ttgc.jl (max_rel_err ~0.17), not just a missed
+# optimization. Root cause: agen_push_pop_source ignores `value_needed`
+# entirely once ectx.push_pop is set (site_level_tbr's own, ii_plan-
+# unaware per-site Dict takes over completely) -- so excluding vn_local
+# from value_needed, which is how this file suppresses a push/pop pair
+# everywhere else, has ZERO effect on the actual push/pop decision once
+# site_level_tbr is on. For `:independent`/`:mixed` this "only" meant
+# a stale, unnecessary push/pop pair reappeared (self-matched within
+# the same embedded call, harmless). For `:reduction` it was worse:
+# agen_forward_body's OWN `:reduction` handling (the plain, non-
+# agen_emit_ii_loop recursion at the forward position) still pushed
+# cavgx et al. because site_level_tbr's stale decision said to -- but
+# NOTHING ever pops that specific push, since fusion's whole point is
+# that the reduction loop's forward recompute never needs its old
+# value restored. That left a genuinely unmatched push on the stack
+# every iteration, permanently growing it and corrupting every later,
+# unrelated pop. This builds a NEW ectx whose push_pop Dict (a COPY,
+# starting from whatever site_level_tbr already decided) additionally
+# forces `false` for every site within `body` that writes a vn_local
+# var -- applied at every point in this file where value_needed is
+# locally modified for ii_plan purposes, not just here.
+function agen_ii_force_no_snapshot!(body, vn_local, override)
+    for (idx, stmt) in enumerate(body)
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            var in vn_local && (override[agen_site_key(body, idx)] = false)
+        elseif stmt.kind == :for
+            agen_ii_force_no_snapshot!(stmt.body, vn_local, override)
+        elseif stmt.kind == :if
+            agen_ii_force_no_snapshot!(stmt.then, vn_local, override)
+            agen_ii_force_no_snapshot!(stmt.els, vn_local, override)
+        end
+    end
+    return nothing
+end
+
+function agen_ii_override_ectx(ectx, body, vn_local)
+    (ectx.push_pop === nothing || isempty(vn_local)) && return ectx
+    override = copy(ectx.push_pop)
+    agen_ii_force_no_snapshot!(body, vn_local, override)
+    return (keep_push_pop = ectx.keep_push_pop, loop_ctx = ectx.loop_ctx, layout = ectx.layout, push_pop = override, ii_plan = ectx.ii_plan)
+end
+
+function agen_emit_ii_loop(stmt, lin_stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx)
+    local_names = cgen_locally_assigned_scalars(stmt.body)
+    redvars = cgen_scalar_reduction_vars(stmt.body)
+    vn_local = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
+    local_value_needed = setdiff(value_needed, vn_local)
+    local_ectx = agen_ii_override_ectx(ectx, stmt.body, vn_local)
+    fwd = agen_forward_body(stmt.body, kinds, active_map, local_value_needed, reassigned, stacks, exempt;
+                             ectx = local_ectx, lin_body = lin_stmt.body, unsafe = unsafe)
+    bwd = agen_backward_body(lin_stmt.body, stmt.body, kinds, active_map, unsafe, local_value_needed, reassigned, stacks, exempt; ectx = local_ectx)
+    return emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, vcat(fwd, bwd))
+end
+
+function agen_forward_body(body, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = agen_ectx_stack(), lin_body = nothing, unsafe = nothing)
     exprs = Any[]
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
@@ -3937,18 +4193,105 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
             end
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
         elseif stmt.kind == :for
-            for bv in agen_tripcount_bound_vars(stmt, reassigned)
-                push!(exprs, agen_emit_push(stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv)))
+            # ii_plan-covered site (fuse_ii_loops=true only -- ectx.
+            # ii_plan is nothing otherwise, so ii_kind is always
+            # nothing and this whole branch is a no-op then): a
+            # `:independent` site gets built as ONE fused, un-reversed
+            # loop (agen_emit_ii_loop) instead of the ordinary push-
+            # then-later-reverse treatment. A `:reduction` site keeps
+            # its ordinary forward-sweep position and structure
+            # entirely (the primal value is often still needed
+            # elsewhere, e.g. ttgc's `aerex = cavgx * re`) -- the only
+            # change is that its reduction var(s) are excluded from
+            # `value_needed` for this recursive call, so nothing here
+            # pushes their old value. They never need it protected: a
+            # pure +/- accumulation's own backward code doesn't read
+            # the old value at all, only distributes the (elsewhere-
+            # accumulated) shadow to each term's own operands -- see
+            # agen_emit_ii_loop's own comment for the full reasoning
+            # and for why this is safe to build the SAME way
+            # :independent's fusion is, just invoked from
+            # agen_backward_body's :for dispatch instead, at this
+            # loop's normal (unfused) backward-sweep position rather
+            # than here. `:mixed` sites get the SAME treatment as
+            # `:reduction` here -- both vn_ind and vn_red excluded from
+            # push, nothing fused at this position -- see the :mixed
+            # branch below for why splitting them across positions
+            # turned out to be unsafe.
+            key = agen_site_key(body, idx)
+            ii_kind = ectx.ii_plan === nothing ? nothing : get(ectx.ii_plan, key, nothing)
+            if ii_kind === :independent && lin_body !== nothing && unsafe !== nothing
+                push!(exprs, agen_emit_ii_loop(stmt, lin_body[idx], kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx))
+            elseif ii_kind === :mixed && lin_body !== nothing && unsafe !== nothing
+                # NOT split across positions -- see agen_backward_
+                # body's own :mixed handling for why: a vn_ind var can
+                # be read by a vn_red statement's own accumulation
+                # term (e.g. transformer's `diff`, read by both `y[...]
+                # += diff*diff` AND `s2 = s2 + diff*diff`), and vn_ind's
+                # own "collect every contribution, then distribute"
+                # step needs BOTH contributions available before it
+                # runs -- but vn_red's contribution isn't available
+                # until the backward position. Splitting the
+                # differentiation across both positions is unsafe
+                # whenever this cross-dependency exists (confirmed via
+                # central-difference validation on transformer.jl,
+                # which has exactly this shape), so this treats
+                # `:mixed` the SAME way `:reduction` treats vn_red:
+                # exclude the whole vn_local set from push here (still
+                # correct, still the actual performance benefit --
+                # neither vn_ind nor vn_red needs its old value
+                # protected), but defer ALL differentiation, vn_ind's
+                # included, to the backward position instead of fusing
+                # any of it here.
+                local_names = cgen_locally_assigned_scalars(stmt.body)
+                redvars = cgen_scalar_reduction_vars(stmt.body)
+                vn_local = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
+                loop_value_needed = setdiff(value_needed, vn_local)
+                loop_ectx = agen_ii_override_ectx(ectx, stmt.body, vn_local)
+                for bv in agen_tripcount_bound_vars(stmt, reassigned)
+                    push!(exprs, agen_emit_push(stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv)))
+                end
+                push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
+                inner = agen_forward_body(stmt.body, kinds, active_map, loop_value_needed, reassigned, stacks, exempt;
+                                           ectx = loop_ectx,
+                                           lin_body = lin_body[idx].body,
+                                           unsafe = unsafe)
+                pop!(ectx.loop_ctx)
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
+            else
+                loop_value_needed = value_needed
+                loop_ectx = ectx
+                if ii_kind === :reduction
+                    local_names = cgen_locally_assigned_scalars(stmt.body)
+                    redvars = cgen_scalar_reduction_vars(stmt.body)
+                    vn_red = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
+                    loop_value_needed = setdiff(value_needed, vn_red)
+                    loop_ectx = agen_ii_override_ectx(ectx, stmt.body, vn_red)
+                end
+                for bv in agen_tripcount_bound_vars(stmt, reassigned)
+                    push!(exprs, agen_emit_push(stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv)))
+                end
+                push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
+                inner = agen_forward_body(stmt.body, kinds, active_map, loop_value_needed, reassigned, stacks, exempt;
+                                           ectx = loop_ectx,
+                                           lin_body = lin_body === nothing ? nothing : lin_body[idx].body,
+                                           unsafe = unsafe)
+                pop!(ectx.loop_ctx)
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
             end
-            push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
-            inner = agen_forward_body(stmt.body, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx)
-            pop!(ectx.loop_ctx)
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
             key = agen_site_key(body, idx)
-            then_exprs = vcat(Any[agen_emit_push(nm, 1, ectx, key)], agen_forward_body(stmt.then, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx))
-            els_exprs = vcat(Any[agen_emit_push(nm, 0, ectx, key)], agen_forward_body(stmt.els, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx))
+            then_exprs = vcat(Any[agen_emit_push(nm, 1, ectx, key)],
+                               agen_forward_body(stmt.then, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                                  ectx = ectx,
+                                                  lin_body = lin_body === nothing ? nothing : lin_body[idx].then,
+                                                  unsafe = unsafe))
+            els_exprs = vcat(Any[agen_emit_push(nm, 0, ectx, key)],
+                              agen_forward_body(stmt.els, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                                 ectx = ectx,
+                                                 lin_body = lin_body === nothing ? nothing : lin_body[idx].els,
+                                                 unsafe = unsafe))
             push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
         end
     end
@@ -3957,7 +4300,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
     # capturing whatever this ENCLOSING iteration's own nested writes
     # left it at -- restored symmetrically at the start of this same
     # body's own backward processing in agen_backward_body.
-    for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)
+    for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan)
         push!(exprs, agen_emit_push(stacks[(:value, var)], var, ectx, agen_site_key(body, 0, var)))
     end
     return exprs
@@ -4033,7 +4376,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
     # this body's OWN nested-loop-written value visible again instead
     # of whatever a later (i.e. previously-processed, in reverse
     # order) sibling iteration of the ENCLOSING loop left behind.
-    for var in agen_block_boundary_vars(primal_body, kinds, value_needed, exempt, stacks)
+    for var in agen_block_boundary_vars(primal_body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan)
         push!(exprs, Expr(:(=), var, agen_emit_pop(stacks[(:value, var)], ectx, agen_site_key(primal_body, 0, var))))
     end
     # int-kinded local assignments (index/bookkeeping helpers) never
@@ -4134,17 +4477,61 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
             append!(exprs, agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, skip_restore; ectx = ectx, key = agen_site_key(primal_body, idx)))
         elseif stmt.kind == :for
-            push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
-            inner = agen_backward_body(stmt.body, primal_body[idx].body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
-            pop!(ectx.loop_ctx)
-            reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, primal_body[idx].body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx)
-            loop_expr = reverse_it ?
-                emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
-                emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
-            for bv in agen_tripcount_bound_vars(stmt, reassigned)
-                push!(exprs, Expr(:(=), bv, agen_emit_pop(stacks[(:tripcount, bv)], ectx, agen_site_key(primal_body, idx, bv))))
+            key = agen_site_key(primal_body, idx)
+            ii_kind = ectx.ii_plan === nothing ? nothing : get(ectx.ii_plan, key, nothing)
+            if ii_kind === :independent
+                # already fully emitted by agen_forward_body's own
+                # agen_emit_ii_loop call for this exact statement --
+                # nothing to do here, including no tripcount pop (the
+                # fused loop's single un-reversed header never pushed
+                # one in the first place).
+            elseif ii_kind === :reduction
+                # this loop's OWN reduction var(s) never needed a
+                # push (agen_forward_body's own :for dispatch excluded
+                # them from value_needed for this statement) -- their
+                # actual adjoint is emitted HERE instead, reusing
+                # agen_emit_ii_loop exactly as :independent does (same
+                # un-reversed, recompute-then-differentiate-per-
+                # iteration shape), but appended at this loop's
+                # ordinary, unfused BACKWARD-sweep position rather
+                # than replacing the forward sweep. This is what makes
+                # it safe unlike fusing at the forward position: by
+                # the time the reverse sweep reaches this loop's own
+                # (unchanged) position, everything logically AFTER it
+                # in the primal -- including whatever reads this
+                # reduction var's final total, e.g. ttgc's own
+                # `aerex = cavgx * re` -- has already run ITS OWN
+                # backward code (processed earlier in the reverse
+                # walk), so the accumulated shadow this loop distributes
+                # is already complete. No tripcount pop either, same
+                # reasoning as :independent (this loop only ever runs
+                # once, at its own single position).
+                push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx))
+            elseif ii_kind === :mixed
+                # NOT split -- see agen_forward_body's own :mixed
+                # handling for the full reasoning (a vn_ind var can be
+                # read by a vn_red statement's own accumulation term,
+                # making a split unsafe whenever that cross-dependency
+                # exists). Both vn_ind and vn_red get their actual
+                # differentiation HERE, together, in one un-reversed
+                # loop -- everything in this loop body still gets
+                # exactly one adjoint computation, just all deferred to
+                # this position instead of some of it running at the
+                # forward position.
+                push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx))
+            else
+                push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
+                inner = agen_backward_body(stmt.body, primal_body[idx].body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
+                pop!(ectx.loop_ctx)
+                reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, primal_body[idx].body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx)
+                loop_expr = reverse_it ?
+                    emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
+                    emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
+                for bv in agen_tripcount_bound_vars(stmt, reassigned)
+                    push!(exprs, Expr(:(=), bv, agen_emit_pop(stacks[(:tripcount, bv)], ectx, agen_site_key(primal_body, idx, bv))))
+                end
+                push!(exprs, loop_expr)
             end
-            push!(exprs, loop_expr)
         elseif stmt.kind == :if
             skip = get(hoisted_vars, idx, Set{Symbol}())
             then_exprs = agen_backward_body(stmt.then, primal_body[idx].then, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt, skip; ectx = ectx)
@@ -4172,7 +4559,7 @@ end
 # agen_block_boundary_vars): that push happens once per iteration of
 # whatever loop `body` is the direct body of, same as any other.
 function agen_body_has_snapshot(body, primal_body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx)
-    !isempty(agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)) && return true
+    !isempty(agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan)) && return true
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
@@ -4385,7 +4772,7 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     unsafe = agen_unsafe_int_vars(kernel)
     exempt = agen_exempt_vars(kernel, value_needed)
 
-    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop)
+    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = nothing)
 
     fwd = agen_forward_body(kernel.body, sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx)
     bwd = agen_backward_body(lin_plan, kernel.body, sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
@@ -7394,13 +7781,14 @@ end
 
 function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
-                        keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+                        keep_push_pop::Bool=true, site_level_tbr::Bool=false, fuse_ii_loops::Bool=false)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
     active_map = act_analyze(kernel)
     snap_sites, agen_sites = site_level_tbr ? stade_site_level_tbr_check(kernel) : (nothing, nothing)
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
-    return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, push_pop = agen_sites)
+    ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
+    return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, push_pop = agen_sites, ii_plan = ii_plan)
 end
 
 function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
@@ -7440,9 +7828,9 @@ function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=tr
     return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr) for (name, expr) in inlined)
 end
 
-function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false, fuse_ii_loops::Bool=false)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr) for (name, expr) in inlined)
+    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
 end
 
 function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
@@ -7471,11 +7859,11 @@ function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bo
     return out_path
 end
 
-function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true, site_level_tbr::Bool=false)
+function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true, site_level_tbr::Bool=false, fuse_ii_loops::Bool=false)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr, fuse_ii_loops = fuse_ii_loops)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.adjoint]))
     return out_path
 end
@@ -7595,7 +7983,7 @@ end
 # usable directly by a caller pointing at their own hand-written file.
 function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::String;
                                        trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                       keep_push_pop::Bool = true, site_level_tbr::Bool = false)
+                                       keep_push_pop::Bool = true, site_level_tbr::Bool = false, fuse_ii_loops::Bool = false)
     mode in (:tangent, :adjoint, :hvp) ||
         error("stade_validate_from_baseline: mode must be :tangent, :adjoint, or :hvp, got $mode")
     primal_expr = io_read_corpus_entry(in_path)
@@ -7607,7 +7995,7 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
         return val_validate_tangent(kernel, primal_expr, tangent_expr, baseline;
                                      trials = trials, epsilon = epsilon, rtol = rtol)
     elseif mode == :adjoint
-        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr, fuse_ii_loops = fuse_ii_loops)
         # under keep_push_pop=false, `initstacks_*`'s own signature is
         # whatever agen_emit actually built it with (a minimal free-var
         # set for Tier A, extended with Phase D's table/total/value
@@ -7655,11 +8043,11 @@ end
 function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                      self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false)
+                                      self_check::Bool = true, keep_push_pop::Bool = true, site_level_tbr::Bool = false, fuse_ii_loops::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:adjoint, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
-                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr)
+                                         keep_push_pop = keep_push_pop, site_level_tbr = site_level_tbr, fuse_ii_loops = fuse_ii_loops)
 end
 
 function stade_validate_hvp_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
@@ -8027,4 +8415,1580 @@ let
     end))
     @assert occursin("@cuda", string(pure_reduce_plan.host)) && !occursin("for i_seq_t", string(pure_reduce_plan.host))
     println("cgen_reduction_only_loop still splits a pure reduction var with no in-loop reset OK (regression guard)")
+end
+# ============================================================
+# ii_* -- eligibility analysis for fused iteration-independent-loop
+# adjoint generation ("II-loop fusion", named after Tapenade's
+# II_LOOP). PROTOTYPE / Phase 1+2 ONLY: classifies loops, does not
+# yet touch codegen (agen_forward_body/agen_backward_body are
+# untouched; ectx gains no new field yet). See the conversation-
+# tracked implementation plan for the full staged design; this
+# section implements exactly its Phase 1 (primal-independence reuse)
+# and Phase 2 (adjoint-side scope/reduction classification).
+#
+# Classification granularity: OUTERMOST eligible loop first. A loop
+# nest (e.g. ttgc's `for i_cell` containing `for i_loc`/`for i_k`) is
+# classified as a single fusion unit whenever the OUTER loop's own
+# full body (including everything nested inside it) passes; only if
+# the outer loop fails does the walk recurse into its direct :for
+# children to look for a smaller eligible unit. This mirrors
+# Tapenade's own observed II_LOOP granularity in the jade-ttgc
+# reference (one II_LOOP at the i_cell level, not one per inner
+# loop) and is what lets a value like `cavgx` -- built by one sibling
+# inner loop, consumed by another sibling inner loop, both nested in
+# the same outer iteration -- classify as :independent without any
+# special-casing: it never "escapes" the OUTER loop's own body, only
+# an inner one, and escape is checked at the granularity being tested.
+# ============================================================
+
+# ---- shared helpers (not duplicated -- pure structural walks, not a
+# TBR/codegen decision, so Hard Rule 7's duplication rationale
+# doesn't apply to them any more than agen_site_key's already-shared
+# status does) ----
+#
+# REVISION NOTE (found by testing against real ttgc.jl, not assumed):
+# a first version of this check was a flat "does this name get read
+# nonlinearly ANYWHERE else in the kernel" test. That's wrong -- ttgc
+# genuinely reuses `vere`/`i_loc`/`i_node` (same symbol names) across
+# TWO unrelated `i_cell` loop nests (the assembly loop this plan
+# targets, and a second, later, entirely separate residual loop that
+# freshly reassigns `vere` before ever reading it). A flat name-based
+# check flagged that second loop's fresh, non-self-referencing
+# `vere = ...` as an "escaping" nonlinear read of the FIRST loop's
+# `vere`, which is wrong: a fresh overwrite kills the dependency, so
+# nothing downstream of it can be reading the first loop's
+# contribution any more. This revision tracks program order and
+# treats a var as "escaped" only if a nonlinear read is reached
+# BEFORE any intervening fresh (non-self-referencing) reassignment of
+# that same name kills it.
+
+# Walks `body` in forward program order, threading `alive` (vars
+# still known to carry `target`'s own contribution) exactly the way
+# snap_fwd_walk!/agen_fwd_walk_loop! thread `seen` -- returns the
+# updated alive-set (their OUT set) and accumulates escapes into
+# `escaped` in place. A var is removed from `alive` the moment a
+# FRESH (non-self-referencing) assignment to it is seen (it no longer
+# carries target's value from that point on); a nonlinear read of a
+# still-alive var is recorded as an escape. `:if` is handled
+# conservatively: a var survives past the branch only if it survives
+# BOTH arms (matches snap_fwd_walk!'s own conservative merge
+# elsewhere in this file), and a read inside either arm is still an
+# escape regardless of which arm actually runs at runtime.
+# True occurrence detector -- unlike agen_var_value_needed!/snap_var_
+# value_needed!, this counts a read REGARDLESS of whether it's linear
+# (a +/- operand) or nonlinear. Found necessary (not anticipated in
+# the original design) by Phase 3 codegen testing on unet.jl: a purely
+# LINEAR downstream read of a fused var (`p1pad[yi] = p1[idx]`, a
+# straight copy, no +/-/* involved at all) still contributes to that
+# var's SHADOW when its own backward code runs (the adjoint of an
+# identity copy is itself an identity pass-through, not zero) -- and
+# that contribution must land BEFORE a fused loop's own backward code
+# reads the shadow, which fusion cannot guarantee for anything outside
+# the loop itself, regardless of whether the read was linear. The
+# "value-needed" (nonlinear-only) concept this file uses elsewhere
+# answers a different, narrower question (does the OLD value need
+# protecting for someone else's own partial derivative) and is
+# correct for its own purpose (TBR pruning, snapshot siting) -- it was
+# simply the wrong tool to reuse here, where the question is "could
+# ANY code outside this loop still be accumulating into this write's
+# shadow at all".
+function ii_expr_reads(expr, vars, acc)
+    if expr isa Expr
+        if expr.head == :ref
+            (expr.args[1] in vars) && push!(acc, expr.args[1])
+            for a in expr.args[2:end]
+                ii_expr_reads(a, vars, acc)
+            end
+        else
+            start = expr.head == :call ? 2 : 1
+            for a in expr.args[start:end]
+                ii_expr_reads(a, vars, acc)
+            end
+        end
+    elseif expr isa Symbol
+        (expr in vars) && push!(acc, expr)
+    end
+    return nothing
+end
+
+# Walks `body` in forward program order, threading `alive` (vars
+# still known to carry `target`'s own contribution) exactly the way
+# snap_fwd_walk!/agen_fwd_walk_loop! thread `seen` -- returns the
+# updated alive-set (their OUT set) and accumulates escapes into
+# `escaped` in place. A var is removed from `alive` the moment a
+# FRESH (non-self-referencing) assignment to it is seen (it no longer
+# carries target's value from that point on); ANY read (linear or
+# nonlinear -- see ii_expr_reads) of a still-alive var is recorded as
+# an escape. `:if` is handled conservatively: a var survives past the
+# branch only if it survives BOTH arms (matches snap_fwd_walk!'s own
+# conservative merge elsewhere in this file), and a read inside either
+# arm is still an escape regardless of which arm actually runs at
+# runtime. A write's own LHS index expressions (for an array target)
+# are checked too -- an alive scalar used as an index elsewhere is
+# still a genuine read of it.
+function ii_kill_and_collect!(body, alive, escaped)
+    for stmt in body
+        isempty(alive) && return alive
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            local_reads = Set{Symbol}()
+            ii_expr_reads(stmt.rhs, alive, local_reads)
+            if stmt.lhs isa Expr
+                for a in stmt.lhs.args[2:end]
+                    ii_expr_reads(a, alive, local_reads)
+                end
+            end
+            union!(escaped, local_reads)
+            if stmt.lhs isa Symbol && var in alive && agen_count_var_refs(stmt.rhs, var) == 0
+                delete!(alive, var)
+            end
+        elseif stmt.kind == :if
+            cond_reads = Set{Symbol}()
+            ii_expr_reads(stmt.cond, alive, cond_reads)
+            union!(escaped, cond_reads)
+            alive_then = ii_kill_and_collect!(stmt.then, copy(alive), escaped)
+            alive_els  = ii_kill_and_collect!(stmt.els,  copy(alive), escaped)
+            alive = intersect(alive_then, alive_els)
+        elseif stmt.kind == :for
+            alive = ii_kill_and_collect!(stmt.body, alive, escaped)
+        end
+    end
+    return alive
+end
+
+# ---- target scope resolution: :for AND :if ancestors ----
+#
+# Found necessary by testing against mg_vcycle.jl: an earlier, purely
+# top-level-only version of this check could never classify its
+# `for j = 1:n` loop at all (nested inside the genuinely-sequential,
+# ineligible `i_seq_level` loop), even though its own locals (`left`,
+# `right`) never escape anywhere. A sound scope check has to handle
+# two different cases depending on whether an ancestor level is the
+# literal kernel top level (executes once, no wraparound) or itself a
+# repeating `:for` (executes possibly many times, so a read positioned
+# TEXTUALLY BEFORE target within that SAME ancestor body can still
+# observe target's contribution -- on the NEXT ancestor iteration).
+#
+# EXTENDED to handle `:if` ancestors (a target loop living inside an
+# `:if` branch), on top of the :for-only version. An `:if` branch does
+# NOT repeat on its own -- one evaluation of the `:if` runs at most one
+# of its two branches exactly once -- so within the branch itself,
+# there is no wraparound: `repeating = false` for a branch-body level,
+# unconditionally. The `:if` STATEMENT's own position within ITS OWN
+# container, one level further out, is a completely separate question
+# and follows the ordinary :for-vs-kernel-top rule (repeating unless
+# that container is the literal kernel body) -- if the whole `:if` sits
+# inside a repeating ancestor, it gets RE-EVALUATED each iteration,
+# which is exactly the same wraparound concern a bare :for ancestor
+# already has, one level further out. Crucially, the SIBLING branch
+# (`:els` when target lives in `:then`) is never examined at all: if
+# `:then` ran (meaning target ran), `:els` provably did not run in
+# that same evaluation, so nothing inside `:els`'s own body could ever
+# observe target's contribution, regardless of what variable names it
+# happens to reuse. This falls out automatically from only ever
+# recursing into the ONE branch that actually contains target, never
+# both -- ii_find_ancestor_path never even looks at the other one's
+# contents once it has found target's own side.
+#
+# `ii_find_ancestor_path(body, target, body_repeats)` returns the
+# chain of (containing body, index, does-this-body-itself-repeat)
+# triples from INNERMOST to OUTERMOST, ending at the kernel body
+# itself (whose own `body_repeats` is always false, seeded by the
+# caller). No case is left unhandled any more -- every :for and :if
+# ancestor is covered -- so `nothing` now only means target genuinely
+# isn't reachable from `body` at all.
+function ii_find_ancestor_path(body, target, body_repeats::Bool)
+    for (idx, stmt) in enumerate(body)
+        if stmt.kind == :for
+            if stmt.body === target
+                return Any[(body, idx, body_repeats)]
+            end
+            sub = ii_find_ancestor_path(stmt.body, target, true)
+            if sub !== nothing
+                push!(sub, (body, idx, body_repeats))
+                return sub
+            end
+        elseif stmt.kind == :if
+            for branch in (stmt.then, stmt.els)
+                sub = ii_find_ancestor_path(branch, target, false)
+                if sub !== nothing
+                    push!(sub, (body, idx, body_repeats))
+                    return sub
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+# vars from `vars` that escape `target`, now handling `target` at any
+# `:for`/`:if`-mixed nesting depth (falls back to exactly the old
+# top-level behavior when target is already top-level, since then the
+# path has length 1 and that single level's `body_repeats` is false).
+#
+# At each repeating (non-outermost) level: a FULL wraparound pass
+# (same-iteration "after" siblings, THEN wrapping to "before" siblings
+# on the next iteration) detects every reachable read -- one pass
+# suffices here, unlike snap_fwd_walk_loop!'s iterative fixed point,
+# because `alive` is a FIXED set of names established once by Phase 1
+# before this runs, not something that itself needs to converge.
+# Separately, what PROPAGATES OUTWARD to the next ancestor level uses
+# ONLY the same-iteration "after" segment's kill effect: a consumer
+# outside this entire loop level only ever observes whatever the
+# LAST iteration's own tail end left behind -- a "before" kill would
+# only matter for a next iteration that, for the last one, never
+# happens, so it must not be allowed to (wrongly) protect the var from
+# being checked further out.
+# At each level whose containing body itself repeats: a FULL
+# wraparound pass (same-position "after" siblings, THEN wrapping to
+# "before" siblings on the next repetition) detects every reachable
+# read -- one pass suffices here, unlike snap_fwd_walk_loop!'s
+# iterative fixed point, because `alive` is a FIXED set of names
+# established once by Phase 1 before this runs, not something that
+# itself needs to converge. Separately, what PROPAGATES OUTWARD to the
+# next ancestor level uses ONLY the same-position "after" segment's
+# kill effect: a consumer outside this entire level only ever observes
+# whatever the LAST repetition's own tail end left behind -- a
+# "before" kill would only matter for a next repetition that, for the
+# last one, never happens, so it must not be allowed to (wrongly)
+# protect the var from being checked further out. A non-repeating
+# level (an :if branch taken in isolation, or the kernel body itself)
+# skips the wraparound pass entirely -- there is no "next repetition"
+# to wrap around to.
+function ii_escapes_nested(kernel_body, target, vars)
+    path = ii_find_ancestor_path(kernel_body, target, false)
+    path === nothing && return copy(vars)
+    escaped = Set{Symbol}()
+    alive = copy(vars)
+    for i in eachindex(path)
+        isempty(alive) && break
+        (body, idx, repeating) = path[i]
+        after = body[idx+1:end]
+        if repeating
+            before = body[1:idx-1]
+            ii_kill_and_collect!(vcat(after, before), copy(alive), escaped)
+            alive = ii_kill_and_collect!(after, alive, escaped)
+        else
+            alive = ii_kill_and_collect!(after, alive, escaped)
+        end
+    end
+    return escaped
+end
+
+# ---- snap_ii_* / agen_ii_* pair (Hard Rule 7 duplication) ----
+
+# collects every array name assigned (as arr[...] = ...) anywhere in
+# body, recursively through :for/:if -- the candidate set to check
+# for outside reads.
+function ii_collect_array_writes!(body, kinds, active_map, acc)
+    for stmt in body
+        if stmt.kind == :assign && stmt.lhs isa Expr && stmt.lhs.head == :ref
+            arr = stmt.lhs.args[1]
+            get(kinds, arr, nothing) == :array_float && get(active_map, arr, false) && push!(acc, arr)
+        elseif stmt.kind == :for
+            ii_collect_array_writes!(stmt.body, kinds, active_map, acc)
+        elseif stmt.kind == :if
+            ii_collect_array_writes!(stmt.then, kinds, active_map, acc)
+            ii_collect_array_writes!(stmt.els, kinds, active_map, acc)
+        end
+    end
+    return nothing
+end
+
+# True iff `body` (recursively, through :for/:if) writes to any
+# active array that is read -- AT ALL, linear or nonlinear, see
+# ii_expr_reads's own comment for why nonlinear-only was the wrong
+# test -- anywhere in `kernel_body` OUTSIDE `body` itself. Found
+# necessary (not anticipated in the original Phase 1+2 design) by
+# Phase 3 codegen testing: agen_emit_ii_loop fuses a loop's ENTIRE
+# backward differentiation (via one agen_backward_body call on the
+# whole stmt.body), not just the scalar vn_ind/vn_red subset Phase
+# 1+2 proved safe. An array write inside the loop body whose array is
+# read anywhere else (e.g. mg_vcycle's `r[j,i_seq_level] = ...`, later
+# read nonlinearly by the prolong statement; ttgc's `res[...]`, later
+# divided by node_vol; unet's `p1[idx] = ...`, later copied by
+# `p1pad[yi] = p1[idx]` -- a purely LINEAR read, which is exactly why
+# this checks "read at all", not "value-needed") gets its backward
+# code fused too, moving it to run WAY too early -- before its true
+# downstream consumer's own (logically later, hence backward-sweep-
+# earlier) code has even run. Confirmed as a genuine correctness bug
+# via central-difference validation on real corpus kernels (mg_vcycle,
+# ttgc, unet all failed with max_rel_err ~1-2, not numerical noise)
+# before this check existed, and again (in its broadened, read-at-all
+# form) when the first, value-needed-only version of this check still
+# left unet failing. Phase 1+2's own "arrays are out of scope"
+# non-goal was correctly stated for classification purposes (never
+# try to prove an array safe) but Phase 3 codegen incorrectly treated
+# "not classified" as "safe to ignore" rather than "must not be swept
+# into the same fusion unit" -- this closes that gap the safe way
+# (refuse the whole loop) rather than the precise way (fuse only the
+# proven-safe statements, leaving array writes to their normal
+# position), which would need agen_backward_body to skip individual
+# STATEMENTS within a body rather than whole bodies -- real future
+# work, not attempted here.
+# Order-aware version, mirroring ii_escapes_nested's own design for
+# scalars. Found necessary by testing (not assumed): the original,
+# purely blanket "read anywhere else in the kernel, unordered" check
+# refused a loop whenever the SAME array name was touched anywhere
+# else at all -- including a read positioned BEFORE the loop, at a
+# non-repeating level, which could never actually observe this
+# write's contribution (it already ran before the write happened).
+# Reuses ii_find_ancestor_path exactly as the scalar side does: each
+# level of the path is checked for reads (via ii_array_reads_walk!,
+# with `target=nothing` since the path's own `after`/`before` slices
+# already exclude target's own containing statement by construction),
+# using the SAME repeating-vs-not distinction (a repeating ancestor
+# needs the wraparound "after ++ before" check; the literal kernel
+# top level only needs "after").
+#
+# Deliberately NOT modeling any "kill" for arrays, unlike the scalar
+# side's fresh-overwrite-kills-alive logic: proving a later WRITE to
+# the same array safely overwrites (kills) whatever this write
+# contributed would require proving index equality between the two
+# writes, which this analysis doesn't attempt -- so an array, once
+# checked, stays "alive" (checked for reads) all the way out to the
+# kernel top level, with no early exit. This is strictly more
+# conservative than the scalar side, and deliberately so.
+function ii_body_has_escaping_array_write(kernel_body, body, kinds, active_map)
+    arrs = Set{Symbol}()
+    ii_collect_array_writes!(body, kinds, active_map, arrs)
+    isempty(arrs) && return false
+    path = ii_find_ancestor_path(kernel_body, body, false)
+    path === nothing && return true   # couldn't locate -- conservative refusal
+    escaped = Set{Symbol}()
+    for i in eachindex(path)
+        (level_body, idx, repeating) = path[i]
+        after = level_body[idx+1:end]
+        if repeating
+            before = level_body[1:idx-1]
+            ii_array_reads_walk!(vcat(after, before), nothing, arrs, escaped)
+        else
+            ii_array_reads_walk!(after, nothing, arrs, escaped)
+        end
+    end
+    return !isempty(escaped)
+end
+
+function ii_array_reads_walk!(walk_body, target, arrs, acc)
+    for stmt in walk_body
+        if stmt.kind == :assign
+            if stmt.lhs isa Expr
+                for a in stmt.lhs.args[2:end]
+                    ii_expr_reads(a, arrs, acc)
+                end
+            end
+            ii_expr_reads(stmt.rhs, arrs, acc)
+        elseif stmt.kind == :if
+            ii_expr_reads(stmt.cond, arrs, acc)
+            ii_array_reads_walk!(stmt.then, target, arrs, acc)
+            ii_array_reads_walk!(stmt.els, target, arrs, acc)
+        elseif stmt.kind == :for
+            stmt.body === target && continue
+            ii_array_reads_walk!(stmt.body, target, arrs, acc)
+        end
+    end
+    return nothing
+end
+
+function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
+    stmt.kind == :for || return :none
+    agen_tier_b_walk(stmt.body, Set{Symbol}()) === nothing || return :none
+    ii_body_has_escaping_array_write(kernel.body, stmt.body, kernel.sig.kinds, active_map) && return :none
+    synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+    synth === nothing && return :none
+    local_names = cgen_locally_assigned_scalars(stmt.body)
+    redvars = cgen_scalar_reduction_vars(stmt.body)
+    # active_map gate first, matching snap_assign_site_decision's own
+    # order (active_map[var] checked before value_needed at all) --
+    # an int-kinded index var like i_loc/i_node can never be active,
+    # so this is what actually excludes them, not an incidental side
+    # effect of anything else here.
+    vn_local = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
+    isempty(vn_local) && return :none
+    vn_red = intersect(vn_local, redvars)
+    vn_ind = setdiff(vn_local, redvars)
+    # Each half is checked independently against ITS OWN safety
+    # condition rather than requiring the whole loop to be purely one
+    # shape or the other -- a loop can genuinely contain both a pure
+    # reduction accumulator and a fully-contained independent chain at
+    # once (they don't interact), and there's no reason to refuse the
+    # whole loop just because it isn't homogeneous.
+    if !isempty(vn_red)
+        inside_nonlinear = Set{Symbol}()
+        snap_collect_value_needed!(stmt.body, inside_nonlinear)
+        isempty(intersect(vn_red, inside_nonlinear)) || return :none
+    end
+    if !isempty(vn_ind)
+        escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
+        isempty(escaped) || return :none
+    end
+    if !isempty(vn_red) && !isempty(vn_ind)
+        return :mixed
+    elseif !isempty(vn_red)
+        return :reduction
+    else
+        return :independent
+    end
+end
+
+function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
+    stmt.kind == :for || return :none
+    agen_tier_b_walk(stmt.body, Set{Symbol}()) === nothing || return :none
+    ii_body_has_escaping_array_write(kernel.body, stmt.body, kernel.sig.kinds, active_map) && return :none
+    synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+    synth === nothing && return :none
+    local_names = cgen_locally_assigned_scalars(stmt.body)
+    redvars = cgen_scalar_reduction_vars(stmt.body)
+    vn_local = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
+    isempty(vn_local) && return :none
+    vn_red = intersect(vn_local, redvars)
+    vn_ind = setdiff(vn_local, redvars)
+    if !isempty(vn_red)
+        inside_nonlinear = Set{Symbol}()
+        agen_collect_value_needed!(stmt.body, inside_nonlinear)
+        isempty(intersect(vn_red, inside_nonlinear)) || return :none
+    end
+    if !isempty(vn_ind)
+        escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
+        isempty(escaped) || return :none
+    end
+    if !isempty(vn_red) && !isempty(vn_ind)
+        return :mixed
+    elseif !isempty(vn_red)
+        return :reduction
+    else
+        return :independent
+    end
+end
+
+# SCOPE RESTRICTION, found necessary by stress-testing (not assumed
+# up front): only ever classify a `:for` statement that sits LITERALLY
+# at the top level of `kernel.body` -- no recursion into a failed
+# loop's own children, no recursion into `:if` branches. This is a
+# real downgrade from the first version of this prototype (which did
+# recurse), made after finding that the recursive version produced an
+# UNSOUND positive for mg_vcycle.jl: its one reported `:independent`
+# site was a `for j = 1:n` loop nested inside the REPEATING outer
+# `i_seq_level` loop, with `:if`-conditioned locals (`left`/`right`)
+# inside it. `ii_escapes`'s `kernel_body[idx+1:end]` scope is only
+# correct when `target` IS a top-level kernel.body statement -- for a
+# loop nested inside a repeating ancestor, "escape" also has to
+# account for a read EARLIER in the ancestor's own body being reached
+# on the NEXT ancestor iteration (the exact fixed-point problem
+# snap_fwd_walk_loop! already solves for site_level_tbr, at a
+# different granularity), and for a loop nested inside an `:if`,
+# "after" has to mean "later in the same branch, then after the
+# enclosing if" -- neither is implemented here. Rather than ship an
+# escape check that's silently wrong in exactly the cases it wasn't
+# tested against, this restricts Phase 1+2's positive results to the
+# only shape it has actually verified sound: a loop (or loop nest)
+# that is its own top-level kernel.body statement, matching every
+# genuine positive found so far (ttgc's two i_cell loops, unet's two,
+# transformer's eleven). Extending this to nested/`:if`-scoped targets
+# is real Phase 3 work, not a quick fix -- see the plan.
+# SCOPE RESTRICTION (superseded): only literal top-level kernel.body
+# statements were classified initially -- see the "SCOPE RESTRICTION,
+# found necessary by stress-testing" comment above, which explains
+# WHY that restriction existed (an unsound mg_vcycle.jl positive) but
+# no longer describes current behavior. Recursion into a failed loop's
+# `:for` children was restored once ii_find_for_path/ii_escapes_nested
+# existed to check that case soundly, and recursion into `:if`
+# branches was added on top of THAT once ii_find_ancestor_path
+# extended the same soundness argument to cover `:if`-nested targets
+# too (see the comment above ii_find_ancestor_path's own definition).
+# Both extensions were built adversarial-tests-first, not retrofitted
+# after trusting an unverified positive.
+function snap_ii_plan(kernel)
+    value_needed = snap_value_needed_vars(kernel)
+    active_map = act_analyze(kernel)
+    plan = Dict{Any,Symbol}()
+    snap_ii_plan_walk!(kernel.body, kernel, value_needed, active_map, plan)
+    return plan
+end
+
+# `known_consts` is now built LOCALLY, fresh at the top of every call
+# (one per body-list), mirroring cgen_body's own exact convention
+# rather than being threaded down from a caller -- confirmed by
+# reading cgen_body directly: its own recursive calls into a nested
+# `:if` branch's body pass no known_consts argument at all, so each
+# body-list gets its own independent Dict, populated only by LITERAL
+# scalar assigns preceding a candidate loop WITHIN THAT SAME body.
+# Found necessary (not just tidier) by testing: with known_consts
+# always empty, an UNRELATED `wb`-style self-referencing-with-reset
+# accumulator anywhere in a loop's body caused cgen_reduction_only_
+# loop to refuse the ENTIRE loop outright -- even when the var this
+# analysis actually cares about (a genuinely independent, value-needed
+# scalar elsewhere in the same body) had nothing to do with `wb` at
+# all. Confirmed directly: cgen_reduction_only_loop(body, var, Dict())
+# returned `nothing` for such a loop, while cgen_reduction_only_loop
+# (body, var, Dict(:wb=>0.0)) accepted it.
+function snap_ii_plan_walk!(body, kernel, value_needed, active_map, plan)
+    known_consts = Dict{Symbol,Any}()
+    for idx in eachindex(body)
+        stmt = body[idx]
+        if stmt.kind == :assign
+            if stmt.lhs isa Symbol
+                if stmt.rhs isa Number
+                    known_consts[stmt.lhs] = stmt.rhs
+                else
+                    delete!(known_consts, stmt.lhs)
+                end
+            end
+        elseif stmt.kind == :for
+            kind = snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
+            if kind === :none
+                snap_ii_plan_walk!(stmt.body, kernel, value_needed, active_map, plan)
+            else
+                plan[agen_site_key(body, idx)] = kind
+            end
+            delete!(known_consts, stmt.var)
+        elseif stmt.kind == :if
+            snap_ii_plan_walk!(stmt.then, kernel, value_needed, active_map, plan)
+            snap_ii_plan_walk!(stmt.els, kernel, value_needed, active_map, plan)
+            for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
+                delete!(known_consts, v)
+            end
+        end
+    end
+    return nothing
+end
+
+function agen_ii_plan(kernel)
+    value_needed = agen_value_needed_vars(kernel)
+    active_map = act_analyze(kernel)
+    plan = Dict{Any,Symbol}()
+    agen_ii_plan_walk!(kernel.body, kernel, value_needed, active_map, plan)
+    return plan
+end
+
+function agen_ii_plan_walk!(body, kernel, value_needed, active_map, plan)
+    known_consts = Dict{Symbol,Any}()
+    for idx in eachindex(body)
+        stmt = body[idx]
+        if stmt.kind == :assign
+            if stmt.lhs isa Symbol
+                if stmt.rhs isa Number
+                    known_consts[stmt.lhs] = stmt.rhs
+                else
+                    delete!(known_consts, stmt.lhs)
+                end
+            end
+        elseif stmt.kind == :for
+            kind = agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
+            if kind === :none
+                agen_ii_plan_walk!(stmt.body, kernel, value_needed, active_map, plan)
+            else
+                plan[agen_site_key(body, idx)] = kind
+            end
+            delete!(known_consts, stmt.var)
+        elseif stmt.kind == :if
+            agen_ii_plan_walk!(stmt.then, kernel, value_needed, active_map, plan)
+            agen_ii_plan_walk!(stmt.els, kernel, value_needed, active_map, plan)
+            for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
+                delete!(known_consts, v)
+            end
+        end
+    end
+    return nothing
+end
+
+# cross-check: both hand-maintained copies must agree exactly,
+# mirroring stade_site_level_tbr_check's own pattern.
+function stade_ii_plan_check(kernel)
+    a = snap_ii_plan(kernel)
+    b = agen_ii_plan(kernel)
+    @assert a == b "snap_ii_plan and agen_ii_plan disagree for kernel $(kernel.sig.name): $a vs $b"
+    return a
+end
+
+# ---- ii_* stress tests -------------------------------------------
+# Regression guards for the two gaps found while hardening Phase 1+2
+# against the real corpus (see the scope-restriction comment above
+# snap_ii_plan/agen_ii_plan for the mg_vcycle/transformer story).
+
+let
+    # Stress 1 (UPDATED): originally asserted refusal on the premise
+    # that a loop nested under :if was invisible to the walker at all
+    # -- that premise is no longer true now that ii_find_ancestor_path
+    # handles :if ancestors. UPDATED AGAIN: the kernel itself had an
+    # accidental array escape (`y` accumulated inside the loop, then
+    # read again by `out[1] = y[1]`) that ii_body_has_escaping_array_
+    # write now correctly catches -- `out` now reads a value untouched
+    # by this loop instead, preserving the test's actual intent
+    # (a fully-contained loop nested under :if should classify).
+    k = parse_kernel(:(function ii_stress_ifnest(x, y, z, cond_arr, n, out)
+        if cond_arr[1] > 0.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+        else
+            for i = 1:n
+                z[i] = z[i] + x[i]
+            end
+        end
+        out[1] = x[1]
+        return nothing
+    end))
+    plan = stade_ii_plan_check(k)
+    @assert length(plan) == 1 && only(values(plan)) == :independent "ii_stress_ifnest: expected one :independent site now that :if-nested targets are handled, got $plan"
+    println("ii_plan correctly classifies a fully-contained loop nested under :if OK (superseded the earlier, now-incorrect refusal assertion)")
+
+    # Stress 2: a single loop mixing a genuine reduction var (self-
+    # referencing, no fresh reset -- `acc`) with a genuine locally-
+    # contained independent var (`t`, freshly assigned every
+    # iteration, consumed later in the SAME statement only) as its
+    # value-needed writes. UPDATED: agen_ii_classify/snap_ii_classify
+    # now check each half against its own condition independently
+    # rather than requiring the whole loop to be homogeneous -- a
+    # reduction accumulator and a fully-contained independent chain
+    # don't interact, so there's no reason to refuse the whole loop
+    # just because it isn't purely one shape. Returns :mixed now,
+    # not :none.
+    k2 = parse_kernel(:(function ii_stress_mixed(x, y, n, acc_out)
+        acc = 0.0
+        for i = 1:n
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+            acc = acc + x[i]
+        end
+        acc_out[1] = acc * acc
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert length(plan2) == 1 && only(values(plan2)) == :mixed "ii_stress_mixed: expected one :mixed site, got $plan2"
+    println("ii_plan correctly classifies a loop mixing reduction and independent value-needed vars as :mixed OK")
+
+    # Positive control, run alongside the two negatives above so a
+    # future change that breaks classification entirely (e.g.
+    # returns :none for everything) doesn't silently pass by having
+    # nothing left to fail: a clean top-level independent loop must
+    # still classify.
+    k3 = parse_kernel(:(function ii_stress_positive_control(x, y, n)
+        for i = 1:n
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+        end
+        return nothing
+    end))
+    plan3 = stade_ii_plan_check(k3)
+    @assert length(plan3) == 1 && only(values(plan3)) == :independent "ii_stress_positive_control: expected exactly one :independent site, got $plan3"
+    println("ii_plan still correctly classifies a clean top-level independent loop OK (positive control)")
+end
+
+# ---- ii_* adversarial regression tests (corpus-independent) -------
+# Added in response to a direct reminder that STADE must work
+# generically, not just on the ~25 kernels in val-corpus -- passing
+# the corpus is necessary but not sufficient, and the two bugs found
+# while hardening Phase 1+2 (the vere false-escape, and the mg_vcycle
+# unsound-nesting result) were BOTH found by testing against real
+# corpus kernels, meaning the corpus itself was never an adversarial
+# test of this code -- it just happened to contain cases that broke
+# it. These are deliberately constructed to NOT resemble anything in
+# val-corpus, targeting specific soundness/completeness dimensions of
+# agen_ii_classify/ii_escapes that corpus testing alone gave no
+# evidence about either way.
+
+let
+    # A1: the CONVERSE of the vere false-escape fix -- a genuine
+    # cross-loop dependency (var read nonlinearly by later code with
+    # NO intervening fresh overwrite) must still be caught. Confirms
+    # the fresh-overwrite-kills-alive fix didn't overcorrect into a
+    # false negative while fixing the false positive.
+    k = parse_kernel(:(function ii_adv_genuine_escape(x, y, n, out)
+        for i = 1:n
+            t = x[i] * x[i]
+            y[i] = y[i] + t
+        end
+        out[1] = t * t
+        return nothing
+    end))
+    plan = stade_ii_plan_check(k)
+    @assert isempty(plan) "ii_adv_genuine_escape: expected refusal (t genuinely escapes with no intervening kill), got $plan"
+
+    # A2: a genuine array recurrence (u[i]=u[i-1]-shaped) buried
+    # inside a loop whose SCALAR content looks perfectly independent
+    # -- Phase 1's array-index-mismatch check (inherited from
+    # cgen_reduction_only_loop) must still refuse the whole loop
+    # regardless of how clean the scalar part is.
+    k2 = parse_kernel(:(function ii_adv_buried_recurrence(u, x, n)
+        for i = 2:n
+            t = x[i] * x[i]
+            s = t / 2.0
+            u[i] = u[i - 1] + s * s
+        end
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert isempty(plan2) "ii_adv_buried_recurrence: expected refusal (genuine array recurrence), got $plan2"
+
+    # A3: trip count bound (`m`) is reassigned elsewhere in the
+    # kernel -- the exact shape snap_check_tripcount! exists to
+    # protect in the TWO-SWEEP case. Locking in the current positive
+    # classification here as a DOCUMENTED, not accidental, result: a
+    # fused loop only ever executes its own header once, at the same
+    # point in program order the primal always did, so it never needs
+    # `m`'s value protected against a LATER reassignment the way a
+    # separately-reversed second traversal would. If Phase 3's actual
+    # codegen ever changes that invariant (e.g. an intermediate design
+    # that still re-reads the bound a second time for some reason),
+    # this assertion is exactly the test that should catch it.
+    k3 = parse_kernel(:(function ii_adv_unstable_tripcount(x, y, n, m_arg)
+        m = m_arg
+        for i = 1:m
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+        end
+        m = 0
+        return nothing
+    end))
+    plan3 = stade_ii_plan_check(k3)
+    @assert length(plan3) == 1 && only(values(plan3)) == :independent "ii_adv_unstable_tripcount: expected one :independent site (fusion sidesteps the tripcount-snapshot problem by never re-traversing), got $plan3"
+
+    # A4: an independent (non-reduction) scalar with TWO fresh
+    # assignment sites in the same iteration, on different :if arms --
+    # must still classify as :independent (neither arm self-
+    # references before assigning, both are fresh within THIS
+    # iteration, consumed only later in the SAME iteration).
+    k4 = parse_kernel(:(function ii_adv_two_assign_sites(x, y, n)
+        for i = 1:n
+            t = 0.0
+            if x[i] > 0.0
+                t = x[i] * x[i]
+            else
+                t = -x[i] * x[i]
+            end
+            y[i] = y[i] + t * t
+        end
+        return nothing
+    end))
+    plan4 = stade_ii_plan_check(k4)
+    @assert length(plan4) == 1 && only(values(plan4)) == :independent "ii_adv_two_assign_sites: expected one :independent site, got $plan4"
+
+    # A5: a value-needed ARRAY write (not scalar) inside an otherwise-
+    # eligible loop, consumed nonlinearly by later, unrelated code --
+    # the generic form of the res/res2/up/mup exclusion, independent
+    # of ttgc's specific shape. The array write must stay out of scope
+    # by construction (array-ref lhs is never in local_names/redvars),
+    # and the loop's own scalar (`t`, fully contained) must not be
+    # affected by the array's own escape.
+    k5 = parse_kernel(:(function ii_adv_array_escape(x, arr, n, out)
+        for i = 1:n
+            t = x[i] * x[i]
+            arr[i] = arr[i] + t
+        end
+        out[1] = arr[1] * arr[1]
+        return nothing
+    end))
+    plan5 = stade_ii_plan_check(k5)
+    @assert isempty(plan5) "ii_adv_array_escape: expected empty (t never escapes on its own, arr correctly out of scope, nothing left to classify), got $plan5"
+
+    println("ii_plan adversarial regression suite (5 corpus-independent cases) OK")
+end
+
+# ---- ii_* nested-:for extension regression tests -------------------
+# Built BEFORE the ii_find_for_path/ii_escapes_nested implementation
+# existed, per the same discipline as the corpus-independent
+# adversarial suite above. Unlike that suite, these specifically
+# target the extension that lets a loop nested inside a genuinely
+# INELIGIBLE ancestor (e.g. mg_vcycle's `i_seq_level`) still be judged
+# on its own -- the exact case that forced this extension to exist.
+
+let
+    # NF1: inner loop's locals fully contained -- outer i_seq_k fails
+    # (genuine array recurrence, u[k]=u[k-1]+1.0), forcing the walker
+    # to judge the inner `for i` loop on its own. Must now succeed.
+    k1 = parse_kernel(:(function ii_nf1_contained(u, x, y, n, m)
+        for i_seq_k = 2:m
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+        end
+        return nothing
+    end))
+    plan1 = stade_ii_plan_check(k1)
+    @assert length(plan1) == 1 && only(values(plan1)) == :independent "ii_nf1_contained: expected one :independent site, got $plan1"
+
+    # NF2: wraparound escape -- a nonlinear read of `t` positioned
+    # BEFORE the inner loop, within the SAME repeating i_seq_k body,
+    # reachable on the NEXT ancestor iteration. Must stay refused.
+    k2 = parse_kernel(:(function ii_nf2_wraparound(u, x, y, n, m, out)
+        for i_seq_k = 2:m
+            out[i_seq_k] = t * t
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+        end
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert isempty(plan2) "ii_nf2_wraparound: expected refusal (wraparound escape), got $plan2"
+
+    # NF3: forward escape -- nonlinear read of `t` AFTER the inner
+    # loop, same repeating ancestor body, no wraparound needed. Must
+    # stay refused.
+    k3 = parse_kernel(:(function ii_nf3_forward(u, x, y, n, m, out)
+        for i_seq_k = 2:m
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+            out[i_seq_k] = t * t
+        end
+        return nothing
+    end))
+    plan3 = stade_ii_plan_check(k3)
+    @assert isempty(plan3) "ii_nf3_forward: expected refusal (forward escape), got $plan3"
+
+    # NF4: two levels of :for nesting below the ineligible ancestor --
+    # confirms multi-level path propagation, not just single-level.
+    k4 = parse_kernel(:(function ii_nf4_two_levels(u, x, y, n, m, p)
+        for i_seq_k = 2:m
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            for k2 = 1:p
+                for i = 1:n
+                    t = x[i] * x[i]
+                    s = t / 2.0
+                    y[i] = y[i] + s * s
+                end
+            end
+        end
+        return nothing
+    end))
+    plan4 = stade_ii_plan_check(k4)
+    @assert length(plan4) == 1 && only(values(plan4)) == :independent "ii_nf4_two_levels: expected one :independent site, got $plan4"
+
+    println("ii_plan nested-:for extension regression suite (4 cases) OK")
+end
+
+# ---- ii_* :if-nesting extension regression tests -------------------
+# Built BEFORE the ii_find_ancestor_path :if-handling existed, per
+# the same discipline as every prior extension in this file.
+
+let
+    # IF1: fully-contained locals in an :if.then branch -- must now
+    # classify (was refused, correctly, before this extension existed).
+    # `else` branch uses a SEPARATE array `z` (not `y`) -- `y[1] =
+    # y[1] + 1.0` would self-reference `y` in the sibling branch,
+    # which ii_body_has_escaping_array_write's simple (branch-
+    # unaware) "read anywhere outside the loop" check can't tell is
+    # actually unreachable in the same execution as the :then branch;
+    # using a different array sidesteps that over-conservative false
+    # positive rather than requiring escape-checking to become
+    # branch-aware too, which is out of scope for this fix.
+    k1 = parse_kernel(:(function ii_if1_contained(x, y, z, n, cflag)
+        if cflag[1] > 0.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+        else
+            z[1] = z[1] + 1.0
+        end
+        return nothing
+    end))
+    plan1 = stade_ii_plan_check(k1)
+    @assert length(plan1) == 1 && only(values(plan1)) == :independent "ii_if1_contained: expected one :independent site, got $plan1"
+
+    # IF2: nonlinear read of `t` AFTER the loop but still within the
+    # SAME branch, before the :if closes. Must stay refused.
+    k2 = parse_kernel(:(function ii_if2_same_branch_after(x, y, z, n, cflag, out)
+        if cflag[1] > 0.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+            out[1] = t * t
+        else
+            z[1] = z[1] + 1.0
+        end
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert isempty(plan2) "ii_if2_same_branch_after: expected refusal (same-branch escape), got $plan2"
+
+    # IF3: nonlinear read AFTER the whole :if statement closes. Must
+    # stay refused -- if the condition is true, this read really would
+    # observe the loop's contribution.
+    k3 = parse_kernel(:(function ii_if3_post_if(x, y, z, n, cflag, out)
+        if cflag[1] > 0.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+        else
+            z[1] = z[1] + 1.0
+        end
+        out[1] = t * t
+        return nothing
+    end))
+    plan3 = stade_ii_plan_check(k3)
+    @assert isempty(plan3) "ii_if3_post_if: expected refusal (post-if escape), got $plan3"
+
+    # IF4: the SIBLING branch reuses the same variable name `t`
+    # nonlinearly, entirely unrelated to the `:then` branch's own `t`.
+    # Must NOT be treated as an escape -- the two branches are
+    # mutually exclusive, so nothing in `:els` can ever observe
+    # `:then`'s contribution. The genuinely interesting check here:
+    # confirms ii_find_ancestor_path never looks at the sibling
+    # branch's contents at all.
+    k4 = parse_kernel(:(function ii_if4_other_branch_safe(x, y, z, n, cflag, out)
+        if cflag[1] > 0.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+        else
+            t = z[1] * z[1]
+            out[1] = t * t
+        end
+        return nothing
+    end))
+    plan4 = stade_ii_plan_check(k4)
+    @assert length(plan4) == 1 && only(values(plan4)) == :independent "ii_if4_other_branch_safe: expected one :independent site (sibling branch must not count), got $plan4"
+
+    # IF5: the whole :if sits inside a repeating ancestor (i_seq_k,
+    # itself ineligible via a genuine array recurrence, forcing the
+    # walker down into the :if), with a nonlinear read of `t`
+    # positioned BEFORE the :if within that SAME repeating body --
+    # reachable on the NEXT ancestor iteration. Must stay refused.
+    k5 = parse_kernel(:(function ii_if5_repeating_ancestor(u, x, y, z, n, m, cflag, out)
+        for i_seq_k = 2:m
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            out[i_seq_k] = t * t
+            if cflag[i_seq_k] > 0.0
+                for i = 1:n
+                    t = x[i] * x[i]
+                    s = t / 2.0
+                    y[i] = y[i] + s * s
+                end
+            else
+                z[1] = z[1] + 1.0
+            end
+        end
+        return nothing
+    end))
+    plan5 = stade_ii_plan_check(k5)
+    @assert isempty(plan5) "ii_if5_repeating_ancestor: expected refusal (wraparound escape through a repeating :if ancestor), got $plan5"
+
+    # IF6: :if nested inside a repeating (ineligible) ancestor, fully
+    # contained -- confirms the combination (repeating ancestor +
+    # :if + :for) works, not just each piece in isolation.
+    k6 = parse_kernel(:(function ii_if6_nested_contained(u, x, y, z, n, m, cflag)
+        for i_seq_k = 2:m
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            if cflag[i_seq_k] > 0.0
+                for i = 1:n
+                    t = x[i] * x[i]
+                    s = t / 2.0
+                    y[i] = y[i] + s * s
+                end
+            else
+                z[1] = z[1] + 1.0
+            end
+        end
+        return nothing
+    end))
+    plan6 = stade_ii_plan_check(k6)
+    @assert length(plan6) == 1 && only(values(plan6)) == :independent "ii_if6_nested_contained: expected one :independent site, got $plan6"
+
+    println("ii_plan :if-nesting extension regression suite (6 cases) OK")
+end
+
+# ---- ii_* known_consts threading + mixed-classification regression -
+# Built BEFORE either fix existed (known_consts was verified empty-
+# vs-populated via cgen_reduction_only_loop directly, and the mixed
+# case's existing ii_stress_mixed kernel from an earlier round was
+# already non-vacuous and reused rather than rebuilt).
+
+let
+    # KC1: an UNRELATED wb-style self-referencing-with-reset
+    # accumulator, sitting in the SAME loop body as a genuinely
+    # independent, value-needed chain (`t`/`s`) that has nothing to do
+    # with `wb` at all. Before known_consts threading, this loop was
+    # refused OUTRIGHT (cgen_reduction_only_loop's own Phase 1 proof
+    # failed on `wb`, regardless of what else was in the body) --
+    # confirmed directly via cgen_reduction_only_loop(body, var,
+    # Dict()) returning `nothing` vs Dict(:wb=>0.0) accepting it.
+    # Must now succeed for `t`/`s`.
+    k1 = parse_kernel(:(function ii_kc1_unrelated_wb(x, y, loss, n)
+        wb = 0.0
+        for i = 1:n
+            wb = wb + loss[1]
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+            if x[i] > 0.0
+                wb = 0.0
+            else
+                wb = 0.0
+            end
+        end
+        return nothing
+    end))
+    plan1 = stade_ii_plan_check(k1)
+    @assert length(plan1) == 1 && only(values(plan1)) == :independent "ii_kc1_unrelated_wb: expected one :independent site, got $plan1"
+
+    # KC2: same shape, but the pre-loop value (1.0) does NOT match
+    # what `wb` converges to inside the loop (0.0) -- unprovable, must
+    # stay refused (mirrors src-work's own cgen_reduction_only_loop
+    # negative test for this exact mismatch).
+    k2 = parse_kernel(:(function ii_kc2_mismatch(x, y, loss, n)
+        wb = 1.0
+        for i = 1:n
+            wb = wb + loss[1]
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+            if x[i] > 0.0
+                wb = 0.0
+            else
+                wb = 0.0
+            end
+        end
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert isempty(plan2) "ii_kc2_mismatch: expected refusal (pre-loop value doesn't match convergent constant), got $plan2"
+
+    # KC3: pre-loop value is a variable, not a literal -- no
+    # known_consts entry possible regardless, must stay refused.
+    k3 = parse_kernel(:(function ii_kc3_nonliteral(x, y, loss, n, wb0)
+        wb = wb0
+        for i = 1:n
+            wb = wb + loss[1]
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+            if x[i] > 0.0
+                wb = 0.0
+            else
+                wb = 0.0
+            end
+        end
+        return nothing
+    end))
+    plan3 = stade_ii_plan_check(k3)
+    @assert isempty(plan3) "ii_kc3_nonliteral: expected refusal (pre-loop value not a literal), got $plan3"
+
+    println("ii_plan known_consts threading regression suite (3 cases) OK")
+end
+
+let
+    # M1: mixed case where the INDEPENDENT half genuinely escapes --
+    # whole loop must still refuse, not silently accept the reduction
+    # half alone.
+    k1 = parse_kernel(:(function ii_mixed_neg_ind_escapes(x, y, n, acc_out, out)
+        acc = 0.0
+        for i = 1:n
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+            acc = acc + x[i]
+        end
+        acc_out[1] = acc * acc
+        out[1] = t * t
+        return nothing
+    end))
+    plan1 = stade_ii_plan_check(k1)
+    @assert isempty(plan1) "ii_mixed_neg_ind_escapes: expected refusal (independent half escapes), got $plan1"
+
+    # M2: mixed case where the REDUCTION half is read nonlinearly
+    # INSIDE the loop (violates pure-reduction shape) -- whole loop
+    # must still refuse.
+    k2 = parse_kernel(:(function ii_mixed_neg_red_inside_nonlinear(x, y, n, acc_out)
+        acc = 0.0
+        for i = 1:n
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+            acc = acc + x[i]
+            y[i] = y[i] + acc * acc
+        end
+        acc_out[1] = acc * acc
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert isempty(plan2) "ii_mixed_neg_red_inside_nonlinear: expected refusal (reduction half read nonlinearly inside loop), got $plan2"
+
+    println("ii_plan mixed-classification negative-control regression suite (2 cases) OK")
+end
+
+# ---- Phase 3 codegen correctness regression tests -------------------
+# Both found via central-difference validation on REAL corpus kernels
+# (mg_vcycle.jl, ttgc.jl, unet.jl all failing with max_rel_err ~1-2,
+# not numerical noise) -- not anticipated by any adversarial kernel
+# built for the eligibility oracle alone, since eligibility (Phase
+# 1+2) never generates code and so never exercises whether FUSING a
+# proven-safe SCALAR chain silently sweeps in something ELSE that
+# isn't safe. Locked in here as permanent regressions on top of
+# ii_plan classification (unaffected -- both fixes live in the
+# eligibility oracle itself) AND on generated code correctness,
+# checked via actual central-difference validation, not just
+# classification results.
+
+let
+    # Array-write-escape regression: a loop containing a genuinely
+    # independent scalar chain (`t`/`s`) ALONGSIDE an array write
+    # (`r[i] = t`) whose array is read elsewhere (`out[1] = r[1] /
+    # 2.0`) must be refused entirely -- agen_emit_ii_loop fuses a
+    # loop's WHOLE backward differentiation, not just the proven-safe
+    # scalar subset, so an escaping array write would have its
+    # backward code moved too early if this weren't caught.
+    k1 = parse_kernel(:(function ii_reg_array_escape(x, r, y, n, out)
+        for i = 1:n
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+            r[i] = t
+        end
+        out[1] = r[1] / 2.0
+        return nothing
+    end))
+    plan1 = stade_ii_plan_check(k1)
+    @assert isempty(plan1) "ii_reg_array_escape: expected refusal (r escapes to out[1]), got $plan1"
+
+    # Regression for the array write that does NOT escape (r never
+    # read outside the loop) -- must still classify. Distinguishes
+    # "any array write refuses" (too conservative, would be a
+    # regression in completeness) from "any ESCAPING array write
+    # refuses" (the actual, correct behavior).
+    k2 = parse_kernel(:(function ii_reg_array_no_escape(x, r, y, n)
+        for i = 1:n
+            t = x[i] * x[i]
+            r[i] = t
+            s = r[i] / 2.0
+            y[i] = y[i] + s * s
+        end
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert length(plan2) == 1 && only(values(plan2)) == :independent "ii_reg_array_no_escape: expected one :independent site, got $plan2"
+
+    # Linear-read-escape regression: a scalar chain fully contained
+    # EXCEPT for a purely LINEAR downstream read (`z = z + t`, a
+    # straight accumulation, no +/-/*/etc. combining it nonlinearly)
+    # outside the loop. agen_var_value_needed!-based escape detection
+    # (used by every OTHER stage in this file for its own, different
+    # purpose) would miss this, since a linear read never marks
+    # `needed=true` -- but the read still contributes to `t`'s shadow,
+    # and that contribution must land before a fused loop's own
+    # backward code reads it. Must be refused.
+    k3 = parse_kernel(:(function ii_reg_linear_escape(x, y, n, out)
+        for i = 1:n
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+        end
+        out[1] = out[1] + t
+        return nothing
+    end))
+    plan3 = stade_ii_plan_check(k3)
+    @assert isempty(plan3) "ii_reg_linear_escape: expected refusal (t read linearly outside the loop), got $plan3"
+
+    println("ii_plan Phase 3 codegen correctness regression suite (3 cases) OK")
+end
+
+let
+    # End-to-end numerical regression: fuse_ii_loops=true must produce
+    # numerically correct gradients (matches fuse_ii_loops=false to
+    # within the same central-difference tolerance) for a kernel that
+    # actually classifies :independent and gets fused. This is the
+    # one test in this file that exercises agen_emit_ii_loop itself,
+    # not just ii_plan classification -- everything else here checks
+    # eligibility only. Uses a temp file since stade_validate_adjoint_
+    # file's baseline-caching path is file-based.
+    mktempdir() do dir
+        path = joinpath(dir, "ii_e2e_stub.jl")
+        write(path, """
+        function ii_e2e_stub(x, y, n)
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+            return nothing
+        end
+        """)
+        plan = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path)))
+        @assert length(plan) == 1 && only(values(plan)) == :independent "ii_e2e_stub: expected one :independent site, got $plan"
+        r_unfused = stade_validate_adjoint_file(path; trials = 10, fuse_ii_loops = false)
+        r_fused   = stade_validate_adjoint_file(path; trials = 10, fuse_ii_loops = true)
+        @assert r_unfused.ok "ii_e2e_stub: unfused baseline itself failed central-difference validation, max_rel_err=$(r_unfused.max_rel_err)"
+        @assert r_fused.ok "ii_e2e_stub: fused adjoint failed central-difference validation, max_rel_err=$(r_fused.max_rel_err)"
+    end
+    println("ii_plan Phase 3 end-to-end numerical regression (agen_emit_ii_loop) OK")
+end
+
+# ---- ii_* array-side order-aware escape analysis regression tests --
+# Built and run against the pre-existing (blanket, order-unaware)
+# check BEFORE ii_body_has_escaping_array_write was rewritten to use
+# ii_find_ancestor_path, per the same discipline as every prior
+# extension in this file. Mirrors the scalar side's own design
+# (ii_escapes_nested), deliberately WITHOUT modeling any "kill" for
+# arrays (see the function's own comment for why) -- strictly more
+# conservative than the scalar side.
+
+let
+    # B1: the SAME array name read by a genuinely UNRELATED, EARLIER
+    # statement (before the loop, non-repeating level) -- a read that
+    # already ran before the write happened could never observe it.
+    # Must now be accepted (was wrongly refused by the blanket check).
+    k1 = parse_kernel(:(function ii_arr_b1_before_unrelated(x, r, y, n, out)
+        out[1] = r[1]
+        for i = 1:n
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+            r[i] = t
+        end
+        return nothing
+    end))
+    plan1 = stade_ii_plan_check(k1)
+    @assert length(plan1) == 1 && only(values(plan1)) == :independent "ii_arr_b1_before_unrelated: expected one :independent site, got $plan1"
+
+    # B2: genuine read AFTER the loop, non-repeating level -- must
+    # stay refused.
+    k2 = parse_kernel(:(function ii_arr_b2_after(x, r, y, n, out)
+        for i = 1:n
+            t = x[i] * x[i]
+            s = t / 2.0
+            y[i] = y[i] + s * s
+            r[i] = t
+        end
+        out[1] = r[1]
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert isempty(plan2) "ii_arr_b2_after: expected refusal (genuine after-loop escape), got $plan2"
+
+    # B3: nested inside a repeating (ineligible) ancestor, read
+    # positioned BEFORE the write within the SAME repeating body --
+    # wraparound escape, must stay refused.
+    k3 = parse_kernel(:(function ii_arr_b3_wraparound(u, x, r, y, n, m, out)
+        for i_seq_k = 2:m
+            out[i_seq_k] = r[1]
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+                r[i] = t
+            end
+        end
+        return nothing
+    end))
+    plan3 = stade_ii_plan_check(k3)
+    @assert isempty(plan3) "ii_arr_b3_wraparound: expected refusal (wraparound escape), got $plan3"
+
+    # B4: nested inside a repeating ancestor, read AFTER the write
+    # within the SAME repeating body -- must stay refused.
+    k4 = parse_kernel(:(function ii_arr_b4_same_level_after(u, x, r, y, n, m, out)
+        for i_seq_k = 2:m
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+                r[i] = t
+            end
+            out[i_seq_k] = r[1]
+        end
+        return nothing
+    end))
+    plan4 = stade_ii_plan_check(k4)
+    @assert isempty(plan4) "ii_arr_b4_same_level_after: expected refusal (same-repeating-level escape), got $plan4"
+
+    # B5: fully contained, array never read anywhere else at all.
+    k5 = parse_kernel(:(function ii_arr_b5_contained(x, r, y, n)
+        for i = 1:n
+            t = x[i] * x[i]
+            r[i] = t
+            s = r[i] / 2.0
+            y[i] = y[i] + s * s
+        end
+        return nothing
+    end))
+    plan5 = stade_ii_plan_check(k5)
+    @assert length(plan5) == 1 && only(values(plan5)) == :independent "ii_arr_b5_contained: expected one :independent site, got $plan5"
+
+    println("ii_plan array-side order-aware escape regression suite (5 cases) OK")
+end
+
+# ---- ii_* :reduction codegen (agen_emit_ii_loop invoked from agen_
+# backward_body) end-to-end numerical regression tests ---------------
+# Both built and run against real generated code via central-
+# difference validation, not just ii_plan classification -- these are
+# the only two tests in this file (alongside the :independent e2e
+# regression above) that exercise agen_emit_ii_loop's actual codegen
+# output rather than eligibility alone.
+
+let
+    mktempdir() do dir
+        # Simple case: each iteration's own contribution lands in a
+        # DISTINCT downstream slot (mirrors ttgc's own cavgx -> distinct
+        # i_node shape) -- summation order is irrelevant here, so fused
+        # and unfused should match to the bit.
+        path1 = joinpath(dir, "ii_red_e2e_simple.jl")
+        write(path1, """
+        function ii_red_e2e_simple(x, y, n, out)
+            s = 0.0
+            for i = 1:n
+                s = s + x[i] * x[i]
+            end
+            out[1] = s * s
+            return nothing
+        end
+        """)
+        plan1 = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path1)))
+        @assert length(plan1) == 1 && only(values(plan1)) == :reduction "ii_red_e2e_simple: expected one :reduction site, got $plan1"
+        r1_unfused = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = false)
+        r1_fused   = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = true)
+        @assert r1_unfused.ok "ii_red_e2e_simple: unfused baseline failed, max_rel_err=$(r1_unfused.max_rel_err)"
+        @assert r1_fused.ok "ii_red_e2e_simple: fused adjoint failed, max_rel_err=$(r1_fused.max_rel_err)"
+
+        # Harder case: every iteration's contribution accumulates into
+        # the SAME shared downstream slot (`z[1]`) -- floating-point
+        # summation order genuinely differs between the un-reversed
+        # (fused) and reversed (unfused) traversals here, unlike the
+        # simple case above, so this is the real test that the
+        # distribution loop's un-reversed order still gives a
+        # numerically correct (not just bit-identical-by-luck) answer.
+        path2 = joinpath(dir, "ii_red_e2e_shared.jl")
+        write(path2, """
+        function ii_red_e2e_shared(x, z, n, out)
+            s = 0.0
+            for i = 1:n
+                s = s + x[i] * x[i]
+            end
+            for i = 1:n
+                z[1] = z[1] + s * x[i]
+            end
+            out[1] = z[1]
+            return nothing
+        end
+        """)
+        plan2 = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path2)))
+        @assert length(plan2) == 1 && only(values(plan2)) == :reduction "ii_red_e2e_shared: expected one :reduction site, got $plan2"
+        r2_unfused = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = false)
+        r2_fused   = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = true)
+        @assert r2_unfused.ok "ii_red_e2e_shared: unfused baseline failed, max_rel_err=$(r2_unfused.max_rel_err)"
+        @assert r2_fused.ok "ii_red_e2e_shared: fused adjoint failed, max_rel_err=$(r2_fused.max_rel_err)"
+    end
+    println("ii_plan Phase 3 :reduction end-to-end numerical regression (2 cases) OK")
+end
+
+# ---- ii_* Phase 3 cleanup: unused stack removal regression tests ---
+# Built to lock in a finding made by checking generated code directly
+# (not assumed): a var covered by an ii_plan site does NOT always
+# mean its stack becomes fully unused -- agen_block_boundary_vars's
+# own, separate mechanism (unrelated to fusion) can still keep it
+# alive, and correctly so when not every write-site of that var is
+# ii_plan-covered (mirrors ttgc's own cavgx: its `= 0.0` reset sits
+# outside the classified accumulation loop, as a sibling statement).
+
+let
+    mktempdir() do dir
+        # Fully covered: single write-site, entirely inside the
+        # classified loop, never escaping -- stack must be fully
+        # eliminated from both signatures.
+        path1 = joinpath(dir, "ii_cleanup_full.jl")
+        write(path1, """
+        function ii_cleanup_full(x, y, n)
+            for i = 1:n
+                t = x[i] * x[i]
+                s = t / 2.0
+                y[i] = y[i] + s * s
+            end
+            return nothing
+        end
+        """)
+        r1 = stade_adjoint(io_read_corpus_entry(path1); fuse_ii_loops = true)
+        sig1 = string(r1.adjoint.args[1])
+        @assert !occursin("t_stack", sig1) && !occursin("s_stack", sig1) "ii_cleanup_full: expected t_stack/s_stack fully removed, got $sig1"
+        @assert isempty(r1.initstacks.args[1].args[2:end]) "ii_cleanup_full: expected initstacks_* to take no stack args, got $(r1.initstacks.args[1])"
+        r1v_false = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = false)
+        r1v_true  = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = true)
+        @assert r1v_false.ok && r1v_true.ok "ii_cleanup_full: validation failed after stack removal"
+
+        # Partially covered: a reset OUTSIDE the classified loop (a
+        # sibling statement, matching ttgc's own cavgx shape) means
+        # NOT every write-site is covered -- the stack must stay.
+        path2 = joinpath(dir, "ii_cleanup_partial.jl")
+        write(path2, """
+        function ii_cleanup_partial(x, y, out, n, m)
+            for j = 1:m
+                s = 0.0
+                for i = 1:n
+                    s = s + x[i, j] * x[i, j]
+                end
+                for i = 1:n
+                    y[i, j] = y[i, j] + s * x[i, j]
+                end
+            end
+            out[1] = y[1, 1]
+            return nothing
+        end
+        """)
+        r2 = stade_adjoint(io_read_corpus_entry(path2); fuse_ii_loops = true)
+        sig2 = string(r2.adjoint.args[1])
+        @assert occursin("s_stack", sig2) "ii_cleanup_partial: expected s_stack to stay (not every write-site is ii_plan-covered), got $sig2"
+        r2v_false = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = false)
+        r2v_true  = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = true)
+        @assert r2v_false.ok && r2v_true.ok "ii_cleanup_partial: validation failed"
+    end
+    println("ii_plan Phase 3 unused-stack-removal regression suite (2 cases) OK")
+end
+
+let
+    # Real-corpus regression: ttgc's own cavgx/vere/etc. stacks must
+    # stay in the signature (block-boundary restoration genuinely
+    # still needs them -- this is NOT a fusion artifact left
+    # uncleaned, it's a correct, necessary use), while the specific
+    # accumulation write-sites inside the classified loop still lose
+    # their own push!/pop! (confirmed via central-difference
+    # validation elsewhere in this file, not re-checked here).
+    # Guarded (skip, don't fail) when val-corpus isn't bundled
+    # alongside this file -- unlike every other test in this suite,
+    # this one is the only one depending on an external corpus file
+    # being present, which won't be true for a standalone copy of
+    # just this file.
+    ttgc_path = joinpath(@__DIR__, "val-corpus", "ttgc.jl")
+    if isfile(ttgc_path)
+        r = stade_adjoint(Meta.parse(read(ttgc_path, String)); fuse_ii_loops = true)
+        sig = string(r.adjoint.args[1])
+        @assert occursin("cavgx_stack", sig) "ttgc regression: expected cavgx_stack to remain in the signature (block-boundary still needs it), got $sig"
+        println("ii_plan Phase 3 real-corpus (ttgc) stack-retention regression OK")
+    else
+        println("ii_plan Phase 3 real-corpus (ttgc) stack-retention regression SKIPPED (val-corpus/ttgc.jl not found alongside this file)")
+    end
+end
+
+# ---- ii_* :mixed codegen end-to-end numerical regression tests -----
+# The cross-dependency case (M2 below) is the one that actually caught
+# a real bug: a first version of :mixed split vn_ind's differentiation
+# to the forward position and vn_red's to the backward position
+# (mirroring how :independent and :reduction each work alone). That
+# passed a minimal test (M1, which happens not to have any vn_ind var
+# read by a vn_red statement) but failed central-difference validation
+# on transformer.jl with max_rel_err ~1.4 -- traced to exactly this
+# cross-dependency: a vn_ind var's own "collect every contribution,
+# then distribute" step ran too early (at the forward position),
+# before its vn_red-side contribution (only available later, at the
+# backward position) had even been computed, silently dropping that
+# contribution and leaking the shadow instead of distributing it.
+# Fixed by NOT splitting -- `:mixed` now gets the same treatment as
+# `:reduction` (everything deferred to the backward position) rather
+# than attempting the split at all. M1 is kept as a positive control
+# that the simpler case still works; M2 is the actual regression that
+# would catch the split-based bug returning.
+
+let
+    mktempdir() do dir
+        # M1: vn_ind (`t`) never read by the vn_red (`acc`) statement
+        # -- no cross-dependency, the simplest possible :mixed case.
+        path1 = joinpath(dir, "ii_mixed_e2e_simple.jl")
+        write(path1, """
+        function ii_mixed_e2e_simple(x, y, n, acc_out)
+            acc = 0.0
+            for i = 1:n
+                t = x[i] * x[i]
+                y[i] = y[i] + t * t
+                acc = acc + x[i]
+            end
+            acc_out[1] = acc * acc
+            return nothing
+        end
+        """)
+        plan1 = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path1)))
+        @assert length(plan1) == 1 && only(values(plan1)) == :mixed "ii_mixed_e2e_simple: expected one :mixed site, got $plan1"
+        r1_unfused = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = false)
+        r1_fused   = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = true)
+        @assert r1_unfused.ok "ii_mixed_e2e_simple: unfused baseline failed, max_rel_err=$(r1_unfused.max_rel_err)"
+        @assert r1_fused.ok "ii_mixed_e2e_simple: fused adjoint failed, max_rel_err=$(r1_fused.max_rel_err)"
+
+        # M2: vn_ind (`diff`) IS read by the vn_red (`s2`) statement's
+        # own accumulation term, matching transformer.jl's own real
+        # shape (a LayerNorm-style variance computation) -- also
+        # nested inside a genuinely sequential outer loop, since that
+        # is what forces the inner loop to be classified on its own
+        # rather than subsumed into a larger :independent unit.
+        path2 = joinpath(dir, "ii_mixed_e2e_crossdep.jl")
+        write(path2, """
+        function ii_mixed_e2e_crossdep(u, x, y, out, d, n_rows)
+            for i_seq_row = 2:n_rows
+                u[i_seq_row] = u[i_seq_row - 1] + 1.0
+                s2 = 0.0
+                for j = 1:d
+                    diff = x[(i_seq_row - 1) * d + j]
+                    y[(i_seq_row - 1) * d + j] = y[(i_seq_row - 1) * d + j] + diff * diff
+                    s2 = s2 + diff * diff
+                end
+                row_var = s2 / d
+                out[i_seq_row] = row_var
+            end
+            return nothing
+        end
+        """)
+        plan2 = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path2)))
+        @assert length(plan2) == 1 && only(values(plan2)) == :mixed "ii_mixed_e2e_crossdep: expected one :mixed site, got $plan2"
+        r2_unfused = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = false)
+        r2_fused   = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = true)
+        @assert r2_unfused.ok "ii_mixed_e2e_crossdep: unfused baseline failed, max_rel_err=$(r2_unfused.max_rel_err)"
+        @assert r2_fused.ok "ii_mixed_e2e_crossdep: fused adjoint failed (max_rel_err=$(r2_fused.max_rel_err)) -- this is exactly the cross-dependency shape that broke the earlier split-based design"
+    end
+    println("ii_plan Phase 3 :mixed end-to-end numerical regression (2 cases) OK")
+end
+
+# ---- ii_* site_level_tbr interaction regression test ---------------
+# Found by direct user report, not internal testing: fuse_ii_loops=true
+# combined with site_level_tbr=true produced genuinely WRONG gradients
+# on ttgc.jl (max_rel_err ~0.17), not just a missed optimization.
+# Root cause: agen_push_pop_source ignores `value_needed` entirely once
+# ectx.push_pop is set (site_level_tbr's own, ii_plan-unaware per-site
+# Dict takes over completely for the push/pop DECISION) -- so excluding
+# a var from value_needed, this file's only mechanism for suppressing
+# a push/pop pair everywhere else, had zero effect under site_level_tbr.
+# For `:reduction` specifically this left a genuinely unmatched push at
+# the forward position (site_level_tbr's stale decision still said to
+# push cavgx et al., but fusion's whole design assumes nothing there
+# ever needs popping), permanently growing the stack and corrupting
+# every later, unrelated pop. This is the ONE test in this file
+# combining site_level_tbr=true with fuse_ii_loops=true end to end --
+# every other fuse_ii_loops regression here only ever exercised the
+# default site_level_tbr=false path, which is exactly why this gap
+# went unnoticed through several rounds of otherwise-careful testing.
+
+let
+    mktempdir() do dir
+        path = joinpath(dir, "ii_tbr_interaction.jl")
+        write(path, """
+        function ii_tbr_interaction(x, y, n, acc_out)
+            acc = 0.0
+            for i = 1:n
+                acc = acc + x[i] * x[i]
+            end
+            acc_out[1] = acc * acc
+            return nothing
+        end
+        """)
+        r_false = stade_validate_adjoint_file(path; trials = 10, fuse_ii_loops = true, site_level_tbr = false)
+        r_true  = stade_validate_adjoint_file(path; trials = 10, fuse_ii_loops = true, site_level_tbr = true)
+        @assert r_false.ok "ii_tbr_interaction: fuse_ii_loops=true, site_level_tbr=false failed, max_rel_err=$(r_false.max_rel_err)"
+        @assert r_true.ok "ii_tbr_interaction: fuse_ii_loops=true, site_level_tbr=true failed (max_rel_err=$(r_true.max_rel_err)) -- this is exactly the stack-imbalance shape that produced wrong gradients before agen_ii_override_ectx existed"
+    end
+    println("ii_plan Phase 3 site_level_tbr interaction regression OK")
 end
