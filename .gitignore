@@ -6,7 +6,7 @@
 
 # Some folders
 val-corpus-gpu-split/
-claude/
+# claude/
 
 # STADE-generated files
 # *_b.jl
