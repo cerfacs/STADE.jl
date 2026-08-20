@@ -8686,6 +8686,199 @@ function ii_array_reads_walk!(walk_body, target, arrs, acc)
     return nothing
 end
 
+# ---- recomputability: can a value be rebuilt at backward time? -----
+#
+# A snapshot exists to carry a primal value from forward time to
+# backward time. The alternative is to recompute it there instead --
+# which moves no differentiation at all, so unlike fusion it stays
+# sound in the presence of an escaping array write. `ii_recomputable`
+# is the proof obligation: re-executing `loop_body`'s own statements
+# at the backward position must reproduce `var`'s forward value.
+#
+# The cone of inputs must bottom out only in things whose forward
+# value is still intact when the backward sweep arrives: values never
+# assigned anywhere in the kernel, this nest's own loop indices, or
+# other members of the recomputed chain. Two deliberate
+# conservatisms, both of which have bitten this codebase before in
+# other guises:
+#   - An ARRAY is refused whenever it's assigned anywhere in the
+#     kernel, even if the writes are inside this same loop: proving a
+#     read observes this loop's own write rather than a foreign one
+#     needs index reasoning this analysis doesn't attempt.
+#   - A SCALAR is refused if it is LIVE-IN to loop_body -- read before
+#     any write of it, so re-execution would restart from whatever the
+#     variable happens to hold at backward time rather than from its
+#     forward-time initial value. This is what separates a reduction
+#     accumulator whose reset sits outside the loop (live-in, refused)
+#     from the same accumulator classified one level further out, with
+#     its reset inside (not live-in, accepted). Note that a scalar
+#     assigned again in some later, unrelated part of the kernel is
+#     NOT a problem: the recompute overwrites it before reading it.
+#     Only the ordering within loop_body matters.
+function ii_assigned_vars!(body, acc, skip = nothing)
+    for stmt in body
+        if stmt.kind == :assign
+            push!(acc, stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1])
+        elseif stmt.kind == :for
+            stmt.body === skip && continue
+            ii_assigned_vars!(stmt.body, acc, skip)
+        elseif stmt.kind == :if
+            ii_assigned_vars!(stmt.then, acc, skip)
+            ii_assigned_vars!(stmt.els, acc, skip)
+        end
+    end
+    return nothing
+end
+
+function ii_collect_defs!(body, defs, loop_vars)
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            push!(get!(defs, var, Any[]), stmt)
+        elseif stmt.kind == :for
+            push!(loop_vars, stmt.var)
+            ii_collect_defs!(stmt.body, defs, loop_vars)
+        elseif stmt.kind == :if
+            ii_collect_defs!(stmt.then, defs, loop_vars)
+            ii_collect_defs!(stmt.els, defs, loop_vars)
+        end
+    end
+    return nothing
+end
+
+# Walks `body` in program order. Returns :live if a read of `var` can
+# precede every write of it, :killed if a write provably comes first,
+# :none if neither occurs. A write nested inside a :for/:if does NOT
+# kill (the loop may run zero times, the branch may not be taken) --
+# only a top-level write of this body does.
+function ii_scalar_live_in(body, var)
+    for stmt in body
+        if stmt.kind == :assign
+            reads = Set{Symbol}()
+            agen_collect_expr_vars!(stmt.rhs, reads)
+            if stmt.lhs isa Expr
+                for a in stmt.lhs.args[2:end]
+                    agen_collect_expr_vars!(a, reads)
+                end
+            end
+            var in reads && return :live
+            stmt.lhs isa Symbol && stmt.lhs == var && return :killed
+        elseif stmt.kind == :for
+            ii_scalar_live_in(stmt.body, var) === :live && return :live
+        elseif stmt.kind == :if
+            cond_reads = Set{Symbol}()
+            agen_collect_expr_vars!(stmt.cond, cond_reads)
+            var in cond_reads && return :live
+            ii_scalar_live_in(stmt.then, var) === :live && return :live
+            ii_scalar_live_in(stmt.els, var) === :live && return :live
+        end
+    end
+    return :none
+end
+
+function ii_recomputable(kernel, loop_body, var)
+    written = Set{Symbol}()
+    ii_assigned_vars!(kernel.body, written)
+    defs = Dict{Symbol,Vector{Any}}()
+    loop_vars = Set{Symbol}()
+    ii_collect_defs!(loop_body, defs, loop_vars)
+    seen = Set{Symbol}()
+    frontier = Symbol[var]
+    while !isempty(frontier)
+        v = pop!(frontier)
+        (v in seen || v in loop_vars) && continue
+        push!(seen, v)
+        is_array = get(kernel.sig.kinds, v, nothing) in (:array_float, :array_int)
+        if !is_array && haskey(defs, v)
+            ii_scalar_live_in(loop_body, v) === :live && return false
+            for stmt in defs[v]
+                stmt.lhs isa Symbol || return false
+                reads = Set{Symbol}()
+                agen_collect_expr_vars!(stmt.rhs, reads)
+                for r in reads
+                    push!(frontier, r)
+                end
+            end
+        elseif v in written
+            return false
+        end
+    end
+    return true
+end
+
+# True iff any var in `vars` is assigned inside a nested :for of
+# `body` (at any depth below body's own top level).
+#
+# agen_emit_ii_loop builds its fused loop as vcat(fwd, bwd) at the
+# CLASSIFIED loop's own level only: the entire forward nest runs, then
+# the entire backward nest. A fused scalar assigned inside a nested
+# :for therefore holds only its LAST inner-iteration value by the time
+# the backward nest reads it -- every backward iteration then uses the
+# wrong primal. (A var assigned at the classified body's own top level
+# is fine: it holds one value for the whole iteration, whatever the
+# nest below reads it. An :if is fine too -- both halves re-evaluate
+# the same branch.) Refusing here rather than teaching
+# agen_emit_ii_loop to interleave per level is the conservative
+# choice; interleaving is real, not-yet-attempted future work.
+function ii_assigns_any(body, vars)
+    for stmt in body
+        if stmt.kind == :assign
+            (stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]) in vars && return true
+        elseif stmt.kind == :for
+            ii_assigns_any(stmt.body, vars) && return true
+        elseif stmt.kind == :if
+            (ii_assigns_any(stmt.then, vars) || ii_assigns_any(stmt.els, vars)) && return true
+        end
+    end
+    return false
+end
+
+function ii_fused_var_in_nested_for(body, vars)
+    for stmt in body
+        if stmt.kind == :for
+            ii_assigns_any(stmt.body, vars) && return true
+        elseif stmt.kind == :if
+            (ii_fused_var_in_nested_for(stmt.then, vars) ||
+             ii_fused_var_in_nested_for(stmt.els, vars)) && return true
+        end
+    end
+    return false
+end
+
+# True iff `body` still contains a push site after the vn_local
+# exclusion -- a snapshot, branch flag, or tripcount that
+# agen_forward_body would emit anyway.
+#
+# This only matters for the classifications that execute the body
+# TWICE: `:reduction`/`:mixed` keep the ordinary forward loop AND emit
+# agen_emit_ii_loop (primal ++ backward) at the backward position, so
+# any surviving push runs in both, leaving the forward one orphaned
+# and restoring the wrong value in the second. `:independent` replaces
+# the forward loop entirely, so its push and pop stay matched within
+# the one fused iteration and it needs no such gate.
+#
+# Deliberately coarser than the emit-time test: whole-variable
+# value_needed rather than site-level TBR's Dict, and no `exempt`
+# consultation (agen_collect_exempt_vars! never exempts a write inside
+# a loop anyway, which every site here is). Both directions only ever
+# refuse more, never fewer.
+function ii_body_has_surviving_snapshot(body, kinds, active_map, value_needed, vn_local, reassigned)
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            get(kinds, var, nothing) in (:scalar_float, :array_float) &&
+                get(active_map, var, false) && var in value_needed &&
+                !(var in vn_local) && return true
+        elseif stmt.kind == :for
+            isempty(agen_tripcount_bound_vars(stmt, reassigned)) || return true
+            ii_body_has_surviving_snapshot(stmt.body, kinds, active_map, value_needed, vn_local, reassigned) && return true
+        elseif stmt.kind == :if
+            return true   # agen_forward_body always pushes a branch flag
+        end
+    end
+    return false
+end
+
 function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     stmt.kind == :for || return :none
     agen_tier_b_walk(stmt.body, Set{Symbol}()) === nothing || return :none
@@ -8701,6 +8894,9 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     # effect of anything else here.
     vn_local = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
     isempty(vn_local) && return :none
+    # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
+    # when no fused var is live across a nested loop boundary.
+    ii_fused_var_in_nested_for(stmt.body, vn_local) && return :none
     vn_red = intersect(vn_local, redvars)
     vn_ind = setdiff(vn_local, redvars)
     # Each half is checked independently against ITS OWN safety
@@ -8717,6 +8913,13 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     if !isempty(vn_ind)
         escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
         isempty(escaped) || return :none
+    end
+    # only :reduction/:mixed run the body twice -- see
+    # ii_body_has_surviving_snapshot.
+    if !isempty(vn_red) &&
+       ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, value_needed,
+                                       vn_local, snap_collect_reassigned(kernel.body))
+        return :none
     end
     if !isempty(vn_red) && !isempty(vn_ind)
         return :mixed
@@ -8737,6 +8940,9 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     redvars = cgen_scalar_reduction_vars(stmt.body)
     vn_local = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
     isempty(vn_local) && return :none
+    # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
+    # when no fused var is live across a nested loop boundary.
+    ii_fused_var_in_nested_for(stmt.body, vn_local) && return :none
     vn_red = intersect(vn_local, redvars)
     vn_ind = setdiff(vn_local, redvars)
     if !isempty(vn_red)
@@ -8747,6 +8953,11 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     if !isempty(vn_ind)
         escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
         isempty(escaped) || return :none
+    end
+    if !isempty(vn_red) &&
+       ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, value_needed,
+                                       vn_local, agen_collect_reassigned(kernel.body))
+        return :none
     end
     if !isempty(vn_red) && !isempty(vn_ind)
         return :mixed
@@ -9807,4 +10018,248 @@ let
         @assert rt_false.ok && rt_true.ok "ii_hvp_e2e_reduction: stade_tangent's fuse_ii_loops no-op broke validation"
     end
     println("ii_plan fuse_ii_loops on stade_hvp/stade_tangent regression OK")
+end
+# ---- ii_* surviving-snapshot regression (:reduction/:mixed) --------
+# `:reduction`/`:mixed` keep the ordinary forward loop AND emit
+# agen_emit_ii_loop (primal ++ backward) at the backward position, so
+# the body runs TWICE. Any push site inside it that the vn_local
+# exclusion doesn't cover therefore fires in both: the forward one is
+# never popped, and the second execution restores the wrong value.
+# S1 is the shape that produced a genuinely wrong gradient
+# (max_rel_err ~2.0, not a near-miss); S2 is the branch-flag variant
+# of the same double-push. S3 is the positive
+# control that `:independent` -- which REPLACES the forward loop
+# rather than adding to it, keeping push and pop matched inside one
+# fused iteration -- is deliberately not gated by this.
+
+let
+    mktempdir() do dir
+        # S1: `z[i] = z[i] * x[i]` is self-referencing under `*`, so it
+        # needs an :array snapshot, and z is not in vn_local (it's an
+        # array, not a locally-assigned scalar), so nothing excludes it.
+        path1 = joinpath(dir, "ii_survsnap_array.jl")
+        write(path1, """
+        function ii_survsnap_array(x, z, n, acc_out)
+            acc = 0.0
+            for i = 1:n
+                z[i] = z[i] * x[i]
+                acc = acc + z[i]
+            end
+            acc_out[1] = acc * acc
+            return nothing
+        end
+        """)
+        plan1 = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path1)))
+        @assert isempty(plan1) "ii_survsnap_array: expected no classified site (surviving array snapshot inside a :reduction body), got $plan1"
+        r1 = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = true)
+        @assert r1.ok "ii_survsnap_array: fused adjoint failed (max_rel_err=$(r1.max_rel_err)) -- a :reduction body executes twice, so a surviving push orphans its forward copy"
+
+        # S2: an :if inside the body -- agen_forward_body pushes a
+        # branch flag unconditionally, so the same double-push applies.
+        path2 = joinpath(dir, "ii_survsnap_branch.jl")
+        write(path2, """
+        function ii_survsnap_branch(x, n, acc_out)
+            acc = 0.0
+            for i = 1:n
+                if x[i] > 0.0
+                    acc = acc + x[i]
+                else
+                    acc = acc - x[i]
+                end
+            end
+            acc_out[1] = acc * acc
+            return nothing
+        end
+        """)
+        plan2 = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path2)))
+        @assert isempty(plan2) "ii_survsnap_branch: expected no classified site (branch flag pushed inside a :reduction body), got $plan2"
+        r2 = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = true)
+        @assert r2.ok "ii_survsnap_branch: fused adjoint failed (max_rel_err=$(r2.max_rel_err))"
+
+        # S3: positive control -- :independent replaces the forward
+        # loop entirely, so a surviving snapshot inside it stays
+        # matched and must NOT be refused.
+        path3 = joinpath(dir, "ii_survsnap_indep_ok.jl")
+        write(path3, """
+        function ii_survsnap_indep_ok(x, y, z, n)
+            for i = 1:n
+                z[i] = z[i] * x[i]
+                t = z[i] * z[i]
+                y[i] = y[i] + t * t
+            end
+            return nothing
+        end
+        """)
+        plan3 = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path3)))
+        @assert length(plan3) == 1 && only(values(plan3)) == :independent "ii_survsnap_indep_ok: :independent must stay classified despite a surviving snapshot, got $plan3"
+        r3 = stade_validate_adjoint_file(path3; trials = 10, fuse_ii_loops = true)
+        @assert r3.ok "ii_survsnap_indep_ok: fused adjoint failed (max_rel_err=$(r3.max_rel_err))"
+    end
+    println("ii_plan surviving-snapshot regression suite (3 cases) OK")
+end
+
+# ---- ii_recomputable adversarial suite ----------------------------
+# The proof obligation for recompute-at-backward-time. Each case
+# targets one way re-execution can silently diverge from the forward
+# values, rather than a happy path.
+
+let
+    kernel_of(ex) = parse_kernel(ex)
+    first_loop(body) = body[findfirst(s -> s.kind == :for, body)]
+
+    # R1: chain bottoming out entirely in never-written arguments.
+    k1 = kernel_of(:(function ii_recomp_clean(x, y, n)
+        for i = 1:n
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+        end
+        return nothing
+    end))
+    @assert ii_recomputable(k1, first_loop(k1.body).body, :t) "R1: a chain over never-written args must be recomputable"
+
+    # R2: chain reads an array the kernel writes elsewhere -- its
+    # forward contents are gone by backward time.
+    k2 = kernel_of(:(function ii_recomp_written_arr(x, z, y, n)
+        for i = 1:n
+            z[i] = x[i] * 2.0
+        end
+        for i = 1:n
+            t = z[i] * z[i]
+            y[i] = y[i] + t * t
+        end
+        return nothing
+    end))
+    @assert !ii_recomputable(k2, k2.body[2].body, :t) "R2: a chain reading a kernel-written array must be refused"
+
+    # R3: accumulator whose reset sits OUTSIDE the candidate loop --
+    # live-in, so re-execution restarts from the wrong value.
+    k3 = kernel_of(:(function ii_recomp_livein(x, n, out)
+        acc = 0.0
+        for i = 1:n
+            acc = acc + x[i] * x[i]
+        end
+        out[1] = acc * acc
+        return nothing
+    end))
+    @assert !ii_recomputable(k3, first_loop(k3.body).body, :acc) "R3: a live-in accumulator must be refused"
+
+    # R4: the same accumulator one level out, with its reset INSIDE
+    # the candidate loop -- no longer live-in, so it is recomputable.
+    # This is the whole reason classification wants to move outward.
+    k4 = kernel_of(:(function ii_recomp_reset_inside(x, n, m, out)
+        for i_seq_o = 1:m
+            acc = 0.0
+            for i = 1:n
+                acc = acc + x[i] * x[i]
+            end
+            out[i_seq_o] = acc * acc
+        end
+        return nothing
+    end))
+    @assert ii_recomputable(k4, first_loop(k4.body).body, :acc) "R4: an accumulator whose reset is inside the loop must be recomputable"
+
+    # R5: a reassigned kernel ARGUMENT read by the chain -- trusting
+    # "it's an argument, so it's safe" was a real bug in the Tier B work.
+    k5 = kernel_of(:(function ii_recomp_reassigned_arg(x, y, a, n)
+        a = a * 2.0
+        for i = 1:n
+            t = x[i] * a
+            y[i] = y[i] + t * t
+        end
+        return nothing
+    end))
+    @assert !ii_recomputable(k5, k5.body[2].body, :t) "R5: a chain reading a reassigned kernel argument must be refused"
+
+    # R6: chain through nested loop indices -- re-established by the
+    # re-executed headers, so recomputable.
+    k6 = kernel_of(:(function ii_recomp_nested_idx(x, y, n, m)
+        for i = 1:n
+            for j = 1:m
+                t = x[(i - 1) * m + j] * x[(i - 1) * m + j]
+                y[(i - 1) * m + j] = y[(i - 1) * m + j] + t * t
+            end
+        end
+        return nothing
+    end))
+    @assert ii_recomputable(k6, first_loop(k6.body).body, :t) "R6: a chain over nested loop indices must be recomputable"
+
+    # R7: read inside an :if condition still counts as a read, so a
+    # var first observed there is live-in.
+    k7 = kernel_of(:(function ii_recomp_if_livein(x, y, n)
+        s = 1.0
+        for i = 1:n
+            if s > 0.0
+                s = x[i] * x[i]
+            end
+            y[i] = y[i] + s * s
+        end
+        return nothing
+    end))
+    @assert !ii_recomputable(k7, first_loop(k7.body).body, :s) "R7: a var read in an :if condition before any write is live-in"
+    println("ii_recomputable adversarial suite (7 cases) OK")
+end
+
+# ---- ii_* nested-loop-boundary regression -------------------------
+# agen_emit_ii_loop fuses as vcat(fwd, bwd) at the CLASSIFIED loop's
+# own level: the whole forward nest, then the whole backward nest. A
+# fused scalar assigned inside a NESTED :for therefore survives into
+# the backward nest holding only its last inner-iteration value, and
+# every backward iteration silently differentiates against it. N1 is
+# that shape (it produced max_rel_err ~1.7, not a near-miss); the
+# correct behaviour is to refuse the outer unit and let the walker
+# fall back to the inner loop, which is flat and genuinely safe. N2
+# is the positive control that a fused var assigned at the classified
+# body's OWN top level is unaffected -- it holds one value for the
+# whole iteration, whatever the nest below it reads.
+#
+# The pre-existing nested-:for suite above covers the other
+# direction (finding a smaller eligible unit inside a failed outer
+# loop) and asserts on classification only, so it never exercised
+# this.
+
+let
+    mktempdir() do dir
+        path1 = joinpath(dir, "ii_nestbound_inner.jl")
+        write(path1, """
+        function ii_nestbound_inner(x, y, n, m)
+            for i = 1:n
+                for j = 1:m
+                    t = x[(i - 1) * m + j] * x[(i - 1) * m + j]
+                    y[(i - 1) * m + j] = y[(i - 1) * m + j] + t * t
+                end
+            end
+            return nothing
+        end
+        """)
+        k1 = parse_kernel(io_read_corpus_entry(path1))
+        plan1 = stade_ii_plan_check(k1)
+        inner_key = agen_site_key(k1.body[1].body, 1)
+        @assert length(plan1) == 1 && haskey(plan1, inner_key) "ii_nestbound_inner: the OUTER loop must be refused (fused var assigned inside a nested :for) and the inner one classified instead, got $plan1"
+        r1u = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = false)
+        r1f = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = true)
+        @assert r1u.ok "ii_nestbound_inner: unfused baseline failed, max_rel_err=$(r1u.max_rel_err)"
+        @assert r1f.ok "ii_nestbound_inner: fused adjoint failed (max_rel_err=$(r1f.max_rel_err)) -- a fused var live across a nested loop boundary keeps only its last inner value"
+
+        # N2: `t` assigned at the classified loop's own top level and
+        # merely READ inside the nested loop -- must stay classified.
+        path2 = joinpath(dir, "ii_nestbound_toplevel.jl")
+        write(path2, """
+        function ii_nestbound_toplevel(x, y, n, m)
+            for i = 1:n
+                t = x[i] * x[i]
+                for j = 1:m
+                    y[(i - 1) * m + j] = y[(i - 1) * m + j] + t * t
+                end
+            end
+            return nothing
+        end
+        """)
+        k2 = parse_kernel(io_read_corpus_entry(path2))
+        plan2 = stade_ii_plan_check(k2)
+        outer_key = agen_site_key(k2.body, 1)
+        @assert length(plan2) == 1 && haskey(plan2, outer_key) "ii_nestbound_toplevel: a fused var written at the classified body's own top level must stay classified, got $plan2"
+        r2f = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = true)
+        @assert r2f.ok "ii_nestbound_toplevel: fused adjoint failed, max_rel_err=$(r2f.max_rel_err)"
+    end
+    println("ii_plan nested-loop-boundary regression suite (2 cases) OK")
 end
