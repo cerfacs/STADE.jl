@@ -4116,14 +4116,60 @@ function agen_ii_override_ectx(ectx, body, vn_local)
     return (keep_push_pop = ectx.keep_push_pop, loop_ctx = ectx.loop_ctx, layout = ectx.layout, push_pop = override, ii_plan = ectx.ii_plan)
 end
 
-function agen_emit_ii_loop(stmt, lin_stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx)
+# ---- filtered primal recompute (backward-position fusion only) ----
+#
+# agen_emit_ii_loop plays two different roles. At the FORWARD position
+# (`:independent`) its `fwd` half is the kernel's actual primal
+# execution and must be emitted whole. At the BACKWARD position
+# (`:reduction`/`:mixed`) the primal already ran in the ordinary
+# forward sweep, so `fwd` there is purely a RECOMPUTE: its only job is
+# to re-establish the fused scalars that were never snapshotted.
+#
+# Re-executing the whole body in that role is wrong, not merely
+# wasteful: an accumulating array write (`y[i] = y[i] + t * t`) applies
+# a second time and leaves the array holding twice its forward value.
+# Verified directly -- gradients stay bit-identical while the array
+# diverges, which is why no finite-difference test ever caught it. It
+# is harmless today only because the escaping-array-write gate keeps
+# anything outside the loop from observing the corruption; it is not
+# harmless in general, and it is what would block any future extension
+# past that gate.
+#
+# The filter keeps every SCALAR assignment (so index scalars like
+# `i_node = i_cell_to_node[...]` come along, and the recompute matches
+# the previous whole-body behaviour exactly for scalars) and drops
+# every array write. Dropping array writes is only sound when no
+# recomputed scalar reads an array this body itself writes -- see
+# ii_body_scalar_reads_own_array_write, which refuses classification
+# in that case rather than silently recomputing from a post-forward
+# array value.
+function agen_ii_recompute_stmts(body)
+    exprs = Any[]
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
+        elseif stmt.kind == :for
+            inner = agen_ii_recompute_stmts(stmt.body)
+            isempty(inner) || push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
+        elseif stmt.kind == :if
+            then_e = agen_ii_recompute_stmts(stmt.then)
+            els_e = agen_ii_recompute_stmts(stmt.els)
+            (isempty(then_e) && isempty(els_e)) || push!(exprs, emit_if(stmt.cond, then_e, els_e))
+        end
+    end
+    return exprs
+end
+
+function agen_emit_ii_loop(stmt, lin_stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx, recompute::Bool = false)
     local_names = cgen_locally_assigned_scalars(stmt.body)
     redvars = cgen_scalar_reduction_vars(stmt.body)
     vn_local = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
     local_value_needed = setdiff(value_needed, vn_local)
     local_ectx = agen_ii_override_ectx(ectx, stmt.body, vn_local)
-    fwd = agen_forward_body(stmt.body, kinds, active_map, local_value_needed, reassigned, stacks, exempt;
-                             ectx = local_ectx, lin_body = lin_stmt.body, unsafe = unsafe)
+    fwd = recompute ?
+        agen_ii_recompute_stmts(stmt.body) :
+        agen_forward_body(stmt.body, kinds, active_map, local_value_needed, reassigned, stacks, exempt;
+                           ectx = local_ectx, lin_body = lin_stmt.body, unsafe = unsafe)
     bwd = agen_backward_body(lin_stmt.body, stmt.body, kinds, active_map, unsafe, local_value_needed, reassigned, stacks, exempt; ectx = local_ectx)
     return emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, vcat(fwd, bwd))
 end
@@ -4437,14 +4483,14 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                 # accumulated shadow this loop distributes is already
                 # complete. No tripcount pop either, same reasoning as
                 # :independent.
-                push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx))
+                push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx, recompute = true))
             elseif ii_kind === :mixed
                 # NOT split -- see agen_forward_body's own :mixed
                 # handling for the full reasoning. Both halves get
                 # their actual differentiation HERE, together, in one
                 # un-reversed loop -- deferred to this position instead
                 # of some of it running at the forward position.
-                push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx))
+                push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx, recompute = true))
             else
                 push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
                 inner = agen_backward_body(stmt.body, primal_body[idx].body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
@@ -8845,6 +8891,52 @@ function ii_fused_var_in_nested_for(body, vars)
     return false
 end
 
+# True iff some scalar assignment in `body` reads an array that `body`
+# itself writes. agen_ii_recompute_stmts drops array writes from the
+# backward-position recompute, so such a scalar would be rebuilt from
+# the array's POST-forward contents rather than the value it held when
+# the statement first ran -- identical for a write-once-per-index
+# array, different for an accumulating one, and not worth
+# distinguishing here.
+function ii_body_scalar_reads_own_array_write(body)
+    arrs = Set{Symbol}()
+    ii_collect_written_arrays!(body, arrs)
+    isempty(arrs) && return false
+    return ii_scalar_reads_arrays(body, arrs)
+end
+
+function ii_collect_written_arrays!(body, acc)
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Expr && stmt.lhs.head == :ref && push!(acc, stmt.lhs.args[1])
+        elseif stmt.kind == :for
+            ii_collect_written_arrays!(stmt.body, acc)
+        elseif stmt.kind == :if
+            ii_collect_written_arrays!(stmt.then, acc)
+            ii_collect_written_arrays!(stmt.els, acc)
+        end
+    end
+    return nothing
+end
+
+function ii_scalar_reads_arrays(body, arrs)
+    for stmt in body
+        if stmt.kind == :assign
+            if stmt.lhs isa Symbol
+                reads = Set{Symbol}()
+                ii_expr_reads(stmt.rhs, arrs, reads)
+                isempty(reads) || return true
+            end
+        elseif stmt.kind == :for
+            ii_scalar_reads_arrays(stmt.body, arrs) && return true
+        elseif stmt.kind == :if
+            (ii_scalar_reads_arrays(stmt.then, arrs) ||
+             ii_scalar_reads_arrays(stmt.els, arrs)) && return true
+        end
+    end
+    return false
+end
+
 # True iff `body` still contains a push site after the vn_local
 # exclusion -- a snapshot, branch flag, or tripcount that
 # agen_forward_body would emit anyway.
@@ -8917,8 +9009,12 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     # only :reduction/:mixed run the body twice -- see
     # ii_body_has_surviving_snapshot.
     if !isempty(vn_red) &&
-       ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, value_needed,
-                                       vn_local, snap_collect_reassigned(kernel.body))
+       (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, value_needed,
+                                        vn_local, snap_collect_reassigned(kernel.body)) ||
+        # the backward-position recompute drops array writes -- see
+        # ii_body_scalar_reads_own_array_write. :independent does not
+        # recompute at all, so this does not apply to it.
+        ii_body_scalar_reads_own_array_write(stmt.body))
         return :none
     end
     if !isempty(vn_red) && !isempty(vn_ind)
@@ -8955,8 +9051,12 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
         isempty(escaped) || return :none
     end
     if !isempty(vn_red) &&
-       ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, value_needed,
-                                       vn_local, agen_collect_reassigned(kernel.body))
+       (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, value_needed,
+                                        vn_local, agen_collect_reassigned(kernel.body)) ||
+        # the backward-position recompute drops array writes -- see
+        # ii_body_scalar_reads_own_array_write. :independent does not
+        # recompute at all, so this does not apply to it.
+        ii_body_scalar_reads_own_array_write(stmt.body))
         return :none
     end
     if !isempty(vn_red) && !isempty(vn_ind)
@@ -10262,4 +10362,69 @@ let
         @assert r2f.ok "ii_nestbound_toplevel: fused adjoint failed, max_rel_err=$(r2f.max_rel_err)"
     end
     println("ii_plan nested-loop-boundary regression suite (2 cases) OK")
+end
+
+# ---- ii_* backward-recompute array-corruption regression ----------
+# agen_emit_ii_loop's `fwd` half is the real primal at the FORWARD
+# position (:independent) but only a RECOMPUTE at the BACKWARD one
+# (:reduction/:mixed), where the primal already ran in the ordinary
+# forward sweep. Re-executing the whole body there applies every
+# accumulating array write a second time, leaving the array at twice
+# its forward value. Gradients stay bit-identical while this happens,
+# so no finite-difference test can catch it -- C1 compares the array
+# STATE after _b against the unfused baseline instead. C2 is the
+# guard for the case that makes dropping array writes unsafe (a
+# recomputed scalar reading an array the same body writes), which is
+# refused rather than recomputed from post-forward contents.
+
+let
+    src = :(function ii_recomp_corrupt(x, y, n, acc_out)
+        acc = 0.0
+        for i = 1:n
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+            acc = acc + x[i]
+        end
+        acc_out[1] = acc * acc
+        return nothing
+    end)
+    plan = stade_ii_plan_check(parse_kernel(src))
+    @assert length(plan) == 1 && only(values(plan)) == :mixed "ii_recomp_corrupt: expected one :mixed site, got $plan"
+    states = Dict{Bool,Any}()
+    for fuse in (false, true)
+        out = stade_adjoint(src; fuse_ii_loops = fuse)
+        tag = fuse ? "f" : "u"
+        Base.eval(Main, Meta.parse("begin\n" *
+            replace(io_expr_to_source(out.initstacks), "initstacks_ii_recomp_corrupt_b" => "ii_rc_init_" * tag) * "\n" *
+            replace(io_expr_to_source(out.adjoint), "ii_recomp_corrupt_b" => "ii_rc_b_" * tag) * "\nend"))
+        n = 5
+        x = [0.3, -0.7, 1.1, 0.5, -0.2]
+        y = [1.0, 2.0, 3.0, 4.0, 5.0]
+        yb = [0.5, -0.5, 0.25, 1.5, -1.0]
+        xb = zeros(n); ao = [0.0]; aob = [1.0]
+        st = Base.invokelatest(Base.eval(Main, Symbol("ii_rc_init_" * tag)))
+        args = Any[x, xb, y, yb, n, ao, aob]
+        st isa Tuple ? append!(args, st) : (st === nothing || push!(args, st))
+        Base.invokelatest(Base.eval(Main, Symbol("ii_rc_b_" * tag)), args...)
+        states[fuse] = (xb = copy(xb), y = copy(y))
+    end
+    @assert maximum(abs.(states[true].xb .- states[false].xb)) < 1e-12 "ii_recomp_corrupt: fused gradient diverged from the unfused baseline"
+    @assert maximum(abs.(states[true].y .- states[false].y)) < 1e-12 "ii_recomp_corrupt: fused _b left the primal array in a different state than the unfused baseline -- the backward-position recompute re-applied an accumulating array write"
+
+    # C2: a recomputed scalar reads an array this same body writes --
+    # dropping the array write would rebuild it from post-forward
+    # contents, so the loop must not be classified at all.
+    k2 = parse_kernel(:(function ii_recomp_reads_own_write(x, z, n, acc_out)
+        acc = 0.0
+        for i = 1:n
+            z[i] = z[i] + x[i]
+            t = z[i] * z[i]
+            acc = acc + t
+        end
+        acc_out[1] = acc * acc
+        return nothing
+    end))
+    plan2 = stade_ii_plan_check(k2)
+    @assert isempty(plan2) "ii_recomp_reads_own_write: expected refusal (recomputed scalar reads an array the body writes), got $plan2"
+    println("ii_plan backward-recompute array-corruption regression suite (2 cases) OK")
 end
