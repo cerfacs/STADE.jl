@@ -1,16 +1,16 @@
 function initstacks_cascadic_mg_prolong_b()
-    hl_stack = Vector{Float64}()
-    hl2_stack = Vector{Float64}()
     tripcount_stack = Vector{Int64}()
     left_stack = Vector{Float64}()
     branch_stack = Vector{Int64}()
     right_stack = Vector{Float64}()
+    hl_stack = Vector{Float64}()
+    hl2_stack = Vector{Float64}()
     cl_stack = Vector{Float64}()
     cr_stack = Vector{Float64}()
-    return (hl_stack, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, cl_stack, cr_stack)
+    return (tripcount_stack, left_stack, branch_stack, right_stack, hl_stack, hl2_stack, cl_stack, cr_stack)
 end
 
-function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_levels, hl_stack, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, cl_stack, cr_stack)
+function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_levels, tripcount_stack, left_stack, branch_stack, right_stack, hl_stack, hl2_stack, cl_stack, cr_stack)
     cl = 0.0
     cr = 0.0
     hl = 0.0
@@ -24,10 +24,8 @@ function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_le
     leftb = 0.0
     rightb = 0.0
     nl = 2
-    push!(hl_stack, hl)
     hl = h_coarse
     nc = nl - 1
-    push!(hl2_stack, hl2)
     hl2 = hl * hl
     for i_seq_k = 1:nu
         push!(tripcount_stack, nc)
@@ -291,11 +289,9 @@ function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_le
             leftb = 0.0
         end
     end
-    hl2 = pop!(hl2_stack)
     hlb = hlb + hl * hl2b
     hlb = hlb + hl * hl2b
     hl2b = 0.0
-    hl = pop!(hl_stack)
     h_coarseb = h_coarseb + hlb
     hlb = 0.0
     return h_coarseb

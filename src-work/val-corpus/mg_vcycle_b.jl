@@ -1,5 +1,4 @@
 function initstacks_mg_vcycle_b()
-    hl_stack = Vector{Float64}()
     hl2_stack = Vector{Float64}()
     tripcount_stack = Vector{Int64}()
     left_stack = Vector{Float64}()
@@ -8,12 +7,13 @@ function initstacks_mg_vcycle_b()
     u_stack = Vector{Float64}()
     r_stack = Vector{Float64}()
     f_stack = Vector{Float64}()
+    hl_stack = Vector{Float64}()
     cl_stack = Vector{Float64}()
     cr_stack = Vector{Float64}()
-    return (hl_stack, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, u_stack, r_stack, f_stack, cl_stack, cr_stack)
+    return (hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, u_stack, r_stack, f_stack, hl_stack, cl_stack, cr_stack)
 end
 
-function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, n, hl_stack, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, u_stack, r_stack, f_stack, cl_stack, cr_stack)
+function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, n, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, u_stack, r_stack, f_stack, hl_stack, cl_stack, cr_stack)
     cl = 0.0
     cr = 0.0
     hl = 0.0
@@ -28,7 +28,6 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
     rightb = 0.0
     n = n * 2
     nl = nfine
-    push!(hl_stack, hl)
     hl = h1
     for i_seq_level = 1:num_levels - 1
         n = nl - 1
@@ -427,7 +426,6 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         hlb = hlb + hl * hl2b
         hl2b = 0.0
     end
-    hl = pop!(hl_stack)
     h1b = h1b + hlb
     hlb = 0.0
     return h1b

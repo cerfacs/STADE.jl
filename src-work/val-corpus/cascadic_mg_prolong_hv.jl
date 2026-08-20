@@ -1,20 +1,20 @@
 function initstacks_cascadic_mg_prolong_b()
-    hl_stack = Vector{Float64}()
-    hl2_stack = Vector{Float64}()
     tripcount_stack = Vector{Int64}()
     left_stack = Vector{Float64}()
     branch_stack = Vector{Int64}()
     right_stack = Vector{Float64}()
+    hl_stack = Vector{Float64}()
+    hl2_stack = Vector{Float64}()
     cl_stack = Vector{Float64}()
     cr_stack = Vector{Float64}()
-    return (hl_stack, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, cl_stack, cr_stack)
+    return (tripcount_stack, left_stack, branch_stack, right_stack, hl_stack, hl2_stack, cl_stack, cr_stack)
 end
 
-function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_levels, ud, ubd, rhsd, rhsbd, h_coarsed, h_coarsebd, hl_stack, hl2_stack, tripcount_stack, left_stack, branch_stack, right_stack, cl_stack, cr_stack)
-    hl_stack_d = Vector{Float64}()
-    hl2_stack_d = Vector{Float64}()
+function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_levels, ud, ubd, rhsd, rhsbd, h_coarsed, h_coarsebd, tripcount_stack, left_stack, branch_stack, right_stack, hl_stack, hl2_stack, cl_stack, cr_stack)
     left_stack_d = Vector{Float64}()
     right_stack_d = Vector{Float64}()
+    hl_stack_d = Vector{Float64}()
+    hl2_stack_d = Vector{Float64}()
     cl_stack_d = Vector{Float64}()
     cr_stack_d = Vector{Float64}()
     cl = 0.0
@@ -42,13 +42,9 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
     rightd = 0.0
     rightbd = 0.0
     nl = 2
-    push!(hl_stack_d, hld)
-    push!(hl_stack, hl)
     hld = h_coarsed
     hl = h_coarse
     nc = nl - 1
-    push!(hl2_stack_d, hl2d)
-    push!(hl2_stack, hl2)
     hl2d = hl * hld + hl * hld
     hl2 = hl * hl
     for i_seq_k = 1:nu
@@ -448,16 +444,12 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
             leftb = 0.0
         end
     end
-    hl2d = pop!(hl2_stack_d)
-    hl2 = pop!(hl2_stack)
     hlbd = hlbd + (hl2b * hld + hl * hl2bd)
     hlb = hlb + hl * hl2b
     hlbd = hlbd + (hl2b * hld + hl * hl2bd)
     hlb = hlb + hl * hl2b
     hl2bd = 0.0
     hl2b = 0.0
-    hld = pop!(hl_stack_d)
-    hl = pop!(hl_stack)
     h_coarsebd = h_coarsebd + hlbd
     h_coarseb = h_coarseb + hlb
     hlbd = 0.0

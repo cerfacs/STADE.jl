@@ -1,5 +1,4 @@
 function initstacks_mg_vcycle_multi_b()
-    hl_stack = Vector{Float64}()
     hl2_stack = Vector{Float64}()
     tripcount_stack = Vector{Int64}()
     left_mg_relax_c1_stack = Vector{Float64}()
@@ -10,15 +9,15 @@ function initstacks_mg_vcycle_multi_b()
     right_stack = Vector{Float64}()
     r_stack = Vector{Float64}()
     f_stack = Vector{Float64}()
+    hl_stack = Vector{Float64}()
     cl_stack = Vector{Float64}()
     cr_stack = Vector{Float64}()
     left_mg_relax_c2_stack = Vector{Float64}()
     right_mg_relax_c2_stack = Vector{Float64}()
-    return (hl_stack, hl2_stack, tripcount_stack, left_mg_relax_c1_stack, branch_stack, right_mg_relax_c1_stack, u_stack, left_stack, right_stack, r_stack, f_stack, cl_stack, cr_stack, left_mg_relax_c2_stack, right_mg_relax_c2_stack)
+    return (hl2_stack, tripcount_stack, left_mg_relax_c1_stack, branch_stack, right_mg_relax_c1_stack, u_stack, left_stack, right_stack, r_stack, f_stack, hl_stack, cl_stack, cr_stack, left_mg_relax_c2_stack, right_mg_relax_c2_stack)
 end
 
-function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, n, ud, ubd, fd, fbd, rd, rbd, h1d, h1bd, hl_stack, hl2_stack, tripcount_stack, left_mg_relax_c1_stack, branch_stack, right_mg_relax_c1_stack, u_stack, left_stack, right_stack, r_stack, f_stack, cl_stack, cr_stack, left_mg_relax_c2_stack, right_mg_relax_c2_stack)
-    hl_stack_d = Vector{Float64}()
+function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, n, ud, ubd, fd, fbd, rd, rbd, h1d, h1bd, hl2_stack, tripcount_stack, left_mg_relax_c1_stack, branch_stack, right_mg_relax_c1_stack, u_stack, left_stack, right_stack, r_stack, f_stack, hl_stack, cl_stack, cr_stack, left_mg_relax_c2_stack, right_mg_relax_c2_stack)
     hl2_stack_d = Vector{Float64}()
     left_mg_relax_c1_stack_d = Vector{Float64}()
     right_mg_relax_c1_stack_d = Vector{Float64}()
@@ -27,6 +26,7 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
     right_stack_d = Vector{Float64}()
     r_stack_d = Vector{Float64}()
     f_stack_d = Vector{Float64}()
+    hl_stack_d = Vector{Float64}()
     cl_stack_d = Vector{Float64}()
     cr_stack_d = Vector{Float64}()
     left_mg_relax_c2_stack_d = Vector{Float64}()
@@ -73,8 +73,6 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
     right_mg_relax_c2bd = 0.0
     n = n * 2
     nl = nfine
-    push!(hl_stack_d, hld)
-    push!(hl_stack, hl)
     hld = h1d
     hl = h1
     for i_seq_level = 1:num_levels - 1
@@ -711,8 +709,6 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
         hl2bd = 0.0
         hl2b = 0.0
     end
-    hld = pop!(hl_stack_d)
-    hl = pop!(hl_stack)
     h1bd = h1bd + hlbd
     h1b = h1b + hlb
     hlbd = 0.0

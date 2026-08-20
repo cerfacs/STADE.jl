@@ -9,15 +9,13 @@ function initstacks_ttgc_b()
     aerez_stack = Vector{Float64}()
     aeresk_stack = Vector{Float64}()
     factor_stack = Vector{Float64}()
-    res_stack = Vector{Float64}()
-    res2_stack = Vector{Float64}()
-    up_stack = Vector{Float64}()
     mup_stack = Vector{Float64}()
     auxu_stack = Vector{Float64}()
-    return (cavgx_stack, cavgy_stack, cavgz_stack, vere_stack, re_stack, aerex_stack, aerey_stack, aerez_stack, aeresk_stack, factor_stack, res_stack, res2_stack, up_stack, mup_stack, auxu_stack)
+    up_stack = Vector{Float64}()
+    return (cavgx_stack, cavgy_stack, cavgz_stack, vere_stack, re_stack, aerex_stack, aerey_stack, aerez_stack, aeresk_stack, factor_stack, mup_stack, auxu_stack, up_stack)
 end
 
-function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_vol, node_volb, skx, skxb, sky, skyb, skz, skzb, i_ncell, i_nnode, c, cb, dt, dtb, beta, betab, gamma, gammab, i_njac, res, resb, res2, res2b, up, upb, mup, mupb, npernode_half, resperio, resperiob, i_node_perio, loss, lossb, ud, ubd, urefd, urefbd, cell_vold, cell_volbd, node_vold, node_volbd, skxd, skxbd, skyd, skybd, skzd, skzbd, cd, cbd, dtd, dtbd, betad, betabd, gammad, gammabd, resd, resbd, res2d, res2bd, upd, upbd, mupd, mupbd, resperiod, resperiobd, lossd, lossbd, cavgx_stack, cavgy_stack, cavgz_stack, vere_stack, re_stack, aerex_stack, aerey_stack, aerez_stack, aeresk_stack, factor_stack, res_stack, res2_stack, up_stack, mup_stack, auxu_stack)
+function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_vol, node_volb, skx, skxb, sky, skyb, skz, skzb, i_ncell, i_nnode, c, cb, dt, dtb, beta, betab, gamma, gammab, i_njac, res, resb, res2, res2b, up, upb, mup, mupb, npernode_half, resperio, resperiob, i_node_perio, loss, lossb, ud, ubd, urefd, urefbd, cell_vold, cell_volbd, node_vold, node_volbd, skxd, skxbd, skyd, skybd, skzd, skzbd, cd, cbd, dtd, dtbd, betad, betabd, gammad, gammabd, resd, resbd, res2d, res2bd, upd, upbd, mupd, mupbd, resperiod, resperiobd, lossd, lossbd, cavgx_stack, cavgy_stack, cavgz_stack, vere_stack, re_stack, aerex_stack, aerey_stack, aerez_stack, aeresk_stack, factor_stack, mup_stack, auxu_stack, up_stack)
     cavgx_stack_d = Vector{Float64}()
     cavgy_stack_d = Vector{Float64}()
     cavgz_stack_d = Vector{Float64}()
@@ -28,11 +26,9 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
     aerez_stack_d = Vector{Float64}()
     aeresk_stack_d = Vector{Float64}()
     factor_stack_d = Vector{Float64}()
-    res_stack_d = Vector{Float64}()
-    res2_stack_d = Vector{Float64}()
-    up_stack_d = Vector{Float64}()
     mup_stack_d = Vector{Float64}()
     auxu_stack_d = Vector{Float64}()
+    up_stack_d = Vector{Float64}()
     aeresk = 0.0
     aerex = 0.0
     aerey = 0.0
@@ -155,12 +151,8 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
                 auxres2d = gamma[i_cell] * factord + factor * gammad[i_cell]
                 auxres2 = factor * gamma[i_cell]
                 i_k_node = i_cell_to_node[i_k, i_cell]
-                push!(res_stack_d, resd[i_k_node])
-                push!(res_stack, res[i_k_node])
                 resd[i_k_node] = resd[i_k_node] + auxresd
                 res[i_k_node] = res[i_k_node] + auxres
-                push!(res2_stack_d, res2d[i_k_node])
-                push!(res2_stack, res2[i_k_node])
                 res2d[i_k_node] = res2d[i_k_node] + auxres2d
                 res2[i_k_node] = res2[i_k_node] + auxres2
             end
@@ -201,18 +193,12 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
     for k = 1:npernode_half
         i1 = i_node_perio[k, 1]
         i2 = i_node_perio[k, 2]
-        push!(res_stack_d, resd[i1])
-        push!(res_stack, res[i1])
         resd[i1] = resd[i1] + resperiod[k, 2]
         res[i1] = res[i1] + resperio[k, 2]
-        push!(res_stack_d, resd[i2])
-        push!(res_stack, res[i2])
         resd[i2] = resd[i2] + resperiod[k, 1]
         res[i2] = res[i2] + resperio[k, 1]
     end
     for i_node = 1:i_nnode
-        push!(up_stack_d, upd[i_node])
-        push!(up_stack, up[i_node])
         upd[i_node] = (1.0 / node_vol[i_node]) * resd[i_node] + -(res[i_node] / node_vol[i_node] ^ 2) * node_vold[i_node]
         up[i_node] = res[i_node] / node_vol[i_node]
     end
@@ -289,8 +275,6 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             resi = -(dt / 4) * vere
             for i_k = 1:4
                 i_k_node = i_cell_to_node[i_k, i_cell]
-                push!(res2_stack_d, res2d[i_k_node])
-                push!(res2_stack, res2[i_k_node])
                 res2d[i_k_node] = res2d[i_k_node] + resid
                 res2[i_k_node] = res2[i_k_node] + resi
             end
@@ -309,12 +293,8 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
     for k = 1:npernode_half
         i1 = i_node_perio[k, 1]
         i2 = i_node_perio[k, 2]
-        push!(res2_stack_d, res2d[i1])
-        push!(res2_stack, res2[i1])
         res2d[i1] = res2d[i1] + resperiod[k, 2]
         res2[i1] = res2[i1] + resperio[k, 2]
-        push!(res2_stack_d, res2d[i2])
-        push!(res2_stack, res2[i2])
         res2d[i2] = res2d[i2] + resperiod[k, 1]
         res2[i2] = res2[i2] + resperio[k, 1]
     end
@@ -546,15 +526,11 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
         upbd[i_node] = 0.0
         upb[i_node] = 0.0
     end
-    for k = npernode_half:-1:1
+    for k = 1:npernode_half
         i1 = i_node_perio[k, 1]
         i2 = i_node_perio[k, 2]
-        res2d[i2] = pop!(res2_stack_d)
-        res2[i2] = pop!(res2_stack)
         resperiobd[k, 1] = resperiobd[k, 1] + res2bd[i2]
         resperiob[k, 1] = resperiob[k, 1] + res2b[i2]
-        res2d[i1] = pop!(res2_stack_d)
-        res2[i1] = pop!(res2_stack)
         resperiobd[k, 2] = resperiobd[k, 2] + res2bd[i1]
         resperiob[k, 2] = resperiob[k, 2] + res2b[i1]
     end
@@ -575,10 +551,8 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
         vere = pop!(vere_stack)
         for i_loc = 4:-1:1
             i_node = i_cell_to_node[i_loc, i_cell]
-            for i_k = 4:-1:1
+            for i_k = 1:4
                 i_k_node = i_cell_to_node[i_k, i_cell]
-                res2d[i_k_node] = pop!(res2_stack_d)
-                res2[i_k_node] = pop!(res2_stack)
                 resibd = resibd + res2bd[i_k_node]
                 resib = resib + res2b[i_k_node]
             end
@@ -700,9 +674,7 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             mupb[i_node] = 0.0
         end
     end
-    for i_node = i_nnode:-1:1
-        upd[i_node] = pop!(up_stack_d)
-        up[i_node] = pop!(up_stack)
+    for i_node = 1:i_nnode
         resbd[i_node] = resbd[i_node] + (upb[i_node] * (-(1.0 / node_vol[i_node] ^ 2) * node_vold[i_node]) + (1.0 / node_vol[i_node]) * upbd[i_node])
         resb[i_node] = resb[i_node] + (1.0 / node_vol[i_node]) * upb[i_node]
         node_volbd[i_node] = node_volbd[i_node] + (upb[i_node] * -(((1.0 / node_vol[i_node] ^ 2) * resd[i_node] + -(res[i_node] / (node_vol[i_node] ^ 2) ^ 2) * ((2 * node_vol[i_node]) * node_vold[i_node]))) + -(res[i_node] / node_vol[i_node] ^ 2) * upbd[i_node])
@@ -710,15 +682,11 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
         upbd[i_node] = 0.0
         upb[i_node] = 0.0
     end
-    for k = npernode_half:-1:1
+    for k = 1:npernode_half
         i1 = i_node_perio[k, 1]
         i2 = i_node_perio[k, 2]
-        resd[i2] = pop!(res_stack_d)
-        res[i2] = pop!(res_stack)
         resperiobd[k, 1] = resperiobd[k, 1] + resbd[i2]
         resperiob[k, 1] = resperiob[k, 1] + resb[i2]
-        resd[i1] = pop!(res_stack_d)
-        res[i1] = pop!(res_stack)
         resperiobd[k, 2] = resperiobd[k, 2] + resbd[i1]
         resperiob[k, 2] = resperiob[k, 2] + resb[i1]
     end
@@ -763,12 +731,8 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             i_node = i_cell_to_node[i_loc, i_cell]
             for i_k = 4:-1:1
                 i_k_node = i_cell_to_node[i_k, i_cell]
-                res2d[i_k_node] = pop!(res2_stack_d)
-                res2[i_k_node] = pop!(res2_stack)
                 auxres2bd = auxres2bd + res2bd[i_k_node]
                 auxres2b = auxres2b + res2b[i_k_node]
-                resd[i_k_node] = pop!(res_stack_d)
-                res[i_k_node] = pop!(res_stack)
                 auxresbd = auxresbd + resbd[i_k_node]
                 auxresb = auxresb + resb[i_k_node]
                 factorbd = factorbd + (auxres2b * gammad[i_cell] + gamma[i_cell] * auxres2bd)
