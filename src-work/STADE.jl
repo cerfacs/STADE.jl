@@ -4690,7 +4690,7 @@ end
 # they never need to outlive one call.
 
 function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing,
-                   tier_b_extra_args::Vector{Symbol} = Symbol[])
+                   tier_b_extra_args::Vector{Symbol} = Symbol[], ii_plan = nothing)
     sig = kernel.sig
     stacks = agen_stack_map(sites)
     value_needed = agen_value_needed_vars(kernel)
@@ -4698,9 +4698,9 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     unsafe = agen_unsafe_int_vars(kernel)
     exempt = agen_exempt_vars(kernel, value_needed)
 
-    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = nothing)
+    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan)
 
-    fwd = agen_forward_body(kernel.body, sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx)
+    fwd = agen_forward_body(kernel.body, sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, lin_body = lin_plan, unsafe = unsafe)
     bwd = agen_backward_body(lin_plan, kernel.body, sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
 
     shadow_of = hvp_shadow_map(kernel, sites)
@@ -7679,13 +7679,15 @@ end
 
 function stade_tangent(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
-                        keep_push_pop::Bool=true)
-    # accepted, documented, and otherwise ignored -- tgen_* never
-    # emits push!/pop! at all (every active statement gets a shadow
-    # line directly, no stacks), so this is a pure interface-
-    # consistency no-op, letting a caller iterate uniformly over
-    # stade_tangent/stade_adjoint/stade_hvp without special-casing
-    # tangent mode. See skill-stade.md's keep_push_pop entry.
+                        keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
+    # both kwargs accepted, documented, and otherwise ignored --
+    # tgen_* never emits push!/pop! at all (every active statement
+    # gets a shadow line directly, no stacks), so there is nothing for
+    # either keep_push_pop's storage strategy or fuse_ii_loops'
+    # fusion to apply to. Pure interface-consistency no-ops, letting a
+    # caller iterate uniformly over stade_tangent/stade_adjoint/
+    # stade_hvp without special-casing tangent mode. See skill-
+    # stade.md's keep_push_pop entry.
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
     active_map = act_analyze(kernel)
     lin_plan = lin_build(kernel, active_map)
@@ -7725,12 +7727,13 @@ end
 
 function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                     dependents::Union{Vector{Symbol},Nothing}=nothing,
-                    keep_push_pop::Bool=true)
+                    keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
     active_map = act_analyze(kernel)
     snap_sites, agen_sites = stade_site_level_tbr_check(kernel)
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
+    ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
     layout = nothing
     value_needed = exempt = stacks = nothing
     if !keep_push_pop
@@ -7745,7 +7748,32 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
                                       active_map = active_map, value_needed = value_needed, exempt = exempt, stacks = stacks, push_pop = agen_sites)
     tier_b_extra_args = vcat(table_names, tot_names, val_names)
     hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites,
-                         tier_b_extra_args = tier_b_extra_args)
+                         tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan)
+    # Mirrors agen_emit's own post-hoc cleanup exactly (see its
+    # comment for the full reasoning), applied here independently
+    # because hvp_expr, not adjoint_expr, is what this function
+    # returns paired with initstacks_expr. Required for consistency,
+    # not just tidiness: stade_adjoint's own initstacks_* (built via
+    # agen_emit) already drops a stack once fusion leaves it fully
+    # unused, and validation code that shares one kernel's initstacks_*
+    # across both its adjoint and hvp calls needs hvp_expr's own
+    # signature to match what that shared initstacks_* actually
+    # provides. hvp_expr's fwd/bwd portions are built from the exact
+    # same agen_forward_body/agen_backward_body calls, same ectx, same
+    # ii_plan, as the adjoint path -- hvp_double_body only ever adds
+    # shadow push!/pop! calls on separate, unlisted shadow-stack names
+    # (never removes or renames an original stack reference), so
+    # scanning hvp_expr independently for used stack names lands on
+    # the same unused set the adjoint side would find, not a
+    # potentially different one.
+    if keep_push_pop && ii_plan !== nothing
+        used = agen_used_stack_names(hvp_expr)
+        unused_stacks = Set(nm for nm in agen_stack_names(snapshot_plan) if !(nm in used))
+        if !isempty(unused_stacks)
+            hvp_expr = agen_drop_unused_stack_args(hvp_expr, unused_stacks)
+            initstacks_expr = agen_drop_unused_stack_allocs(initstacks_expr, unused_stacks)
+        end
+    end
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
 
@@ -7755,9 +7783,9 @@ end
 # overrides still don't belong here -- a caller who needs them can run
 # inl_inline_calls directly and call stade_tangent/stade_adjoint/
 # stade_hvp per kernel.
-function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true)
+function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop) for (name, expr) in inlined)
+    return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
 end
 
 function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
@@ -7765,9 +7793,9 @@ function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=tr
     return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
 end
 
-function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true)
+function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_hvp(expr; keep_push_pop = keep_push_pop) for (name, expr) in inlined)
+    return Dict(name => stade_hvp(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
 end
 
 # reads any number of kernels from one file (a lone kernel, or a
@@ -7782,11 +7810,11 @@ end
 # handles both: a single-kernel file is just a one-entry corpus, where
 # inlining is a no-op and this reduces to differentiating that lone
 # kernel exactly as before.
-function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
+function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_tangent(inlined[entry_name]; keep_push_pop = keep_push_pop)
+    generated = stade_tangent(inlined[entry_name]; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated]))
     return out_path
 end
@@ -7800,11 +7828,11 @@ function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bo
     return out_path
 end
 
-function stade_hvp_file(in_path::String, out_path::String; keep_push_pop::Bool=true)
+function stade_hvp_file(in_path::String, out_path::String; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_hvp(inlined[entry_name]; keep_push_pop = keep_push_pop)
+    generated = stade_hvp(inlined[entry_name]; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.hvp]))
     return out_path
 end
@@ -7923,7 +7951,7 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
     baseline = io_read_baseline_yaml(yaml_path)
     val_coerce_int_arrays!(kernel, baseline.values)
     if mode == :tangent
-        tangent_expr = stade_tangent(primal_expr; keep_push_pop = keep_push_pop)
+        tangent_expr = stade_tangent(primal_expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
         return val_validate_tangent(kernel, primal_expr, tangent_expr, baseline;
                                      trials = trials, epsilon = epsilon, rtol = rtol)
     elseif mode == :adjoint
@@ -7938,8 +7966,8 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
         return val_validate_adjoint(kernel, primal_expr, adjoint_out, baseline;
                                      trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
     else
-        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop)
-        hvp_out = stade_hvp(primal_expr; keep_push_pop = keep_push_pop)
+        adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
+        hvp_out = stade_hvp(primal_expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
         stack_arg_names = keep_push_pop ? Symbol[] : Symbol.(adjoint_out.initstacks.args[1].args[2:end])
         return val_validate_hvp(kernel, primal_expr, adjoint_out, hvp_out, baseline;
                                  trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
@@ -7965,11 +7993,11 @@ end
 function stade_validate_tangent_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                      self_check::Bool = true, keep_push_pop::Bool = true)
+                                      self_check::Bool = true, keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:tangent, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
-                                         keep_push_pop = keep_push_pop)
+                                         keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
 end
 
 function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
@@ -7985,11 +8013,11 @@ end
 function stade_validate_hvp_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                   scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
                                   trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
-                                  self_check::Bool = true, keep_push_pop::Bool = true)
+                                  self_check::Bool = true, keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     return stade_validate_from_baseline(:hvp, in_path, yp; trials = trials, epsilon = epsilon, rtol = rtol,
-                                         keep_push_pop = keep_push_pop)
+                                         keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
 end
 
 # Sibling to stade_validate_adjoint_file for a third-party (not
@@ -9718,4 +9746,65 @@ let
         @assert r.ok "ii_tbr_interaction: fuse_ii_loops=true failed (max_rel_err=$(r.max_rel_err)) -- this is exactly the stack-imbalance shape that produced wrong gradients before agen_ii_override_ectx existed"
     end
     println("ii_plan Phase 3 site-level TBR interaction regression OK")
+end
+
+# ---- ii_* fuse_ii_loops on stade_hvp/stade_tangent regression -----
+# fuse_ii_loops was originally wired only into stade_adjoint;
+# extended here to stade_tangent (a documented no-op, tgen_* has no
+# stacks to fuse in the first place, matching keep_push_pop's own
+# existing treatment there) and stade_hvp (genuinely functional --
+# hvp_emit reuses the exact same agen_forward_body/agen_backward_body
+# calls the adjoint path does, just with ii_plan previously hardcoded
+# to nothing instead of threaded through).
+#
+# A real consistency bug was found and fixed while wiring this in, not
+# assumed away: hvp_emit's own fwd/bwd portion never went through the
+# post-hoc unused-stack cleanup that stade_adjoint's own agen_emit
+# already applies, so once fusion left a stack unused, the generated
+# `_hv` function's signature and a shared `initstacks_*`'s own return
+# tuple went out of sync -- any caller (validation code included) that
+# passes one kernel's initstacks_* output to both its adjoint and hvp
+# functions would hit a MethodError from the extra trailing stack
+# arguments the hvp function no longer needed but still declared.
+# Fixed by applying the same cleanup independently to hvp_expr.
+
+let
+    mktempdir() do dir
+        # Reduction case: exercises hvp_double_body's own handling of
+        # the backward-position distribution loop, not just a fused
+        # forward-position loop.
+        path = joinpath(dir, "ii_hvp_e2e_reduction.jl")
+        write(path, """
+        function ii_hvp_e2e_reduction(x, y, n, out)
+            s = 0.0
+            for i = 1:n
+                s = s + x[i] * x[i]
+            end
+            out[1] = s * s
+            return nothing
+        end
+        """)
+        plan = stade_ii_plan_check(parse_kernel(io_read_corpus_entry(path)))
+        @assert length(plan) == 1 && only(values(plan)) == :reduction "ii_hvp_e2e_reduction: expected one :reduction site, got $plan"
+
+        # Signature consistency: stade_adjoint's own cleaned-up
+        # initstacks_* must exactly match what stade_hvp's own cleaned-
+        # up hvp function expects -- this is the exact shape of the
+        # bug found above (a MethodError from mismatched stack args).
+        a = stade_adjoint(io_read_corpus_entry(path); fuse_ii_loops = true)
+        h = stade_hvp(io_read_corpus_entry(path); fuse_ii_loops = true)
+        @assert string(a.initstacks.args[1]) == string(h.initstacks.args[1]) "ii_hvp_e2e_reduction: adjoint and hvp initstacks_* signatures diverged: $(a.initstacks.args[1]) vs $(h.initstacks.args[1])"
+        @assert isempty(a.initstacks.args[1].args[2:end]) "ii_hvp_e2e_reduction: expected s_stack fully removed from initstacks_*, got $(a.initstacks.args[1])"
+
+        r_unfused = stade_validate_hvp_file(path; trials = 10, fuse_ii_loops = false)
+        r_fused   = stade_validate_hvp_file(path; trials = 10, fuse_ii_loops = true)
+        @assert r_unfused.ok "ii_hvp_e2e_reduction: unfused baseline failed, max_rel_err=$(r_unfused.max_rel_err)"
+        @assert r_fused.ok "ii_hvp_e2e_reduction: fused hvp failed, max_rel_err=$(r_fused.max_rel_err)"
+
+        # stade_tangent's own no-op: both settings must still validate.
+        rt_false = stade_validate_tangent_file(path; trials = 10, fuse_ii_loops = false)
+        rt_true  = stade_validate_tangent_file(path; trials = 10, fuse_ii_loops = true)
+        @assert rt_false.ok && rt_true.ok "ii_hvp_e2e_reduction: stade_tangent's fuse_ii_loops no-op broke validation"
+    end
+    println("ii_plan fuse_ii_loops on stade_hvp/stade_tangent regression OK")
 end
