@@ -40,7 +40,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
             gen_fn, suffix = generators[mode]
             out_path = joinpath(dir, name * suffix)
             try
-                gen_fn(path, out_path; fuse_ii_loops = true)
+                gen_fn(path, out_path)
             catch e
                 push!(results, (kernel = name, mode = mode, status = :gen_error, max_rel_err = NaN))
                 continue
