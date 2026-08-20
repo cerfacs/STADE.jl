@@ -160,13 +160,6 @@ time it was skipped or rushed, a real bug slipped through:
 3. **Check generated code directly, not just central-difference error
    numbers.** A byte-identical or structurally-sane diff against the
    unfused baseline is what actually confirms a fix, not just `ok=true`.
-4. **Run all four validators after every change**: `validate_corpus.jl`,
-   `validate_corpus_keep_push_pop_false.jl`,
-   `validate_corpus_keep_push_pop_false_site_level_tbr_true.jl` (needs its
-   explicit `site_level_tbr=true` kwarg call removed — the flag no longer
-   exists — see that script's one changed line), `validate_corpus_gpu.jl`
-   (same removal needed there). 20 `gen_error`s in the GPU validator are
-   pre-existing and unrelated (`initstacks*_b` ingestion) — don't chase
-   those.
+4. **Run the validator after every change**: `validate_corpus.jl`
 5. **Lock in a permanent regression test for whatever you fix**, using the
    real corpus shape that caught the bug, not a simplified version of it.
