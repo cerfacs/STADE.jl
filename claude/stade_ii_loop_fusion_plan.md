@@ -1,8 +1,9 @@
 # STADE: next step to minimize stack-variable footprint
 
 **Context for whoever picks this up:** `STADE.jl` (the attached file) has a
-working, validated feature (`fuse_ii_loops::Bool=false` on `stade_adjoint`/
-`stade_hvp`) that eliminates snapshot stacks for provably-safe loops. It
+working, validated feature (`fuse_ii_loops::Bool=false` on `stade_tangent`/
+`stade_adjoint`/`stade_hvp`, matching `keep_push_pop`'s existing presence
+on all three) that eliminates snapshot stacks for provably-safe loops. It
 works, but on real kernels it currently eliminates far fewer stacks than
 it could. This document says precisely why, and what to do about it. It
 does not recount how the existing feature was built — that history isn't
@@ -17,11 +18,16 @@ blocker are.
   `:reduction` (a pure `+`/`-` accumulator, fuse into a backward-only
   distribution pass), `:mixed` (both present, treated like `:reduction`
   — see below for why), or unclassified.
-- `agen_emit_ii_loop` does the actual codegen for all three kinds.
+- `agen_emit_ii_loop` does the actual codegen for all three kinds, reused
+  as-is by `stade_hvp` (`hvp_emit` shares the exact same underlying
+  `agen_forward_body`/`agen_backward_body` calls the adjoint path uses).
 - Stack cleanup (`agen_used_stack_names`, `agen_block_boundary_vars`'s
   `ii_plan`-awareness) removes a stack from the generated signature when
   it's genuinely unused — not just when its var is `ii_plan`-covered
-  (see below, this distinction matters).
+  (see below, this distinction matters). Applied independently to both
+  `stade_adjoint`'s and `stade_hvp`'s own output, since code that shares
+  one kernel's `initstacks_*` across both calls needs their signatures to
+  stay in sync with each other, not just each individually correct.
 - All of this is validated: central-difference comparison against the
   unfused baseline, plus direct diffing of generated code on real corpus
   kernels (`val-corpus/ttgc.jl`, `val-corpus/transformer.jl`), not just
@@ -36,20 +42,32 @@ array read elsewhere in the kernel — even when that escaping write has
 nothing to do with the scalar variables you actually want to fuse.
 
 **Concrete, verified example (`ttgc.jl`):** `res`/`res2` are written
-inside the same `i_k` loop that also computes `aeresk`/`factor` (value-
-needed scalars). `res`/`res2` genuinely escape (read later via
+inside the same `i_seq_k` loop that also computes `aeresk`/`factor`
+(value-needed scalars). `res`/`res2` genuinely escape (read later via
 `up[i] = res[i] / node_vol[i]`). Because that write sits in the same loop
 nest as the scalar computation, at every level of nesting, `vere`/`re`/
 `aerex`/`aerey`/`aerez`/`aeresk`/`factor` never get classified — their
 stacks (`re_stack`, `aerex_stack`, etc.) still scale with `i_ncell` even
 with `fuse_ii_loops=true`. Only `cavgx`/`cavgy`/`cavgz` (a separate loop
-that never touches `res`/`res2`) currently benefits.
+that never touches `res`/`res2`) currently benefits. Re-confirmed against
+an updated revision of `ttgc.jl` that removed its earlier periodic-
+boundary-exchange loops (`resperio`/`i_node_perio`) entirely and renamed
+`i_loc`/`i_k` to `i_seq_loc`/`i_seq_k` — same classification result
+exactly (one `:reduction` site, the `cavgx`/`cavgy`/`cavgz` loop; the
+`vere`/`aeresk` chain still refused). Removing the periodic-exchange loops
+didn't change anything because they were never the actual blocker — the
+`up[i] = res[i] / node_vol[i]` read alone is sufficient to keep `res`/
+`res2` escaping, and it's still there. Useful to know: the escape here has
+exactly one remaining consumer statement now, not several, which may make
+it a simpler first target for whichever option below gets attempted.
 
 **Verify this directly before trusting it** — call
 `ii_body_has_escaping_array_write(kernel.body, loop.body, kernel.sig.kinds,
 active_map)` on the relevant loops in `val-corpus/ttgc.jl` and confirm it
 returns `true` at every level containing that chain. Don't take this
-document's word for it.
+document's word for it — re-verify against whatever revision of the file
+is actually present, since the exact loop-variable names may have changed
+again by the time this is read.
 
 ## What would fix it: two options, with their real risks
 
@@ -83,12 +101,15 @@ statement subset safe, widen the *candidate* so the escaping consumer is
 included in the same classified unit (the way `ttgc`'s own `cavgx` case
 already works — its consumer sits inside the same outer `i_cell` loop, so
 nothing escapes at that granularity). For `res`/`res2` specifically this
-would mean including the periodic-fixup code and the `up = res/node_vol`
-statement in the same fusion unit as the assembly loop — a much larger,
-structurally different unit than anything currently classified. Untried,
-uncertain payoff, and likely still blocked by the same kind of
-cross-dependency risk as Option A once the unit contains genuinely
-different computations.
+would mean including the `up[i] = res[i] / node_vol[i]` loop (now the
+only remaining consumer, after an updated revision of the kernel dropped
+the periodic-boundary-exchange code that used to be a second one) in the
+same fusion unit as the assembly loop — a larger, structurally different
+unit than anything currently classified, though a genuinely smaller one
+to reason about than before, now that there's only one consumer loop
+instead of three. Untried, uncertain payoff, and likely still blocked by
+the same kind of cross-dependency risk as Option A once the unit contains
+genuinely different computations.
 
 **Recommendation:** attempt Option A first, scoped narrowly (one specific
 escaping-array-write shape at a time, starting with `ttgc`'s `res`/`res2`
