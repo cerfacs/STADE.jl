@@ -5,7 +5,8 @@
 *.zip
 
 # Some folders
-version-final-*/
+val-corpus-gpu-split/
+claude/
 
 # STADE-generated files
 # *_b.jl
