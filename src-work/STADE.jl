@@ -2747,7 +2747,7 @@ function agen_ii_covered_write_check(body, var, ii_plan, in_covered)
             end
         elseif stmt.kind == :for
             key = agen_site_key(body, idx)
-            covered_here = in_covered || get(ii_plan, key, nothing) in (:independent, :reduction, :mixed)
+            covered_here = in_covered || get(ii_plan, key, nothing) in (:independent, :reduction, :mixed, :recompute)
             agen_ii_covered_write_check(stmt.body, var, ii_plan, covered_here) || return false
         elseif stmt.kind == :if
             agen_ii_covered_write_check(stmt.then, var, ii_plan, in_covered) || return false
@@ -4245,7 +4245,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
             else
                 loop_value_needed = value_needed
                 loop_ectx = ectx
-                if ii_kind === :reduction
+                if ii_kind === :reduction || ii_kind === :recompute
                     local_names = cgen_locally_assigned_scalars(stmt.body)
                     redvars = cgen_scalar_reduction_vars(stmt.body)
                     vn_red = Set(v for v in intersect(value_needed, union(local_names, redvars)) if get(active_map, v, false))
@@ -4483,6 +4483,14 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                 # accumulated shadow this loop distributes is already
                 # complete. No tripcount pop either, same reasoning as
                 # :independent.
+                push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx, recompute = true))
+            elseif ii_kind === :recompute
+                # Same dispatch as :reduction -- the loop keeps its
+                # ordinary forward position and its ordinary backward
+                # position; only its snapshots are replaced by the
+                # filtered recompute. Nothing moves, which is what lets
+                # this kind exist for a loop with an escaping array
+                # write at all.
                 push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx, recompute = true))
             elseif ii_kind === :mixed
                 # NOT split -- see agen_forward_body's own :mixed
@@ -8822,7 +8830,7 @@ function ii_scalar_live_in(body, var)
     return :none
 end
 
-function ii_recomputable(kernel, loop_body, var)
+function ii_recomputable(kernel, loop_body, var, restored = Set{Symbol}())
     written = Set{Symbol}()
     ii_assigned_vars!(kernel.body, written)
     defs = Dict{Symbol,Vector{Any}}()
@@ -8835,18 +8843,28 @@ function ii_recomputable(kernel, loop_body, var)
         (v in seen || v in loop_vars) && continue
         push!(seen, v)
         is_array = get(kernel.sig.kinds, v, nothing) in (:array_float, :array_int)
-        if !is_array && haskey(defs, v)
-            ii_scalar_live_in(loop_body, v) === :live && return false
-            for stmt in defs[v]
-                stmt.lhs isa Symbol || return false
-                reads = Set{Symbol}()
-                agen_collect_expr_vars!(stmt.rhs, reads)
-                for r in reads
-                    push!(frontier, r)
+        if is_array
+            v in written && return false
+        elseif haskey(defs, v) || v in written
+            # a scalar neither assigned in this body nor anywhere in the
+            # kernel is a loop index or a read-only argument -- nothing
+            # to prove, and it must not trip the live-in test below.
+            if ii_scalar_live_in(loop_body, v) === :live
+                # live-in: the recompute cannot rebuild it, so the
+                # ordinary machinery must restore it instead (its own
+                # stack pop, or an enclosing classified loop's own
+                # recompute). Treated as a leaf either way.
+                v in restored || return false
+            else
+                for stmt in get(defs, v, Any[])
+                    stmt.lhs isa Symbol || return false
+                    reads = Set{Symbol}()
+                    agen_collect_expr_vars!(stmt.rhs, reads)
+                    for r in reads
+                        push!(frontier, r)
+                    end
                 end
             end
-        elseif v in written
-            return false
         end
     end
     return true
@@ -8879,13 +8897,16 @@ function ii_assigns_any(body, vars)
     return false
 end
 
-function ii_fused_var_in_nested_for(body, vars)
-    for stmt in body
+function ii_fused_var_in_nested_for(body, vars, plan = nothing)
+    for (idx, stmt) in enumerate(body)
         if stmt.kind == :for
-            ii_assigns_any(stmt.body, vars) && return true
+            # a nested loop that is ITSELF classified re-establishes its
+            # own scalars per inner iteration, so it is not a hazard.
+            covered = plan !== nothing && haskey(plan, agen_site_key(body, idx))
+            (!covered && ii_assigns_any(stmt.body, vars)) && return true
         elseif stmt.kind == :if
-            (ii_fused_var_in_nested_for(stmt.then, vars) ||
-             ii_fused_var_in_nested_for(stmt.els, vars)) && return true
+            (ii_fused_var_in_nested_for(stmt.then, vars, plan) ||
+             ii_fused_var_in_nested_for(stmt.els, vars, plan)) && return true
         end
     end
     return false
@@ -8949,21 +8970,26 @@ end
 # the forward loop entirely, so its push and pop stay matched within
 # the one fused iteration and it needs no such gate.
 #
-# Deliberately coarser than the emit-time test: whole-variable
-# value_needed rather than site-level TBR's Dict, and no `exempt`
-# consultation (agen_collect_exempt_vars! never exempts a write inside
-# a loop anyway, which every site here is). Both directions only ever
-# refuse more, never fewer.
-function ii_body_has_surviving_snapshot(body, kinds, active_map, value_needed, vn_local, reassigned)
-    for stmt in body
+# Keyed by the SITE-level TBR decisions, exactly as agen_forward_body's
+# own push gate is (agen_push_pop_source reads ectx.push_pop, which is
+# this same Dict). A whole-variable approximation is unusable here: a
+# pure accumulation like `res[i] = res[i] + auxres` is value-needed as
+# a variable yet emits no push at all, and treating it as one refuses
+# every loop containing a scatter-accumulate -- which is most of the
+# loops this analysis exists to classify. `exempt` is deliberately not
+# consulted: agen_collect_exempt_vars! never exempts a write inside a
+# loop, which every site here is.
+function ii_body_has_surviving_snapshot(body, kinds, active_map, sites, vn_local, reassigned)
+    for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             get(kinds, var, nothing) in (:scalar_float, :array_float) &&
-                get(active_map, var, false) && var in value_needed &&
+                get(active_map, var, false) &&
+                get(sites, agen_site_key(body, idx), false) &&
                 !(var in vn_local) && return true
         elseif stmt.kind == :for
             isempty(agen_tripcount_bound_vars(stmt, reassigned)) || return true
-            ii_body_has_surviving_snapshot(stmt.body, kinds, active_map, value_needed, vn_local, reassigned) && return true
+            ii_body_has_surviving_snapshot(stmt.body, kinds, active_map, sites, vn_local, reassigned) && return true
         elseif stmt.kind == :if
             return true   # agen_forward_body always pushes a branch flag
         end
@@ -8971,10 +8997,14 @@ function ii_body_has_surviving_snapshot(body, kinds, active_map, value_needed, v
     return false
 end
 
-function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
+function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, plan = nothing)
     stmt.kind == :for || return :none
     agen_tier_b_walk(stmt.body, Set{Symbol}()) === nothing || return :none
-    ii_body_has_escaping_array_write(kernel.body, stmt.body, kernel.sig.kinds, active_map) && return :none
+    # An escaping array write rules out the three FUSING kinds, whose
+    # codegen would move the array's adjoint to the forward position.
+    # It does not rule out :recompute, which leaves every adjoint where
+    # it was and only replaces snapshots with re-execution.
+    has_escape = ii_body_has_escaping_array_write(kernel.body, stmt.body, kernel.sig.kinds, active_map)
     synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
     synth === nothing && return :none
     local_names = cgen_locally_assigned_scalars(stmt.body)
@@ -8988,7 +9018,7 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     isempty(vn_local) && return :none
     # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
     # when no fused var is live across a nested loop boundary.
-    ii_fused_var_in_nested_for(stmt.body, vn_local) && return :none
+    ii_fused_var_in_nested_for(stmt.body, vn_local, plan) && return :none
     vn_red = intersect(vn_local, redvars)
     vn_ind = setdiff(vn_local, redvars)
     # Each half is checked independently against ITS OWN safety
@@ -9008,14 +9038,22 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     end
     # only :reduction/:mixed run the body twice -- see
     # ii_body_has_surviving_snapshot.
-    if !isempty(vn_red) &&
-       (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, value_needed,
+    if (!isempty(vn_red) || has_escape) &&
+       (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, snap_value_needed_sites(kernel),
                                         vn_local, snap_collect_reassigned(kernel.body)) ||
         # the backward-position recompute drops array writes -- see
         # ii_body_scalar_reads_own_array_write. :independent does not
         # recompute at all, so this does not apply to it.
         ii_body_scalar_reads_own_array_write(stmt.body))
         return :none
+    end
+    if has_escape
+        # Nothing moves, so the snapshots must go instead: every fused
+        # var has to be rebuildable at the backward position, with
+        # live-ins supplied by the ordinary restore machinery.
+        restored = setdiff(value_needed, vn_local)
+        all(v -> ii_recomputable(kernel, stmt.body, v, restored), vn_local) || return :none
+        return :recompute
     end
     if !isempty(vn_red) && !isempty(vn_ind)
         return :mixed
@@ -9026,10 +9064,14 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     end
 end
 
-function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
+function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, plan = nothing)
     stmt.kind == :for || return :none
     agen_tier_b_walk(stmt.body, Set{Symbol}()) === nothing || return :none
-    ii_body_has_escaping_array_write(kernel.body, stmt.body, kernel.sig.kinds, active_map) && return :none
+    # An escaping array write rules out the three FUSING kinds, whose
+    # codegen would move the array's adjoint to the forward position.
+    # It does not rule out :recompute, which leaves every adjoint where
+    # it was and only replaces snapshots with re-execution.
+    has_escape = ii_body_has_escaping_array_write(kernel.body, stmt.body, kernel.sig.kinds, active_map)
     synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
     synth === nothing && return :none
     local_names = cgen_locally_assigned_scalars(stmt.body)
@@ -9038,7 +9080,7 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
     isempty(vn_local) && return :none
     # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
     # when no fused var is live across a nested loop boundary.
-    ii_fused_var_in_nested_for(stmt.body, vn_local) && return :none
+    ii_fused_var_in_nested_for(stmt.body, vn_local, plan) && return :none
     vn_red = intersect(vn_local, redvars)
     vn_ind = setdiff(vn_local, redvars)
     if !isempty(vn_red)
@@ -9050,14 +9092,22 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
         escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
         isempty(escaped) || return :none
     end
-    if !isempty(vn_red) &&
-       (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, value_needed,
+    if (!isempty(vn_red) || has_escape) &&
+       (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, agen_value_needed_sites(kernel),
                                         vn_local, agen_collect_reassigned(kernel.body)) ||
         # the backward-position recompute drops array writes -- see
         # ii_body_scalar_reads_own_array_write. :independent does not
         # recompute at all, so this does not apply to it.
         ii_body_scalar_reads_own_array_write(stmt.body))
         return :none
+    end
+    if has_escape
+        # Nothing moves, so the snapshots must go instead: every fused
+        # var has to be rebuildable at the backward position, with
+        # live-ins supplied by the ordinary restore machinery.
+        restored = setdiff(value_needed, vn_local)
+        all(v -> ii_recomputable(kernel, stmt.body, v, restored), vn_local) || return :none
+        return :recompute
     end
     if !isempty(vn_red) && !isempty(vn_ind)
         return :mixed
@@ -9104,12 +9154,11 @@ function snap_ii_plan_walk!(body, kernel, value_needed, active_map, plan)
                 end
             end
         elseif stmt.kind == :for
-            kind = snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
-            if kind === :none
-                snap_ii_plan_walk!(stmt.body, kernel, value_needed, active_map, plan)
-            else
-                plan[agen_site_key(body, idx)] = kind
-            end
+            # post-order: nested loops are classified FIRST, so this
+            # loop's own ii_fused_var_in_nested_for check can see them.
+            snap_ii_plan_walk!(stmt.body, kernel, value_needed, active_map, plan)
+            kind = snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, plan)
+            kind === :none || (plan[agen_site_key(body, idx)] = kind)
             delete!(known_consts, stmt.var)
         elseif stmt.kind == :if
             snap_ii_plan_walk!(stmt.then, kernel, value_needed, active_map, plan)
@@ -9143,12 +9192,11 @@ function agen_ii_plan_walk!(body, kernel, value_needed, active_map, plan)
                 end
             end
         elseif stmt.kind == :for
-            kind = agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map)
-            if kind === :none
-                agen_ii_plan_walk!(stmt.body, kernel, value_needed, active_map, plan)
-            else
-                plan[agen_site_key(body, idx)] = kind
-            end
+            # post-order: nested loops are classified FIRST, so this
+            # loop's own ii_fused_var_in_nested_for check can see them.
+            agen_ii_plan_walk!(stmt.body, kernel, value_needed, active_map, plan)
+            kind = agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, plan)
+            kind === :none || (plan[agen_site_key(body, idx)] = kind)
             delete!(known_consts, stmt.var)
         elseif stmt.kind == :if
             agen_ii_plan_walk!(stmt.then, kernel, value_needed, active_map, plan)
@@ -9397,7 +9445,11 @@ let
         return nothing
     end))
     plan4 = stade_ii_plan_check(k4)
-    @assert length(plan4) == 1 && only(values(plan4)) == :independent "ii_nf4_two_levels: expected one :independent site, got $plan4"
+    # both the inner loop and the k2 loop wrapping it now classify: the
+    # walker is post-order, so k2 sees its nested loop already covered
+    # and is no longer refused by ii_fused_var_in_nested_for. The larger
+    # unit is strictly better; what matters is that both are eligible.
+    @assert length(plan4) == 2 && all(v -> v == :independent, values(plan4)) "ii_nf4_two_levels: expected the inner loop AND its k2 wrapper to classify, got $plan4"
 
     println("ii_plan nested-:for extension regression suite (4 cases) OK")
 end
@@ -9669,7 +9721,7 @@ let
         return nothing
     end))
     plan1 = stade_ii_plan_check(k1)
-    @assert isempty(plan1) "ii_reg_array_escape: expected refusal (r escapes to out[1]), got $plan1"
+    @assert all(v -> v == :recompute, values(plan1)) "ii_reg_array_escape: expected refusal of every FUSING kind (r escapes to out[1]); :recompute is permitted here because it moves no adjoint, got $plan1"
 
     # Regression for the array write that does NOT escape (r never
     # read outside the loop) -- must still classify. Distinguishes
@@ -9707,7 +9759,7 @@ let
         return nothing
     end))
     plan3 = stade_ii_plan_check(k3)
-    @assert isempty(plan3) "ii_reg_linear_escape: expected refusal (t read linearly outside the loop), got $plan3"
+    @assert all(v -> v == :recompute, values(plan3)) "ii_reg_linear_escape: expected refusal of every FUSING kind (t read linearly outside the loop); :recompute is permitted here because it moves no adjoint, got $plan3"
 
     println("ii_plan Phase 3 codegen correctness regression suite (3 cases) OK")
 end
@@ -9780,7 +9832,7 @@ let
         return nothing
     end))
     plan2 = stade_ii_plan_check(k2)
-    @assert isempty(plan2) "ii_arr_b2_after: expected refusal (genuine after-loop escape), got $plan2"
+    @assert all(v -> v == :recompute, values(plan2)) "ii_arr_b2_after: expected refusal of every FUSING kind (genuine after-loop escape); :recompute is permitted here because it moves no adjoint, got $plan2"
 
     # B3: nested inside a repeating (ineligible) ancestor, read
     # positioned BEFORE the write within the SAME repeating body --
@@ -9799,7 +9851,7 @@ let
         return nothing
     end))
     plan3 = stade_ii_plan_check(k3)
-    @assert isempty(plan3) "ii_arr_b3_wraparound: expected refusal (wraparound escape), got $plan3"
+    @assert all(v -> v == :recompute, values(plan3)) "ii_arr_b3_wraparound: expected refusal of every FUSING kind (wraparound escape); :recompute is permitted here because it moves no adjoint, got $plan3"
 
     # B4: nested inside a repeating ancestor, read AFTER the write
     # within the SAME repeating body -- must stay refused.
@@ -9817,7 +9869,7 @@ let
         return nothing
     end))
     plan4 = stade_ii_plan_check(k4)
-    @assert isempty(plan4) "ii_arr_b4_same_level_after: expected refusal (same-repeating-level escape), got $plan4"
+    @assert all(v -> v == :recompute, values(plan4)) "ii_arr_b4_same_level_after: expected refusal of every FUSING kind (same-repeating-level escape); :recompute is permitted here because it moves no adjoint, got $plan4"
 
     # B5: fully contained, array never read anywhere else at all.
     k5 = parse_kernel(:(function ii_arr_b5_contained(x, r, y, n)
@@ -9944,7 +9996,13 @@ let
         """)
         r2 = stade_adjoint(io_read_corpus_entry(path2); fuse_ii_loops = true)
         sig2 = string(r2.adjoint.args[1])
-        @assert occursin("s_stack", sig2) "ii_cleanup_partial: expected s_stack to stay (not every write-site is ii_plan-covered), got $sig2"
+        # `s = 0.0` used to be an uncovered write-site because the
+        # enclosing `j` loop was refused (y escapes to out[1]). It now
+        # classifies as :recompute, so every write-site of `s` IS
+        # covered and the stack goes -- the coverage improvement this
+        # kind exists to produce. The validation below is what keeps
+        # this honest.
+        @assert !occursin("s_stack", sig2) "ii_cleanup_partial: expected s_stack to be removed (every write-site is now ii_plan-covered via the enclosing :recompute loop), got $sig2"
         r2v_false = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = false)
         r2v_true  = stade_validate_adjoint_file(path2; trials = 10, fuse_ii_loops = true)
         @assert r2v_false.ok && r2v_true.ok "ii_cleanup_partial: validation failed"
@@ -10334,7 +10392,15 @@ let
         k1 = parse_kernel(io_read_corpus_entry(path1))
         plan1 = stade_ii_plan_check(k1)
         inner_key = agen_site_key(k1.body[1].body, 1)
-        @assert length(plan1) == 1 && haskey(plan1, inner_key) "ii_nestbound_inner: the OUTER loop must be refused (fused var assigned inside a nested :for) and the inner one classified instead, got $plan1"
+        # The inner loop must be classified; the outer one is allowed to
+        # be as well, but ONLY because the inner is -- that is exactly
+        # what ii_fused_var_in_nested_for's plan-awareness permits, and
+        # the fused outer loop then delegates to the inner fused form
+        # rather than reading a stale last-iteration value. If the inner
+        # were ever refused, the outer must be too.
+        @assert haskey(plan1, inner_key) "ii_nestbound_inner: the inner loop must be classified, got $plan1"
+        outer_key1 = agen_site_key(k1.body, 1)
+        @assert !haskey(plan1, outer_key1) || haskey(plan1, inner_key) "ii_nestbound_inner: the outer loop may only be classified when its nested loop is, got $plan1"
         r1u = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = false)
         r1f = stade_validate_adjoint_file(path1; trials = 10, fuse_ii_loops = true)
         @assert r1u.ok "ii_nestbound_inner: unfused baseline failed, max_rel_err=$(r1u.max_rel_err)"
