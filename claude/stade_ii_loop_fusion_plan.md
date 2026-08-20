@@ -49,17 +49,7 @@ nest as the scalar computation, at every level of nesting, `vere`/`re`/
 `aerex`/`aerey`/`aerez`/`aeresk`/`factor` never get classified — their
 stacks (`re_stack`, `aerex_stack`, etc.) still scale with `i_ncell` even
 with `fuse_ii_loops=true`. Only `cavgx`/`cavgy`/`cavgz` (a separate loop
-that never touches `res`/`res2`) currently benefits. Re-confirmed against
-an updated revision of `ttgc.jl` that removed its earlier periodic-
-boundary-exchange loops (`resperio`/`i_node_perio`) entirely and renamed
-`i_loc`/`i_k` to `i_seq_loc`/`i_seq_k` — same classification result
-exactly (one `:reduction` site, the `cavgx`/`cavgy`/`cavgz` loop; the
-`vere`/`aeresk` chain still refused). Removing the periodic-exchange loops
-didn't change anything because they were never the actual blocker — the
-`up[i] = res[i] / node_vol[i]` read alone is sufficient to keep `res`/
-`res2` escaping, and it's still there. Useful to know: the escape here has
-exactly one remaining consumer statement now, not several, which may make
-it a simpler first target for whichever option below gets attempted.
+that never touches `res`/`res2`) currently benefits.
 
 **Verify this directly before trusting it** — call
 `ii_body_has_escaping_array_write(kernel.body, loop.body, kernel.sig.kinds,
@@ -101,9 +91,7 @@ statement subset safe, widen the *candidate* so the escaping consumer is
 included in the same classified unit (the way `ttgc`'s own `cavgx` case
 already works — its consumer sits inside the same outer `i_cell` loop, so
 nothing escapes at that granularity). For `res`/`res2` specifically this
-would mean including the `up[i] = res[i] / node_vol[i]` loop (now the
-only remaining consumer, after an updated revision of the kernel dropped
-the periodic-boundary-exchange code that used to be a second one) in the
+would mean including the `up[i] = res[i] / node_vol[i]` loop in the
 same fusion unit as the assembly loop — a larger, structurally different
 unit than anything currently classified, though a genuinely smaller one
 to reason about than before, now that there's only one consumer loop
