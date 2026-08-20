@@ -11,17 +11,16 @@ function initstacks_transformer_b()
     resid1_stack = Vector{Float64}()
     row_mean_stack = Vector{Float64}()
     s2_stack = Vector{Float64}()
-    diff_stack = Vector{Float64}()
     row_var_stack = Vector{Float64}()
     denom_stack = Vector{Float64}()
     normed1_stack = Vector{Float64}()
     ff_hidden_stack = Vector{Float64}()
     resid2_stack = Vector{Float64}()
     x_stack = Vector{Float64}()
-    return (s_stack, q_stack, k_stack, v_stack, scores_stack, row_max_stack, probs_stack, row_sum_stack, ctx_stack, resid1_stack, row_mean_stack, s2_stack, diff_stack, row_var_stack, denom_stack, normed1_stack, ff_hidden_stack, resid2_stack, x_stack)
+    return (s_stack, q_stack, k_stack, v_stack, scores_stack, row_max_stack, probs_stack, row_sum_stack, ctx_stack, resid1_stack, row_mean_stack, s2_stack, row_var_stack, denom_stack, normed1_stack, ff_hidden_stack, resid2_stack, x_stack)
 end
 
-function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, bvb, wo, wob, bo, bob, ln1_gain, ln1_gainb, ln1_bias, ln1_biasb, w1, w1b, b1, b1b, w2, w2b, b2, b2b, ln2_gain, ln2_gainb, ln2_bias, ln2_biasb, q, qb, k, kb, v, vb, scores, scoresb, probs, probsb, ctx, ctxb, attn_out, attn_outb, resid1, resid1b, normed1, normed1b, ff_hidden, ff_hiddenb, ff_out, ff_outb, resid2, resid2b, x_next, x_nextb, n, d, dk, h, dff, n_layers, eps, epsb, xd, xbd, wqd, wqbd, bqd, bqbd, wkd, wkbd, bkd, bkbd, wvd, wvbd, bvd, bvbd, wod, wobd, bod, bobd, ln1_gaind, ln1_gainbd, ln1_biasd, ln1_biasbd, w1d, w1bd, b1d, b1bd, w2d, w2bd, b2d, b2bd, ln2_gaind, ln2_gainbd, ln2_biasd, ln2_biasbd, qd, qbd, kd, kbd, vd, vbd, scoresd, scoresbd, probsd, probsbd, ctxd, ctxbd, attn_outd, attn_outbd, resid1d, resid1bd, normed1d, normed1bd, ff_hiddend, ff_hiddenbd, ff_outd, ff_outbd, resid2d, resid2bd, x_nextd, x_nextbd, epsd, epsbd, s_stack, q_stack, k_stack, v_stack, scores_stack, row_max_stack, probs_stack, row_sum_stack, ctx_stack, resid1_stack, row_mean_stack, s2_stack, diff_stack, row_var_stack, denom_stack, normed1_stack, ff_hidden_stack, resid2_stack, x_stack)
+function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, bvb, wo, wob, bo, bob, ln1_gain, ln1_gainb, ln1_bias, ln1_biasb, w1, w1b, b1, b1b, w2, w2b, b2, b2b, ln2_gain, ln2_gainb, ln2_bias, ln2_biasb, q, qb, k, kb, v, vb, scores, scoresb, probs, probsb, ctx, ctxb, attn_out, attn_outb, resid1, resid1b, normed1, normed1b, ff_hidden, ff_hiddenb, ff_out, ff_outb, resid2, resid2b, x_next, x_nextb, n, d, dk, h, dff, n_layers, eps, epsb, xd, xbd, wqd, wqbd, bqd, bqbd, wkd, wkbd, bkd, bkbd, wvd, wvbd, bvd, bvbd, wod, wobd, bod, bobd, ln1_gaind, ln1_gainbd, ln1_biasd, ln1_biasbd, w1d, w1bd, b1d, b1bd, w2d, w2bd, b2d, b2bd, ln2_gaind, ln2_gainbd, ln2_biasd, ln2_biasbd, qd, qbd, kd, kbd, vd, vbd, scoresd, scoresbd, probsd, probsbd, ctxd, ctxbd, attn_outd, attn_outbd, resid1d, resid1bd, normed1d, normed1bd, ff_hiddend, ff_hiddenbd, ff_outd, ff_outbd, resid2d, resid2bd, x_nextd, x_nextbd, epsd, epsbd, s_stack, q_stack, k_stack, v_stack, scores_stack, row_max_stack, probs_stack, row_sum_stack, ctx_stack, resid1_stack, row_mean_stack, s2_stack, row_var_stack, denom_stack, normed1_stack, ff_hidden_stack, resid2_stack, x_stack)
     s_stack_d = Vector{Float64}()
     q_stack_d = Vector{Float64}()
     k_stack_d = Vector{Float64}()
@@ -96,8 +95,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = 0.0
             s = 0.0
             for i_seq_p = 1:d
-                push!(s_stack_d, sd)
-                push!(s_stack, s)
                 sd = sd + (wq[w_offset + (i_seq_p - 1) * d + j] * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * wqd[w_offset + (i_seq_p - 1) * d + j])
                 s = s + x[(i - 1) * d + i_seq_p] * wq[w_offset + (i_seq_p - 1) * d + j]
             end
@@ -116,8 +113,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = 0.0
             s = 0.0
             for i_seq_p = 1:d
-                push!(s_stack_d, sd)
-                push!(s_stack, s)
                 sd = sd + (wk[w_offset + (i_seq_p - 1) * d + j] * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * wkd[w_offset + (i_seq_p - 1) * d + j])
                 s = s + x[(i - 1) * d + i_seq_p] * wk[w_offset + (i_seq_p - 1) * d + j]
             end
@@ -136,8 +131,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = 0.0
             s = 0.0
             for i_seq_p = 1:d
-                push!(s_stack_d, sd)
-                push!(s_stack, s)
                 sd = sd + (wv[w_offset + (i_seq_p - 1) * d + j] * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * wvd[w_offset + (i_seq_p - 1) * d + j])
                 s = s + x[(i - 1) * d + i_seq_p] * wv[w_offset + (i_seq_p - 1) * d + j]
             end
@@ -159,8 +152,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 sd = 0.0
                 s = 0.0
                 for i_seq_p = 1:dk
-                    push!(s_stack_d, sd)
-                    push!(s_stack, s)
                     sd = sd + (k[(j - 1) * d + head_offset + i_seq_p] * qd[(i - 1) * d + head_offset + i_seq_p] + q[(i - 1) * d + head_offset + i_seq_p] * kd[(j - 1) * d + head_offset + i_seq_p])
                     s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                 end
@@ -194,8 +185,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 row_sumd = 0.0
                 row_sum = 0.0
                 for i_seq_j = 1:n
-                    push!(row_sum_stack_d, row_sumd)
-                    push!(row_sum_stack, row_sum)
                     row_sumd = row_sumd + probsd[score_off + (i - 1) * n + i_seq_j]
                     row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                 end
@@ -219,8 +208,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 sd = 0.0
                 s = 0.0
                 for i_seq_j = 1:n
-                    push!(s_stack_d, sd)
-                    push!(s_stack, s)
                     sd = sd + (v[(i_seq_j - 1) * d + head_offset + p] * probsd[score_off + (i - 1) * n + i_seq_j] + probs[score_off + (i - 1) * n + i_seq_j] * vd[(i_seq_j - 1) * d + head_offset + p])
                     s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                 end
@@ -246,8 +233,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = 0.0
             s = 0.0
             for i_seq_p = 1:d
-                push!(s_stack_d, sd)
-                push!(s_stack, s)
                 sd = sd + (wo[w_offset + (i_seq_p - 1) * d + j] * ctxd[(i - 1) * d + i_seq_p] + ctx[(i - 1) * d + i_seq_p] * wod[w_offset + (i_seq_p - 1) * d + j])
                 s = s + ctx[(i - 1) * d + i_seq_p] * wo[w_offset + (i_seq_p - 1) * d + j]
             end
@@ -268,8 +253,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = 0.0
             s = 0.0
             for i_seq_j = 1:d
-                push!(s_stack_d, sd)
-                push!(s_stack, s)
                 sd = sd + resid1d[(i - 1) * d + i_seq_j]
                 s = s + resid1[(i - 1) * d + i_seq_j]
             end
@@ -282,12 +265,8 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             s2d = 0.0
             s2 = 0.0
             for i_seq_j = 1:d
-                push!(diff_stack_d, diffd)
-                push!(diff_stack, diff)
                 diffd = resid1d[(i - 1) * d + i_seq_j] + -row_meand
                 diff = resid1[(i - 1) * d + i_seq_j] - row_mean
-                push!(s2_stack_d, s2d)
-                push!(s2_stack, s2)
                 s2d = s2d + (diff * diffd + diff * diffd)
                 s2 = s2 + diff * diff
             end
@@ -306,8 +285,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 normed1d[kk] = (ln1_gain[ln_offset + j] * ((1.0 / denom) * (resid1d[kk] + -row_meand) + -((resid1[kk] - row_mean) / denom ^ 2) * denomd) + ((resid1[kk] - row_mean) / denom) * ln1_gaind[ln_offset + j]) + ln1_biasd[ln_offset + j]
                 normed1[kk] = ((resid1[kk] - row_mean) / denom) * ln1_gain[ln_offset + j] + ln1_bias[ln_offset + j]
             end
-            push!(diff_stack_d, diffd)
-            push!(diff_stack, diff)
             push!(s_stack_d, sd)
             push!(s_stack, s)
             push!(s2_stack_d, s2d)
@@ -321,8 +298,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = 0.0
             s = 0.0
             for i_seq_p = 1:d
-                push!(s_stack_d, sd)
-                push!(s_stack, s)
                 sd = sd + (w1[w1_offset + (i_seq_p - 1) * dff + j] * normed1d[(i - 1) * d + i_seq_p] + normed1[(i - 1) * d + i_seq_p] * w1d[w1_offset + (i_seq_p - 1) * dff + j])
                 s = s + normed1[(i - 1) * d + i_seq_p] * w1[w1_offset + (i_seq_p - 1) * dff + j]
             end
@@ -341,8 +316,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = 0.0
             s = 0.0
             for i_seq_p = 1:dff
-                push!(s_stack_d, sd)
-                push!(s_stack, s)
                 sd = sd + (w2[w2_offset + (i_seq_p - 1) * d + j] * ff_hiddend[(i - 1) * dff + i_seq_p] + ff_hidden[(i - 1) * dff + i_seq_p] * w2d[w2_offset + (i_seq_p - 1) * d + j])
                 s = s + ff_hidden[(i - 1) * dff + i_seq_p] * w2[w2_offset + (i_seq_p - 1) * d + j]
             end
@@ -363,8 +336,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sd = 0.0
             s = 0.0
             for i_seq_j = 1:d
-                push!(s_stack_d, sd)
-                push!(s_stack, s)
                 sd = sd + resid2d[(i - 1) * d + i_seq_j]
                 s = s + resid2[(i - 1) * d + i_seq_j]
             end
@@ -377,12 +348,8 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             s2d = 0.0
             s2 = 0.0
             for i_seq_j = 1:d
-                push!(diff_stack_d, diffd)
-                push!(diff_stack, diff)
                 diffd = resid2d[(i - 1) * d + i_seq_j] + -row_meand
                 diff = resid2[(i - 1) * d + i_seq_j] - row_mean
-                push!(s2_stack_d, s2d)
-                push!(s2_stack, s2)
                 s2d = s2d + (diff * diffd + diff * diffd)
                 s2 = s2 + diff * diff
             end
@@ -399,8 +366,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 x_nextd[kk] = (ln2_gain[ln2_offset + j] * ((1.0 / denom) * (resid2d[kk] + -row_meand) + -((resid2[kk] - row_mean) / denom ^ 2) * denomd) + ((resid2[kk] - row_mean) / denom) * ln2_gaind[ln2_offset + j]) + ln2_biasd[ln2_offset + j]
                 x_next[kk] = ((resid2[kk] - row_mean) / denom) * ln2_gain[ln2_offset + j] + ln2_bias[ln2_offset + j]
             end
-            push!(diff_stack_d, diffd)
-            push!(diff_stack, diff)
             push!(s_stack_d, sd)
             push!(s_stack, s)
             push!(s2_stack_d, s2d)
@@ -414,8 +379,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
         end
         push!(denom_stack_d, denomd)
         push!(denom_stack, denom)
-        push!(diff_stack_d, diffd)
-        push!(diff_stack, diff)
         push!(row_max_stack_d, row_maxd)
         push!(row_max_stack, row_max)
         push!(row_mean_stack_d, row_meand)
@@ -431,8 +394,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
     end
     push!(denom_stack_d, denomd)
     push!(denom_stack, denom)
-    push!(diff_stack_d, diffd)
-    push!(diff_stack, diff)
     push!(row_max_stack_d, row_maxd)
     push!(row_max_stack, row_max)
     push!(row_mean_stack_d, row_meand)
@@ -447,8 +408,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
     push!(s2_stack, s2)
     denomd = pop!(denom_stack_d)
     denom = pop!(denom_stack)
-    diffd = pop!(diff_stack_d)
-    diff = pop!(diff_stack)
     row_maxd = pop!(row_max_stack_d)
     row_max = pop!(row_max_stack)
     row_meand = pop!(row_mean_stack_d)
@@ -466,8 +425,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
     for i_seq_l = n_layers:-1:1
         denomd = pop!(denom_stack_d)
         denom = pop!(denom_stack)
-        diffd = pop!(diff_stack_d)
-        diff = pop!(diff_stack)
         row_maxd = pop!(row_max_stack_d)
         row_max = pop!(row_max_stack)
         row_meand = pop!(row_mean_stack_d)
@@ -497,8 +454,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             xb[idx] = 0.0
         end
         for i = n:-1:1
-            diffd = pop!(diff_stack_d)
-            diff = pop!(diff_stack)
             sd = pop!(s_stack_d)
             s = pop!(s_stack)
             s2d = pop!(s2_stack_d)
@@ -532,15 +487,15 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             s2b = s2b + (1.0 / d) * row_varb
             row_varbd = 0.0
             row_varb = 0.0
-            for i_seq_j = d:-1:1
-                s2d = pop!(s2_stack_d)
-                s2 = pop!(s2_stack)
+            for i_seq_j = 1:d
+                diffd = resid2d[(i - 1) * d + i_seq_j] + -row_meand
+                diff = resid2[(i - 1) * d + i_seq_j] - row_mean
+                s2d = s2d + (diff * diffd + diff * diffd)
+                s2 = s2 + diff * diff
                 diffbd = diffbd + (s2b * diffd + diff * s2bd)
                 diffb = diffb + diff * s2b
                 diffbd = diffbd + (s2b * diffd + diff * s2bd)
                 diffb = diffb + diff * s2b
-                diffd = pop!(diff_stack_d)
-                diff = pop!(diff_stack)
                 resid2bd[(i - 1) * d + i_seq_j] = resid2bd[(i - 1) * d + i_seq_j] + diffbd
                 resid2b[(i - 1) * d + i_seq_j] = resid2b[(i - 1) * d + i_seq_j] + diffb
                 row_meanbd = row_meanbd + -diffbd
@@ -558,9 +513,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sb = sb + (1.0 / d) * row_meanb
             row_meanbd = 0.0
             row_meanb = 0.0
-            for i_seq_j = d:-1:1
-                sd = pop!(s_stack_d)
-                s = pop!(s_stack)
+            for i_seq_j = 1:d
+                sd = sd + resid2d[(i - 1) * d + i_seq_j]
+                s = s + resid2[(i - 1) * d + i_seq_j]
                 resid2bd[(i - 1) * d + i_seq_j] = resid2bd[(i - 1) * d + i_seq_j] + sbd
                 resid2b[(i - 1) * d + i_seq_j] = resid2b[(i - 1) * d + i_seq_j] + sb
             end
@@ -590,9 +545,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             b2b[b2_offset + j] = b2b[b2_offset + j] + ff_outb[(i - 1) * d + j]
             ff_outbd[(i - 1) * d + j] = 0.0
             ff_outb[(i - 1) * d + j] = 0.0
-            for i_seq_p = dff:-1:1
-                sd = pop!(s_stack_d)
-                s = pop!(s_stack)
+            for i_seq_p = 1:dff
+                sd = sd + (w2[w2_offset + (i_seq_p - 1) * d + j] * ff_hiddend[(i - 1) * dff + i_seq_p] + ff_hidden[(i - 1) * dff + i_seq_p] * w2d[w2_offset + (i_seq_p - 1) * d + j])
+                s = s + ff_hidden[(i - 1) * dff + i_seq_p] * w2[w2_offset + (i_seq_p - 1) * d + j]
                 ff_hiddenbd[(i - 1) * dff + i_seq_p] = ff_hiddenbd[(i - 1) * dff + i_seq_p] + (sb * w2d[w2_offset + (i_seq_p - 1) * d + j] + w2[w2_offset + (i_seq_p - 1) * d + j] * sbd)
                 ff_hiddenb[(i - 1) * dff + i_seq_p] = ff_hiddenb[(i - 1) * dff + i_seq_p] + w2[w2_offset + (i_seq_p - 1) * d + j] * sb
                 w2bd[w2_offset + (i_seq_p - 1) * d + j] = w2bd[w2_offset + (i_seq_p - 1) * d + j] + (sb * ff_hiddend[(i - 1) * dff + i_seq_p] + ff_hidden[(i - 1) * dff + i_seq_p] * sbd)
@@ -616,9 +571,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             b1b[b1_offset + j] = b1b[b1_offset + j] + (0.5 * (1.0 + sign(s + b1[b1_offset + j]))) * ff_hiddenb[(i - 1) * dff + j]
             ff_hiddenbd[(i - 1) * dff + j] = 0.0
             ff_hiddenb[(i - 1) * dff + j] = 0.0
-            for i_seq_p = d:-1:1
-                sd = pop!(s_stack_d)
-                s = pop!(s_stack)
+            for i_seq_p = 1:d
+                sd = sd + (w1[w1_offset + (i_seq_p - 1) * dff + j] * normed1d[(i - 1) * d + i_seq_p] + normed1[(i - 1) * d + i_seq_p] * w1d[w1_offset + (i_seq_p - 1) * dff + j])
+                s = s + normed1[(i - 1) * d + i_seq_p] * w1[w1_offset + (i_seq_p - 1) * dff + j]
                 normed1bd[(i - 1) * d + i_seq_p] = normed1bd[(i - 1) * d + i_seq_p] + (sb * w1d[w1_offset + (i_seq_p - 1) * dff + j] + w1[w1_offset + (i_seq_p - 1) * dff + j] * sbd)
                 normed1b[(i - 1) * d + i_seq_p] = normed1b[(i - 1) * d + i_seq_p] + w1[w1_offset + (i_seq_p - 1) * dff + j] * sb
                 w1bd[w1_offset + (i_seq_p - 1) * dff + j] = w1bd[w1_offset + (i_seq_p - 1) * dff + j] + (sb * normed1d[(i - 1) * d + i_seq_p] + normed1[(i - 1) * d + i_seq_p] * sbd)
@@ -630,8 +585,6 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sb = 0.0
         end
         for i = n:-1:1
-            diffd = pop!(diff_stack_d)
-            diff = pop!(diff_stack)
             sd = pop!(s_stack_d)
             s = pop!(s_stack)
             s2d = pop!(s2_stack_d)
@@ -667,15 +620,15 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             s2b = s2b + (1.0 / d) * row_varb
             row_varbd = 0.0
             row_varb = 0.0
-            for i_seq_j = d:-1:1
-                s2d = pop!(s2_stack_d)
-                s2 = pop!(s2_stack)
+            for i_seq_j = 1:d
+                diffd = resid1d[(i - 1) * d + i_seq_j] + -row_meand
+                diff = resid1[(i - 1) * d + i_seq_j] - row_mean
+                s2d = s2d + (diff * diffd + diff * diffd)
+                s2 = s2 + diff * diff
                 diffbd = diffbd + (s2b * diffd + diff * s2bd)
                 diffb = diffb + diff * s2b
                 diffbd = diffbd + (s2b * diffd + diff * s2bd)
                 diffb = diffb + diff * s2b
-                diffd = pop!(diff_stack_d)
-                diff = pop!(diff_stack)
                 resid1bd[(i - 1) * d + i_seq_j] = resid1bd[(i - 1) * d + i_seq_j] + diffbd
                 resid1b[(i - 1) * d + i_seq_j] = resid1b[(i - 1) * d + i_seq_j] + diffb
                 row_meanbd = row_meanbd + -diffbd
@@ -693,9 +646,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             sb = sb + (1.0 / d) * row_meanb
             row_meanbd = 0.0
             row_meanb = 0.0
-            for i_seq_j = d:-1:1
-                sd = pop!(s_stack_d)
-                s = pop!(s_stack)
+            for i_seq_j = 1:d
+                sd = sd + resid1d[(i - 1) * d + i_seq_j]
+                s = s + resid1[(i - 1) * d + i_seq_j]
                 resid1bd[(i - 1) * d + i_seq_j] = resid1bd[(i - 1) * d + i_seq_j] + sbd
                 resid1b[(i - 1) * d + i_seq_j] = resid1b[(i - 1) * d + i_seq_j] + sb
             end
@@ -725,9 +678,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             bob[b_offset + j] = bob[b_offset + j] + attn_outb[(i - 1) * d + j]
             attn_outbd[(i - 1) * d + j] = 0.0
             attn_outb[(i - 1) * d + j] = 0.0
-            for i_seq_p = d:-1:1
-                sd = pop!(s_stack_d)
-                s = pop!(s_stack)
+            for i_seq_p = 1:d
+                sd = sd + (wo[w_offset + (i_seq_p - 1) * d + j] * ctxd[(i - 1) * d + i_seq_p] + ctx[(i - 1) * d + i_seq_p] * wod[w_offset + (i_seq_p - 1) * d + j])
+                s = s + ctx[(i - 1) * d + i_seq_p] * wo[w_offset + (i_seq_p - 1) * d + j]
                 ctxbd[(i - 1) * d + i_seq_p] = ctxbd[(i - 1) * d + i_seq_p] + (sb * wod[w_offset + (i_seq_p - 1) * d + j] + wo[w_offset + (i_seq_p - 1) * d + j] * sbd)
                 ctxb[(i - 1) * d + i_seq_p] = ctxb[(i - 1) * d + i_seq_p] + wo[w_offset + (i_seq_p - 1) * d + j] * sb
                 wobd[w_offset + (i_seq_p - 1) * d + j] = wobd[w_offset + (i_seq_p - 1) * d + j] + (sb * ctxd[(i - 1) * d + i_seq_p] + ctx[(i - 1) * d + i_seq_p] * sbd)
@@ -758,9 +711,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 sb = sb + ctxb[(i - 1) * d + head_offset + p]
                 ctxbd[(i - 1) * d + head_offset + p] = 0.0
                 ctxb[(i - 1) * d + head_offset + p] = 0.0
-                for i_seq_j = n:-1:1
-                    sd = pop!(s_stack_d)
-                    s = pop!(s_stack)
+                for i_seq_j = 1:n
+                    sd = sd + (v[(i_seq_j - 1) * d + head_offset + p] * probsd[score_off + (i - 1) * n + i_seq_j] + probs[score_off + (i - 1) * n + i_seq_j] * vd[(i_seq_j - 1) * d + head_offset + p])
+                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
                     probsbd[score_off + (i - 1) * n + i_seq_j] = probsbd[score_off + (i - 1) * n + i_seq_j] + (sb * vd[(i_seq_j - 1) * d + head_offset + p] + v[(i_seq_j - 1) * d + head_offset + p] * sbd)
                     probsb[score_off + (i - 1) * n + i_seq_j] = probsb[score_off + (i - 1) * n + i_seq_j] + v[(i_seq_j - 1) * d + head_offset + p] * sb
                     vbd[(i_seq_j - 1) * d + head_offset + p] = vbd[(i_seq_j - 1) * d + head_offset + p] + (sb * probsd[score_off + (i - 1) * n + i_seq_j] + probs[score_off + (i - 1) * n + i_seq_j] * sbd)
@@ -785,9 +738,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                     probsbd[kk] = probsb[kk] * (-(1.0 / row_sum ^ 2) * row_sumd) + (1.0 / row_sum) * probsbd[kk]
                     probsb[kk] = (1.0 / row_sum) * probsb[kk]
                 end
-                for i_seq_j = n:-1:1
-                    row_sumd = pop!(row_sum_stack_d)
-                    row_sum = pop!(row_sum_stack)
+                for i_seq_j = 1:n
+                    row_sumd = row_sumd + probsd[score_off + (i - 1) * n + i_seq_j]
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
                     probsbd[score_off + (i - 1) * n + i_seq_j] = probsbd[score_off + (i - 1) * n + i_seq_j] + row_sumbd
                     probsb[score_off + (i - 1) * n + i_seq_j] = probsb[score_off + (i - 1) * n + i_seq_j] + row_sumb
                 end
@@ -832,9 +785,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
                 sb = sb + inv_sqrt_dk * scoresb[score_off + (i - 1) * n + j]
                 scoresbd[score_off + (i - 1) * n + j] = 0.0
                 scoresb[score_off + (i - 1) * n + j] = 0.0
-                for i_seq_p = dk:-1:1
-                    sd = pop!(s_stack_d)
-                    s = pop!(s_stack)
+                for i_seq_p = 1:dk
+                    sd = sd + (k[(j - 1) * d + head_offset + i_seq_p] * qd[(i - 1) * d + head_offset + i_seq_p] + q[(i - 1) * d + head_offset + i_seq_p] * kd[(j - 1) * d + head_offset + i_seq_p])
+                    s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
                     qbd[(i - 1) * d + head_offset + i_seq_p] = qbd[(i - 1) * d + head_offset + i_seq_p] + (sb * kd[(j - 1) * d + head_offset + i_seq_p] + k[(j - 1) * d + head_offset + i_seq_p] * sbd)
                     qb[(i - 1) * d + head_offset + i_seq_p] = qb[(i - 1) * d + head_offset + i_seq_p] + k[(j - 1) * d + head_offset + i_seq_p] * sb
                     kbd[(j - 1) * d + head_offset + i_seq_p] = kbd[(j - 1) * d + head_offset + i_seq_p] + (sb * qd[(i - 1) * d + head_offset + i_seq_p] + q[(i - 1) * d + head_offset + i_seq_p] * sbd)
@@ -859,9 +812,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             bvb[b_offset + j] = bvb[b_offset + j] + vb[(i - 1) * d + j]
             vbd[(i - 1) * d + j] = 0.0
             vb[(i - 1) * d + j] = 0.0
-            for i_seq_p = d:-1:1
-                sd = pop!(s_stack_d)
-                s = pop!(s_stack)
+            for i_seq_p = 1:d
+                sd = sd + (wv[w_offset + (i_seq_p - 1) * d + j] * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * wvd[w_offset + (i_seq_p - 1) * d + j])
+                s = s + x[(i - 1) * d + i_seq_p] * wv[w_offset + (i_seq_p - 1) * d + j]
                 xbd[(i - 1) * d + i_seq_p] = xbd[(i - 1) * d + i_seq_p] + (sb * wvd[w_offset + (i_seq_p - 1) * d + j] + wv[w_offset + (i_seq_p - 1) * d + j] * sbd)
                 xb[(i - 1) * d + i_seq_p] = xb[(i - 1) * d + i_seq_p] + wv[w_offset + (i_seq_p - 1) * d + j] * sb
                 wvbd[w_offset + (i_seq_p - 1) * d + j] = wvbd[w_offset + (i_seq_p - 1) * d + j] + (sb * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * sbd)
@@ -885,9 +838,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             bkb[b_offset + j] = bkb[b_offset + j] + kb[(i - 1) * d + j]
             kbd[(i - 1) * d + j] = 0.0
             kb[(i - 1) * d + j] = 0.0
-            for i_seq_p = d:-1:1
-                sd = pop!(s_stack_d)
-                s = pop!(s_stack)
+            for i_seq_p = 1:d
+                sd = sd + (wk[w_offset + (i_seq_p - 1) * d + j] * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * wkd[w_offset + (i_seq_p - 1) * d + j])
+                s = s + x[(i - 1) * d + i_seq_p] * wk[w_offset + (i_seq_p - 1) * d + j]
                 xbd[(i - 1) * d + i_seq_p] = xbd[(i - 1) * d + i_seq_p] + (sb * wkd[w_offset + (i_seq_p - 1) * d + j] + wk[w_offset + (i_seq_p - 1) * d + j] * sbd)
                 xb[(i - 1) * d + i_seq_p] = xb[(i - 1) * d + i_seq_p] + wk[w_offset + (i_seq_p - 1) * d + j] * sb
                 wkbd[w_offset + (i_seq_p - 1) * d + j] = wkbd[w_offset + (i_seq_p - 1) * d + j] + (sb * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * sbd)
@@ -911,9 +864,9 @@ function transformer_hv(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, 
             bqb[b_offset + j] = bqb[b_offset + j] + qb[(i - 1) * d + j]
             qbd[(i - 1) * d + j] = 0.0
             qb[(i - 1) * d + j] = 0.0
-            for i_seq_p = d:-1:1
-                sd = pop!(s_stack_d)
-                s = pop!(s_stack)
+            for i_seq_p = 1:d
+                sd = sd + (wq[w_offset + (i_seq_p - 1) * d + j] * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * wqd[w_offset + (i_seq_p - 1) * d + j])
+                s = s + x[(i - 1) * d + i_seq_p] * wq[w_offset + (i_seq_p - 1) * d + j]
                 xbd[(i - 1) * d + i_seq_p] = xbd[(i - 1) * d + i_seq_p] + (sb * wqd[w_offset + (i_seq_p - 1) * d + j] + wq[w_offset + (i_seq_p - 1) * d + j] * sbd)
                 xb[(i - 1) * d + i_seq_p] = xb[(i - 1) * d + i_seq_p] + wq[w_offset + (i_seq_p - 1) * d + j] * sb
                 wqbd[w_offset + (i_seq_p - 1) * d + j] = wqbd[w_offset + (i_seq_p - 1) * d + j] + (sb * xd[(i - 1) * d + i_seq_p] + x[(i - 1) * d + i_seq_p] * sbd)

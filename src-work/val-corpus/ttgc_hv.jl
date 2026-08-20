@@ -100,16 +100,10 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
         cavgz = 0.0
         for i_seq_loc = 1:4
             i_node = i_cell_to_node[i_seq_loc, i_cell]
-            push!(cavgx_stack_d, cavgxd)
-            push!(cavgx_stack, cavgx)
             cavgxd = cavgxd + 0.25 * cd[1, i_node]
             cavgx = cavgx + c[1, i_node] / 4
-            push!(cavgy_stack_d, cavgyd)
-            push!(cavgy_stack, cavgy)
             cavgyd = cavgyd + 0.25 * cd[2, i_node]
             cavgy = cavgy + c[2, i_node] / 4
-            push!(cavgz_stack_d, cavgzd)
-            push!(cavgz_stack, cavgz)
             cavgzd = cavgzd + 0.25 * cd[3, i_node]
             cavgz = cavgz + c[3, i_node] / 4
         end
@@ -673,18 +667,19 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             verebd = 0.0
             vereb = 0.0
         end
-        for i_seq_loc = 4:-1:1
+        for i_seq_loc = 1:4
             i_node = i_cell_to_node[i_seq_loc, i_cell]
-            cavgzd = pop!(cavgz_stack_d)
-            cavgz = pop!(cavgz_stack)
+            cavgxd = cavgxd + 0.25 * cd[1, i_node]
+            cavgx = cavgx + c[1, i_node] / 4
+            cavgyd = cavgyd + 0.25 * cd[2, i_node]
+            cavgy = cavgy + c[2, i_node] / 4
+            cavgzd = cavgzd + 0.25 * cd[3, i_node]
+            cavgz = cavgz + c[3, i_node] / 4
+            i_node = i_cell_to_node[i_seq_loc, i_cell]
             cbd[3, i_node] = cbd[3, i_node] + 0.25cavgzbd
             cb[3, i_node] = cb[3, i_node] + 0.25cavgzb
-            cavgyd = pop!(cavgy_stack_d)
-            cavgy = pop!(cavgy_stack)
             cbd[2, i_node] = cbd[2, i_node] + 0.25cavgybd
             cb[2, i_node] = cb[2, i_node] + 0.25cavgyb
-            cavgxd = pop!(cavgx_stack_d)
-            cavgx = pop!(cavgx_stack)
             cbd[1, i_node] = cbd[1, i_node] + 0.25cavgxbd
             cb[1, i_node] = cb[1, i_node] + 0.25cavgxb
         end

@@ -53,11 +53,8 @@ function ttgc_b(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_vo
         cavgz = 0.0
         for i_seq_loc = 1:4
             i_node = i_cell_to_node[i_seq_loc, i_cell]
-            push!(cavgx_stack, cavgx)
             cavgx = cavgx + c[1, i_node] / 4
-            push!(cavgy_stack, cavgy)
             cavgy = cavgy + c[2, i_node] / 4
-            push!(cavgz_stack, cavgz)
             cavgz = cavgz + c[3, i_node] / 4
         end
         for i_seq_loc = 1:4
@@ -385,13 +382,14 @@ function ttgc_b(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_vo
             skzb[i_seq_loc, i_cell] = skzb[i_seq_loc, i_cell] + c[3, i_node] * ((-(1.0 / 3.0) * u[i_node]) * vereb)
             vereb = 0.0
         end
-        for i_seq_loc = 4:-1:1
+        for i_seq_loc = 1:4
             i_node = i_cell_to_node[i_seq_loc, i_cell]
-            cavgz = pop!(cavgz_stack)
+            cavgx = cavgx + c[1, i_node] / 4
+            cavgy = cavgy + c[2, i_node] / 4
+            cavgz = cavgz + c[3, i_node] / 4
+            i_node = i_cell_to_node[i_seq_loc, i_cell]
             cb[3, i_node] = cb[3, i_node] + 0.25cavgzb
-            cavgy = pop!(cavgy_stack)
             cb[2, i_node] = cb[2, i_node] + 0.25cavgyb
-            cavgx = pop!(cavgx_stack)
             cb[1, i_node] = cb[1, i_node] + 0.25cavgxb
         end
         cavgz = pop!(cavgz_stack)
