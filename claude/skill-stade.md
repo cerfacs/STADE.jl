@@ -193,8 +193,8 @@ suites.
   only to generation. The validator's defaults will otherwise check a
   different mode's math than the one under test, and the flagged path
   goes unexercised.
-- Run in halves — `validate_corpus_sel.jl` / `validate_corpus_stk_sel.jl`
-  take kernel names. Backgrounded runs get reaped.
+- Run in halves — `validate_corpus.jl` take kernel names.
+  Backgrounded runs get reaped.
 - The baseline generator draws random integer arguments and retries.
   It gates candidates on the `keep_push_pop=false` `initstacks_*`, so a
   dimensionally incoherent draw is redrawn automatically — generic, with
