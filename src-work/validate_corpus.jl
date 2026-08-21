@@ -29,7 +29,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_
     results = NamedTuple[]
     for f in sort(
         filter(
-            f -> endswith(f, ".jl") && !(endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl")),
+            f -> endswith(f, ".jl") && (isempty(ARGS) || f in ARGS) && !(endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl")),
             readdir(dir)
         )
     )
