@@ -7204,13 +7204,39 @@ end
 # encoding any kernel-specific domain knowledge.
 function val_generate_baseline(kernel, primal_expr::Expr;
                                 scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
-                                grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 5,
+                                grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 16,
                                 self_check::Bool = true, self_check_trials::Int = 2,
                                 self_check_epsilon::Float64 = 1e-6, self_check_rtol::Float64 = 1e-3,
                                 max_output_magnitude::Float64 = 1e6)
     primal_fn = val_compile(primal_expr)
     obs_fn = self_check ? val_compile(val_primal_observing_expr(kernel, primal_expr)) : nothing
     tangent_fn = self_check ? val_compile(val_build_tangent(kernel)) : nothing
+    # The self-check below exercises the primal and the tangent, both of
+    # which are keep_push_pop-agnostic -- so it never touches the one
+    # place a kernel's integer arguments have to be mutually COHERENT:
+    # `keep_push_pop=false`'s initstacks_*, which sizes every stack up
+    # front from those arguments. A multigrid kernel drawn with
+    # nfine=4, num_levels=4 asks for four coarsenings of a 4-point grid
+    # and computes a negative length; :stack mode computes no sizes at
+    # all, so the baseline looked fine and only failed years later when
+    # someone ran the indexed path.
+    #
+    # Running it here turns that into just another rejected candidate,
+    # redrawn by the existing retry loop. Deliberately generic: no
+    # kernel knows what its own constraint is, and none has to declare
+    # one -- the sizing code IS the constraint. Kernels whose indexed
+    # adjoint can't be built at all (or that have no stacks) simply skip.
+    sizing_fn = nothing
+    sizing_arg_names = Symbol[]
+    if self_check
+        try
+            init_expr = stade_adjoint(primal_expr; keep_push_pop = false).initstacks
+            sizing_arg_names = Symbol[a for a in init_expr.args[1].args[2:end]]
+            sizing_fn = val_compile(init_expr)
+        catch
+            sizing_fn = nothing
+        end
+    end
     last_err = nothing
     # a scalar_int arg is very often an iteration count (a relaxation
     # loop bound, a refinement-pass count, etc.) -- more iterations
@@ -7234,6 +7260,14 @@ function val_generate_baseline(kernel, primal_expr::Expr;
         try
             grown = val_grow_shapes(kernel, primal_fn, int_args; start = grow_start, max_size = grow_max)
             values = val_random_values(kernel, grown.shapes, int_args; scale = scale, idx_cap = grown.idx_cap)
+            if sizing_fn !== nothing
+                # same arg-source convention as val_call_adjoint's
+                # stack_extra_args: an initstacks_* parameter is an int
+                # arg when there is one, otherwise a float scalar value.
+                Base.invokelatest(sizing_fn,
+                                   [haskey(int_args, a) ? int_args[a] : deepcopy(values[a])
+                                    for a in sizing_arg_names]...)
+            end
             if self_check
                 x0 = val_flatten(kernel, values)
                 f_eval_vec = x -> val_call_primal_observed(obs_fn, kernel, int_args,
@@ -11136,4 +11170,80 @@ let
         @assert r.ok "ii_init_derived: indexed-mode adjoint failed, max_rel_err=$(r.max_rel_err)"
     end
     println("initstacks_* derived-bound hoist regression suite (2 cases) OK")
+end
+
+# ---- baseline generator: indexed-sizing coherence gate ------------
+# val_generate_baseline's self-check exercises the primal and the
+# tangent, both keep_push_pop-agnostic, so it never touched the one
+# place a kernel's integer arguments must be mutually COHERENT:
+# keep_push_pop=false's initstacks_*, which sizes every stack up front.
+# A multigrid baseline drawn with nfine=4, num_levels=4 asks for four
+# coarsenings of a 4-point grid and computes a negative length. :stack
+# mode computes no sizes, so such a baseline looked healthy and only
+# failed when someone ran the indexed path.
+#
+# B1: a kernel whose stack sizing is only valid for some integer
+#     draws must still produce a WORKING baseline -- the gate rejects
+#     the bad candidates and the existing retry loop redraws.
+# B2: the gate is generic, not kernel-aware: a kernel with no such
+#     constraint must be unaffected (no spurious rejections).
+#
+# Deliberately NOT a declarative constraint syntax: the sizing code is
+# the constraint, so it cannot go stale, and a newly added corpus
+# kernel needs no annotation to be protected.
+
+let
+    # stack size is `n - levels`, so a draw with levels >= n asks for a
+    # negative-length allocation. Deliberately NOT a coarsening loop
+    # with a reassigned tripcount bound: that shape has an unrelated
+    # indexed-mode defect (see the note below), which would make this
+    # guard fail for the wrong reason.
+    src = :(function val_coherence_probe(x, y, n, levels, out)
+        m = n - levels
+        for i = 1:m
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+        end
+        out[1] = y[1]
+        return nothing
+    end)
+    mktempdir() do dir
+        p = joinpath(dir, "val_coherence_probe.jl")
+        write(p, io_expr_to_source(src))
+        yp = joinpath(dir, "val_coherence_probe.yaml")
+        stade_generate_baseline_file(p; yaml_path = yp)
+        bl = io_read_baseline_yaml(yp)
+        # the drawn arguments must actually size the stacks
+        init_expr = stade_adjoint(io_read_corpus_entry(p); keep_push_pop = false).initstacks
+        fn = val_compile(init_expr)
+        names = Symbol[a for a in init_expr.args[1].args[2:end]]
+        try
+            Base.invokelatest(fn, [haskey(bl.int_args, a) ? bl.int_args[a] : bl.values[a] for a in names]...)
+        catch e
+            msg = first(split(sprint(showerror, e), "\n"))
+            error("val_coherence_probe: the generated baseline " * string(bl.int_args) *
+                  " cannot size its own stacks (" * msg * ") -- the indexed-sizing gate " *
+                  "is not rejecting incoherent integer draws")
+        end
+        r = stade_validate_adjoint_file(p; yaml_path = yp, trials = 8, keep_push_pop = false)
+        @assert r.ok "val_coherence_probe: indexed-mode adjoint failed on the generated baseline, max_rel_err=$(r.max_rel_err)"
+
+        # B2: an unconstrained kernel must still generate normally
+        p2 = joinpath(dir, "val_coherence_plain.jl")
+        write(p2, """
+        function val_coherence_plain(x, y, n, out)
+            for i = 1:n
+                t = x[i] * x[i]
+                y[i] = y[i] + t * t
+            end
+            out[1] = y[1]
+            return nothing
+        end
+        """)
+        yp2 = joinpath(dir, "val_coherence_plain.yaml")
+        stade_generate_baseline_file(p2; yaml_path = yp2)
+        r2 = stade_validate_adjoint_file(p2; yaml_path = yp2, trials = 8, keep_push_pop = false)
+        @assert r2.ok "val_coherence_plain: the gate rejected draws for a kernel that has no coherence constraint"
+    end
+    println("baseline indexed-sizing coherence gate (2 cases) OK")
 end
