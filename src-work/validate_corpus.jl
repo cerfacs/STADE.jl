@@ -56,6 +56,8 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
                 r = fn(path; trials = trials, keep_push_pop = false, fuse_ii_loops = true)
                 push!(results, (kernel = name, mode = mode, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
             catch e
+                println("  !! ", name, " [", mode, "] ", first(split(sprint(showerror, e), "
+"))[1:min(end,150)])
                 push!(results, (kernel = name, mode = mode, status = :error, max_rel_err = NaN))
             end
         end
@@ -73,6 +75,8 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
             r = stade_validate_dotprod_file(path; trials = trials, keep_push_pop = false, fuse_ii_loops = true)
             push!(results, (kernel = name, mode = :dotprod, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
         catch e
+            println("  !! ", name, " [dotprod] ", first(split(sprint(showerror, e), "
+"))[1:min(end,150)])
             push!(results, (kernel = name, mode = :dotprod, status = :error, max_rel_err = NaN))
         end
     end
