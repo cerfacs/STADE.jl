@@ -1,12 +1,6 @@
 function initstacks_unet_b()
     t_e1_stack = Vector{Float64}()
     skip1_stack = Vector{Float64}()
-    a11_stack = Vector{Float64}()
-    a12_stack = Vector{Float64}()
-    a21_stack = Vector{Float64}()
-    a22_stack = Vector{Float64}()
-    m1_stack = Vector{Float64}()
-    m2_stack = Vector{Float64}()
     t_e2_stack = Vector{Float64}()
     skip2_stack = Vector{Float64}()
     t_b_stack = Vector{Float64}()
@@ -15,10 +9,10 @@ function initstacks_unet_b()
     dec2out_stack = Vector{Float64}()
     t_d1_stack = Vector{Float64}()
     dec1out_stack = Vector{Float64}()
-    return (t_e1_stack, skip1_stack, a11_stack, a12_stack, a21_stack, a22_stack, m1_stack, m2_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
+    return (t_e1_stack, skip1_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
 end
 
-function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1ab, w_e1b, w_e1bb, b_e1b, b_e1bb, w_e2a, w_e2ab, b_e2a, b_e2ab, w_e2b, w_e2bb, b_e2b, b_e2bb, w_ba, w_bab, b_ba, b_bab, w_bb, w_bbb, b_bb, b_bbb, w_d2a, w_d2ab, b_d2a, b_d2ab, w_d2b, w_d2bb, b_d2b, b_d2bb, w_d1a, w_d1ab, b_d1a, b_d1ab, w_d1b, w_d1bb, b_d1b, b_d1bb, w_out, w_outb, b_out, b_outb, xpad0, xpad0b, t_e1, t_e1b, t_e1pad, t_e1padb, skip1, skip1b, p1, p1b, p1pad, p1padb, t_e2, t_e2b, t_e2pad, t_e2padb, skip2, skip2b, p2, p2b, p2pad, p2padb, t_b, t_bb, t_bpad, t_bpadb, bott, bottb, u2, u2b, cat2, cat2b, cat2pad, cat2padb, t_d2, t_d2b, t_d2pad, t_d2padb, dec2out, dec2outb, u1, u1b, cat1, cat1b, cat1pad, cat1padb, t_d1, t_d1b, t_d1pad, t_d1padb, dec1out, dec1outb, y, yb, xd, xbd, w_e1ad, w_e1abd, b_e1ad, b_e1abd, w_e1bd, w_e1bbd, b_e1bd, b_e1bbd, w_e2ad, w_e2abd, b_e2ad, b_e2abd, w_e2bd, w_e2bbd, b_e2bd, b_e2bbd, w_bad, w_babd, b_bad, b_babd, w_bbd, w_bbbd, b_bbd, b_bbbd, w_d2ad, w_d2abd, b_d2ad, b_d2abd, w_d2bd, w_d2bbd, b_d2bd, b_d2bbd, w_d1ad, w_d1abd, b_d1ad, b_d1abd, w_d1bd, w_d1bbd, b_d1bd, b_d1bbd, w_outd, w_outbd, b_outd, b_outbd, xpad0d, xpad0bd, t_e1d, t_e1bd, t_e1padd, t_e1padbd, skip1d, skip1bd, p1d, p1bd, p1padd, p1padbd, t_e2d, t_e2bd, t_e2padd, t_e2padbd, skip2d, skip2bd, p2d, p2bd, p2padd, p2padbd, t_bd, t_bbd, t_bpadd, t_bpadbd, bottd, bottbd, u2d, u2bd, cat2d, cat2bd, cat2padd, cat2padbd, t_d2d, t_d2bd, t_d2padd, t_d2padbd, dec2outd, dec2outbd, u1d, u1bd, cat1d, cat1bd, cat1padd, cat1padbd, t_d1d, t_d1bd, t_d1padd, t_d1padbd, dec1outd, dec1outbd, yd, ybd, t_e1_stack, skip1_stack, a11_stack, a12_stack, a21_stack, a22_stack, m1_stack, m2_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
+function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1ab, w_e1b, w_e1bb, b_e1b, b_e1bb, w_e2a, w_e2ab, b_e2a, b_e2ab, w_e2b, w_e2bb, b_e2b, b_e2bb, w_ba, w_bab, b_ba, b_bab, w_bb, w_bbb, b_bb, b_bbb, w_d2a, w_d2ab, b_d2a, b_d2ab, w_d2b, w_d2bb, b_d2b, b_d2bb, w_d1a, w_d1ab, b_d1a, b_d1ab, w_d1b, w_d1bb, b_d1b, b_d1bb, w_out, w_outb, b_out, b_outb, xpad0, xpad0b, t_e1, t_e1b, t_e1pad, t_e1padb, skip1, skip1b, p1, p1b, p1pad, p1padb, t_e2, t_e2b, t_e2pad, t_e2padb, skip2, skip2b, p2, p2b, p2pad, p2padb, t_b, t_bb, t_bpad, t_bpadb, bott, bottb, u2, u2b, cat2, cat2b, cat2pad, cat2padb, t_d2, t_d2b, t_d2pad, t_d2padb, dec2out, dec2outb, u1, u1b, cat1, cat1b, cat1pad, cat1padb, t_d1, t_d1b, t_d1pad, t_d1padb, dec1out, dec1outb, y, yb, xd, xbd, w_e1ad, w_e1abd, b_e1ad, b_e1abd, w_e1bd, w_e1bbd, b_e1bd, b_e1bbd, w_e2ad, w_e2abd, b_e2ad, b_e2abd, w_e2bd, w_e2bbd, b_e2bd, b_e2bbd, w_bad, w_babd, b_bad, b_babd, w_bbd, w_bbbd, b_bbd, b_bbbd, w_d2ad, w_d2abd, b_d2ad, b_d2abd, w_d2bd, w_d2bbd, b_d2bd, b_d2bbd, w_d1ad, w_d1abd, b_d1ad, b_d1abd, w_d1bd, w_d1bbd, b_d1bd, b_d1bbd, w_outd, w_outbd, b_outd, b_outbd, xpad0d, xpad0bd, t_e1d, t_e1bd, t_e1padd, t_e1padbd, skip1d, skip1bd, p1d, p1bd, p1padd, p1padbd, t_e2d, t_e2bd, t_e2padd, t_e2padbd, skip2d, skip2bd, p2d, p2bd, p2padd, p2padbd, t_bd, t_bbd, t_bpadd, t_bpadbd, bottd, bottbd, u2d, u2bd, cat2d, cat2bd, cat2padd, cat2padbd, t_d2d, t_d2bd, t_d2padd, t_d2padbd, dec2outd, dec2outbd, u1d, u1bd, cat1d, cat1bd, cat1padd, cat1padbd, t_d1d, t_d1bd, t_d1padd, t_d1padbd, dec1outd, dec1outbd, yd, ybd, t_e1_stack, skip1_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
     t_e1_stack_d = Vector{Float64}()
     skip1_stack_d = Vector{Float64}()
     a11_stack_d = Vector{Float64}()
@@ -208,28 +202,16 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         oj = mod(rem, w2) + 1
         i0 = 2oi - 1
         j0 = 2oj - 1
-        push!(a11_stack_d, a11d)
-        push!(a11_stack, a11)
         a11d = skip1d[(ci - 1) * hw + (i0 - 1) * w + j0]
         a11 = skip1[(ci - 1) * hw + (i0 - 1) * w + j0]
-        push!(a12_stack_d, a12d)
-        push!(a12_stack, a12)
         a12d = skip1d[(ci - 1) * hw + (i0 - 1) * w + j0 + 1]
         a12 = skip1[(ci - 1) * hw + (i0 - 1) * w + j0 + 1]
-        push!(a21_stack_d, a21d)
-        push!(a21_stack, a21)
         a21d = skip1d[(ci - 1) * hw + i0 * w + j0]
         a21 = skip1[(ci - 1) * hw + i0 * w + j0]
-        push!(a22_stack_d, a22d)
-        push!(a22_stack, a22)
         a22d = skip1d[(ci - 1) * hw + i0 * w + j0 + 1]
         a22 = skip1[(ci - 1) * hw + i0 * w + j0 + 1]
-        push!(m1_stack_d, m1d)
-        push!(m1_stack, m1)
         m1d = (0.5 * (1.0 + sign(a11 - a12))) * a11d + (0.5 * (1.0 + sign(a12 - a11))) * a12d
         m1 = max(a11, a12)
-        push!(m2_stack_d, m2d)
-        push!(m2_stack, m2)
         m2d = (0.5 * (1.0 + sign(a21 - a22))) * a21d + (0.5 * (1.0 + sign(a22 - a21))) * a22d
         m2 = max(a21, a22)
         p1d[idx] = (0.5 * (1.0 + sign(m1 - m2))) * m1d + (0.5 * (1.0 + sign(m2 - m1))) * m2d
@@ -331,28 +313,16 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         oj = mod(rem, w4) + 1
         i0 = 2oi - 1
         j0 = 2oj - 1
-        push!(a11_stack_d, a11d)
-        push!(a11_stack, a11)
         a11d = skip2d[(ci - 1) * hw2 + (i0 - 1) * w2 + j0]
         a11 = skip2[(ci - 1) * hw2 + (i0 - 1) * w2 + j0]
-        push!(a12_stack_d, a12d)
-        push!(a12_stack, a12)
         a12d = skip2d[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1]
         a12 = skip2[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1]
-        push!(a21_stack_d, a21d)
-        push!(a21_stack, a21)
         a21d = skip2d[(ci - 1) * hw2 + i0 * w2 + j0]
         a21 = skip2[(ci - 1) * hw2 + i0 * w2 + j0]
-        push!(a22_stack_d, a22d)
-        push!(a22_stack, a22)
         a22d = skip2d[(ci - 1) * hw2 + i0 * w2 + j0 + 1]
         a22 = skip2[(ci - 1) * hw2 + i0 * w2 + j0 + 1]
-        push!(m1_stack_d, m1d)
-        push!(m1_stack, m1)
         m1d = (0.5 * (1.0 + sign(a11 - a12))) * a11d + (0.5 * (1.0 + sign(a12 - a11))) * a12d
         m1 = max(a11, a12)
-        push!(m2_stack_d, m2d)
-        push!(m2_stack, m2)
         m2d = (0.5 * (1.0 + sign(a21 - a22))) * a21d + (0.5 * (1.0 + sign(a22 - a21))) * a22d
         m2 = max(a21, a22)
         p2d[idx] = (0.5 * (1.0 + sign(m1 - m2))) * m1d + (0.5 * (1.0 + sign(m2 - m1))) * m2d
@@ -690,30 +660,6 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         yd[idx] = sd + b_outd[co]
         y[idx] = s + b_out[co]
     end
-    push!(a11_stack_d, a11d)
-    push!(a11_stack, a11)
-    push!(a12_stack_d, a12d)
-    push!(a12_stack, a12)
-    push!(a21_stack_d, a21d)
-    push!(a21_stack, a21)
-    push!(a22_stack_d, a22d)
-    push!(a22_stack, a22)
-    push!(m1_stack_d, m1d)
-    push!(m1_stack, m1)
-    push!(m2_stack_d, m2d)
-    push!(m2_stack, m2)
-    a11d = pop!(a11_stack_d)
-    a11 = pop!(a11_stack)
-    a12d = pop!(a12_stack_d)
-    a12 = pop!(a12_stack)
-    a21d = pop!(a21_stack_d)
-    a21 = pop!(a21_stack)
-    a22d = pop!(a22_stack_d)
-    a22 = pop!(a22_stack)
-    m1d = pop!(m1_stack_d)
-    m1 = pop!(m1_stack)
-    m2d = pop!(m2_stack_d)
-    m2 = pop!(m2_stack)
     two = 2
     four = 4
     h2 = div(h, two)
@@ -1157,7 +1103,26 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         p2padbd[i] = 0.0
         p2padb[i] = 0.0
     end
-    for idx = c2 * hw4:-1:1
+    for idx = 1:c2 * hw4
+        idxm1 = idx - 1
+        ci = div(idxm1, hw4) + 1
+        rem = mod(idxm1, hw4)
+        oi = div(rem, w4) + 1
+        oj = mod(rem, w4) + 1
+        i0 = 2oi - 1
+        j0 = 2oj - 1
+        a11d = skip2d[(ci - 1) * hw2 + (i0 - 1) * w2 + j0]
+        a11 = skip2[(ci - 1) * hw2 + (i0 - 1) * w2 + j0]
+        a12d = skip2d[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1]
+        a12 = skip2[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1]
+        a21d = skip2d[(ci - 1) * hw2 + i0 * w2 + j0]
+        a21 = skip2[(ci - 1) * hw2 + i0 * w2 + j0]
+        a22d = skip2d[(ci - 1) * hw2 + i0 * w2 + j0 + 1]
+        a22 = skip2[(ci - 1) * hw2 + i0 * w2 + j0 + 1]
+        m1d = (0.5 * (1.0 + sign(a11 - a12))) * a11d + (0.5 * (1.0 + sign(a12 - a11))) * a12d
+        m1 = max(a11, a12)
+        m2d = (0.5 * (1.0 + sign(a21 - a22))) * a21d + (0.5 * (1.0 + sign(a22 - a21))) * a22d
+        m2 = max(a21, a22)
         idxm1 = idx - 1
         ci = div(idxm1, hw4) + 1
         rem = mod(idxm1, hw4)
@@ -1171,42 +1136,30 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         m2b = m2b + (0.5 * (1.0 + sign(m2 - m1))) * p2b[idx]
         p2bd[idx] = 0.0
         p2b[idx] = 0.0
-        m2d = pop!(m2_stack_d)
-        m2 = pop!(m2_stack)
         a21bd = a21bd + (0.5 * (1.0 + sign(a21 - a22))) * m2bd
         a21b = a21b + (0.5 * (1.0 + sign(a21 - a22))) * m2b
         a22bd = a22bd + (0.5 * (1.0 + sign(a22 - a21))) * m2bd
         a22b = a22b + (0.5 * (1.0 + sign(a22 - a21))) * m2b
         m2bd = 0.0
         m2b = 0.0
-        m1d = pop!(m1_stack_d)
-        m1 = pop!(m1_stack)
         a11bd = a11bd + (0.5 * (1.0 + sign(a11 - a12))) * m1bd
         a11b = a11b + (0.5 * (1.0 + sign(a11 - a12))) * m1b
         a12bd = a12bd + (0.5 * (1.0 + sign(a12 - a11))) * m1bd
         a12b = a12b + (0.5 * (1.0 + sign(a12 - a11))) * m1b
         m1bd = 0.0
         m1b = 0.0
-        a22d = pop!(a22_stack_d)
-        a22 = pop!(a22_stack)
         skip2bd[(ci - 1) * hw2 + i0 * w2 + j0 + 1] = skip2bd[(ci - 1) * hw2 + i0 * w2 + j0 + 1] + a22bd
         skip2b[(ci - 1) * hw2 + i0 * w2 + j0 + 1] = skip2b[(ci - 1) * hw2 + i0 * w2 + j0 + 1] + a22b
         a22bd = 0.0
         a22b = 0.0
-        a21d = pop!(a21_stack_d)
-        a21 = pop!(a21_stack)
         skip2bd[(ci - 1) * hw2 + i0 * w2 + j0] = skip2bd[(ci - 1) * hw2 + i0 * w2 + j0] + a21bd
         skip2b[(ci - 1) * hw2 + i0 * w2 + j0] = skip2b[(ci - 1) * hw2 + i0 * w2 + j0] + a21b
         a21bd = 0.0
         a21b = 0.0
-        a12d = pop!(a12_stack_d)
-        a12 = pop!(a12_stack)
         skip2bd[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1] = skip2bd[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1] + a12bd
         skip2b[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1] = skip2b[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1] + a12b
         a12bd = 0.0
         a12b = 0.0
-        a11d = pop!(a11_stack_d)
-        a11 = pop!(a11_stack)
         skip2bd[(ci - 1) * hw2 + (i0 - 1) * w2 + j0] = skip2bd[(ci - 1) * hw2 + (i0 - 1) * w2 + j0] + a11bd
         skip2b[(ci - 1) * hw2 + (i0 - 1) * w2 + j0] = skip2b[(ci - 1) * hw2 + (i0 - 1) * w2 + j0] + a11b
         a11bd = 0.0
@@ -1316,7 +1269,26 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         p1padbd[i] = 0.0
         p1padb[i] = 0.0
     end
-    for idx = c1 * hw2:-1:1
+    for idx = 1:c1 * hw2
+        idxm1 = idx - 1
+        ci = div(idxm1, hw2) + 1
+        rem = mod(idxm1, hw2)
+        oi = div(rem, w2) + 1
+        oj = mod(rem, w2) + 1
+        i0 = 2oi - 1
+        j0 = 2oj - 1
+        a11d = skip1d[(ci - 1) * hw + (i0 - 1) * w + j0]
+        a11 = skip1[(ci - 1) * hw + (i0 - 1) * w + j0]
+        a12d = skip1d[(ci - 1) * hw + (i0 - 1) * w + j0 + 1]
+        a12 = skip1[(ci - 1) * hw + (i0 - 1) * w + j0 + 1]
+        a21d = skip1d[(ci - 1) * hw + i0 * w + j0]
+        a21 = skip1[(ci - 1) * hw + i0 * w + j0]
+        a22d = skip1d[(ci - 1) * hw + i0 * w + j0 + 1]
+        a22 = skip1[(ci - 1) * hw + i0 * w + j0 + 1]
+        m1d = (0.5 * (1.0 + sign(a11 - a12))) * a11d + (0.5 * (1.0 + sign(a12 - a11))) * a12d
+        m1 = max(a11, a12)
+        m2d = (0.5 * (1.0 + sign(a21 - a22))) * a21d + (0.5 * (1.0 + sign(a22 - a21))) * a22d
+        m2 = max(a21, a22)
         idxm1 = idx - 1
         ci = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -1330,42 +1302,30 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         m2b = m2b + (0.5 * (1.0 + sign(m2 - m1))) * p1b[idx]
         p1bd[idx] = 0.0
         p1b[idx] = 0.0
-        m2d = pop!(m2_stack_d)
-        m2 = pop!(m2_stack)
         a21bd = a21bd + (0.5 * (1.0 + sign(a21 - a22))) * m2bd
         a21b = a21b + (0.5 * (1.0 + sign(a21 - a22))) * m2b
         a22bd = a22bd + (0.5 * (1.0 + sign(a22 - a21))) * m2bd
         a22b = a22b + (0.5 * (1.0 + sign(a22 - a21))) * m2b
         m2bd = 0.0
         m2b = 0.0
-        m1d = pop!(m1_stack_d)
-        m1 = pop!(m1_stack)
         a11bd = a11bd + (0.5 * (1.0 + sign(a11 - a12))) * m1bd
         a11b = a11b + (0.5 * (1.0 + sign(a11 - a12))) * m1b
         a12bd = a12bd + (0.5 * (1.0 + sign(a12 - a11))) * m1bd
         a12b = a12b + (0.5 * (1.0 + sign(a12 - a11))) * m1b
         m1bd = 0.0
         m1b = 0.0
-        a22d = pop!(a22_stack_d)
-        a22 = pop!(a22_stack)
         skip1bd[(ci - 1) * hw + i0 * w + j0 + 1] = skip1bd[(ci - 1) * hw + i0 * w + j0 + 1] + a22bd
         skip1b[(ci - 1) * hw + i0 * w + j0 + 1] = skip1b[(ci - 1) * hw + i0 * w + j0 + 1] + a22b
         a22bd = 0.0
         a22b = 0.0
-        a21d = pop!(a21_stack_d)
-        a21 = pop!(a21_stack)
         skip1bd[(ci - 1) * hw + i0 * w + j0] = skip1bd[(ci - 1) * hw + i0 * w + j0] + a21bd
         skip1b[(ci - 1) * hw + i0 * w + j0] = skip1b[(ci - 1) * hw + i0 * w + j0] + a21b
         a21bd = 0.0
         a21b = 0.0
-        a12d = pop!(a12_stack_d)
-        a12 = pop!(a12_stack)
         skip1bd[(ci - 1) * hw + (i0 - 1) * w + j0 + 1] = skip1bd[(ci - 1) * hw + (i0 - 1) * w + j0 + 1] + a12bd
         skip1b[(ci - 1) * hw + (i0 - 1) * w + j0 + 1] = skip1b[(ci - 1) * hw + (i0 - 1) * w + j0 + 1] + a12b
         a12bd = 0.0
         a12b = 0.0
-        a11d = pop!(a11_stack_d)
-        a11 = pop!(a11_stack)
         skip1bd[(ci - 1) * hw + (i0 - 1) * w + j0] = skip1bd[(ci - 1) * hw + (i0 - 1) * w + j0] + a11bd
         skip1b[(ci - 1) * hw + (i0 - 1) * w + j0] = skip1b[(ci - 1) * hw + (i0 - 1) * w + j0] + a11b
         a11bd = 0.0
