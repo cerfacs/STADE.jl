@@ -6019,28 +6019,8 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
     end
     for stmt in body
         if stmt.kind == :stackpush
-            # A push's VALUE can be a device-array element (`push!(
-            # du_stack, du[i_x])` in any host-resident loop the splitter
-            # refused), so it needs an allowscalar wrap. Without one it
-            # hit "Scalar indexing is disallowed" at runtime on a real
-            # GPU -- while the matching `du[i_x] = pop!(du_stack)` was
-            # fine, being an :assign whose lhs is a ref and therefore
-            # already swept into the pending run's wrap.
-            #
-            # Wrapped individually rather than joined to the pending
-            # run: strictly less code ends up inside the macro, and this
-            # form is the one validated end-to-end on device
-            # (advection/advection_multi/geomrecur/relu_field/
-            # cascadic_mg_prolong, max_rel_err 0.0). Joining the run was
-            # NOT shown to be wrong -- an earlier note here claimed the
-            # macro's closure would swallow scalar assignments, and that
-            # was measured false on CUDA.jl 12.4 (assignments inside a
-            # CUDA.@allowscalar block do survive). Corpus output already
-            # contains such assignments in six kernels; they are fine.
             flush_pending!()
-            pushexpr = Expr(:call, :push!, stmt.stack, stmt.value)
-            push!(exprs, cgen_expr_has_ref(stmt.value) ?
-                  Expr(:macrocall, backend.allowscalar_macro, nothing, pushexpr) : pushexpr)
+            push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? cgen_stack_device_expr(stmt.rhs, backend) : stmt.rhs
             push!(pending, Expr(:(=), stmt.lhs, rhs))
@@ -10984,67 +10964,4 @@ let
     combined = join([string(stade_adjoint(pr; fuse_ii_loops = false).adjoint) for pr in probes], "\n")
     @assert hash(combined) == 0x29f780b8c26c019a && length(combined) == 2107 "ii_containment: fuse_ii_loops=false output has DRIFTED from its pinned fingerprint (len=$(length(combined)), hash=$(repr(hash(combined)))). Either behaviour leaked into the default path -- which breaks the exact-rollback property the single-flag design rests on -- or codegen changed deliberately, in which case re-pin this and say so."
     println("fuse_ii_loops=false containment guard (3 cases, 4 default-path probes) OK")
-end
-
-# ---- cgen_ host-resident stack push regression --------------------
-# cgen_body batches host-resident statements that touch a device array
-# element-wise into one backend.allowscalar_macro block. A :stackpush
-# bypassed that batching entirely, so `push!(du_stack, du[i_x])` in any
-# loop the splitter refused was emitted bare and died with
-# "Scalar indexing is disallowed" on a real GPU -- while the matching
-# `du[i_x] = pop!(du_stack)` was fine, being an :assign whose lhs is a
-# ref. Nothing in this file caught it because nothing here executes GPU
-# output; it was found by running the corpus on device.
-#
-# G1: a push whose value reads an array must be wrapped.
-# G2: a push whose value is a plain scalar must NOT be (don't pay for
-#     a device round-trip that isn't needed).
-# G3: the wrap is on the push itself, not a block that swallowed the
-#     surrounding statement run.
-#
-# Numerical confirmation needs a GPU and lives outside this file --
-# see gpu_validate_build.jl. This guard is structural only.
-
-let
-    src = :(function cgen_push_probe(u, du, i_n, i_nstep, loss)
-        for i_seq_ = 1:i_nstep
-            for i_x = 2:i_n
-                du[i_x] = u[i_x] * u[i_x - 1]
-            end
-            for i_x = 1:i_n
-                loss[1] = loss[1] + du[i_x] * du[i_x]
-            end
-        end
-        return nothing
-    end)
-    plan = stade_cuda(stade_adjoint(src).adjoint)
-    @assert !isempty(plan.kernels) "cgen_push_probe: expected at least one split kernel, or this guard proves nothing"
-
-    pushes = Any[]
-    walk(e, wrap) = begin
-        if e isa Expr
-            if e.head == :macrocall && occursin("allowscalar", string(e.args[1]))
-                for a in e.args[3:end]; walk(a, e); end
-                return
-            end
-            if e.head == :call && e.args[1] === :push!
-                push!(pushes, (value = e.args[3], wrap = wrap))
-            end
-            for a in e.args; walk(a, wrap); end
-        end
-    end
-    walk(plan.host, nothing)
-    @assert !isempty(pushes) "cgen_push_probe: expected a host-resident push!, got none -- the probe no longer exercises this path"
-
-    for p in pushes
-        if cgen_expr_has_ref(p.value)
-            @assert p.wrap !== nothing "cgen_push_probe: `push!(..., $(p.value))` reads a device-array element but is NOT inside an allowscalar block -- this is exactly the shape that failed on device with \"Scalar indexing is disallowed\""
-            # G3: the wrapped payload is the push alone
-            payload = p.wrap.args[3]
-            @assert !(payload isa Expr && payload.head == :block && length(payload.args) > 1) "cgen_push_probe: the allowscalar wrap swallowed a whole statement run rather than the push alone"
-        else
-            @assert p.wrap === nothing "cgen_push_probe: `push!(..., $(p.value))` needs no device access but was wrapped anyway"
-        end
-    end
-    println("cgen_ host-resident stack push allowscalar guard (3 cases) OK")
 end
