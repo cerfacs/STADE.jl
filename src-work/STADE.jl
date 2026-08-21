@@ -8081,13 +8081,27 @@ function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::
         # args for a Tier B ragged block) -- read it back from the
         # GENERATED Expr itself rather than recomputing it here, so
         # this can never drift from whatever agen_init_emit decided.
-        stack_arg_names = keep_push_pop ? Symbol[] : Symbol.(adjoint_out.initstacks.args[1].args[2:end])
+        # NB: `Symbol.(...)` on an EMPTY Any[] yields Vector{Any}, not
+        # Vector{Symbol}, so a kernel whose indexed-mode initstacks_*
+        # takes no arguments (i.e. has no stacks at all) tripped the
+        # `stack_arg_names::Vector{Symbol}` keyword's type assertion.
+        # The typed comprehension is what val_def_arg_names already
+        # uses; keep the two spellings the same.
+        stack_arg_names = keep_push_pop ? Symbol[] :
+            Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
         return val_validate_adjoint(kernel, primal_expr, adjoint_out, baseline;
                                      trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
     else
         adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
         hvp_out = stade_hvp(primal_expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
-        stack_arg_names = keep_push_pop ? Symbol[] : Symbol.(adjoint_out.initstacks.args[1].args[2:end])
+        # NB: `Symbol.(...)` on an EMPTY Any[] yields Vector{Any}, not
+        # Vector{Symbol}, so a kernel whose indexed-mode initstacks_*
+        # takes no arguments (i.e. has no stacks at all) tripped the
+        # `stack_arg_names::Vector{Symbol}` keyword's type assertion.
+        # The typed comprehension is what val_def_arg_names already
+        # uses; keep the two spellings the same.
+        stack_arg_names = keep_push_pop ? Symbol[] :
+            Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
         return val_validate_hvp(kernel, primal_expr, adjoint_out, hvp_out, baseline;
                                  trials = trials, epsilon = epsilon, rtol = rtol, stack_arg_names = stack_arg_names)
     end
