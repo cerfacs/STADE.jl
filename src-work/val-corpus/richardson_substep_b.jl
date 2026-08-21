@@ -13,11 +13,11 @@ function initstacks_richardson_substep_b(dt_stage, num_stages, y_init)
         prefix_y_stack_1[(i_seq_stage - 1) + 1] = __tot_y_stack_1
         h = dt_stage / nsub
         y = y_init
-        nsub = nsub * 2
         val_nsub_1[(i_seq_stage - 1) + 1] = nsub
         __tot_h_stack_1 = __tot_h_stack_1 + 1
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + 1
         __tot_y_stack_1 = __tot_y_stack_1 + ((1 + (div(nsub - 1, 1) + 1)) + 1)
+        nsub = nsub * 2
     end
     h_stack = Vector{Float64}(undef, __tot_h_stack_1 + 1)
     y_stack = Vector{Float64}(undef, __tot_y_stack_1 + 1)

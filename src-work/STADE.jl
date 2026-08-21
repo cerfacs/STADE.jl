@@ -3856,14 +3856,53 @@ function agen_tier_b_block_stmts(block_id, blk, kinds)
         push!(decls, Expr(:(=), value_table_name(v), Expr(:call, Expr(:curly, :Vector, vt), :undef, tripcount_expr)))
     end
     idx_expr = agen_add_exprs(agen_pos0(header), 1)
+    # The value tables and the size accumulation must see each local as
+    # it stood WHEN THIS ITERATION'S INNER LOOPS RAN, so the block body
+    # is split at its first inner `:for`: scalar statements before it
+    # set up the bounds those loops use, statements after it belong to
+    # the NEXT iteration.
+    #
+    # Emitting everything first (as this did) is only accidentally right
+    # when the bound is reassigned BEFORE the loop it governs -- which
+    # every ragged kernel in the corpus happens to do (`n = nl - 1` at
+    # the top of mg_vcycle's body). Reassign it after instead --
+    # `cur = div(cur, 2)` following the loop it bounds -- and every
+    # val_* entry, hence every block size, was the NEXT level's value:
+    # trip counts 8,4,2 recorded as 4,2,1, blocks sized 5,3,2, each one
+    # overrunning into the next. Wrong gradients in :indexed mode only.
+    # Split before the first RETIRE reassignment: an assignment to a
+    # size-relevant local that a loop in this body has ALREADY consumed
+    # as a bound. That is the statement which belongs to the next
+    # iteration. Splitting at the first `:for` instead is too early --
+    # mg_vcycle defines `nc` (a later loop's bound) after its first
+    # loop, so the sizes would reference it before it exists.
+    relevant = Set{Symbol}(value_vars)
+    for s_ in stack_names
+        agen_collect_expr_vars!(blk.local_sizes[s_], relevant)
+    end
+    consumed = Set{Symbol}()
+    split_at = nothing
+    for (i, st) in enumerate(blk.body)
+        if st.kind == :assign && st.lhs isa Symbol && st.lhs in relevant && st.lhs in consumed
+            split_at = i
+            break
+        elseif st.kind == :for
+            agen_collect_expr_vars!(st.lo, consumed)
+            agen_collect_expr_vars!(st.hi, consumed)
+            agen_collect_expr_vars!(st.step, consumed)
+        end
+    end
+    pre_body = split_at === nothing ? blk.body : blk.body[1:split_at - 1]
+    post_body = split_at === nothing ? blk.body[1:0] : blk.body[split_at:end]
     loop_body = Any[Expr(:(=), Expr(:ref, table_name(s), idx_expr), blk.total_sym[s]) for s in stack_names]
-    append!(loop_body, agen_tier_b_block_skeleton(blk.body, kinds))
+    append!(loop_body, agen_tier_b_block_skeleton(pre_body, kinds))
     for v in value_vars
         push!(loop_body, Expr(:(=), Expr(:ref, value_table_name(v), idx_expr), v))
     end
     for s in stack_names
         push!(loop_body, Expr(:(=), blk.total_sym[s], agen_add_exprs(blk.total_sym[s], blk.local_sizes[s])))
     end
+    append!(loop_body, agen_tier_b_block_skeleton(post_body, kinds))
     push!(decls, emit_forloop(header.var, header.lo, header.hi, header.step, loop_body))
     return decls
 end
@@ -9279,6 +9318,14 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
     # when no fused var is live across a nested loop boundary.
     ii_fused_var_in_nested_for(stmt.body, vn_local, plan) && return :none
+    # A loop whose OWN trip count is a reassigned scalar (`for i = 1:cur`
+    # with `cur` retired each pass) carries a tripcount snapshot, and
+    # every fusing kind re-runs the header at the backward position
+    # against whatever `cur` holds there rather than the value this
+    # iteration used. Gate 2 above only inspects the loop's BODY, so
+    # this shape slipped through and produced wrong gradients in both
+    # stack modes whenever fusion was on.
+    isempty(agen_tripcount_bound_vars(stmt, snap_collect_reassigned(kernel.body))) || return :none
     vn_red = intersect(vn_local, redvars)
     vn_ind = setdiff(vn_local, redvars)
     # Each half is checked independently against ITS OWN safety
@@ -9341,6 +9388,14 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
     # when no fused var is live across a nested loop boundary.
     ii_fused_var_in_nested_for(stmt.body, vn_local, plan) && return :none
+    # A loop whose OWN trip count is a reassigned scalar (`for i = 1:cur`
+    # with `cur` retired each pass) carries a tripcount snapshot, and
+    # every fusing kind re-runs the header at the backward position
+    # against whatever `cur` holds there rather than the value this
+    # iteration used. Gate 2 above only inspects the loop's BODY, so
+    # this shape slipped through and produced wrong gradients in both
+    # stack modes whenever fusion was on.
+    isempty(agen_tripcount_bound_vars(stmt, agen_collect_reassigned(kernel.body))) || return :none
     vn_red = intersect(vn_local, redvars)
     vn_ind = setdiff(vn_local, redvars)
     if !isempty(vn_red)
@@ -11194,7 +11249,9 @@ end
 
 let
     # stack size is `n - levels`, so a draw with levels >= n asks for a
-    # negative-length allocation. Deliberately NOT a coarsening loop
+    # negative-length allocation -- and `x[m]` makes m == 0 fail too,
+    # since Vector{Float64}(undef, 0) is perfectly legal and would
+    # otherwise sail through the gate and then die in the adjoint. Deliberately NOT a coarsening loop
     # with a reassigned tripcount bound: that shape has an unrelated
     # indexed-mode defect (see the note below), which would make this
     # guard fail for the wrong reason.
@@ -11204,14 +11261,21 @@ let
             t = x[i] * x[i]
             y[i] = y[i] + t * t
         end
-        out[1] = y[1]
+        out[1] = y[1] * x[m]
         return nothing
     end)
     mktempdir() do dir
         p = joinpath(dir, "val_coherence_probe.jl")
         write(p, io_expr_to_source(src))
         yp = joinpath(dir, "val_coherence_probe.yaml")
-        stade_generate_baseline_file(p; yaml_path = yp)
+        # Generated with a deep retry budget ON PURPOSE: the gate rejects
+        # every draw with levels >= n, which is 62.5% of the default
+        # [2,5] x [2,5] space, so the stock `attempts` occasionally
+        # exhausts itself and this guard fails for a reason that has
+        # nothing to do with what it tests. That flakiness is a property
+        # of the probe's deliberately tight constraint, not of the gate.
+        gen = val_generate_baseline(parse_kernel(io_read_corpus_entry(p)), io_read_corpus_entry(p); attempts = 200)
+        io_write_baseline_yaml(yp, :val_coherence_probe, gen.int_args, gen.values)
         bl = io_read_baseline_yaml(yp)
         # the drawn arguments must actually size the stacks
         init_expr = stade_adjoint(io_read_corpus_entry(p); keep_push_pop = false).initstacks
@@ -11246,4 +11310,97 @@ let
         @assert r2.ok "val_coherence_plain: the gate rejected draws for a kernel that has no coherence constraint"
     end
     println("baseline indexed-sizing coherence gate (2 cases) OK")
+end
+
+# ---- Tier B: bound reassigned AFTER the loop it governs -----------
+# agen_tier_b_block_stmts recorded each level's val_*/size table from
+# the block body's locals as they stood at the END of the body. That is
+# only accidentally right when the bound is reassigned BEFORE the loop
+# it governs -- which every ragged kernel in this corpus happens to do
+# (`n = nl - 1` at the top of mg_vcycle's level body). Reassign it
+# after instead and every entry was the NEXT level's value: trip counts
+# 8,4,2 recorded as 4,2,1, blocks sized 5,3,2, each overrunning into
+# its successor. Wrong gradients, :indexed mode only (:stack mode
+# computes no sizes at all, so it validated clean throughout) --
+# max_rel_err ~4.5e-2 to 1.2, not a near-miss.
+#
+# T1 pins the recorded values directly, which is where the defect is;
+# T2 is the numerical consequence, in both flag states.
+
+let
+    src = :(function ii_tierb_trailing(x, y, n, levels, out)
+        cur = n
+        for i_seq_l = 1:levels
+            for i = 1:cur
+                t = x[i] * x[i]
+                y[i] = y[i] + t * t
+            end
+            cur = div(cur, 2)
+        end
+        out[1] = y[1]
+        return nothing
+    end)
+    out = stade_adjoint(src; keep_push_pop = false)
+    Base.eval(Main, Meta.parse("begin\n" * io_expr_to_source(out.initstacks) * "\nend"))
+    st = Base.invokelatest(Base.eval(Main, :initstacks_ii_tierb_trailing_b), 3, 8)   # levels=3, n=8
+    vals = st[end]
+    @assert collect(vals) == [8, 4, 2] "ii_tierb_trailing: the ragged block recorded $(collect(vals)) for a bound whose loops ran 8, 4, 2 times -- it is capturing the value AFTER the body's reassignment, so every block is sized one level short and overruns the next"
+
+    mktempdir() do dir
+        p = joinpath(dir, "ii_tierb_trailing.jl")
+        write(p, io_expr_to_source(src))
+        for kpp in (true, false)
+            r = stade_validate_adjoint_file(p; trials = 8, keep_push_pop = kpp)
+            @assert r.ok "ii_tierb_trailing: adjoint failed with keep_push_pop=$kpp, max_rel_err=$(r.max_rel_err)"
+        end
+        d = stade_validate_dotprod_file(p; trials = 8, keep_push_pop = false)
+        @assert d.ok "ii_tierb_trailing: exact tangent-vs-adjoint identity failed, max_rel_err=$(d.max_rel_err)"
+    end
+    println("Tier B trailing-reassignment regression suite (2 cases) OK")
+end
+
+# ---- fusion: loop whose OWN trip count is a reassigned bound ------
+# Classification's Tier B gate inspects the candidate loop's BODY
+# (agen_tier_b_walk) but never the loop's own HEADER. So
+# `for i = 1:cur`, with `cur` retired once per outer pass, was
+# classified and fused -- and every fusing kind re-runs that header at
+# the backward position against whatever `cur` holds THERE, not the
+# value this iteration used. Wrong gradients (~1.3 rel err) in BOTH
+# stack modes whenever fuse_ii_loops was on.
+#
+# Found only because val-corpus/coarsen_retire.jl was added: every
+# other ragged kernel reassigns its bound at the top of the body, so
+# the shape was unreachable from the corpus.
+#
+# R1: the loop must not be classified at all.
+# R2: and must validate in both stack modes with fusion on -- the
+#     refusal is what makes that true, so this is the real assertion.
+
+let
+    src = :(function ii_fuse_carried_bound(x, y, n, levels, out)
+        cur = n
+        for i_seq_l = 1:levels
+            for i = 1:cur
+                t = x[i] * x[i]
+                y[i] = y[i] + t * t
+            end
+            cur = div(cur + 1, 2)
+        end
+        out[1] = y[1]
+        return nothing
+    end)
+    plan = stade_ii_plan_check(parse_kernel(src))
+    @assert isempty(plan) "ii_fuse_carried_bound: a loop whose own trip count is a reassigned bound must not be classified -- fusing it re-runs the header at the backward position against the wrong value, got $plan"
+
+    mktempdir() do dir
+        p = joinpath(dir, "ii_fuse_carried_bound.jl")
+        write(p, io_expr_to_source(src))
+        for kpp in (true, false)
+            r = stade_validate_adjoint_file(p; trials = 8, keep_push_pop = kpp, fuse_ii_loops = true)
+            @assert r.ok "ii_fuse_carried_bound: adjoint failed with keep_push_pop=$kpp under fusion, max_rel_err=$(r.max_rel_err)"
+        end
+        d = stade_validate_dotprod_file(p; trials = 8, keep_push_pop = false, fuse_ii_loops = true)
+        @assert d.ok "ii_fuse_carried_bound: exact tangent-vs-adjoint identity failed, max_rel_err=$(d.max_rel_err)"
+    end
+    println("fusion carried-bound refusal regression suite (2 cases) OK")
 end

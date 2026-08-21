@@ -8,10 +8,10 @@ function initstacks_coarsen_retire_b(levels, n)
     for i_seq_l = 1:levels
         prefix_t_stack_1[(i_seq_l - 1) + 1] = __tot_t_stack_1
         prefix_tripcount_stack_1[(i_seq_l - 1) + 1] = __tot_tripcount_stack_1
-        cur = div(cur + 1, 2)
         val_cur_1[(i_seq_l - 1) + 1] = cur
         __tot_t_stack_1 = __tot_t_stack_1 + ((div(cur - 1, 1) + 1) + 1)
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + 1
+        cur = div(cur + 1, 2)
     end
     tripcount_stack = Vector{Int64}(undef, __tot_tripcount_stack_1)
     t_stack = Vector{Float64}(undef, __tot_t_stack_1 + 1)
@@ -25,19 +25,25 @@ function coarsen_retire_b(x, xb, y, yb, n, levels, out, outb, tripcount_stack, t
     for i_seq_l = 1:levels
         tripcount_stack[prefix_tripcount_stack_1[(i_seq_l - 1) + 1] + 1] = cur
         for i = 1:cur
+            t_stack[prefix_t_stack_1[(i_seq_l - 1) + 1] + ((i - 1) + 1)] = t
             t = x[i] * x[i]
             y[i] = y[i] + t * t
         end
         cur = div(cur + 1, 2)
+        t_stack[(prefix_t_stack_1[(i_seq_l - 1) + 1] + (div(val_cur_1[(i_seq_l - 1) + 1] - 1, 1) + 1)) + 1] = t
     end
     out[1] = y[1]
+    t_stack[__tot_t_stack_1 + 1] = t
+    t = t_stack[__tot_t_stack_1 + 1]
     yb[1] = yb[1] + outb[1]
     outb[1] = 0.0
     for i_seq_l = levels:-1:1
-        for i = 1:cur
-            t = x[i] * x[i]
+        t = t_stack[(prefix_t_stack_1[(i_seq_l - 1) + 1] + (div(val_cur_1[(i_seq_l - 1) + 1] - 1, 1) + 1)) + 1]
+        cur = tripcount_stack[prefix_tripcount_stack_1[(i_seq_l - 1) + 1] + 1]
+        for i = cur:-1:1
             tb = tb + t * yb[i]
             tb = tb + t * yb[i]
+            t = t_stack[prefix_t_stack_1[(i_seq_l - 1) + 1] + ((i - 1) + 1)]
             xb[i] = xb[i] + x[i] * tb
             xb[i] = xb[i] + x[i] * tb
             tb = 0.0
