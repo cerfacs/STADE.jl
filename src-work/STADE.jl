@@ -6019,8 +6019,28 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
     end
     for stmt in body
         if stmt.kind == :stackpush
+            # A push's VALUE can be a device-array element (`push!(
+            # du_stack, du[i_x])` in any host-resident loop the splitter
+            # refused), so it needs an allowscalar wrap. Without one it
+            # hit "Scalar indexing is disallowed" at runtime on a real
+            # GPU -- while the matching `du[i_x] = pop!(du_stack)` was
+            # fine, being an :assign whose lhs is a ref and therefore
+            # already swept into the pending run's wrap.
+            #
+            # Wrapped individually rather than joined to the pending
+            # run: strictly less code ends up inside the macro, and this
+            # form is the one validated end-to-end on device
+            # (advection/advection_multi/geomrecur/relu_field/
+            # cascadic_mg_prolong, max_rel_err 0.0). Joining the run was
+            # NOT shown to be wrong -- an earlier note here claimed the
+            # macro's closure would swallow scalar assignments, and that
+            # was measured false on CUDA.jl 12.4 (assignments inside a
+            # CUDA.@allowscalar block do survive). Corpus output already
+            # contains such assignments in six kernels; they are fine.
             flush_pending!()
-            push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
+            pushexpr = Expr(:call, :push!, stmt.stack, stmt.value)
+            push!(exprs, cgen_expr_has_ref(stmt.value) ?
+                  Expr(:macrocall, backend.allowscalar_macro, nothing, pushexpr) : pushexpr)
         elseif stmt.kind == :assign
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? cgen_stack_device_expr(stmt.rhs, backend) : stmt.rhs
             push!(pending, Expr(:(=), stmt.lhs, rhs))
@@ -7467,6 +7487,50 @@ function val_validate_adjoint(kernel, primal_expr::Expr, adjoint_out, baseline;
     return val_finite_diff_check(f_eval, f_grad, x0; epsilon = epsilon, trials = trials, rtol = rtol)
 end
 
+# ---- exact tangent-vs-adjoint dot-product oracle -------------------
+#
+# The three oracles above all bottom out in finite differences, so
+# their accuracy is capped by FD truncation (~1e-8 relative) and a
+# systematic error smaller than that is indistinguishable from noise.
+# This one compares the two DERIVATIVE codes against each other
+# instead, via the defining identity of the adjoint:
+#
+#     <Yb, J*Xd>  ==  <J'*Yb, Xd>
+#
+# with the left side computed by _d and the right side by _b, both at
+# the same point and with the same random Xd/Yb. No epsilon, no
+# truncation: agreement should be at machine precision (~1e-14), so
+# this catches systematic adjoint errors two orders of magnitude
+# smaller than the FD oracles can see. It does NOT validate the
+# tangent -- a bug shared by both codes cancels -- so it complements
+# val_validate_tangent rather than replacing it. (This is the same
+# layering Tapenade uses: validate the tangent against divided
+# differences, then validate the adjoint against the tangent.)
+function val_validate_dotprod(kernel, tangent_expr::Expr, adjoint_out, baseline;
+                               trials::Int = 10, rtol::Float64 = 1e-11,
+                               stack_arg_names::Vector{Symbol} = Symbol[])
+    tangent_fn = val_compile(tangent_expr)
+    adjoint_fn = val_compile(adjoint_out.adjoint)
+    initstacks_fn = val_compile(adjoint_out.initstacks)
+    int_args = baseline.int_args
+    vals = baseline.values
+    zeros_t = val_zeros_like(kernel, vals)
+    results = NamedTuple[]
+    for _ in 1:trials
+        xd = val_random_values_like(kernel, vals)
+        yb = val_random_values_like(kernel, vals)
+        yd = val_call_tangent(tangent_fn, kernel, int_args, deepcopy(vals), xd)
+        xb = val_call_adjoint(adjoint_fn, initstacks_fn, kernel, int_args, deepcopy(vals), yb;
+                               stack_arg_names = stack_arg_names)
+        lhs = sum(val_flatten(kernel, yb) .* yd)
+        rhs = sum(xb .* val_flatten(kernel, xd))
+        scale = max(abs(lhs), abs(rhs), 1.0)
+        push!(results, (lhs = lhs, rhs = rhs, rel_err = abs(lhs - rhs) / scale))
+    end
+    max_rel_err = maximum(r.rel_err for r in results)
+    return (ok = max_rel_err <= rtol, max_rel_err = max_rel_err, results = results)
+end
+
 function val_validate_hvp(kernel, primal_expr::Expr, adjoint_out, hvp_out, baseline;
                            trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
                            stack_arg_names::Vector{Symbol} = Symbol[])
@@ -7995,6 +8059,27 @@ end
 
 # the function that reads a baseline YAML and performs the check --
 # usable directly by a caller pointing at their own hand-written file.
+# Exact tangent-vs-adjoint check for one kernel file. Generates both
+# derivative codes with the SAME flags (the defaults would otherwise
+# validate a different mode's math than the one under test -- the same
+# trap documented for keep_push_pop).
+function stade_validate_dotprod_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
+                                      scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                      trials::Int = 10, rtol::Float64 = 1e-11, self_check::Bool = true,
+                                      keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
+    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
+    primal_expr = io_read_corpus_entry(in_path)
+    kernel = parse_kernel(primal_expr)
+    baseline = io_read_baseline_yaml(yp)
+    val_coerce_int_arrays!(kernel, baseline.values)
+    tangent_expr = stade_tangent(primal_expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
+    adjoint_out = stade_adjoint(primal_expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
+    stack_names = Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
+    return val_validate_dotprod(kernel, tangent_expr, adjoint_out, baseline;
+                                 trials = trials, rtol = rtol, stack_arg_names = stack_names)
+end
+
 function stade_validate_from_baseline(mode::Symbol, in_path::String, yaml_path::String;
                                        trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
                                        keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
@@ -8830,6 +8915,65 @@ function ii_scalar_live_in(body, var)
     return :none
 end
 
+# ---- array intactness: mirror of the escaping-write check ----------
+#
+# `ii_body_has_escaping_array_write` asks "is a READ of this array
+# reachable after this loop". Intactness asks the dual: "is a WRITE
+# reachable after this loop". If none is, the array still holds its
+# forward contents when the backward sweep arrives, because the sweep
+# is an exact reversal -- a write BEFORE the loop has its restore run
+# AFTER the loop's backward code, and so cannot disturb it.
+#
+# This is what separates two cases that the blunt "assigned anywhere
+# in the kernel" rule conflated: an encoder output written once and
+# read by a much later decoder loop is intact, while an array
+# rewritten by passes that follow the loop is not (and its writes may
+# be unsnapshotted accumulations, which nothing restores at all).
+#
+# Same machinery as the read side, deliberately: `ii_find_ancestor_path`
+# unchanged, and the same repeating-vs-non-repeating distinction -- a
+# write positioned textually BEFORE the loop inside a repeating
+# ancestor is still reachable on the next iteration, so the wraparound
+# pass is mandatory. A write inside `loop_body` itself also disqualifies
+# it: the backward-position recompute drops array writes, so a read
+# there would observe post-forward contents.
+function ii_array_writes_walk!(walk_body, target, arrs, acc)
+    for stmt in walk_body
+        if stmt.kind == :assign
+            if stmt.lhs isa Expr && stmt.lhs.head == :ref && stmt.lhs.args[1] in arrs
+                push!(acc, stmt.lhs.args[1])
+            end
+        elseif stmt.kind == :if
+            ii_array_writes_walk!(stmt.then, target, arrs, acc)
+            ii_array_writes_walk!(stmt.els, target, arrs, acc)
+        elseif stmt.kind == :for
+            stmt.body === target && continue
+            ii_array_writes_walk!(stmt.body, target, arrs, acc)
+        end
+    end
+    return nothing
+end
+
+function ii_array_intact(kernel_body, loop_body, arr)
+    arrs = Set{Symbol}([arr])
+    own = Set{Symbol}()
+    ii_array_writes_walk!(loop_body, nothing, arrs, own)
+    isempty(own) || return false
+    path = ii_find_ancestor_path(kernel_body, loop_body, false)
+    path === nothing && return false   # couldn't locate -- conservative
+    later = Set{Symbol}()
+    for (level_body, idx, repeating) in path
+        after = level_body[idx+1:end]
+        if repeating
+            before = level_body[1:idx-1]
+            ii_array_writes_walk!(vcat(after, before), loop_body, arrs, later)
+        else
+            ii_array_writes_walk!(after, loop_body, arrs, later)
+        end
+    end
+    return isempty(later)
+end
+
 function ii_recomputable(kernel, loop_body, var, restored = Set{Symbol}())
     written = Set{Symbol}()
     ii_assigned_vars!(kernel.body, written)
@@ -8844,7 +8988,9 @@ function ii_recomputable(kernel, loop_body, var, restored = Set{Symbol}())
         push!(seen, v)
         is_array = get(kernel.sig.kinds, v, nothing) in (:array_float, :array_int)
         if is_array
-            v in written && return false
+            # intact arrays keep their forward contents at the backward
+            # position -- see ii_array_intact.
+            (v in written && !ii_array_intact(kernel.body, loop_body, v)) && return false
         elseif haskey(defs, v) || v in written
             # a scalar neither assigned in this body nor anywhere in the
             # kernel is a loop index or a read-only argument -- nothing
@@ -10275,9 +10421,26 @@ let
     end))
     @assert ii_recomputable(k1, first_loop(k1.body).body, :t) "R1: a chain over never-written args must be recomputable"
 
-    # R2: chain reads an array the kernel writes elsewhere -- its
-    # forward contents are gone by backward time.
-    k2 = kernel_of(:(function ii_recomp_written_arr(x, z, y, n)
+    # R2: chain reads an array rewritten AFTER the loop -- the backward
+    # sweep restores (or fails to restore) it before reaching here, so
+    # its forward contents are gone. Must be refused.
+    k2 = kernel_of(:(function ii_recomp_written_after(x, z, y, n)
+        for i = 1:n
+            t = z[i] * z[i]
+            y[i] = y[i] + t * t
+        end
+        for i = 1:n
+            z[i] = x[i] * 2.0
+        end
+        return nothing
+    end))
+    @assert !ii_recomputable(k2, k2.body[1].body, :t) "R2: a chain reading an array rewritten after the loop must be refused"
+
+    # R2b: the same array written strictly BEFORE the loop and never
+    # again -- intact, because a write before the loop has its restore
+    # run after this loop's backward code. This is the shape that makes
+    # an encoder-output/decoder-consumer kernel eligible at all.
+    k2b = kernel_of(:(function ii_recomp_written_before(x, z, y, n)
         for i = 1:n
             z[i] = x[i] * 2.0
         end
@@ -10287,7 +10450,37 @@ let
         end
         return nothing
     end))
-    @assert !ii_recomputable(k2, k2.body[2].body, :t) "R2: a chain reading a kernel-written array must be refused"
+    @assert ii_recomputable(k2b, k2b.body[2].body, :t) "R2b: a chain reading an array written only before the loop must be recomputable"
+
+    # R2c: written before the loop but inside a REPEATING ancestor --
+    # the next ancestor iteration rewrites it, so the wraparound pass
+    # must refuse. A non-wraparound implementation accepts this.
+    k2c = kernel_of(:(function ii_recomp_wraparound(u, x, z, y, n, m)
+        for i_seq_k = 2:m
+            u[i_seq_k] = u[i_seq_k - 1] + 1.0
+            for i = 1:n
+                z[i] = x[i] * 2.0
+            end
+            for i = 1:n
+                t = z[i] * z[i]
+                y[i] = y[i] + t * t
+            end
+        end
+        return nothing
+    end))
+    @assert !ii_recomputable(k2c, k2c.body[1].body[3].body, :t) "R2c: a write before the loop inside a REPEATING ancestor must be refused (wraparound)"
+
+    # R2d: the loop writes the array it also reads -- the recompute
+    # drops array writes, so the read would see post-forward contents.
+    k2d = kernel_of(:(function ii_recomp_own_write(x, z, y, n)
+        for i = 1:n
+            z[i] = z[i] + x[i]
+            t = z[i] * z[i]
+            y[i] = y[i] + t * t
+        end
+        return nothing
+    end))
+    @assert !ii_recomputable(k2d, first_loop(k2d.body).body, :t) "R2d: a chain reading an array this same loop writes must be refused"
 
     # R3: accumulator whose reset sits OUTSIDE the candidate loop --
     # live-in, so re-execution restarts from the wrong value.
@@ -10354,7 +10547,7 @@ let
         return nothing
     end))
     @assert !ii_recomputable(k7, first_loop(k7.body).body, :s) "R7: a var read in an :if condition before any write is live-in"
-    println("ii_recomputable adversarial suite (7 cases) OK")
+    println("ii_recomputable adversarial suite (10 cases) OK")
 end
 
 # ---- ii_* nested-loop-boundary regression -------------------------
@@ -10581,4 +10774,277 @@ let
         @assert rf2.ok "ii_recompute_footprint: fused adjoint failed, max_rel_err=$(rf2.max_rel_err)"
     end
     println("ii_plan :recompute end-to-end + footprint regression suite (2 cases) OK")
+end
+
+
+# ---- exact dot-product oracle: self-test + sensitivity proof ------
+# D1 checks the oracle agrees at machine precision on correct code.
+# D2 is the point of having it: a systematic error injected BELOW the
+# finite-difference truncation floor is invisible to the FD oracle
+# (its own noise on this kernel is ~1e-9) but sits six orders above
+# this oracle's noise floor (~1e-15), so only this one rejects it.
+# Without D2 there would be no evidence the extra oracle earns its
+# keep -- a guard never seen to fail is a guard you don't know you
+# have.
+
+let
+    p = joinpath(mktempdir(), "dp_quad.jl")
+    write(p, """
+    function dp_quad(x, w, n, out)
+        for i = 1:n
+            t = x[i] * x[i]
+            out[1] = out[1] + w[i] * t
+        end
+        return nothing
+    end
+    """)
+    r = stade_validate_dotprod_file(p; trials = 10)
+    @assert r.ok "dp_quad: exact tangent-vs-adjoint identity failed on correct code, max_rel_err=$(r.max_rel_err)"
+    @assert r.max_rel_err < 1e-12 "dp_quad: dot-product agreement should be at machine precision, got $(r.max_rel_err)"
+
+    primal = io_read_corpus_entry(p)
+    kernel = parse_kernel(primal)
+    baseline = io_read_baseline_yaml(io_default_yaml_path(p))
+    val_coerce_int_arrays!(kernel, baseline.values)
+    tangent_expr = stade_tangent(primal)
+    adjoint_out = stade_adjoint(primal)
+    # scale every shadow accumulation by 1 + 1e-10
+    hits = Ref(0)
+    walk(e) = begin
+        if e isa Expr
+            if e.head == :(=) && e.args[2] isa Expr && e.args[2].head == :call && e.args[2].args[1] == :+
+                nm = e.args[1] isa Expr ? string(e.args[1].args[1]) : string(e.args[1])
+                if endswith(nm, "b")
+                    hits[] += 1
+                    return Expr(:(=), e.args[1], Expr(:call, :*, 1.0000000001, e.args[2]))
+                end
+            end
+            return Expr(e.head, map(walk, e.args)...)
+        end
+        return e
+    end
+    bad = (adjoint = walk(adjoint_out.adjoint), initstacks = adjoint_out.initstacks)
+    @assert hits[] > 0 "dp_quad: sensitivity probe injected nothing -- the shape it matches has changed"
+    stk = Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
+    fd = val_validate_adjoint(kernel, primal, bad, baseline; trials = 10, stack_arg_names = stk)
+    dp = val_validate_dotprod(kernel, tangent_expr, bad, baseline; trials = 10, stack_arg_names = stk)
+    @assert fd.ok "dp_quad sensitivity: the FD oracle was expected NOT to see a sub-truncation error, but it rejected (max_rel_err=$(fd.max_rel_err)) -- re-tune the injected magnitude"
+    @assert !dp.ok "dp_quad sensitivity: the dot-product oracle FAILED to reject a $(hits[])-site systematic error the FD oracle also missed (max_rel_err=$(dp.max_rel_err)) -- it is not buying the precision it claims"
+    println("val_validate_dotprod exact-identity + sensitivity suite (2 cases) OK")
+end
+
+# ---- array-intactness end-to-end + footprint regression -----------
+# The shape ii_array_intact exists for: an array written once early,
+# read by a much later loop whose scalars are otherwise recomputable.
+# Under the old "assigned anywhere in the kernel" rule this was
+# refused outright. A1 validates the generated code numerically (and
+# with the exact dot-product identity, which the FD oracles cannot
+# match for sensitivity); A2 guards the footprint, since a silent
+# re-block costs the memory saving while every gradient stays correct.
+
+let
+    mktempdir() do dir
+        path = joinpath(dir, "ii_intact_e2e.jl")
+        write(path, """
+        function ii_intact_e2e(x, w, skip, y, out, n)
+            for i = 1:n
+                skip[i] = x[i] * w[i]
+            end
+            for i = 1:n
+                m = skip[i] * skip[i]
+                y[i] = y[i] + m * m
+            end
+            out[1] = y[1]
+            return nothing
+        end
+        """)
+        k = parse_kernel(io_read_corpus_entry(path))
+        plan = stade_ii_plan_check(k)
+        consumer_key = agen_site_key(k.body, 2)
+        @assert haskey(plan, consumer_key) "ii_intact_e2e: the consumer loop must classify -- `skip` is written only before it, so it is intact, got $plan"
+        for (mode, fn) in ((:adjoint, stade_validate_adjoint_file), (:hvp, stade_validate_hvp_file))
+            ru = fn(path; trials = 10, fuse_ii_loops = false)
+            rf = fn(path; trials = 10, fuse_ii_loops = true)
+            @assert ru.ok "ii_intact_e2e [$mode]: unfused baseline failed, max_rel_err=$(ru.max_rel_err)"
+            @assert rf.ok "ii_intact_e2e [$mode]: fused failed (max_rel_err=$(rf.max_rel_err))"
+        end
+        dp = stade_validate_dotprod_file(path; trials = 10, fuse_ii_loops = true)
+        @assert dp.ok "ii_intact_e2e: exact tangent-vs-adjoint identity failed (max_rel_err=$(dp.max_rel_err))"
+
+        # A2: footprint. `m`'s stack must be present without fusion and
+        # gone with it. The baseline half keeps this guard from being
+        # vacuous if the shape ever stops producing a stack at all.
+        sig_off = string(stade_adjoint(io_read_corpus_entry(path); fuse_ii_loops = false).adjoint.args[1])
+        sig_on  = string(stade_adjoint(io_read_corpus_entry(path); fuse_ii_loops = true).adjoint.args[1])
+        @assert occursin("m_stack", sig_off) "ii_intact_e2e: the unfused baseline should carry m_stack -- this guard is measuring the wrong thing"
+        @assert !occursin("m_stack", sig_on) "ii_intact_e2e: m_stack survived fusion -- array intactness has silently re-blocked and the saving is gone (gradients stay correct, so nothing else here would notice)"
+    end
+    println("ii_array_intact end-to-end + footprint regression suite (2 cases) OK")
+end
+
+# ---- fuse_ii_loops=false containment guard ------------------------
+# The single-flag design rests on one property: turning the flag off is
+# an exact rollback. Everything this feature does must sit behind it,
+# so `false` output stays byte-identical to the pre-feature codebase
+# (verified across the corpus at the time of writing). Nothing else in
+# this file checks that a future extension has not leaked behaviour
+# into the default path -- which would be invisible, since `false` mode
+# would still produce correct gradients, just different code.
+#
+# F1 pins the exact `false`-mode text for a kernel that DOES classify
+# with the flag on: if the two ever coincide, the flag has stopped
+# gating. F2 is the same check one level up -- the plan itself must be
+# empty when the flag is off, since that is the mechanism the gating
+# relies on.
+
+let
+    src = :(function ii_containment(x, y, n, acc_out)
+        acc = 0.0
+        for i = 1:n
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+            acc = acc + x[i]
+        end
+        acc_out[1] = acc * acc
+        return nothing
+    end)
+    kernel = parse_kernel(src)
+    @assert !isempty(stade_ii_plan_check(kernel)) "ii_containment: the probe kernel must classify with the flag ON, or this guard proves nothing"
+
+    off = string(stade_adjoint(src; fuse_ii_loops = false).adjoint)
+    on  = string(stade_adjoint(src; fuse_ii_loops = true).adjoint)
+    @assert off != on "ii_containment: fuse_ii_loops=false produced the SAME code as true on a kernel that classifies -- the flag has stopped gating, and behaviour has leaked into the default path"
+
+    # F2: with the flag off, agen_emit must never see an ii_plan at all.
+    # stade_adjoint builds one only when the flag is set; assert that the
+    # off-path output is reproducible with an explicitly absent plan.
+    active_map = act_analyze(kernel)
+    snap_sites, agen_sites = stade_site_level_tbr_check(kernel)
+    plan_free = agen_emit(kernel, lin_build(kernel, active_map),
+                           snap_plan(kernel, active_map; site_needed = snap_sites);
+                           push_pop = agen_sites, ii_plan = nothing)
+    @assert string(plan_free.adjoint) == off "ii_containment: fuse_ii_loops=false output differs from ii_plan=nothing output -- the default path is consulting the plan somewhere it should not"
+    # F3: pins the default path against DRIFT. F1/F2 are weak alone --
+    # F1 only catches `false` becoming identical to `true`, F2 only
+    # catches the default path consulting a plan. Neither notices a new
+    # analysis quietly changing `false`-mode output, which would still
+    # be correct code, just no longer the pre-feature code.
+    #
+    # A fingerprint over ONE kernel is also too narrow: a first attempt
+    # pinned only the loop-with-accumulator shape, and a sabotage that
+    # disabled agen_exempt_vars entirely sailed past it, because that
+    # kernel has no exempt var to lose. The probe set below spans the
+    # distinct default-path shapes -- exempt var, branch, nested loop,
+    # reassigned tripcount -- so a change to any of them is visible.
+    #
+    # If a deliberate codegen change breaks this, re-pin it. Being
+    # forced to re-pin is the point: it makes changing default-path
+    # output a conscious act rather than an accident.
+    probes = [
+        # straight-line write with a single top-level assign (exempt var)
+        :(function ii_cont_exempt(x, y, out)
+            v = x[1] * x[1]
+            y[1] = y[1] + v * v
+            out[1] = y[1]
+            return nothing
+        end),
+        # branch (branch-flag push/pop)
+        :(function ii_cont_branch(x, y, n)
+            for i = 1:n
+                if x[i] > 0.0
+                    y[i] = y[i] + x[i] * x[i]
+                else
+                    y[i] = y[i] - x[i] * x[i]
+                end
+            end
+            return nothing
+        end),
+        # nested loop
+        :(function ii_cont_nested(x, y, n, m)
+            for i = 1:n
+                for j = 1:m
+                    t = x[(i - 1) * m + j] * x[(i - 1) * m + j]
+                    y[(i - 1) * m + j] = y[(i - 1) * m + j] + t * t
+                end
+            end
+            return nothing
+        end),
+        # reassigned bound -> tripcount snapshot
+        :(function ii_cont_tripcount(x, y, n, m)
+            k = m
+            for i_seq_o = 1:n
+                k = k + 1
+                for j = 1:k
+                    y[j] = y[j] + x[j] * x[j]
+                end
+            end
+            return nothing
+        end),
+    ]
+    combined = join([string(stade_adjoint(pr; fuse_ii_loops = false).adjoint) for pr in probes], "\n")
+    @assert hash(combined) == 0x29f780b8c26c019a && length(combined) == 2107 "ii_containment: fuse_ii_loops=false output has DRIFTED from its pinned fingerprint (len=$(length(combined)), hash=$(repr(hash(combined)))). Either behaviour leaked into the default path -- which breaks the exact-rollback property the single-flag design rests on -- or codegen changed deliberately, in which case re-pin this and say so."
+    println("fuse_ii_loops=false containment guard (3 cases, 4 default-path probes) OK")
+end
+
+# ---- cgen_ host-resident stack push regression --------------------
+# cgen_body batches host-resident statements that touch a device array
+# element-wise into one backend.allowscalar_macro block. A :stackpush
+# bypassed that batching entirely, so `push!(du_stack, du[i_x])` in any
+# loop the splitter refused was emitted bare and died with
+# "Scalar indexing is disallowed" on a real GPU -- while the matching
+# `du[i_x] = pop!(du_stack)` was fine, being an :assign whose lhs is a
+# ref. Nothing in this file caught it because nothing here executes GPU
+# output; it was found by running the corpus on device.
+#
+# G1: a push whose value reads an array must be wrapped.
+# G2: a push whose value is a plain scalar must NOT be (don't pay for
+#     a device round-trip that isn't needed).
+# G3: the wrap is on the push itself, not a block that swallowed the
+#     surrounding statement run.
+#
+# Numerical confirmation needs a GPU and lives outside this file --
+# see gpu_validate_build.jl. This guard is structural only.
+
+let
+    src = :(function cgen_push_probe(u, du, i_n, i_nstep, loss)
+        for i_seq_ = 1:i_nstep
+            for i_x = 2:i_n
+                du[i_x] = u[i_x] * u[i_x - 1]
+            end
+            for i_x = 1:i_n
+                loss[1] = loss[1] + du[i_x] * du[i_x]
+            end
+        end
+        return nothing
+    end)
+    plan = stade_cuda(stade_adjoint(src).adjoint)
+    @assert !isempty(plan.kernels) "cgen_push_probe: expected at least one split kernel, or this guard proves nothing"
+
+    pushes = Any[]
+    walk(e, wrap) = begin
+        if e isa Expr
+            if e.head == :macrocall && occursin("allowscalar", string(e.args[1]))
+                for a in e.args[3:end]; walk(a, e); end
+                return
+            end
+            if e.head == :call && e.args[1] === :push!
+                push!(pushes, (value = e.args[3], wrap = wrap))
+            end
+            for a in e.args; walk(a, wrap); end
+        end
+    end
+    walk(plan.host, nothing)
+    @assert !isempty(pushes) "cgen_push_probe: expected a host-resident push!, got none -- the probe no longer exercises this path"
+
+    for p in pushes
+        if cgen_expr_has_ref(p.value)
+            @assert p.wrap !== nothing "cgen_push_probe: `push!(..., $(p.value))` reads a device-array element but is NOT inside an allowscalar block -- this is exactly the shape that failed on device with \"Scalar indexing is disallowed\""
+            # G3: the wrapped payload is the push alone
+            payload = p.wrap.args[3]
+            @assert !(payload isa Expr && payload.head == :block && length(payload.args) > 1) "cgen_push_probe: the allowscalar wrap swallowed a whole statement run rather than the push alone"
+        else
+            @assert p.wrap === nothing "cgen_push_probe: `push!(..., $(p.value))` needs no device access but was wrapped anyway"
+        end
+    end
+    println("cgen_ host-resident stack push allowscalar guard (3 cases) OK")
 end
