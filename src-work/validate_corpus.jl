@@ -40,7 +40,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
             gen_fn, suffix = generators[mode]
             out_path = joinpath(dir, name * suffix)
             try
-                gen_fn(path, out_path; fuse_ii_loops = true)
+                gen_fn(path, out_path; keep_push_pop = false, fuse_ii_loops = true)
             catch e
                 push!(results, (kernel = name, mode = mode, status = :gen_error, max_rel_err = NaN))
                 continue
@@ -53,7 +53,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
                 # above -- the validator's own defaults would otherwise
                 # regenerate and check unfused math regardless, so the
                 # fused path would never actually be exercised here.
-                r = fn(path; trials = trials, fuse_ii_loops = true)
+                r = fn(path; trials = trials, keep_push_pop = false, fuse_ii_loops = true)
                 push!(results, (kernel = name, mode = mode, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
             catch e
                 push!(results, (kernel = name, mode = mode, status = :error, max_rel_err = NaN))
@@ -70,7 +70,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
         # codes cancels in the identity), so it complements the three
         # checks above rather than replacing any of them.
         try
-            r = stade_validate_dotprod_file(path; trials = trials, fuse_ii_loops = true)
+            r = stade_validate_dotprod_file(path; trials = trials, keep_push_pop = false, fuse_ii_loops = true)
             push!(results, (kernel = name, mode = :dotprod, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
         catch e
             push!(results, (kernel = name, mode = :dotprod, status = :error, max_rel_err = NaN))

@@ -1,17 +1,17 @@
 function initstacks_branchsel_b()
-    branch_stack = Vector{Int64}()
+    branch_stack = Vector{Int64}(undef, 1)
     return branch_stack
 end
 
 function branchsel_b(loss, lossb, x, xb, y, yb, branch_stack)
     if x > y
-        push!(branch_stack, 1)
+        branch_stack[1] = 1
         loss[1] = x ^ 2 - y
     else
-        push!(branch_stack, 0)
+        branch_stack[1] = 0
         loss[1] = y ^ 2 - x
     end
-    __branch = pop!(branch_stack)
+    __branch = branch_stack[1]
     if __branch == 1
         xb = xb + (2x) * lossb[1]
         yb = yb + -(lossb[1])

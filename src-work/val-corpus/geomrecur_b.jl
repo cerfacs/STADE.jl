@@ -1,11 +1,11 @@
-function initstacks_geomrecur_b()
-    u_stack = Vector{Float64}()
+function initstacks_geomrecur_b(i_n)
+    u_stack = Vector{Float64}(undef, div(i_n - 2, 1) + 1)
     return u_stack
 end
 
 function geomrecur_b(loss, lossb, u, ub, c, cb, i_n, u_stack)
     for i_seq_x = 2:i_n
-        push!(u_stack, u[i_seq_x])
+        u_stack[(i_seq_x - 2) + 1] = u[i_seq_x]
         u[i_seq_x] = c * u[i_seq_x - 1]
     end
     for i_seq_x = 1:i_n
@@ -15,7 +15,7 @@ function geomrecur_b(loss, lossb, u, ub, c, cb, i_n, u_stack)
         ub[i_seq_x] = ub[i_seq_x] + (2 * u[i_seq_x]) * lossb[1]
     end
     for i_seq_x = i_n:-1:2
-        u[i_seq_x] = pop!(u_stack)
+        u[i_seq_x] = u_stack[(i_seq_x - 2) + 1]
         cb = cb + u[i_seq_x - 1] * ub[i_seq_x]
         ub[i_seq_x - 1] = ub[i_seq_x - 1] + c * ub[i_seq_x]
         ub[i_seq_x] = 0.0
