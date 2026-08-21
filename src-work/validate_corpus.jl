@@ -2,7 +2,7 @@ include("STADE.jl")
 using Random
 
 """
-    validate_corpus(dir="val-corpus"; trials=8)
+    validate_corpus(dir="val-corpus"; trials::Int = 8, keep_push_pop::Bool = false, fuse_ii_loops::Bool = true)
 
 For every `.jl` kernel in `dir`: generates its tangent (`_d.jl`), adjoint
 (`_b.jl`), and hvp (`_hv.jl`) files alongside it, then runs finite-difference
@@ -17,7 +17,7 @@ a baseline or against generated code left over from a different STADE.jl
 revision than the one currently loaded. Only kernel source `.jl` files are
 the real inputs here, so everything else in `dir` is disposable.
 """
-function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
+function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_pop::Bool = false, fuse_ii_loops::Bool = true)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") || endswith(f, ".yaml")
             rm(joinpath(dir, f))
@@ -40,7 +40,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
             gen_fn, suffix = generators[mode]
             out_path = joinpath(dir, name * suffix)
             try
-                gen_fn(path, out_path; keep_push_pop = false, fuse_ii_loops = true)
+                gen_fn(path, out_path; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
             catch e
                 push!(results, (kernel = name, mode = mode, status = :gen_error, max_rel_err = NaN))
                 continue
@@ -53,7 +53,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
                 # above -- the validator's own defaults would otherwise
                 # regenerate and check unfused math regardless, so the
                 # fused path would never actually be exercised here.
-                r = fn(path; trials = trials, keep_push_pop = false, fuse_ii_loops = true)
+                r = fn(path; trials = trials, keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
                 push!(results, (kernel = name, mode = mode, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
             catch e
                 println("  !! ", name, " [", mode, "] ", first(split(sprint(showerror, e), "
@@ -72,7 +72,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8)
         # codes cancels in the identity), so it complements the three
         # checks above rather than replacing any of them.
         try
-            r = stade_validate_dotprod_file(path; trials = trials, keep_push_pop = false, fuse_ii_loops = true)
+            r = stade_validate_dotprod_file(path; trials = trials, keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
             push!(results, (kernel = name, mode = :dotprod, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
         catch e
             println("  !! ", name, " [dotprod] ", first(split(sprint(showerror, e), "
