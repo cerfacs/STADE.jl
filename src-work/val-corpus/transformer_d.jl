@@ -1,4 +1,6 @@
-function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, bvd, wo, wod, bo, bod, ln1_gain, ln1_gaind, ln1_bias, ln1_biasd, w1, w1d, b1, b1d, w2, w2d, b2, b2d, ln2_gain, ln2_gaind, ln2_bias, ln2_biasd, q, qd, k, kd, v, vd, scores, scoresd, probs, probsd, ctx, ctxd, attn_out, attn_outd, resid1, resid1d, normed1, normed1d, ff_hidden, ff_hiddend, ff_out, ff_outd, resid2, resid2d, x_next, x_nextd, n, d, dk, h, dff, n_layers, eps, epsd)
+function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, bvd, wo, wod, bo, bod, ln1_gain, ln1_gaind, ln1_bias, ln1_biasd, w1, w1d, b1, b1d, w2, w2d, b2, b2d, ln2_gain, ln2_gaind, ln2_bias, ln2_biasd, q, qd, k, kd, v, vd, scores, scoresd, probs, probsd, ctx, ctxd, attn_out, attn_outd, resid1, resid1d, normed1, normed1d, ff_hidden, ff_hiddend, ff_out, ff_outd, resid2, resid2d, x_next, x_nextd, n, dk, h, dff, n_layers, eps, epsd)
+    dd = 0.0
+    d = h * dk
     inv_sqrt_dkd = 0.0
     inv_sqrt_dk = 1.0 / sqrt(dk)
     n_dd = 0.0
@@ -238,7 +240,8 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
     return nothing
 end
 
-function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, b1, w2, b2, ln2_gain, ln2_bias, q, k, v, scores, probs, ctx, attn_out, resid1, normed1, ff_hidden, ff_out, resid2, x_next, n, d, dk, h, dff, n_layers, eps)
+function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, b1, w2, b2, ln2_gain, ln2_bias, q, k, v, scores, probs, ctx, attn_out, resid1, normed1, ff_hidden, ff_out, resid2, x_next, n, dk, h, dff, n_layers, eps)
+    d = h * dk
     inv_sqrt_dk = 1.0 / sqrt(dk)
     n_d = n * d
     n_dff = n * dff

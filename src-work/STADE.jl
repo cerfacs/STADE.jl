@@ -2586,6 +2586,70 @@ end
 # splat-the-whole-tuple convention keeps working unmodified: Phase D
 # adds no special-cased plumbing to the validation/calling machinery,
 # only more return values and more parameters, kept in lockstep here.
+# A stack-size formula can reference a scalar DERIVED at the kernel
+# body's top level rather than a kernel argument -- `n_d = n * d` in
+# transformer, `n_e1_mid = c1 * hw` in unet. agen_layout cannot put such
+# a name in initstacks_*'s signature (the caller has no way to supply
+# it), and dropping it left the emitted body referencing a name that is
+# neither a parameter nor defined anywhere in scope:
+#
+#     q_stack = Vector{Float64}(undef, (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1))
+#     #                                                                    ^ UndefVarError
+#
+# So hoist the defining assignments instead, transitively, in dependency
+# order, and report whatever kernel arguments they in turn need so the
+# signature can widen to match (unet needs h, w, c3 this way).
+#
+# `already_defined` carries the names the Tier B sizing/table passes
+# define themselves (the ragged-controlling locals n, nc, ...): those
+# must NOT be hoisted -- their values come from that pass, and a
+# top-level copy would be both duplicated and wrong.
+#
+# A name assigned more than once anywhere in the kernel is skipped: the
+# top-level value is not necessarily the one a later loop bound meant.
+# That leaves the original UndefVarError rather than silently emitting a
+# wrong size, which is the right failure of the two.
+function agen_collect_assigned_syms!(e, acc)
+    if e isa Expr
+        e.head == :(=) && e.args[1] isa Symbol && push!(acc, e.args[1])
+        for a in e.args
+            agen_collect_assigned_syms!(a, acc)
+        end
+    end
+    return nothing
+end
+
+function agen_init_derived_stmts(kernel, wanted, already_defined)
+    defs = Dict{Symbol,Any}()
+    counts = agen_count_assign_sites(kernel.body)
+    for stmt in kernel.body
+        stmt.kind == :assign || continue
+        stmt.lhs isa Symbol || continue
+        get(counts, stmt.lhs, 0) == 1 || continue
+        haskey(defs, stmt.lhs) || (defs[stmt.lhs] = stmt.rhs)
+    end
+    args = Set{Symbol}(kernel.sig.args)
+    order = Symbol[]
+    seen = Set{Symbol}()
+    extra = Set{Symbol}()
+    function visit(v)
+        (v in seen || v in args || v in already_defined) && return
+        push!(seen, v)
+        haskey(defs, v) || return
+        rd = Set{Symbol}()
+        agen_collect_expr_vars!(defs[v], rd)
+        for r in rd
+            visit(r)
+            r in args && push!(extra, r)
+        end
+        push!(order, v)
+    end
+    for v in wanted
+        visit(v)
+    end
+    return (Any[Expr(:(=), v, defs[v]) for v in order], extra)
+end
+
 function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = nothing,
                          active_map = nothing, value_needed = nothing, exempt = nothing, stacks = nothing, push_pop = nothing)
     fname = agen_init_fname(kernel.sig.name)
@@ -2652,7 +2716,18 @@ function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = noth
         push!(alloc_stmts, agen_init_alloc_stmt(nm, kind_of[nm], keep_push_pop, layout))
         haskey(total_of, nm) && push!(alloc_stmts, Expr(:call, :sizehint!, nm, total_of[nm]))
     end
-    body = vcat(sizing_stmts, table_stmts, alloc_stmts)
+    # names the Tier B passes define for themselves must not be hoisted
+    derived_stmts = Any[]
+    if !keep_push_pop && !isempty(layout.derived_vars)
+        already = Set{Symbol}()
+        for st in vcat(sizing_stmts, table_stmts)
+            st isa Expr && st.head == :(=) && st.args[1] isa Symbol && push!(already, st.args[1])
+            st isa Expr && st.head == :for && agen_collect_assigned_syms!(st, already)
+        end
+        (derived_stmts, extra) = agen_init_derived_stmts(kernel, layout.derived_vars, already)
+        fargs = sort(union(fargs, extra); by = string)
+    end
+    body = vcat(derived_stmts, sizing_stmts, table_stmts, alloc_stmts)
     push!(body, emit_return_scalars(vcat(names, table_names, tot_names, val_names)))
     return (Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...)), table_names, tot_names, val_names)
 end
@@ -3251,7 +3326,8 @@ function agen_indexed_layout(kernel, kinds, active_map, value_needed, reassigned
     for (_, sz) in sizes
         agen_collect_expr_vars!(sz, free)
     end
-    return (offsets = offsets, sizes = sizes, free_vars = sort(collect(free); by = string), tainted_stacks = tainted_stacks)
+    return (offsets = offsets, sizes = sizes, free_vars = sort(collect(free); by = string),
+            tainted_stacks = tainted_stacks, derived_vars = Symbol[])
 end
 
 # `seq_reassigned`/`in_ragged` mirror agen_tier_b_walk's own recursion
@@ -3536,9 +3612,19 @@ function agen_layout(kernel, kinds, active_map, value_needed, reassigned, exempt
     # size, which by construction only ever references true kernel
     # arguments already). Filtered here, once, rather than trusting
     # every future caller to filter it themselves.
+    # ... but a pure Tier A size formula does NOT "by construction only
+    # reference true kernel arguments": a loop bound can be a scalar
+    # DERIVED at the kernel body's top level (`n_d = n * d` in
+    # transformer, `n_e1_mid = c1 * hw` in unet). Dropping those left
+    # initstacks_* referencing a name that is neither a parameter nor
+    # defined in its body -- `UndefVarError: n_d not defined` at every
+    # call. They are reported separately so agen_init_emit can hoist
+    # their defining assignments instead of losing them.
+    derived = sort(collect(setdiff(free, Set(kernel.sig.args))); by = string)
     free = intersect(free, Set(kernel.sig.args))
     return (offsets = offsets, sizes = sizes, blocks = blocks, block_of = block_of, block_totals = block_totals,
-            tainted_stacks = ineligible, free_vars = sort(collect(free); by = string))
+            tainted_stacks = ineligible, free_vars = sort(collect(free); by = string),
+            derived_vars = derived)
 end
 
 function agen_layout_walk_top!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop)
@@ -10978,4 +11064,76 @@ let
     combined = join([string(stade_adjoint(pr; fuse_ii_loops = false).adjoint) for pr in probes], "\n")
     @assert hash(combined) == 0x29f780b8c26c019a && length(combined) == 2107 "ii_containment: fuse_ii_loops=false output has DRIFTED from its pinned fingerprint (len=$(length(combined)), hash=$(repr(hash(combined)))). Either behaviour leaked into the default path -- which breaks the exact-rollback property the single-flag design rests on -- or codegen changed deliberately, in which case re-pin this and say so."
     println("fuse_ii_loops=false containment guard (3 cases, 4 default-path probes) OK")
+end
+
+# ---- initstacks_* free-variable closure regression ----------------
+# Under keep_push_pop=false, a stack-size formula can reference a
+# scalar DERIVED at the kernel body's top level rather than a kernel
+# argument. agen_layout cannot put such a name in the signature (the
+# caller has no way to supply it) and used to drop it silently, leaving
+# initstacks_* referencing a name defined nowhere -- `UndefVarError:
+# n_d not defined` on every call. Nothing caught it because the
+# :stack-mode initstacks_* computes no sizes at all, so the whole
+# sizing path was unexercised by the corpus.
+#
+# D1 is the shape (a derived bound feeding a stack size), asserted on
+# the invariant that matters: initstacks_*'s body has NO free variable
+# outside its own parameter list.
+# D2 is the transitive case -- the derived scalar depends on another
+# derived scalar, and on a kernel argument the signature must widen to
+# accept.
+
+let
+    freevars_of(fn_expr) = begin
+        params = Set{Symbol}(fn_expr.args[1].args[2:end])
+        assigned = Set{Symbol}()
+        for st in fn_expr.args[2].args
+            st isa Expr && st.head == :(=) && st.args[1] isa Symbol && push!(assigned, st.args[1])
+        end
+        used = Set{Symbol}()
+        agen_collect_expr_vars!(fn_expr.args[2], used)
+        sort(collect(setdiff(used, params, assigned, Set([:undef]))))
+    end
+
+    # D1: `m = a * b` derived at top level, used as a loop bound whose
+    # trip count sizes t's stack.
+    k1 = :(function ii_init_derived(x, y, a, b, out)
+        m = a * b
+        for i = 1:m
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+        end
+        out[1] = y[1]
+        return nothing
+    end)
+    out1 = stade_adjoint(k1; keep_push_pop = false)
+    fv1 = freevars_of(out1.initstacks)
+    @assert isempty(fv1) "ii_init_derived: initstacks_* references $fv1, which is neither a parameter nor defined in its body -- a derived bound was dropped instead of hoisted"
+    @assert any(st -> st isa Expr && st.head == :(=) && st.args[1] === :m, out1.initstacks.args[2].args) "ii_init_derived: expected `m` to be hoisted into initstacks_*'s body"
+
+    # D2: derived-on-derived, pulling a further kernel argument in.
+    k2 = :(function ii_init_derived2(x, y, a, b, c, out)
+        p = a * b
+        m = p * c
+        for i = 1:m
+            t = x[i] * x[i]
+            y[i] = y[i] + t * t
+        end
+        out[1] = y[1]
+        return nothing
+    end)
+    out2 = stade_adjoint(k2; keep_push_pop = false)
+    fv2 = freevars_of(out2.initstacks)
+    @assert isempty(fv2) "ii_init_derived2: initstacks_* references $fv2 -- the transitive hoist did not close"
+    params2 = Set{Symbol}(out2.initstacks.args[1].args[2:end])
+    @assert :c in params2 "ii_init_derived2: the signature must widen to accept `c`, which only the hoisted definitions need; got $(collect(params2))"
+
+    # and it must still be numerically right, not merely well-scoped
+    mktempdir() do dir
+        p = joinpath(dir, "ii_init_derived.jl")
+        write(p, io_expr_to_source(k1))
+        r = stade_validate_adjoint_file(p; trials = 8, keep_push_pop = false)
+        @assert r.ok "ii_init_derived: indexed-mode adjoint failed, max_rel_err=$(r.max_rel_err)"
+    end
+    println("initstacks_* derived-bound hoist regression suite (2 cases) OK")
 end

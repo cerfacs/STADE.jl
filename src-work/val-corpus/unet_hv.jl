@@ -1,4 +1,23 @@
-function initstacks_unet_b(c1, c2)
+function initstacks_unet_b(c1, c2, c3, h, w)
+    two = 2
+    h2 = div(h, two)
+    w2 = div(w, two)
+    hw2 = h2 * w2
+    four = 4
+    h4 = div(h, four)
+    w4 = div(w, four)
+    hw4 = h4 * w4
+    n_b_mid = c3 * hw4
+    n_b_out = c3 * hw4
+    hw = h * w
+    n_d1_mid = c1 * hw
+    n_d1_out = c1 * hw
+    n_d2_mid = c2 * hw2
+    n_d2_out = c2 * hw2
+    n_e1_mid = c1 * hw
+    n_e1_out = c1 * hw
+    n_e2_mid = c2 * hw2
+    n_e2_out = c2 * hw2
     t_e1_stack = Vector{Float64}(undef, div(n_e1_mid - 1, 1) + 1)
     skip1_stack = Vector{Float64}(undef, div(n_e1_out - 1, 1) + 1)
     a11_stack = Vector{Float64}(undef, ((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1)
