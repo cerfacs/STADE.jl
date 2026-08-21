@@ -36,13 +36,14 @@
 # x_next: scratch array of length n*d holding each layer's freshly
 #    computed output before it is copied back into x
 # n: number of tokens in the sequence
-# d: model width
-# dk: per-head width (d divided by h)
+# dk: per-head width
 # h: number of attention heads
+#    (the model width d is derived in the body as h*dk, not passed)
 # dff: feed-forward hidden width
 # n_layers: number of stacked encoder layers
 # eps: layer-norm epsilon
-function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, b1, w2, b2, ln2_gain, ln2_bias, q, k, v, scores, probs, ctx, attn_out, resid1, normed1, ff_hidden, ff_out, resid2, x_next, n, d, dk, h, dff, n_layers, eps)
+function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, b1, w2, b2, ln2_gain, ln2_bias, q, k, v, scores, probs, ctx, attn_out, resid1, normed1, ff_hidden, ff_out, resid2, x_next, n, dk, h, dff, n_layers, eps)
+    d = h * dk
     inv_sqrt_dk = 1.0 / sqrt(dk)
     n_d = n * d
     n_dff = n * dff
