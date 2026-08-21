@@ -45,7 +45,7 @@ For now, the aforementioned goals come at the cost of supporting only a subset o
 
 ### Acknowledgements
 
-This project has been mainly inspired by [Inria Tapenade AD engine](https://team.inria.fr/ecuador/en/tapenade/).
+This project has been mainly inspired by [Inria Tapenade AD engine](https://team.inria.fr/ecuador/en/tapenade/) and received funding support from [ANITI EXPLEARTH](https://aniti.univ-toulouse.fr/en/explainable-and-physics-informed-ai-for-regional-weatherprediction/), [ROSAS](https://www.rosas-project.eu/), and [PHLUSIM ANR-23-CE23-0025](https://anr.fr/Project-ANR-23-CE23-0025).
 
 #### If you use or build upon this software, please cite us:
 
