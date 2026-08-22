@@ -42,57 +42,79 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
     dx2 = dx * dx
     for i_seq_pass = 1:num_passes
         if mod(i_seq_pass, 2) == 0
-            branch_stack[prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1] = 1
+            __idx_branch_stack_1_0 = prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1
+            branch_stack[__idx_branch_stack_1_0] = 1
             w = w - 1
         else
-            branch_stack[prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1] = 0
+            __idx_branch_stack_1_0 = prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1
+            branch_stack[__idx_branch_stack_1_0] = 0
         end
-        tripcount_stack[prefix_tripcount_stack_1[(i_seq_pass - 1) + 1] + 1] = w
+        __idx_tripcount_stack_1_1 = prefix_tripcount_stack_1[(i_seq_pass - 1) + 1] + 1
+        tripcount_stack[__idx_tripcount_stack_1_1] = w
         for i_seq_j = 1:w
-            left_stack[prefix_left_stack_1[(i_seq_pass - 1) + 1] + ((i_seq_j - 1) + 1)] = left
+            __idx_left_stack_1_0 = prefix_left_stack_1[(i_seq_pass - 1) + 1] + ((i_seq_j - 1) + 1)
+            left_stack[__idx_left_stack_1_0] = left
             left = 0.0
             if i_seq_j > 1
-                branch_stack[(prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1) + ((i_seq_j - 1) + 1)] = 1
-                left_stack[(prefix_left_stack_1[(i_seq_pass - 1) + 1] + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + ((i_seq_j - 1) + 1)] = left
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1) + ((i_seq_j - 1) + 1)
+                branch_stack[__idx_branch_stack_1_0] = 1
+                __idx_left_stack_1_0 = (prefix_left_stack_1[(i_seq_pass - 1) + 1] + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + ((i_seq_j - 1) + 1)
+                left_stack[__idx_left_stack_1_0] = left
                 left = u[i_seq_j - 1]
             else
-                branch_stack[(prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1) + ((i_seq_j - 1) + 1)] = 0
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1) + ((i_seq_j - 1) + 1)
+                branch_stack[__idx_branch_stack_1_0] = 0
             end
-            right_stack[prefix_right_stack_1[(i_seq_pass - 1) + 1] + ((i_seq_j - 1) + 1)] = right
+            __idx_right_stack_1_4 = prefix_right_stack_1[(i_seq_pass - 1) + 1] + ((i_seq_j - 1) + 1)
+            right_stack[__idx_right_stack_1_4] = right
             right = 0.0
             if i_seq_j < n
-                branch_stack[(prefix_branch_stack_1[(i_seq_pass - 1) + 1] + (1 + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)] = 1
-                right_stack[(prefix_right_stack_1[(i_seq_pass - 1) + 1] + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + ((i_seq_j - 1) + 1)] = right
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_pass - 1) + 1] + (1 + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)
+                branch_stack[__idx_branch_stack_1_0] = 1
+                __idx_right_stack_1_0 = (prefix_right_stack_1[(i_seq_pass - 1) + 1] + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + ((i_seq_j - 1) + 1)
+                right_stack[__idx_right_stack_1_0] = right
                 right = u[i_seq_j + 1]
             else
-                branch_stack[(prefix_branch_stack_1[(i_seq_pass - 1) + 1] + (1 + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)] = 0
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_pass - 1) + 1] + (1 + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)
+                branch_stack[__idx_branch_stack_1_0] = 0
             end
             u[i_seq_j] = 0.5 * (dx2 * f[i_seq_j] + left + right)
-            left_stack[(prefix_left_stack_1[(i_seq_pass - 1) + 1] + ((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)] = left
-            right_stack[(prefix_right_stack_1[(i_seq_pass - 1) + 1] + ((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)] = right
+            __idx_left_stack_1_9 = (prefix_left_stack_1[(i_seq_pass - 1) + 1] + ((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)
+            left_stack[__idx_left_stack_1_9] = left
+            __idx_right_stack_1_11 = (prefix_right_stack_1[(i_seq_pass - 1) + 1] + ((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)
+            right_stack[__idx_right_stack_1_11] = right
         end
-        left_stack[(prefix_left_stack_1[(i_seq_pass - 1) + 1] + (((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + 1] = left
-        right_stack[(prefix_right_stack_1[(i_seq_pass - 1) + 1] + (((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + 1] = right
+        __idx_left_stack_1_4 = (prefix_left_stack_1[(i_seq_pass - 1) + 1] + (((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + 1
+        left_stack[__idx_left_stack_1_4] = left
+        __idx_right_stack_1_6 = (prefix_right_stack_1[(i_seq_pass - 1) + 1] + (((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + 1
+        right_stack[__idx_right_stack_1_6] = right
     end
     left_stack[__tot_left_stack_1 + 1] = left
     right_stack[__tot_right_stack_1 + 1] = right
     left = left_stack[__tot_left_stack_1 + 1]
     right = right_stack[__tot_right_stack_1 + 1]
     for i_seq_pass = num_passes:-1:1
-        left = left_stack[(prefix_left_stack_1[(i_seq_pass - 1) + 1] + (((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + 1]
-        right = right_stack[(prefix_right_stack_1[(i_seq_pass - 1) + 1] + (((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + 1]
-        w = tripcount_stack[prefix_tripcount_stack_1[(i_seq_pass - 1) + 1] + 1]
+        __idx_left_stack_1_0 = (prefix_left_stack_1[(i_seq_pass - 1) + 1] + (((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + 1
+        left = left_stack[__idx_left_stack_1_0]
+        __idx_right_stack_1_2 = (prefix_right_stack_1[(i_seq_pass - 1) + 1] + (((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + 1
+        right = right_stack[__idx_right_stack_1_2]
+        __idx_tripcount_stack_1_4 = prefix_tripcount_stack_1[(i_seq_pass - 1) + 1] + 1
+        w = tripcount_stack[__idx_tripcount_stack_1_4]
         for i_seq_j = w:-1:1
-            left = left_stack[(prefix_left_stack_1[(i_seq_pass - 1) + 1] + ((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)]
-            right = right_stack[(prefix_right_stack_1[(i_seq_pass - 1) + 1] + ((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)]
-            __branch_pre_4 = branch_stack[(prefix_branch_stack_1[(i_seq_pass - 1) + 1] + (1 + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)]
+            __idx_left_stack_1_0 = (prefix_left_stack_1[(i_seq_pass - 1) + 1] + ((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)
+            left = left_stack[__idx_left_stack_1_0]
+            __idx_right_stack_1_2 = (prefix_right_stack_1[(i_seq_pass - 1) + 1] + ((div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)
+            right = right_stack[__idx_right_stack_1_2]
+            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_seq_pass - 1) + 1] + (1 + (div(val_w_1[(i_seq_pass - 1) + 1] - 1, 1) + 1))) + ((i_seq_j - 1) + 1)
+            __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
             right = 0.0
             if __branch_pre_4 == 1
                 right = u[i_seq_j + 1]
             else
                 right = 0.0
             end
-            __branch_pre_2 = branch_stack[(prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1) + ((i_seq_j - 1) + 1)]
+            __idx_branch_stack_1_8 = (prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1) + ((i_seq_j - 1) + 1)
+            __branch_pre_2 = branch_stack[__idx_branch_stack_1_8]
             left = 0.0
             if __branch_pre_2 == 1
                 left = u[i_seq_j - 1]
@@ -108,16 +130,19 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
                 ub[i_seq_j + 1] = ub[i_seq_j + 1] + rightb
                 rightb = 0.0
             end
-            right = right_stack[prefix_right_stack_1[(i_seq_pass - 1) + 1] + ((i_seq_j - 1) + 1)]
+            __idx_right_stack_1_0 = prefix_right_stack_1[(i_seq_pass - 1) + 1] + ((i_seq_j - 1) + 1)
+            right = right_stack[__idx_right_stack_1_0]
             rightb = 0.0
             if __branch_pre_2 == 1
                 ub[i_seq_j - 1] = ub[i_seq_j - 1] + leftb
                 leftb = 0.0
             end
-            left = left_stack[prefix_left_stack_1[(i_seq_pass - 1) + 1] + ((i_seq_j - 1) + 1)]
+            __idx_left_stack_1_0 = prefix_left_stack_1[(i_seq_pass - 1) + 1] + ((i_seq_j - 1) + 1)
+            left = left_stack[__idx_left_stack_1_0]
             leftb = 0.0
         end
-        __branch = branch_stack[prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1]
+        __idx_branch_stack_1_7 = prefix_branch_stack_1[(i_seq_pass - 1) + 1] + 1
+        __branch = branch_stack[__idx_branch_stack_1_7]
         if __branch == 1
         end
     end

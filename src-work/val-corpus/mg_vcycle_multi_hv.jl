@@ -185,120 +185,156 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
     hl = h1
     for i_seq_level = 1:num_levels - 1
         n = nl - 1
-        hl2_stack_d[prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1] = hl2d
-        hl2_stack[prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1] = hl2
+        __idx_hl2_stack_1_1 = prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1
+        hl2_stack_d[__idx_hl2_stack_1_1] = hl2d
+        hl2_stack[__idx_hl2_stack_1_1] = hl2
         hl2d = hl * hld + hl * hld
         hl2 = hl * hl
         for i_seq_k_mg_relax_c1 = 1:nu1
-            tripcount_stack[prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((i_seq_k_mg_relax_c1 - 1) + 1)] = n
+            __idx_tripcount_stack_1_0 = prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((i_seq_k_mg_relax_c1 - 1) + 1)
+            tripcount_stack[__idx_tripcount_stack_1_0] = n
             for i_seq_j_mg_relax_c1 = 1:n
-                left_mg_relax_c1_stack_d[prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = left_mg_relax_c1d
-                left_mg_relax_c1_stack[prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = left_mg_relax_c1
+                __idx_left_mg_relax_c1_stack_1_0 = prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_0] = left_mg_relax_c1d
+                left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_0] = left_mg_relax_c1
                 left_mg_relax_c1d = 0.0
                 left_mg_relax_c1 = 0.0
                 if i_seq_j_mg_relax_c1 > 1
-                    branch_stack[prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = 1
-                    left_mg_relax_c1_stack_d[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = left_mg_relax_c1d
-                    left_mg_relax_c1_stack[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = left_mg_relax_c1
+                    __idx_branch_stack_1_0 = prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                    branch_stack[__idx_branch_stack_1_0] = 1
+                    __idx_left_mg_relax_c1_stack_1_0 = (prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                    left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_0] = left_mg_relax_c1d
+                    left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_0] = left_mg_relax_c1
                     left_mg_relax_c1d = ud[i_seq_j_mg_relax_c1 - 1, i_seq_level]
                     left_mg_relax_c1 = u[i_seq_j_mg_relax_c1 - 1, i_seq_level]
                 else
-                    branch_stack[prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = 0
+                    __idx_branch_stack_1_0 = prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                    branch_stack[__idx_branch_stack_1_0] = 0
                 end
-                right_mg_relax_c1_stack_d[prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = right_mg_relax_c1d
-                right_mg_relax_c1_stack[prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = right_mg_relax_c1
+                __idx_right_mg_relax_c1_stack_1_4 = prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_4] = right_mg_relax_c1d
+                right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_4] = right_mg_relax_c1
                 right_mg_relax_c1d = 0.0
                 right_mg_relax_c1 = 0.0
                 if i_seq_j_mg_relax_c1 < n
-                    branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = 1
-                    right_mg_relax_c1_stack_d[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = right_mg_relax_c1d
-                    right_mg_relax_c1_stack[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = right_mg_relax_c1
+                    __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                    branch_stack[__idx_branch_stack_1_0] = 1
+                    __idx_right_mg_relax_c1_stack_1_0 = (prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                    right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_0] = right_mg_relax_c1d
+                    right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_0] = right_mg_relax_c1
                     right_mg_relax_c1d = ud[i_seq_j_mg_relax_c1 + 1, i_seq_level]
                     right_mg_relax_c1 = u[i_seq_j_mg_relax_c1 + 1, i_seq_level]
                 else
-                    branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = 0
+                    __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                    branch_stack[__idx_branch_stack_1_0] = 0
                 end
-                u_stack_d[prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = ud[i_seq_j_mg_relax_c1, i_seq_level]
-                u_stack[prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = u[i_seq_j_mg_relax_c1, i_seq_level]
+                __idx_u_stack_1_8 = prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                u_stack_d[__idx_u_stack_1_8] = ud[i_seq_j_mg_relax_c1, i_seq_level]
+                u_stack[__idx_u_stack_1_8] = u[i_seq_j_mg_relax_c1, i_seq_level]
                 ud[i_seq_j_mg_relax_c1, i_seq_level] = 0.5 * (((f[i_seq_j_mg_relax_c1, i_seq_level] * hl2d + hl2 * fd[i_seq_j_mg_relax_c1, i_seq_level]) + left_mg_relax_c1d) + right_mg_relax_c1d)
                 u[i_seq_j_mg_relax_c1, i_seq_level] = 0.5 * (hl2 * f[i_seq_j_mg_relax_c1, i_seq_level] + left_mg_relax_c1 + right_mg_relax_c1)
-                left_mg_relax_c1_stack_d[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = left_mg_relax_c1d
-                left_mg_relax_c1_stack[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = left_mg_relax_c1
-                right_mg_relax_c1_stack_d[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = right_mg_relax_c1d
-                right_mg_relax_c1_stack[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)] = right_mg_relax_c1
+                __idx_left_mg_relax_c1_stack_1_11 = (prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_11] = left_mg_relax_c1d
+                left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_11] = left_mg_relax_c1
+                __idx_right_mg_relax_c1_stack_1_13 = (prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_13] = right_mg_relax_c1d
+                right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_13] = right_mg_relax_c1
             end
-            left_mg_relax_c1_stack_d[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)] = left_mg_relax_c1d
-            left_mg_relax_c1_stack[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)] = left_mg_relax_c1
-            right_mg_relax_c1_stack_d[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)] = right_mg_relax_c1d
-            right_mg_relax_c1_stack[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)] = right_mg_relax_c1
+            __idx_left_mg_relax_c1_stack_1_3 = (prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)
+            left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_3] = left_mg_relax_c1d
+            left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_3] = left_mg_relax_c1
+            __idx_right_mg_relax_c1_stack_1_5 = (prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)
+            right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_5] = right_mg_relax_c1d
+            right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_5] = right_mg_relax_c1
         end
-        tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1)) + 1] = n
+        __idx_tripcount_stack_1_5 = (prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1)) + 1
+        tripcount_stack[__idx_tripcount_stack_1_5] = n
         for j = 1:n
-            left_stack_d[prefix_left_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = leftd
-            left_stack[prefix_left_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = left
+            __idx_left_stack_1_0 = prefix_left_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)
+            left_stack_d[__idx_left_stack_1_0] = leftd
+            left_stack[__idx_left_stack_1_0] = left
             leftd = 0.0
             left = 0.0
             if j > 1
-                branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = 1
-                left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = leftd
-                left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = left
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+                branch_stack[__idx_branch_stack_1_0] = 1
+                __idx_left_stack_1_0 = (prefix_left_stack_1[(i_seq_level - 1) + 1] + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+                left_stack_d[__idx_left_stack_1_0] = leftd
+                left_stack[__idx_left_stack_1_0] = left
                 leftd = ud[j - 1, i_seq_level]
                 left = u[j - 1, i_seq_level]
             else
-                branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = 0
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+                branch_stack[__idx_branch_stack_1_0] = 0
             end
-            right_stack_d[prefix_right_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = rightd
-            right_stack[prefix_right_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = right
+            __idx_right_stack_1_4 = prefix_right_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)
+            right_stack_d[__idx_right_stack_1_4] = rightd
+            right_stack[__idx_right_stack_1_4] = right
             rightd = 0.0
             right = 0.0
             if j < n
-                branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = 1
-                right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = rightd
-                right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = right
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+                branch_stack[__idx_branch_stack_1_0] = 1
+                __idx_right_stack_1_0 = (prefix_right_stack_1[(i_seq_level - 1) + 1] + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+                right_stack_d[__idx_right_stack_1_0] = rightd
+                right_stack[__idx_right_stack_1_0] = right
                 rightd = ud[j + 1, i_seq_level]
                 right = u[j + 1, i_seq_level]
             else
-                branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = 0
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+                branch_stack[__idx_branch_stack_1_0] = 0
             end
-            r_stack_d[prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = rd[j, i_seq_level]
-            r_stack[prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = r[j, i_seq_level]
+            __idx_r_stack_1_8 = prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)
+            r_stack_d[__idx_r_stack_1_8] = rd[j, i_seq_level]
+            r_stack[__idx_r_stack_1_8] = r[j, i_seq_level]
             rd[j, i_seq_level] = fd[j, i_seq_level] + -(((1.0 / hl2) * ((2.0 * ud[j, i_seq_level] + -leftd) + -rightd) + -(((2.0 * u[j, i_seq_level] - left) - right) / hl2 ^ 2) * hl2d))
             r[j, i_seq_level] = f[j, i_seq_level] - ((2.0 * u[j, i_seq_level] - left) - right) / hl2
-            left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = leftd
-            left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = left
-            right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = rightd
-            right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)] = right
+            __idx_left_stack_1_11 = (prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+            left_stack_d[__idx_left_stack_1_11] = leftd
+            left_stack[__idx_left_stack_1_11] = left
+            __idx_right_stack_1_13 = (prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+            right_stack_d[__idx_right_stack_1_13] = rightd
+            right_stack[__idx_right_stack_1_13] = right
         end
         ncg = div(nl, 2)
         nc = ncg - 1
-        tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) + 1)) + 1] = nc
+        __idx_tripcount_stack_1_10 = (prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) + 1)) + 1
+        tripcount_stack[__idx_tripcount_stack_1_10] = nc
         for j = 1:nc
             jf = j * 2
-            f_stack_d[prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = fd[j, i_seq_level + 1]
-            f_stack[prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)] = f[j, i_seq_level + 1]
+            __idx_f_stack_1_1 = prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)
+            f_stack_d[__idx_f_stack_1_1] = fd[j, i_seq_level + 1]
+            f_stack[__idx_f_stack_1_1] = f[j, i_seq_level + 1]
             fd[j, i_seq_level + 1] = (0.25 * rd[jf - 1, i_seq_level] + 0.5 * rd[jf, i_seq_level]) + 0.25 * rd[jf + 1, i_seq_level]
             f[j, i_seq_level + 1] = 0.25 * r[jf - 1, i_seq_level] + 0.5 * r[jf, i_seq_level] + 0.25 * r[jf + 1, i_seq_level]
         end
-        tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) + 1) + 1)) + 1] = nc
+        __idx_tripcount_stack_1_13 = (prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) + 1) + 1)) + 1
+        tripcount_stack[__idx_tripcount_stack_1_13] = nc
         for j = 1:nc
-            u_stack_d[(prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = ud[j, i_seq_level + 1]
-            u_stack[(prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = u[j, i_seq_level + 1]
+            __idx_u_stack_1_0 = (prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            u_stack_d[__idx_u_stack_1_0] = ud[j, i_seq_level + 1]
+            u_stack[__idx_u_stack_1_0] = u[j, i_seq_level + 1]
             ud[j, i_seq_level + 1] = 0.0
             u[j, i_seq_level + 1] = 0.0
         end
         nl = ncg
-        hl_stack_d[prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1] = hld
-        hl_stack[prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1] = hl
+        __idx_hl_stack_1_17 = prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1
+        hl_stack_d[__idx_hl_stack_1_17] = hld
+        hl_stack[__idx_hl_stack_1_17] = hl
         hld = 2.0hld
         hl = hl * 2.0
-        left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1] = leftd
-        left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1] = left
-        left_mg_relax_c1_stack_d[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1] = left_mg_relax_c1d
-        left_mg_relax_c1_stack[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1] = left_mg_relax_c1
-        right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1] = rightd
-        right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1] = right
-        right_mg_relax_c1_stack_d[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1] = right_mg_relax_c1d
-        right_mg_relax_c1_stack[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1] = right_mg_relax_c1
+        __idx_left_stack_1_20 = (prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1
+        left_stack_d[__idx_left_stack_1_20] = leftd
+        left_stack[__idx_left_stack_1_20] = left
+        __idx_left_mg_relax_c1_stack_1_22 = (prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1
+        left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_22] = left_mg_relax_c1d
+        left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_22] = left_mg_relax_c1
+        __idx_right_stack_1_24 = (prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1
+        right_stack_d[__idx_right_stack_1_24] = rightd
+        right_stack[__idx_right_stack_1_24] = right
+        __idx_right_mg_relax_c1_stack_1_26 = (prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1
+        right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_26] = right_mg_relax_c1d
+        right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_26] = right_mg_relax_c1
     end
     hl2_stack_d[__tot_hl2_stack_1 + 1] = hl2d
     hl2_stack[__tot_hl2_stack_1 + 1] = hl2
@@ -310,114 +346,148 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
     u[1, num_levels] = 0.5 * hl2 * f[1, num_levels]
     for i_seq_level = num_levels - 1:-1:1
         nl = nl * 2
-        hl_stack_d[(__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = hld
-        hl_stack[(__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = hl
+        __idx_hl_stack_2_1 = (__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1
+        hl_stack_d[__idx_hl_stack_2_1] = hld
+        hl_stack[__idx_hl_stack_2_1] = hl
         hld = 0.5hld
         hl = hl / 2.0
         n = nl - 1
         ncg = div(nl, 2)
         nc = ncg - 1
-        hl2_stack_d[((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = hl2d
-        hl2_stack[((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = hl2
+        __idx_hl2_stack_2_7 = ((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1
+        hl2_stack_d[__idx_hl2_stack_2_7] = hl2d
+        hl2_stack[__idx_hl2_stack_2_7] = hl2
         hl2d = hl * hld + hl * hld
         hl2 = hl * hl
-        tripcount_stack[(__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1] = nc
+        __idx_tripcount_stack_2_10 = (__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1
+        tripcount_stack[__idx_tripcount_stack_2_10] = nc
         for j = 1:nc
             jf = j * 2
-            u_stack_d[((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)] = ud[jf, i_seq_level]
-            u_stack[((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)] = u[jf, i_seq_level]
+            __idx_u_stack_2_1 = ((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
+            u_stack_d[__idx_u_stack_2_1] = ud[jf, i_seq_level]
+            u_stack[__idx_u_stack_2_1] = u[jf, i_seq_level]
             ud[jf, i_seq_level] = ud[jf, i_seq_level] + ud[j, i_seq_level + 1]
             u[jf, i_seq_level] = u[jf, i_seq_level] + u[j, i_seq_level + 1]
         end
-        tripcount_stack[((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1) + 1] = nc
+        __idx_tripcount_stack_2_13 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1) + 1
+        tripcount_stack[__idx_tripcount_stack_2_13] = nc
         for j = 1:nc + 1
             jf = j * 2 - 1
-            cl_stack_d[prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)] = cld
-            cl_stack[prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)] = cl
+            __idx_cl_stack_2_1 = prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
+            cl_stack_d[__idx_cl_stack_2_1] = cld
+            cl_stack[__idx_cl_stack_2_1] = cl
             cld = 0.0
             cl = 0.0
             if j > 1
-                branch_stack[(__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)] = 1
-                cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cld
-                cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cl
+                __idx_branch_stack_2_0 = (__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
+                branch_stack[__idx_branch_stack_2_0] = 1
+                __idx_cl_stack_2_0 = (prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)
+                cl_stack_d[__idx_cl_stack_2_0] = cld
+                cl_stack[__idx_cl_stack_2_0] = cl
                 cld = ud[j - 1, i_seq_level + 1]
                 cl = u[j - 1, i_seq_level + 1]
             else
-                branch_stack[(__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)] = 0
+                __idx_branch_stack_2_0 = (__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
+                branch_stack[__idx_branch_stack_2_0] = 0
             end
-            cr_stack_d[prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)] = crd
-            cr_stack[prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)] = cr
+            __idx_cr_stack_2_5 = prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
+            cr_stack_d[__idx_cr_stack_2_5] = crd
+            cr_stack[__idx_cr_stack_2_5] = cr
             crd = 0.0
             cr = 0.0
             if j <= nc
-                branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = 1
-                cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = crd
-                cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = cr
+                __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)
+                branch_stack[__idx_branch_stack_2_0] = 1
+                __idx_cr_stack_2_0 = (prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)
+                cr_stack_d[__idx_cr_stack_2_0] = crd
+                cr_stack[__idx_cr_stack_2_0] = cr
                 crd = ud[j, i_seq_level + 1]
                 cr = u[j, i_seq_level + 1]
             else
-                branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)] = 0
+                __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)
+                branch_stack[__idx_branch_stack_2_0] = 0
             end
-            u_stack_d[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = ud[jf, i_seq_level]
-            u_stack[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)] = u[jf, i_seq_level]
+            __idx_u_stack_2_9 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            u_stack_d[__idx_u_stack_2_9] = ud[jf, i_seq_level]
+            u_stack[__idx_u_stack_2_9] = u[jf, i_seq_level]
             ud[jf, i_seq_level] = ud[jf, i_seq_level] + 0.5 * (cld + crd)
             u[jf, i_seq_level] = u[jf, i_seq_level] + 0.5 * (cl + cr)
-            cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cld
-            cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cl
-            cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = crd
-            cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)] = cr
+            __idx_cl_stack_2_12 = (prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)
+            cl_stack_d[__idx_cl_stack_2_12] = cld
+            cl_stack[__idx_cl_stack_2_12] = cl
+            __idx_cr_stack_2_14 = (prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)
+            cr_stack_d[__idx_cr_stack_2_14] = crd
+            cr_stack[__idx_cr_stack_2_14] = cr
         end
         for i_seq_k_mg_relax_c2 = 1:nu2
-            tripcount_stack[((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (1 + 1)) + ((i_seq_k_mg_relax_c2 - 1) + 1)] = n
+            __idx_tripcount_stack_2_0 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (1 + 1)) + ((i_seq_k_mg_relax_c2 - 1) + 1)
+            tripcount_stack[__idx_tripcount_stack_2_0] = n
             for i_seq_j_mg_relax_c2 = 1:n
-                left_mg_relax_c2_stack_d[prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = left_mg_relax_c2d
-                left_mg_relax_c2_stack[prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = left_mg_relax_c2
+                __idx_left_mg_relax_c2_stack_2_0 = prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_0] = left_mg_relax_c2d
+                left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_0] = left_mg_relax_c2
                 left_mg_relax_c2d = 0.0
                 left_mg_relax_c2 = 0.0
                 if i_seq_j_mg_relax_c2 > 1
-                    branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = 1
-                    left_mg_relax_c2_stack_d[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = left_mg_relax_c2d
-                    left_mg_relax_c2_stack[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = left_mg_relax_c2
+                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                    branch_stack[__idx_branch_stack_2_0] = 1
+                    __idx_left_mg_relax_c2_stack_2_0 = (prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                    left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_0] = left_mg_relax_c2d
+                    left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_0] = left_mg_relax_c2
                     left_mg_relax_c2d = ud[i_seq_j_mg_relax_c2 - 1, i_seq_level]
                     left_mg_relax_c2 = u[i_seq_j_mg_relax_c2 - 1, i_seq_level]
                 else
-                    branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = 0
+                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                    branch_stack[__idx_branch_stack_2_0] = 0
                 end
-                right_mg_relax_c2_stack_d[prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = right_mg_relax_c2d
-                right_mg_relax_c2_stack[prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = right_mg_relax_c2
+                __idx_right_mg_relax_c2_stack_2_4 = prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_4] = right_mg_relax_c2d
+                right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_4] = right_mg_relax_c2
                 right_mg_relax_c2d = 0.0
                 right_mg_relax_c2 = 0.0
                 if i_seq_j_mg_relax_c2 < n
-                    branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = 1
-                    right_mg_relax_c2_stack_d[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = right_mg_relax_c2d
-                    right_mg_relax_c2_stack[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = right_mg_relax_c2
+                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                    branch_stack[__idx_branch_stack_2_0] = 1
+                    __idx_right_mg_relax_c2_stack_2_0 = (prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                    right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_0] = right_mg_relax_c2d
+                    right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_0] = right_mg_relax_c2
                     right_mg_relax_c2d = ud[i_seq_j_mg_relax_c2 + 1, i_seq_level]
                     right_mg_relax_c2 = u[i_seq_j_mg_relax_c2 + 1, i_seq_level]
                 else
-                    branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = 0
+                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                    branch_stack[__idx_branch_stack_2_0] = 0
                 end
-                u_stack_d[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = ud[i_seq_j_mg_relax_c2, i_seq_level]
-                u_stack[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = u[i_seq_j_mg_relax_c2, i_seq_level]
+                __idx_u_stack_2_8 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                u_stack_d[__idx_u_stack_2_8] = ud[i_seq_j_mg_relax_c2, i_seq_level]
+                u_stack[__idx_u_stack_2_8] = u[i_seq_j_mg_relax_c2, i_seq_level]
                 ud[i_seq_j_mg_relax_c2, i_seq_level] = 0.5 * (((f[i_seq_j_mg_relax_c2, i_seq_level] * hl2d + hl2 * fd[i_seq_j_mg_relax_c2, i_seq_level]) + left_mg_relax_c2d) + right_mg_relax_c2d)
                 u[i_seq_j_mg_relax_c2, i_seq_level] = 0.5 * (hl2 * f[i_seq_j_mg_relax_c2, i_seq_level] + left_mg_relax_c2 + right_mg_relax_c2)
-                left_mg_relax_c2_stack_d[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = left_mg_relax_c2d
-                left_mg_relax_c2_stack[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = left_mg_relax_c2
-                right_mg_relax_c2_stack_d[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = right_mg_relax_c2d
-                right_mg_relax_c2_stack[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)] = right_mg_relax_c2
+                __idx_left_mg_relax_c2_stack_2_11 = (prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_11] = left_mg_relax_c2d
+                left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_11] = left_mg_relax_c2
+                __idx_right_mg_relax_c2_stack_2_13 = (prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_13] = right_mg_relax_c2d
+                right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_13] = right_mg_relax_c2
             end
-            left_mg_relax_c2_stack_d[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)] = left_mg_relax_c2d
-            left_mg_relax_c2_stack[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)] = left_mg_relax_c2
-            right_mg_relax_c2_stack_d[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)] = right_mg_relax_c2d
-            right_mg_relax_c2_stack[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)] = right_mg_relax_c2
+            __idx_left_mg_relax_c2_stack_2_3 = (prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)
+            left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_3] = left_mg_relax_c2d
+            left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_3] = left_mg_relax_c2
+            __idx_right_mg_relax_c2_stack_2_5 = (prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)
+            right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_5] = right_mg_relax_c2d
+            right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_5] = right_mg_relax_c2
         end
-        cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1] = cld
-        cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1] = cl
-        cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1] = crd
-        cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1] = cr
-        left_mg_relax_c2_stack_d[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1] = left_mg_relax_c2d
-        left_mg_relax_c2_stack[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1] = left_mg_relax_c2
-        right_mg_relax_c2_stack_d[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1] = right_mg_relax_c2d
-        right_mg_relax_c2_stack[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1] = right_mg_relax_c2
+        __idx_cl_stack_2_17 = (prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1
+        cl_stack_d[__idx_cl_stack_2_17] = cld
+        cl_stack[__idx_cl_stack_2_17] = cl
+        __idx_cr_stack_2_19 = (prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1
+        cr_stack_d[__idx_cr_stack_2_19] = crd
+        cr_stack[__idx_cr_stack_2_19] = cr
+        __idx_left_mg_relax_c2_stack_2_21 = (prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1
+        left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_21] = left_mg_relax_c2d
+        left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_21] = left_mg_relax_c2
+        __idx_right_mg_relax_c2_stack_2_23 = (prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1
+        right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_23] = right_mg_relax_c2d
+        right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_23] = right_mg_relax_c2
     end
     cl_stack_d[__tot_cl_stack_2 + 1] = cld
     cl_stack[__tot_cl_stack_2 + 1] = cl
@@ -460,26 +530,36 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
     right_mg_relax_c2d = right_mg_relax_c2_stack_d[__tot_right_mg_relax_c2_stack_2 + 1]
     right_mg_relax_c2 = right_mg_relax_c2_stack[__tot_right_mg_relax_c2_stack_2 + 1]
     for i_seq_level = 1:num_levels - 1
-        cld = cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1]
-        cl = cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1]
-        crd = cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1]
-        cr = cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1]
-        left_mg_relax_c2d = left_mg_relax_c2_stack_d[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1]
-        left_mg_relax_c2 = left_mg_relax_c2_stack[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1]
-        right_mg_relax_c2d = right_mg_relax_c2_stack_d[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1]
-        right_mg_relax_c2 = right_mg_relax_c2_stack[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1]
+        __idx_cl_stack_2_0 = (prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1
+        cld = cl_stack_d[__idx_cl_stack_2_0]
+        cl = cl_stack[__idx_cl_stack_2_0]
+        __idx_cr_stack_2_2 = (prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + 1
+        crd = cr_stack_d[__idx_cr_stack_2_2]
+        cr = cr_stack[__idx_cr_stack_2_2]
+        __idx_left_mg_relax_c2_stack_2_4 = (prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1
+        left_mg_relax_c2d = left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_4]
+        left_mg_relax_c2 = left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_4]
+        __idx_right_mg_relax_c2_stack_2_6 = (prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1))) + 1
+        right_mg_relax_c2d = right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_6]
+        right_mg_relax_c2 = right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_6]
         for i_seq_k_mg_relax_c2 = nu2:-1:1
-            left_mg_relax_c2d = left_mg_relax_c2_stack_d[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)]
-            left_mg_relax_c2 = left_mg_relax_c2_stack[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)]
-            right_mg_relax_c2d = right_mg_relax_c2_stack_d[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)]
-            right_mg_relax_c2 = right_mg_relax_c2_stack[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)]
-            n = tripcount_stack[((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (1 + 1)) + ((i_seq_k_mg_relax_c2 - 1) + 1)]
+            __idx_left_mg_relax_c2_stack_2_0 = (prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)
+            left_mg_relax_c2d = left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_0]
+            left_mg_relax_c2 = left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_0]
+            __idx_right_mg_relax_c2_stack_2_2 = (prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c2 - 1) + 1)
+            right_mg_relax_c2d = right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_2]
+            right_mg_relax_c2 = right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_2]
+            __idx_tripcount_stack_2_4 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (1 + 1)) + ((i_seq_k_mg_relax_c2 - 1) + 1)
+            n = tripcount_stack[__idx_tripcount_stack_2_4]
             for i_seq_j_mg_relax_c2 = n:-1:1
-                left_mg_relax_c2d = left_mg_relax_c2_stack_d[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
-                left_mg_relax_c2 = left_mg_relax_c2_stack[(prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
-                right_mg_relax_c2d = right_mg_relax_c2_stack_d[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
-                right_mg_relax_c2 = right_mg_relax_c2_stack[(prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
-                __branch_pre_4 = branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
+                __idx_left_mg_relax_c2_stack_2_0 = (prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                left_mg_relax_c2d = left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_0]
+                left_mg_relax_c2 = left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_0]
+                __idx_right_mg_relax_c2_stack_2_2 = (prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                right_mg_relax_c2d = right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_2]
+                right_mg_relax_c2 = right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_2]
+                __idx_branch_stack_2_4 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + (div(nu2 - 1, 1) + 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                __branch_pre_4 = branch_stack[__idx_branch_stack_2_4]
                 right_mg_relax_c2d = 0.0
                 right_mg_relax_c2 = 0.0
                 if __branch_pre_4 == 1
@@ -489,7 +569,8 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                     right_mg_relax_c2d = 0.0
                     right_mg_relax_c2 = 0.0
                 end
-                __branch_pre_2 = branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
+                __idx_branch_stack_2_8 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                __branch_pre_2 = branch_stack[__idx_branch_stack_2_8]
                 left_mg_relax_c2d = 0.0
                 left_mg_relax_c2 = 0.0
                 if __branch_pre_2 == 1
@@ -499,8 +580,9 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                     left_mg_relax_c2d = 0.0
                     left_mg_relax_c2 = 0.0
                 end
-                ud[i_seq_j_mg_relax_c2, i_seq_level] = u_stack_d[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
-                u[i_seq_j_mg_relax_c2, i_seq_level] = u_stack[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
+                __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                ud[i_seq_j_mg_relax_c2, i_seq_level] = u_stack_d[__idx_u_stack_2_0]
+                u[i_seq_j_mg_relax_c2, i_seq_level] = u_stack[__idx_u_stack_2_0]
                 hl2bd = hl2bd + ((0.5 * ub[i_seq_j_mg_relax_c2, i_seq_level]) * fd[i_seq_j_mg_relax_c2, i_seq_level] + f[i_seq_j_mg_relax_c2, i_seq_level] * (0.5 * ubd[i_seq_j_mg_relax_c2, i_seq_level]))
                 hl2b = hl2b + f[i_seq_j_mg_relax_c2, i_seq_level] * (0.5 * ub[i_seq_j_mg_relax_c2, i_seq_level])
                 fbd[i_seq_j_mg_relax_c2, i_seq_level] = fbd[i_seq_j_mg_relax_c2, i_seq_level] + ((0.5 * ub[i_seq_j_mg_relax_c2, i_seq_level]) * hl2d + hl2 * (0.5 * ubd[i_seq_j_mg_relax_c2, i_seq_level]))
@@ -517,8 +599,9 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                     right_mg_relax_c2bd = 0.0
                     right_mg_relax_c2b = 0.0
                 end
-                right_mg_relax_c2d = right_mg_relax_c2_stack_d[prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
-                right_mg_relax_c2 = right_mg_relax_c2_stack[prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
+                __idx_right_mg_relax_c2_stack_2_0 = prefix_right_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                right_mg_relax_c2d = right_mg_relax_c2_stack_d[__idx_right_mg_relax_c2_stack_2_0]
+                right_mg_relax_c2 = right_mg_relax_c2_stack[__idx_right_mg_relax_c2_stack_2_0]
                 right_mg_relax_c2bd = 0.0
                 right_mg_relax_c2b = 0.0
                 if __branch_pre_2 == 1
@@ -527,20 +610,25 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                     left_mg_relax_c2bd = 0.0
                     left_mg_relax_c2b = 0.0
                 end
-                left_mg_relax_c2d = left_mg_relax_c2_stack_d[prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
-                left_mg_relax_c2 = left_mg_relax_c2_stack[prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)]
+                __idx_left_mg_relax_c2_stack_2_0 = prefix_left_mg_relax_c2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + (((i_seq_k_mg_relax_c2 - 1) * (div(val_n_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c2 - 1)) + 1)
+                left_mg_relax_c2d = left_mg_relax_c2_stack_d[__idx_left_mg_relax_c2_stack_2_0]
+                left_mg_relax_c2 = left_mg_relax_c2_stack[__idx_left_mg_relax_c2_stack_2_0]
                 left_mg_relax_c2bd = 0.0
                 left_mg_relax_c2b = 0.0
             end
         end
-        nc = tripcount_stack[((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1) + 1]
+        __idx_tripcount_stack_2_9 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1) + 1
+        nc = tripcount_stack[__idx_tripcount_stack_2_9]
         for j = nc + 1:-1:1
-            cld = cl_stack_d[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
-            cl = cl_stack[(prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
-            crd = cr_stack_d[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
-            cr = cr_stack[(prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)]
+            __idx_cl_stack_2_0 = (prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)
+            cld = cl_stack_d[__idx_cl_stack_2_0]
+            cl = cl_stack[__idx_cl_stack_2_0]
+            __idx_cr_stack_2_2 = (prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + ((j - 1) + 1)
+            crd = cr_stack_d[__idx_cr_stack_2_2]
+            cr = cr_stack[__idx_cr_stack_2_2]
             jf = j * 2 - 1
-            __branch_pre_5 = branch_stack[((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)]
+            __idx_branch_stack_2_5 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div((val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)
+            __branch_pre_5 = branch_stack[__idx_branch_stack_2_5]
             crd = 0.0
             cr = 0.0
             if __branch_pre_5 == 1
@@ -550,7 +638,8 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                 crd = 0.0
                 cr = 0.0
             end
-            __branch_pre_3 = branch_stack[(__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)]
+            __idx_branch_stack_2_9 = (__tot_branch_stack_1 + prefix_branch_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
+            __branch_pre_3 = branch_stack[__idx_branch_stack_2_9]
             cld = 0.0
             cl = 0.0
             if __branch_pre_3 == 1
@@ -560,8 +649,9 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                 cld = 0.0
                 cl = 0.0
             end
-            ud[jf, i_seq_level] = u_stack_d[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)]
-            u[jf, i_seq_level] = u_stack[(((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)]
+            __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + (div(val_nc_2[div(i_seq_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            ud[jf, i_seq_level] = u_stack_d[__idx_u_stack_2_0]
+            u[jf, i_seq_level] = u_stack[__idx_u_stack_2_0]
             clbd = clbd + 0.5 * ubd[jf, i_seq_level]
             clb = clb + 0.5 * ub[jf, i_seq_level]
             crbd = crbd + 0.5 * ubd[jf, i_seq_level]
@@ -572,8 +662,9 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                 crbd = 0.0
                 crb = 0.0
             end
-            crd = cr_stack_d[prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)]
-            cr = cr_stack[prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)]
+            __idx_cr_stack_2_0 = prefix_cr_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
+            crd = cr_stack_d[__idx_cr_stack_2_0]
+            cr = cr_stack[__idx_cr_stack_2_0]
             crbd = 0.0
             crb = 0.0
             if __branch_pre_3 == 1
@@ -582,29 +673,34 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                 clbd = 0.0
                 clb = 0.0
             end
-            cld = cl_stack_d[prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)]
-            cl = cl_stack[prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)]
+            __idx_cl_stack_2_0 = prefix_cl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
+            cld = cl_stack_d[__idx_cl_stack_2_0]
+            cl = cl_stack[__idx_cl_stack_2_0]
             clbd = 0.0
             clb = 0.0
         end
-        nc = tripcount_stack[(__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
+        __idx_tripcount_stack_2_12 = (__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1
+        nc = tripcount_stack[__idx_tripcount_stack_2_12]
         for j = nc:-1:1
             jf = j * 2
-            ud[jf, i_seq_level] = u_stack_d[((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)]
-            u[jf, i_seq_level] = u_stack[((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)]
+            __idx_u_stack_2_0 = ((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
+            ud[jf, i_seq_level] = u_stack_d[__idx_u_stack_2_0]
+            u[jf, i_seq_level] = u_stack[__idx_u_stack_2_0]
             ubd[j, i_seq_level + 1] = ubd[j, i_seq_level + 1] + ubd[jf, i_seq_level]
             ub[j, i_seq_level + 1] = ub[j, i_seq_level + 1] + ub[jf, i_seq_level]
         end
-        hl2d = hl2_stack_d[((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
-        hl2 = hl2_stack[((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
+        __idx_hl2_stack_2_0 = ((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1
+        hl2d = hl2_stack_d[__idx_hl2_stack_2_0]
+        hl2 = hl2_stack[__idx_hl2_stack_2_0]
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
         hlb = hlb + hl * hl2b
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
         hlb = hlb + hl * hl2b
         hl2bd = 0.0
         hl2b = 0.0
-        hld = hl_stack_d[(__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
-        hl = hl_stack[(__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1]
+        __idx_hl_stack_2_0 = (__tot_hl_stack_1 + prefix_hl_stack_2[div(i_seq_level - (num_levels - 1), -1) + 1]) + 1
+        hld = hl_stack_d[__idx_hl_stack_2_0]
+        hl = hl_stack[__idx_hl_stack_2_0]
         hlbd = 0.5hlbd
         hlb = 0.5hlb
     end
@@ -625,30 +721,39 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
     hl2bd = 0.0
     hl2b = 0.0
     for i_seq_level = num_levels - 1:-1:1
-        leftd = left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1]
-        left = left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1]
-        left_mg_relax_c1d = left_mg_relax_c1_stack_d[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1]
-        left_mg_relax_c1 = left_mg_relax_c1_stack[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1]
-        rightd = right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1]
-        right = right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1]
-        right_mg_relax_c1d = right_mg_relax_c1_stack_d[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1]
-        right_mg_relax_c1 = right_mg_relax_c1_stack[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1]
-        hld = hl_stack_d[prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1]
-        hl = hl_stack[prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1]
+        __idx_left_stack_1_0 = (prefix_left_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1
+        leftd = left_stack_d[__idx_left_stack_1_0]
+        left = left_stack[__idx_left_stack_1_0]
+        __idx_left_mg_relax_c1_stack_1_2 = (prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1
+        left_mg_relax_c1d = left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_2]
+        left_mg_relax_c1 = left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_2]
+        __idx_right_stack_1_4 = (prefix_right_stack_1[(i_seq_level - 1) + 1] + (((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + 1
+        rightd = right_stack_d[__idx_right_stack_1_4]
+        right = right_stack[__idx_right_stack_1_4]
+        __idx_right_mg_relax_c1_stack_1_6 = (prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1))) + 1
+        right_mg_relax_c1d = right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_6]
+        right_mg_relax_c1 = right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_6]
+        __idx_hl_stack_1_0 = prefix_hl_stack_1[(i_seq_level - 1) + 1] + 1
+        hld = hl_stack_d[__idx_hl_stack_1_0]
+        hl = hl_stack[__idx_hl_stack_1_0]
         hlbd = 2.0hlbd
         hlb = 2.0hlb
-        nc = tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) + 1) + 1)) + 1]
+        __idx_tripcount_stack_1_11 = (prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) + 1) + 1)) + 1
+        nc = tripcount_stack[__idx_tripcount_stack_1_11]
         for j = nc:-1:1
-            ud[j, i_seq_level + 1] = u_stack_d[(prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)]
-            u[j, i_seq_level + 1] = u_stack[(prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)]
+            __idx_u_stack_1_0 = (prefix_u_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            ud[j, i_seq_level + 1] = u_stack_d[__idx_u_stack_1_0]
+            u[j, i_seq_level + 1] = u_stack[__idx_u_stack_1_0]
             ubd[j, i_seq_level + 1] = 0.0
             ub[j, i_seq_level + 1] = 0.0
         end
-        nc = tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) + 1)) + 1]
+        __idx_tripcount_stack_1_14 = (prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) + 1)) + 1
+        nc = tripcount_stack[__idx_tripcount_stack_1_14]
         for j = nc:-1:1
             jf = j * 2
-            fd[j, i_seq_level + 1] = f_stack_d[prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
-            f[j, i_seq_level + 1] = f_stack[prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
+            __idx_f_stack_1_0 = prefix_f_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)
+            fd[j, i_seq_level + 1] = f_stack_d[__idx_f_stack_1_0]
+            f[j, i_seq_level + 1] = f_stack[__idx_f_stack_1_0]
             rbd[jf - 1, i_seq_level] = rbd[jf - 1, i_seq_level] + 0.25 * fbd[j, i_seq_level + 1]
             rb[jf - 1, i_seq_level] = rb[jf - 1, i_seq_level] + 0.25 * fb[j, i_seq_level + 1]
             rbd[jf, i_seq_level] = rbd[jf, i_seq_level] + 0.5 * fbd[j, i_seq_level + 1]
@@ -658,13 +763,17 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
             fbd[j, i_seq_level + 1] = 0.0
             fb[j, i_seq_level + 1] = 0.0
         end
-        n = tripcount_stack[(prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1)) + 1]
+        __idx_tripcount_stack_1_17 = (prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1)) + 1
+        n = tripcount_stack[__idx_tripcount_stack_1_17]
         for j = n:-1:1
-            leftd = left_stack_d[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
-            left = left_stack[(prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
-            rightd = right_stack_d[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
-            right = right_stack[(prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
-            __branch_pre_4 = branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
+            __idx_left_stack_1_0 = (prefix_left_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+            leftd = left_stack_d[__idx_left_stack_1_0]
+            left = left_stack[__idx_left_stack_1_0]
+            __idx_right_stack_1_2 = (prefix_right_stack_1[(i_seq_level - 1) + 1] + ((div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+            rightd = right_stack_d[__idx_right_stack_1_2]
+            right = right_stack[__idx_right_stack_1_2]
+            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+            __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
             rightd = 0.0
             right = 0.0
             if __branch_pre_4 == 1
@@ -674,7 +783,8 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                 rightd = 0.0
                 right = 0.0
             end
-            __branch_pre_2 = branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)]
+            __idx_branch_stack_1_8 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+            __branch_pre_2 = branch_stack[__idx_branch_stack_1_8]
             leftd = 0.0
             left = 0.0
             if __branch_pre_2 == 1
@@ -684,8 +794,9 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                 leftd = 0.0
                 left = 0.0
             end
-            rd[j, i_seq_level] = r_stack_d[prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
-            r[j, i_seq_level] = r_stack[prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
+            __idx_r_stack_1_0 = prefix_r_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)
+            rd[j, i_seq_level] = r_stack_d[__idx_r_stack_1_0]
+            r[j, i_seq_level] = r_stack[__idx_r_stack_1_0]
             fbd[j, i_seq_level] = fbd[j, i_seq_level] + rbd[j, i_seq_level]
             fb[j, i_seq_level] = fb[j, i_seq_level] + rb[j, i_seq_level]
             ubd[j, i_seq_level] = ubd[j, i_seq_level] + 2.0 * (-(rb[j, i_seq_level]) * (-(1.0 / hl2 ^ 2) * hl2d) + (1.0 / hl2) * -(rbd[j, i_seq_level]))
@@ -704,8 +815,9 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                 rightbd = 0.0
                 rightb = 0.0
             end
-            rightd = right_stack_d[prefix_right_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
-            right = right_stack[prefix_right_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
+            __idx_right_stack_1_0 = prefix_right_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)
+            rightd = right_stack_d[__idx_right_stack_1_0]
+            right = right_stack[__idx_right_stack_1_0]
             rightbd = 0.0
             rightb = 0.0
             if __branch_pre_2 == 1
@@ -714,23 +826,30 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                 leftbd = 0.0
                 leftb = 0.0
             end
-            leftd = left_stack_d[prefix_left_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
-            left = left_stack[prefix_left_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)]
+            __idx_left_stack_1_0 = prefix_left_stack_1[(i_seq_level - 1) + 1] + ((j - 1) + 1)
+            leftd = left_stack_d[__idx_left_stack_1_0]
+            left = left_stack[__idx_left_stack_1_0]
             leftbd = 0.0
             leftb = 0.0
         end
         for i_seq_k_mg_relax_c1 = nu1:-1:1
-            left_mg_relax_c1d = left_mg_relax_c1_stack_d[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)]
-            left_mg_relax_c1 = left_mg_relax_c1_stack[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)]
-            right_mg_relax_c1d = right_mg_relax_c1_stack_d[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)]
-            right_mg_relax_c1 = right_mg_relax_c1_stack[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)]
-            n = tripcount_stack[prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((i_seq_k_mg_relax_c1 - 1) + 1)]
+            __idx_left_mg_relax_c1_stack_1_0 = (prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)
+            left_mg_relax_c1d = left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_0]
+            left_mg_relax_c1 = left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_0]
+            __idx_right_mg_relax_c1_stack_1_2 = (prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + ((i_seq_k_mg_relax_c1 - 1) + 1)
+            right_mg_relax_c1d = right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_2]
+            right_mg_relax_c1 = right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_2]
+            __idx_tripcount_stack_1_4 = prefix_tripcount_stack_1[(i_seq_level - 1) + 1] + ((i_seq_k_mg_relax_c1 - 1) + 1)
+            n = tripcount_stack[__idx_tripcount_stack_1_4]
             for i_seq_j_mg_relax_c1 = n:-1:1
-                left_mg_relax_c1d = left_mg_relax_c1_stack_d[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
-                left_mg_relax_c1 = left_mg_relax_c1_stack[(prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
-                right_mg_relax_c1d = right_mg_relax_c1_stack_d[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
-                right_mg_relax_c1 = right_mg_relax_c1_stack[(prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
-                __branch_pre_4 = branch_stack[(prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
+                __idx_left_mg_relax_c1_stack_1_0 = (prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                left_mg_relax_c1d = left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_0]
+                left_mg_relax_c1 = left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_0]
+                __idx_right_mg_relax_c1_stack_1_2 = (prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + ((div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1))) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                right_mg_relax_c1d = right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_2]
+                right_mg_relax_c1 = right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_2]
+                __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_seq_level - 1) + 1] + (div(nu1 - 1, 1) + 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1)) + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
                 right_mg_relax_c1d = 0.0
                 right_mg_relax_c1 = 0.0
                 if __branch_pre_4 == 1
@@ -740,7 +859,8 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                     right_mg_relax_c1d = 0.0
                     right_mg_relax_c1 = 0.0
                 end
-                __branch_pre_2 = branch_stack[prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
+                __idx_branch_stack_1_8 = prefix_branch_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                __branch_pre_2 = branch_stack[__idx_branch_stack_1_8]
                 left_mg_relax_c1d = 0.0
                 left_mg_relax_c1 = 0.0
                 if __branch_pre_2 == 1
@@ -750,8 +870,9 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                     left_mg_relax_c1d = 0.0
                     left_mg_relax_c1 = 0.0
                 end
-                ud[i_seq_j_mg_relax_c1, i_seq_level] = u_stack_d[prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
-                u[i_seq_j_mg_relax_c1, i_seq_level] = u_stack[prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
+                __idx_u_stack_1_0 = prefix_u_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                ud[i_seq_j_mg_relax_c1, i_seq_level] = u_stack_d[__idx_u_stack_1_0]
+                u[i_seq_j_mg_relax_c1, i_seq_level] = u_stack[__idx_u_stack_1_0]
                 hl2bd = hl2bd + ((0.5 * ub[i_seq_j_mg_relax_c1, i_seq_level]) * fd[i_seq_j_mg_relax_c1, i_seq_level] + f[i_seq_j_mg_relax_c1, i_seq_level] * (0.5 * ubd[i_seq_j_mg_relax_c1, i_seq_level]))
                 hl2b = hl2b + f[i_seq_j_mg_relax_c1, i_seq_level] * (0.5 * ub[i_seq_j_mg_relax_c1, i_seq_level])
                 fbd[i_seq_j_mg_relax_c1, i_seq_level] = fbd[i_seq_j_mg_relax_c1, i_seq_level] + ((0.5 * ub[i_seq_j_mg_relax_c1, i_seq_level]) * hl2d + hl2 * (0.5 * ubd[i_seq_j_mg_relax_c1, i_seq_level]))
@@ -768,8 +889,9 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                     right_mg_relax_c1bd = 0.0
                     right_mg_relax_c1b = 0.0
                 end
-                right_mg_relax_c1d = right_mg_relax_c1_stack_d[prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
-                right_mg_relax_c1 = right_mg_relax_c1_stack[prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
+                __idx_right_mg_relax_c1_stack_1_0 = prefix_right_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                right_mg_relax_c1d = right_mg_relax_c1_stack_d[__idx_right_mg_relax_c1_stack_1_0]
+                right_mg_relax_c1 = right_mg_relax_c1_stack[__idx_right_mg_relax_c1_stack_1_0]
                 right_mg_relax_c1bd = 0.0
                 right_mg_relax_c1b = 0.0
                 if __branch_pre_2 == 1
@@ -778,14 +900,16 @@ function mg_vcycle_multi_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1
                     left_mg_relax_c1bd = 0.0
                     left_mg_relax_c1b = 0.0
                 end
-                left_mg_relax_c1d = left_mg_relax_c1_stack_d[prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
-                left_mg_relax_c1 = left_mg_relax_c1_stack[prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)]
+                __idx_left_mg_relax_c1_stack_1_0 = prefix_left_mg_relax_c1_stack_1[(i_seq_level - 1) + 1] + (((i_seq_k_mg_relax_c1 - 1) * (div(val_n_1[(i_seq_level - 1) + 1] - 1, 1) + 1) + (i_seq_j_mg_relax_c1 - 1)) + 1)
+                left_mg_relax_c1d = left_mg_relax_c1_stack_d[__idx_left_mg_relax_c1_stack_1_0]
+                left_mg_relax_c1 = left_mg_relax_c1_stack[__idx_left_mg_relax_c1_stack_1_0]
                 left_mg_relax_c1bd = 0.0
                 left_mg_relax_c1b = 0.0
             end
         end
-        hl2d = hl2_stack_d[prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1]
-        hl2 = hl2_stack[prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1]
+        __idx_hl2_stack_1_0 = prefix_hl2_stack_1[(i_seq_level - 1) + 1] + 1
+        hl2d = hl2_stack_d[__idx_hl2_stack_1_0]
+        hl2 = hl2_stack[__idx_hl2_stack_1_0]
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)
         hlb = hlb + hl * hl2b
         hlbd = hlbd + (hl2b * hld + hl * hl2bd)

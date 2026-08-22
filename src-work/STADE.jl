@@ -4009,7 +4009,7 @@ function agen_substitute_vars(expr, subst::Dict{Symbol,Any})
     return expr
 end
 
-function agen_site_index(ectx, key)
+function agen_site_index(exprs, ectx, key)
     entry = ectx.layout.offsets[key]
     if entry[1] === :ragged
         # Tier B (Phase C): a ragged-block occurrence -- see the
@@ -4062,7 +4062,26 @@ function agen_site_index(ectx, key)
         # which only ever holds closed-form/kernel-arg/`__tot_*`
         # terms -- see agen_layout_static_record!/agen_layout_walk_top!
         # -- so it needs no substitution of its own.
-        return agen_add_exprs(agen_add_exprs(agen_add_exprs(get(blk.base, stack, 0), Expr(:ref, table_name, table_idx)), local_offset), local_position)
+        full_index = agen_add_exprs(agen_add_exprs(agen_add_exprs(get(blk.base, stack, 0), Expr(:ref, table_name, table_idx)), local_offset), local_position)
+        # `full_index` embeds at least one table lookup (the
+        # `Expr(:ref, table_name, table_idx)` term above -- and,
+        # whenever `local_offset`/`local_position` referenced a
+        # block-local scalar, agen_substitute_vars just replaced THAT
+        # with its own `val_*_N[table_idx]` lookup too) as a sub-
+        # expression of what's about to become the index of an OUTER
+        # `stack[...]` ref. That's exactly the a[b[i]]-style indirect
+        # indexing parse_check_no_indirect_indexing forbids -- STADE's
+        # own front end rejecting STADE's own generated code (see
+        # stade_gpu_plan.md Item 3). Reading it into a scalar on its
+        # own line first, right here, satisfies that rule the same way
+        # a hand-written kernel author would -- and does so unconditionally
+        # correctly regardless of which of the (potentially several)
+        # possible nested-ref shapes triggered it, rather than chasing
+        # each one individually.
+        parse_contains_ref(full_index) || return full_index
+        tmp = Symbol("__idx_", string(stack), "_", block_id, "_", length(exprs))
+        push!(exprs, Expr(:(=), tmp, full_index))
+        return tmp
     end
     (_, offset) = entry
     return agen_add_exprs(offset, agen_local_position(ectx.loop_ctx))
@@ -4090,16 +4109,25 @@ agen_use_stack_push(ectx, stack_name) = ectx.keep_push_pop ||
 # agen_use_stack_push(ectx, stack_name) is true, matching every call
 # site below that only ever computes a real key inside the :indexed
 # branch's own guard
-function agen_emit_push(stack_name::Symbol, value, ectx, key)
-    agen_use_stack_push(ectx, stack_name) && return Expr(:call, :push!, stack_name, value)
-    return Expr(:(=), Expr(:ref, stack_name, agen_site_index(ectx, key)), value)
+function agen_emit_push!(exprs, stack_name::Symbol, value, ectx, key)
+    if agen_use_stack_push(ectx, stack_name)
+        push!(exprs, Expr(:call, :push!, stack_name, value))
+        return nothing
+    end
+    idx = agen_site_index(exprs, ectx, key)
+    push!(exprs, Expr(:(=), Expr(:ref, stack_name, idx), value))
+    return nothing
 end
 
 # returns the RHS expr only -- caller wraps `lhs = <this>`, matching
-# how a plain `pop!(stack)` was always just an rhs expr too
-function agen_emit_pop(stack_name::Symbol, ectx, key)
+# how a plain `pop!(stack)` was always just an rhs expr too. `exprs`
+# is the caller's own in-construction statement list -- agen_site_index
+# may need to push a hoisted index assignment onto it BEFORE this
+# returns, so the hoist statement lands immediately ahead of whatever
+# statement the caller builds from this call's own return value.
+function agen_emit_pop(stack_name::Symbol, ectx, key, exprs)
     agen_use_stack_push(ectx, stack_name) && return Expr(:call, :pop!, stack_name)
-    return Expr(:ref, stack_name, agen_site_index(ectx, key))
+    return Expr(:ref, stack_name, agen_site_index(exprs, ectx, key))
 end
 
 # ---- Phase 3 cleanup: drop stack args left unused by fusion --------
@@ -4319,7 +4347,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
             # `exempt` skips the push entirely for a write snap_plan
             # itself would also elide -- see agen_exempt_vars.
             if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, agen_push_pop_source(value_needed, ectx), agen_site_key(body, idx)) && !(var in exempt)
-                push!(exprs, agen_emit_push(stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs, ectx, agen_site_key(body, idx)))
+                agen_emit_push!(exprs, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs, ectx, agen_site_key(body, idx))
             end
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
         elseif stmt.kind == :for
@@ -4358,7 +4386,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
                 loop_value_needed = setdiff(value_needed, vn_local)
                 loop_ectx = agen_ii_override_ectx(ectx, stmt.body, vn_local)
                 for bv in agen_tripcount_bound_vars(stmt, reassigned)
-                    push!(exprs, agen_emit_push(stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv)))
+                    agen_emit_push!(exprs, stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv))
                 end
                 push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
                 inner = agen_forward_body(stmt.body, kinds, active_map, loop_value_needed, reassigned, stacks, exempt;
@@ -4378,7 +4406,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
                     loop_ectx = agen_ii_override_ectx(ectx, stmt.body, vn_red)
                 end
                 for bv in agen_tripcount_bound_vars(stmt, reassigned)
-                    push!(exprs, agen_emit_push(stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv)))
+                    agen_emit_push!(exprs, stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv))
                 end
                 push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
                 inner = agen_forward_body(stmt.body, kinds, active_map, loop_value_needed, reassigned, stacks, exempt;
@@ -4391,16 +4419,25 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
             key = agen_site_key(body, idx)
-            then_exprs = vcat(Any[agen_emit_push(nm, 1, ectx, key)],
-                               agen_forward_body(stmt.then, kinds, active_map, value_needed, reassigned, stacks, exempt;
-                                                  ectx = ectx,
-                                                  lin_body = lin_body === nothing ? nothing : lin_body[idx].then,
-                                                  unsafe = unsafe))
-            els_exprs = vcat(Any[agen_emit_push(nm, 0, ectx, key)],
-                              agen_forward_body(stmt.els, kinds, active_map, value_needed, reassigned, stacks, exempt;
-                                                 ectx = ectx,
-                                                 lin_body = lin_body === nothing ? nothing : lin_body[idx].els,
-                                                 unsafe = unsafe))
+            # built as a fresh list (rather than the previous
+            # vcat(Any[agen_emit_push(...)], ...) one-liner) so
+            # agen_emit_push! has this branch's OWN statement list to
+            # hoist a ragged index assignment into, ahead of the
+            # branch-flag push itself -- hoisting into the OUTER
+            # `exprs` here would be wrong (it isn't guarded by
+            # `stmt.cond`, this push is).
+            then_exprs = Any[]
+            agen_emit_push!(then_exprs, nm, 1, ectx, key)
+            append!(then_exprs, agen_forward_body(stmt.then, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                                    ectx = ectx,
+                                                    lin_body = lin_body === nothing ? nothing : lin_body[idx].then,
+                                                    unsafe = unsafe))
+            els_exprs = Any[]
+            agen_emit_push!(els_exprs, nm, 0, ectx, key)
+            append!(els_exprs, agen_forward_body(stmt.els, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                                   ectx = ectx,
+                                                   lin_body = lin_body === nothing ? nothing : lin_body[idx].els,
+                                                   unsafe = unsafe))
             push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
         end
     end
@@ -4410,7 +4447,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
     # left it at -- restored symmetrically at the start of this same
     # body's own backward processing in agen_backward_body.
     for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan)
-        push!(exprs, agen_emit_push(stacks[(:value, var)], var, ectx, agen_site_key(body, 0, var)))
+        agen_emit_push!(exprs, stacks[(:value, var)], var, ectx, agen_site_key(body, 0, var))
     end
     return exprs
 end
@@ -4486,7 +4523,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
     # of whatever a later (i.e. previously-processed, in reverse
     # order) sibling iteration of the ENCLOSING loop left behind.
     for var in agen_block_boundary_vars(primal_body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan)
-        push!(exprs, Expr(:(=), var, agen_emit_pop(stacks[(:value, var)], ectx, agen_site_key(primal_body, 0, var))))
+        push!(exprs, Expr(:(=), var, agen_emit_pop(stacks[(:value, var)], ectx, agen_site_key(primal_body, 0, var), exprs)))
     end
     # int-kinded local assignments (index/bookkeeping helpers) never
     # carry gradients, so agen_backward_assign emits nothing at all
@@ -4551,7 +4588,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
         end
         isempty(resolved) && continue
         flag = Symbol("__branch_pre_", idx)
-        push!(exprs, Expr(:(=), flag, agen_emit_pop(stacks[(:branch, :cond)], ectx, agen_site_key(primal_body, idx))))
+        push!(exprs, Expr(:(=), flag, agen_emit_pop(stacks[(:branch, :cond)], ectx, agen_site_key(primal_body, idx), exprs)))
         branch_flags[idx] = flag
         hoisted_vars[idx] = Set(v for (v, _, _, _, _) in resolved)
         for (var, then_expr, els_expr, then_pushed, els_pushed) in resolved
@@ -4563,11 +4600,11 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             # skill-stade.md's keep_push_pop entry)
             if ectx.keep_push_pop
                 if then_pushed && els_pushed
-                    push!(exprs, Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing)))
+                    push!(exprs, Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing, exprs)))
                 elseif then_pushed
-                    push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing))], Any[]))
+                    push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing, exprs))], Any[]))
                 elseif els_pushed
-                    push!(exprs, emit_if(Expr(:call, :(==), flag, 0), Any[Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing))], Any[]))
+                    push!(exprs, emit_if(Expr(:call, :(==), flag, 0), Any[Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing, exprs))], Any[]))
                 end
             end
             # declared with a dummy numeric value first, then assigned
@@ -4633,7 +4670,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                     emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
                     emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
                 for bv in agen_tripcount_bound_vars(stmt, reassigned)
-                    push!(exprs, Expr(:(=), bv, agen_emit_pop(stacks[(:tripcount, bv)], ectx, agen_site_key(primal_body, idx, bv))))
+                    push!(exprs, Expr(:(=), bv, agen_emit_pop(stacks[(:tripcount, bv)], ectx, agen_site_key(primal_body, idx, bv), exprs)))
                 end
                 push!(exprs, loop_expr)
             end
@@ -4645,7 +4682,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                 push!(exprs, emit_if(Expr(:call, :(==), branch_flags[idx], 1), then_exprs, els_exprs))
             else
                 nm = stacks[(:branch, :cond)]
-                push!(exprs, Expr(:(=), :__branch, agen_emit_pop(nm, ectx, agen_site_key(primal_body, idx))))
+                push!(exprs, Expr(:(=), :__branch, agen_emit_pop(nm, ectx, agen_site_key(primal_body, idx), exprs)))
                 push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
             end
         end
@@ -4703,7 +4740,7 @@ function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned,
         # nothing to pop.
         if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), key) && !(var in exempt) && !(var in skip_restore)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
-            push!(exprs, Expr(:(=), stmt.lhs, agen_emit_pop(nm, ectx, key)))
+            push!(exprs, Expr(:(=), stmt.lhs, agen_emit_pop(nm, ectx, key, exprs)))
         end
         if stmt.active
             lhsb = agen_shadow(stmt.lhs)
@@ -5545,7 +5582,7 @@ function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, kno
         c = cgen_loop_convergent_constant(body, v)
         c !== nothing && c == known_consts[v] && (synth[v] = c)
     end
-    cgen_reduction_only_scalar_walk(body, Set{Symbol}(), local_names, synth)[1] || return nothing
+    cgen_use_before_def(body, local_names, synth)[1] || return nothing
     writes = Dict{Any,Vector{Any}}()
     reads = Dict{Any,Vector{Any}}()
     cgen_collect_array_accesses!(body, writes, reads)
@@ -5620,7 +5657,25 @@ function cgen_terminal_value_walk(body::Vector{NamedTuple}, var::Symbol, state)
                 :unknown
             end
         elseif stmt.kind == :for
-            cgen_var_assigned_anywhere(stmt.body, var) && (state = :unknown)
+            if cgen_var_assigned_anywhere(stmt.body, var)
+                # A var touched inside a NESTED loop isn't automatically
+                # :unknown -- if that nested loop's OWN body provably
+                # converges `var` to the SAME literal on every one of
+                # ITS control-flow paths too (recursing into
+                # cgen_loop_convergent_constant exactly as the top-level
+                # caller does), that literal is what `var` holds after
+                # the nested loop finishes, regardless of what it held
+                # entering it: the nested walk's own :unchanged->literal
+                # reasoning doesn't depend on the true entering value,
+                # only on every path ending at the same place. Needed
+                # once this proof runs on loops whose reset lives one
+                # level deeper than the reduction itself (e.g. `sb`
+                # reset inside a nested per-output-feature loop, itself
+                # inside the per-edge/per-node loop being split) --
+                # see stade_gpu_plan.md Item 2.
+                inner = cgen_loop_convergent_constant(stmt.body, var)
+                state = inner === nothing ? :unknown : inner
+            end
         end
     end
     return state
@@ -5669,34 +5724,55 @@ end
 # synthesized as a literal `wb = 0.0` at the top of the per-thread
 # kernel body, since it's provably the value every iteration starts
 # with anyway.
-function cgen_reduction_only_scalar_walk(body::Vector{NamedTuple}, defined_in::Set{Symbol}, local_names::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}())
+cgen_read_vars(e) = (s = Set{Symbol}(); cgen_collect_expr_vars!(e, s); s)
+
+# Generalizes cgen_reduction_only_scalar_walk's self-referencing-only
+# check to ANY read of a local_names var, anywhere in an expression --
+# not just a var appearing on its own rhs. See stade_gpu_plan.md Item 2:
+# a locally-assigned scalar can carry a genuine cross-iteration
+# dependency without ever being self-referencing on its OWN lhs -- e.g.
+# a stack-restored value consumed by an EARLIER statement (reading last
+# iteration's stale carry-over) and only refreshed by a LATER statement
+# in the same body (a "prefetch for next iteration" pattern that is
+# only valid under strict sequential order). cgen_reduction_only_scalar_
+# walk's self-assign-only check can't see this at all, since the
+# offending read sits on some OTHER statement's rhs, not on the var's
+# own lhs. This subsumes that check (a self-referencing read is just
+# one case of "a read"), so it replaces it as cgen_reduction_only_loop's
+# safety gate rather than running alongside it.
+function cgen_use_before_def(body::Vector{NamedTuple}, local_names::Set{Symbol}, synth::Dict{Symbol,Any}, defined_in::Set{Symbol} = Set{Symbol}())
     defined = union(defined_in, Set{Symbol}(keys(synth)))
+    flagged(vars) = any(v -> v in local_names && !(v in defined), vars)
     for stmt in body
-        if stmt.kind == :assign && stmt.lhs isa Symbol
-            if stmt.lhs in local_names && cgen_expr_contains(stmt.rhs, stmt.lhs)
-                stmt.lhs in defined || return (false, defined)
+        if stmt.kind == :assign
+            flagged(cgen_read_vars(stmt.rhs)) && return (false, defined)
+            if stmt.lhs isa Expr && stmt.lhs.head == :ref
+                flagged(cgen_read_vars(stmt.lhs.args[2:end])) && return (false, defined)
+            elseif stmt.lhs isa Symbol
+                push!(defined, stmt.lhs)
             end
-            push!(defined, stmt.lhs)
         elseif stmt.kind == :if
-            ok_then, defined_then = cgen_reduction_only_scalar_walk(stmt.then, defined, local_names, synth)
+            flagged(cgen_read_vars(stmt.cond)) && return (false, defined)
+            ok_then, defined_then = cgen_use_before_def(stmt.then, local_names, synth, defined)
             ok_then || return (false, defined)
-            ok_els, defined_els = cgen_reduction_only_scalar_walk(stmt.els, defined, local_names, synth)
+            ok_els, defined_els = cgen_use_before_def(stmt.els, local_names, synth, defined)
             ok_els || return (false, defined)
             defined = intersect(defined_then, defined_els)
         elseif stmt.kind == :for
-            ok, _ = cgen_reduction_only_scalar_walk(stmt.body, defined, local_names, synth)
+            flagged(cgen_read_vars(stmt.lo)) && return (false, defined)
+            flagged(cgen_read_vars(stmt.hi)) && return (false, defined)
+            flagged(cgen_read_vars(stmt.step)) && return (false, defined)
+            # the loop's own iteration variable is bound by its header,
+            # hence always "defined" throughout its body -- not a read-
+            # before-def case at all, unlike a genuine local scalar.
+            ok, _ = cgen_use_before_def(stmt.body, local_names, synth, union(defined, Set([stmt.var])))
             ok || return (false, defined)
         end
     end
     return (true, defined)
 end
 
-# collects every array read/write index expression (as a Vector of the
-# :ref node's index args, for structural `==` comparison) reachable
-# anywhere within body, at any nesting depth -- deliberately flat/
-# order-insensitive since cgen_reduction_only_loop only needs to know
-# WHICH index expressions a given array is touched at, not in what
-# sequence, to detect a genuine same-array differing-index recurrence.
+# collects every array read/write index expression
 function cgen_collect_array_accesses!(body::Vector{NamedTuple}, writes::Dict, reads::Dict)
     for stmt in body
         if stmt.kind == :assign
@@ -6126,7 +6202,7 @@ end
 # changes which of two ALREADY-equivalent primal computations gets
 # emitted for a provably pure scalar reduction, never what a kernel
 # computes.
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}; keep_all_atomic::Bool = true)
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true)
     exprs = Any[]
     known_consts = Dict{Symbol,Any}()
     pending = Any[]
@@ -6168,14 +6244,62 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars; keep_all_atomic), cgen_body(stmt.els, kernels, owner, backend, reduce_vars; keep_all_atomic)))
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
         elseif stmt.kind == :for
             flush_pending!()
-            synth = !stmt.sequential ? Dict{Symbol,Any}() : cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
-            if synth !== nothing && !cgen_contains_stackop(stmt.body)
+            # Previously: only a loop already marked `sequential`
+            # (skill-jade's naming convention) ran the convergent-
+            # constant/use-before-def safety check at all -- an
+            # already-`!stmt.sequential` (independent) loop got an
+            # unconditional empty synth, on the assumption that
+            # independence alone made it always safe to split. That
+            # assumption is false whenever the loop's OWN body (not the
+            # primal's, since this runs for both primal and reverse-
+            # mode/adjoint bodies alike) carries a scalar whose true
+            # entering value crosses the loop boundary -- see
+            # stade_gpu_plan.md Item 2 (mpnn/ttgc/transformer/unet: a
+            # reverse-mode reduction shadow like `sb`/`auxub`, reset at
+            # the END of every iteration but never freshly initialized
+            # at the START of the FIRST one within this loop's own
+            # body). Running the same check unconditionally costs
+            # nothing when there's no such scalar (synth/local_names end
+            # up empty, cgen_use_before_def trivially passes) and, when
+            # there IS one, either recovers it via synth (if its entering
+            # value is a provable literal constant) or correctly refuses
+            # to split this loop at all (if not) -- never silently
+            # emitting a kernel that reads an undefined or stale value.
+            synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+            # A var cgen_scalar_reduction_vars calls reduction-worthy
+            # (self-referencing, no fresh reset within THIS loop's own
+            # body) is only safe for the GLOBAL box-once/unbox-once
+            # treatment cgen_emit applies (see its own comment) when it
+            # is a genuine whole-function-lifetime entity -- a top-level
+            # argument like `alphab`/`betab`/`cb`, whose caller-visible
+            # identity spans the entire host function by construction.
+            # A purely internal scratch scalar (never in fn_args) can
+            # satisfy the SAME self-referencing-with-no-local-reset
+            # shape purely as an accident of an ENCLOSING loop demoting
+            # for an unrelated reason (its own true reset ends up a
+            # sibling statement in now-host-resident code, one level
+            # up from THIS loop, rather than inside THIS loop's body at
+            # all) -- see stade_gpu_plan.md Item 2 (ttgc's `cavgx`/
+            # `resib`, transformer's `s`/`row_sum`/etc: each reset by a
+            # sibling statement of the loop that reads them, not by
+            # anything inside that loop). Globally boxing such a var is
+            # wrong two ways at once: the box gets inserted before its
+            # OWN host-side reset ever runs (UndefVarError), and even
+            # with the ordering fixed, one function-lifetime box shared
+            # across every unrelated call site silently accumulates
+            # across launches that were each supposed to start fresh.
+            # Refusing to split here (rather than trying to invent a
+            # per-launch box/unbox scheme) is the same conservative
+            # choice as any other unprovable case: slower, never wrong.
+            loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
+            safe_scope = issubset(loop_reduce_vars, fn_args)
+            if synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
                     target, op, arrs, term = red
@@ -6185,13 +6309,12 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 else
                     idx = length(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
-                    loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
                     union!(reduce_vars, loop_reduce_vars)
                     push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth))
                     push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars; keep_all_atomic)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic)))
             end
             delete!(known_consts, stmt.var)
         end
@@ -6265,6 +6388,27 @@ function cgen_expr_injective_ok(x, injective_dep::Set{Symbol}, thread_dep::Set{S
     x isa Symbol && return !(x in thread_dep) || (x in injective_dep)
     x isa Expr || return true
     x.head == :ref && return false
+    # div/mod/rem/fld/cld (and their operator spellings) collapse
+    # multiple thread-index values onto the same result by
+    # construction -- e.g. a 2x nearest-neighbor upsample's
+    # `i = div(oim1, scale) + 1` maps every PAIR of adjacent output
+    # positions to the SAME source row, so the write index built from
+    # it (dec2outb[xi] = dec2outb[xi] + u1b[idx]) genuinely collides
+    # across threads. Recursing into their args like any other :call
+    # (the previous behavior) asks "are the OPERANDS injective",
+    # which is the wrong question -- div/mod throw injectivity away
+    # regardless of whether their operands had any. There's no
+    # general way to prove a *specific* division happens to be exact
+    # (the paired div+mod "unravel a flat index" idiom used
+    # throughout this corpus IS bijective as a tuple, but only when
+    # both halves are reunited at the read/write site -- this
+    # function sees one index expression at a time, not the pairing),
+    # so, like a bare array read, this stays unconditionally
+    # non-injective. Confirmed live: a plain (non-atomic) write here
+    # silently dropped a fraction of the correct dec2outb accumulation
+    # on a real GPU run (max_rel_err ~1.9, not a crash) -- see
+    # stade_gpu_plan.md Item 2's unet follow-up.
+    x.head == :call && x.args[1] in (:div, :mod, :rem, :fld, :cld, :÷, :%) && return false
     return all(a -> cgen_expr_injective_ok(a, injective_dep, thread_dep), x.args)
 end
 cgen_expr_injective_ok(xs::Vector, injective_dep::Set{Symbol}, thread_dep::Set{Symbol}) =
@@ -6436,7 +6580,8 @@ cgen_host_fname(name::Symbol, backend) = Symbol(string(name) * backend.suffix)
 function cgen_emit(gk, backend; keep_all_atomic::Bool = true)
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
-    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars; keep_all_atomic)
+    fn_args = Set{Symbol}(gk.args)
+    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; keep_all_atomic)
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     # Every scalar cross-thread reduction free var (see
     # cgen_scalar_reduction_vars) must already be a 1-element device
@@ -6624,15 +6769,30 @@ end
 # uses for reduce_vars accumulation -- the same shape keep_all_atomic=
 # true independently reaches (via its per-element atomic kernel) and
 # which the live GPU run confirmed works.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}; keep_all_atomic::Bool = true)
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true)
     exprs = Any[]
     known_consts = Dict{Symbol,Any}()
+    pending = Any[]
+    pending_has_array = false
+    flush_pending! = () -> begin
+        if !isempty(pending)
+            if pending_has_array && allowscalar_macro !== nothing
+                push!(exprs, Expr(:macrocall, allowscalar_macro, nothing, Expr(:block, pending...)))
+            else
+                append!(exprs, pending)
+            end
+            empty!(pending)
+            pending_has_array = false
+        end
+    end
     for stmt in body
         if stmt.kind == :stackpush
+            flush_pending!()
             push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
         elseif stmt.kind == :assign
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? jgen_stack_device_expr(stmt.rhs) : stmt.rhs
-            push!(exprs, Expr(:(=), stmt.lhs, rhs))
+            push!(pending, Expr(:(=), stmt.lhs, rhs))
+            pending_has_array = pending_has_array || cgen_expr_has_ref(stmt.lhs) || cgen_expr_has_ref(rhs)
             if stmt.lhs isa Symbol
                 if stmt.rhs isa Number
                     known_consts[stmt.lhs] = stmt.rhs
@@ -6641,13 +6801,22 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 end
             end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars; keep_all_atomic), jgen_body(stmt.els, kernels, owner, reduce_vars; keep_all_atomic)))
+            flush_pending!()
+            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
         elseif stmt.kind == :for
-            synth = !stmt.sequential ? Dict{Symbol,Any}() : cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
-            if synth !== nothing && !cgen_contains_stackop(stmt.body)
+            flush_pending!()
+            # see cgen_body's identical fix (stade_gpu_plan.md Item 2) --
+            # same bug, same reasoning, kept in sync since jgen_body is
+            # this same host-splitting logic for the JACC target.
+            synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+            # see cgen_body's identical fn_args scope gate (stade_gpu_plan.md
+            # Item 2) -- same reasoning, kept in sync for the JACC target.
+            loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
+            safe_scope = issubset(loop_reduce_vars, fn_args)
+            if synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
                     target, op, arrs, term = red
@@ -6711,17 +6880,17 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 else
                     idx = length(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
-                    loop_reduce_vars = cgen_scalar_reduction_vars(stmt.body)
                     union!(reduce_vars, loop_reduce_vars)
                     push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth))
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars; keep_all_atomic)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic)))
             end
             delete!(known_consts, stmt.var)
         end
     end
+    flush_pending!()
     return exprs
 end
 
@@ -6831,10 +7000,31 @@ end
 
 jgen_host_fname(name::Symbol) = Symbol(string(name) * "_jacc")
 
-function jgen_emit(gk; keep_all_atomic::Bool = true)
+# JACC has no vendor-neutral scalar-indexing escape hatch of its own
+# (unlike CUDA.jl/AMDGPU.jl/Metal.jl, each shipping their own
+# @allowscalar) -- see stade_gpu_plan.md Item 4. A loop jgen_body
+# demotes to host-sequential (the same synth/fn_args logic cgen_body
+# uses -- see its own Item 2 comment) can still need to touch a
+# JACC.array-boxed argument element-wise, with nothing to wrap that
+# touch in at all: confirmed live, `mpnn_b_jacc` crashed with
+# GPUArraysCore's own "Scalar indexing is disallowed" before this
+# existed. On THIS deployed image, JACC.set_backend("CUDA") means
+# JACC.array literally returns a CuArray under the hood (skill-runpod-
+# julia-cuda-jacc's own JACC v1.x API note), so CUDA.@allowscalar is a
+# real, correctly-scoped fix for a JACC-array touch too -- confirmed
+# live, the same mpnn case passes with this as jgen_emit's default.
+# This is a CUDA-backend-specific stand-in, not a portable JACC API: if
+# a future image backs JACC with AMDGPU/Metal instead, this default
+# needs to change to match (or a caller can pass their own vendor's
+# equivalent, or `nothing` to disable wrapping and get the pre-fix
+# behavior back).
+jgen_default_allowscalar_macro() = Expr(:., :CUDA, QuoteNode(Symbol("@allowscalar")))
+
+function jgen_emit(gk; keep_all_atomic::Bool = true, allowscalar_macro = jgen_default_allowscalar_macro())
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
-    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars; keep_all_atomic)
+    fn_args = Set{Symbol}(gk.args)
+    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic)
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the
     # reverse -- see the "JACC v1.x API" section of
@@ -6858,7 +7048,13 @@ function jgen_preamble()
     # v0.0.x's plain-function-call API) -- an unpinned Pkg.add here
     # would silently drift onto whatever major version is newest,
     # exactly the class of mismatch that motivated this pin.
-    return "import Pkg\nhaskey(Pkg.project().dependencies, \"JACC\") || Pkg.add(name = \"JACC\", version = \"1\")\nhaskey(Pkg.project().dependencies, \"Atomix\") || Pkg.add(\"Atomix\")\nimport JACC\nimport Atomix\nJACC.@init_backend\n"
+    #
+    # `using CUDA` alongside JACC/Atomix: jgen_emit's default
+    # allowscalar_macro (see its own comment, stade_gpu_plan.md Item 4)
+    # emits CUDA.@allowscalar around any host-side JACC-array touch a
+    # demoted loop needs -- every jgen_-generated file needs CUDA
+    # loaded for that to resolve, not just this validator's own script.
+    return "import Pkg\nhaskey(Pkg.project().dependencies, \"JACC\") || Pkg.add(name = \"JACC\", version = \"1\")\nhaskey(Pkg.project().dependencies, \"Atomix\") || Pkg.add(\"Atomix\")\nusing CUDA\nimport JACC\nimport Atomix\nJACC.@init_backend\n"
 end
 
 
@@ -7086,8 +7282,43 @@ end
 
 # ---- random baseline generation -------------------------------------
 
-function val_random_int_args(sig; lo::Int = 2, hi::Int = 5)
-    return Dict{Symbol,Int}(a => rand(lo:hi) for a in sig.args if sig.kinds[a] == :scalar_int)
+function val_random_int_args(sig; lo::Int = 2, hi::Int = 5, divisible_by::Dict{Symbol,Int} = Dict{Symbol,Int}())
+    return Dict{Symbol,Int}(a => val_random_int_arg(lo, hi, get(divisible_by, a, 1)) for a in sig.args if sig.kinds[a] == :scalar_int)
+end
+
+# Plain rand(lo:hi) when `k <= 1` (no constraint). Otherwise draws
+# uniformly among the multiples of `k` within [lo, hi] -- and, since a
+# narrow caller-supplied range (e.g. lo=2,hi=5 with k=4) can easily
+# contain none or exactly one, falls back to the single nearest
+# multiple of `k` at or above `lo` rather than erroring: a valid draw
+# outside the requested range is far more useful than none at all,
+# matching val_generate_baseline's own attempts-loop philosophy for
+# cur_hi. `k` itself is always a valid answer when lo <= k <= hi.
+function val_random_int_arg(lo::Int, hi::Int, k::Int)
+    k <= 1 && return rand(lo:hi)
+    candidates = [m for m in (k * cld(lo, k)):k:hi]
+    isempty(candidates) && return k * cld(lo, k)
+    return rand(candidates)
+end
+
+# A scalar_int kernel argument can be a divisor a corpus kernel's own
+# comment documents a hard constraint on (e.g. unet.jl: "h and w must
+# both be divisible by 4") that plain rand(lo:hi) has no way to know
+# about -- a bad draw doesn't produce a wrong answer here, it produces
+# a degenerate (possibly zero) derived dimension that crashes deep
+# inside a GPU kernel launch, which is a much more confusing failure
+# to debug than a baseline generator simply respecting the constraint
+# up front. This is deliberately a small, explicit, per-kernel lookup
+# -- not a general static scanner that infers "must divide evenly"
+# from every div() call in a kernel body -- since exactly one corpus
+# kernel needs it today and a hand-verified list is both simpler and
+# safer than guessing which literal divisors are load-bearing size
+# constraints versus incidental arithmetic. Extend this table (never
+# scatter a kernel-name check anywhere else) if another kernel needs
+# one.
+function val_corpus_int_constraints(kernel_name::Symbol)
+    kernel_name === :unet && return Dict{Symbol,Int}(:h => 4, :w => 4)
+    return Dict{Symbol,Int}()
 end
 
 # ---- avoiding near-zero/negative divisors in random baselines ------
@@ -7246,7 +7477,9 @@ function val_generate_baseline(kernel, primal_expr::Expr;
                                 grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 16,
                                 self_check::Bool = true, self_check_trials::Int = 2,
                                 self_check_epsilon::Float64 = 1e-6, self_check_rtol::Float64 = 1e-3,
-                                max_output_magnitude::Float64 = 1e6)
+                                max_output_magnitude::Float64 = 1e6,
+                                divisible_by::Union{Dict{Symbol,Int},Nothing} = nothing)
+    divisible_by = divisible_by === nothing ? val_corpus_int_constraints(kernel.sig.name) : divisible_by
     primal_fn = val_compile(primal_expr)
     obs_fn = self_check ? val_compile(val_primal_observing_expr(kernel, primal_expr)) : nothing
     tangent_fn = self_check ? val_compile(val_build_tangent(kernel)) : nothing
@@ -7295,7 +7528,7 @@ function val_generate_baseline(kernel, primal_expr::Expr;
     # problem.
     cur_hi = int_hi
     for attempt in 1:attempts
-        int_args = val_random_int_args(kernel.sig; lo = min(int_lo, cur_hi), hi = cur_hi)
+        int_args = val_random_int_args(kernel.sig; lo = min(int_lo, cur_hi), hi = cur_hi, divisible_by = divisible_by)
         try
             grown = val_grow_shapes(kernel, primal_fn, int_args; start = grow_start, max_size = grow_max)
             values = val_random_values(kernel, grown.shapes, int_args; scale = scale, idx_cap = grown.idx_cap)
@@ -8272,11 +8505,12 @@ end
 # once, hand-edit the result, then validate repeatedly against it.
 function stade_generate_baseline_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                        scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
-                                       self_check::Bool = true)
+                                       self_check::Bool = true,
+                                       divisible_by::Union{Dict{Symbol,Int},Nothing} = nothing)
     primal_expr = io_read_corpus_entry(in_path)
     kernel = parse_kernel(primal_expr)
     baseline = val_generate_baseline(kernel, primal_expr; scale = scale, int_lo = int_lo, int_hi = int_hi,
-                                      self_check = self_check)
+                                      self_check = self_check, divisible_by = divisible_by)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_write_baseline_yaml(yp, kernel.sig.name, baseline.int_args, baseline.values)
     return yp
@@ -8348,6 +8582,345 @@ function stade_validate_adjoint_against_file(primal_path::String, adjoint_path::
                                  trials = trials, epsilon = epsilon, rtol = rtol,
                                  stack_arg_names = stack_arg_names)
 end
+
+# ==================== stade_validate_gpu_file (Item 1) ==============
+# See stade_gpu_plan.md Item 1: GPU validation lived only in an
+# external `gpu_validate_build.jl` script; this lands the same design
+# in STADE.jl proper so items 2-4 (and every future GPU fix) have a
+# `stade_validate_*_file`-shaped gate instead of a script nobody else
+# knows exists.
+#
+# Design: emit ONE self-contained Julia script bundling the
+# keep_push_pop=false CPU adjoint (`stade_adjoint`'s own output,
+# untouched) and its `stade_gpu`-converted device counterpart, plus a
+# baseline embedded as literal Julia source (arrays as `Float64[...]`/
+# `Int64[...]` literals, never JSON) -- the script has no dependency on
+# STADE.jl itself. It runs BOTH on whatever machine it lands on,
+# compares every mutated float/int array and every scalar_float return
+# element-wise, and prints ONLY a verdict (ok/max_rel_err/device) on
+# stdout. That is the point: the actual numbers never have to cross
+# the Claude-sandbox/GPU-worker boundary, only the verdict does, so
+# there is no float-serialisation noise to chase.
+#
+# This sandbox has no GPU, so `stade_validate_gpu_file` itself never
+# executes the script it writes -- it returns a NamedTuple shaped like
+# every other stade_validate_*_file (`ok`, `max_rel_err`) so it drops
+# into `validate_corpus.jl` as a fifth mode, plus `skipped = true` and
+# `script_path` so a driver can tell "no device here" apart from an
+# actual failure rather than mistaking one for the other. A caller
+# with real device access (e.g. via the runpod-julia-cuda-jacc skill's
+# inline `_script`) runs `script_path` there and reads its stdout for
+# the real verdict.
+#
+# Only keep_push_pop=false has a GPU target at all -- `:stack` mode's
+# push!/pop! is inherently host-only -- so this is a hard error, not a
+# silent fallback, on keep_push_pop=true.
+
+val_def_fn_name(expr::Expr) = expr.args[1].args[1]
+
+# Array SHAPES always come from the caller's own baseline/seed Dicts
+# (never hand-constructed here -- see the Item-1 trap about ttgc's
+# `c`/`skx`/`i_cell_to_node` matrices), so this only ever needs to
+# serialize whatever real value/shape it's handed.
+val_julia_literal(v::Real) = string(Float64(v))
+function val_julia_literal(v::AbstractVector{<:Real})
+    T = eltype(v) <: Integer ? "Int64" : "Float64"
+    return "$(T)[" * join(v, ", ") * "]"
+end
+function val_julia_literal(v::AbstractMatrix{<:Real})
+    T = eltype(v) <: Integer ? "Int64" : "Float64"
+    rows = [join(v[i, :], " ") for i in 1:size(v, 1)]
+    return "$(T)[" * join(rows, "; ") * "]"
+end
+
+# positional call-argument NAMES (not values) for one device's copies,
+# in kernel.sig.args order with each float-kind arg expanded to its
+# (value, shadow) pair -- mirrors val_adjoint_call_args's own ordering
+# rule exactly (array_int gets no shadow; scalar_int is a bare name,
+# shared verbatim between cpu/gpu since it's never wrapped).
+function val_gpu_call_args(sig, device::Symbol)
+    parts = String[]
+    for a in sig.args
+        k = sig.kinds[a]
+        if k == :scalar_int
+            push!(parts, string(a))
+        elseif k in (:scalar_float, :array_float)
+            push!(parts, "$(a)_val_$(device)", "$(a)_sh_$(device)")
+        else
+            push!(parts, "$(a)_val_$(device)")
+        end
+    end
+    return parts
+end
+
+# a stack_arg_name is either a kernel-level scalar_int (already bound
+# to a plain, device-independent variable above) or a values-Dict
+# entry with its own per-device _val copy -- same two cases
+# val_call_adjoint already distinguishes.
+function val_gpu_stack_extra_ref(n::Symbol, int_args::Dict, device::Symbol)
+    haskey(int_args, n) && return string(n)
+    return "$(n)_val_$(device)"
+end
+
+# device-name text embedded in the script's own final JSON line --
+# generic over backend rather than hardcoding CUDA, since stade_gpu
+# itself is backend-parametric; falls back to a literal string for any
+# backend this hasn't been taught a device-query for yet rather than
+# emitting code that won't run.
+function val_gpu_device_name_expr(backend)
+    backend.kernel_tag == "cuda" && return "string(CUDA.name(CUDA.device()))"
+    backend.kernel_tag == "amdgpu" && return "string(AMDGPU.device())"
+    backend.kernel_tag == "metal" && return "string(Metal.current_device())"
+    # JACC has no vendor-neutral device-name query of its own -- the
+    # image sets its backend at build time via JACC.set_backend("CUDA")
+    # (see skill-runpod-julia-cuda-jacc's own JACC v1.x API note), so on
+    # THIS image JACC's device and CUDA's device are the same physical
+    # GPU; val_jacc_backend()'s own preamble adds `using CUDA` (JACC's
+    # own preamble alone doesn't) specifically so this query works.
+    backend.kernel_tag == "jacc" && return "string(CUDA.name(CUDA.device()))"
+    return "\"unknown-backend-$(backend.kernel_tag)\""
+end
+
+# Assembles the full script described above. `seeds` is a Vector of
+# per-trial seed Dicts (same shape as `values`, one per trial) --
+# `values` itself (the primal baseline) is shared across trials but
+# freshly deepcopy'd every trial on both devices, since the call under
+# test mutates its float arrays in place.
+function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vector,
+                                adjoint_out, gpu_init, gpu_adj, stack_arg_names::Vector{Symbol},
+                                backend; rtol::Float64 = 2.5e-14)
+    sig = kernel.sig
+    cpu_init_name = val_def_fn_name(adjoint_out.initstacks)
+    cpu_adj_name  = val_def_fn_name(adjoint_out.adjoint)
+    gpu_init_name = val_def_fn_name(gpu_init.host)
+    gpu_adj_name  = val_def_fn_name(gpu_adj.host)
+    arrtype = backend.arrtype
+
+    lines = String[]
+    isempty(backend.preamble) || push!(lines, backend.preamble)
+    push!(lines, "using JSON3", "")
+
+    push!(lines, io_expr_to_source(adjoint_out.initstacks))
+    push!(lines, io_expr_to_source(adjoint_out.adjoint))
+    push!(lines, io_expr_to_source(gpu_init.host))
+    for k in gpu_init.kernels
+        push!(lines, io_expr_to_source(k))
+    end
+    push!(lines, io_expr_to_source(gpu_adj.host))
+    for k in gpu_adj.kernels
+        push!(lines, io_expr_to_source(k))
+    end
+
+    push!(lines, "function _val_init_stacks_local(fn, extra_args)\n    r = fn(extra_args...)\n    r === nothing && return ()\n    r isa Tuple && return r\n    return (r,)\nend\n")
+    push!(lines, "_relerr_scalar(a, b) = abs(a - b) / max(abs(a), abs(b), 1.0)\n" *
+                 "_relerr_arr(a, b) = maximum(abs.(a .- b) ./ max.(abs.(a), abs.(b), 1.0))\n")
+
+    for a in sig.args
+        sig.kinds[a] == :scalar_int || continue
+        push!(lines, "$(a) = $(int_args[a])")
+    end
+
+    float_or_intarr_args = [a for a in sig.args if sig.kinds[a] in (:scalar_float, :array_float, :array_int)]
+    scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
+    array_float_args = [a for a in sig.args if sig.kinds[a] == :array_float]
+    array_int_args = [a for a in sig.args if sig.kinds[a] == :array_int]
+
+    for a in float_or_intarr_args
+        push!(lines, "__base_$(a) = $(val_julia_literal(values[a]))")
+    end
+    for a in scalar_args
+        seed_list = join([val_julia_literal(sd[a]) for sd in seeds], ", ")
+        push!(lines, "__seed_$(a) = [$(seed_list)]")
+    end
+    for a in array_float_args
+        seed_list = join([val_julia_literal(sd[a]) for sd in seeds], ", ")
+        push!(lines, "__seed_$(a) = [$(seed_list)]")
+    end
+
+    stack_extra_cpu = join([val_gpu_stack_extra_ref(n, int_args, :cpu) for n in stack_arg_names], ", ")
+    stack_extra_gpu = join([val_gpu_stack_extra_ref(n, int_args, :gpu) for n in stack_arg_names], ", ")
+    cpu_call = "$(cpu_adj_name)($(join(val_gpu_call_args(sig, :cpu), ", ")), stacks_cpu...)"
+    gpu_call = "$(gpu_adj_name)($(join(val_gpu_call_args(sig, :gpu), ", ")), stacks_gpu...)"
+    ret_cpu_tuple = isempty(scalar_args) ? "()" : (length(scalar_args) == 1 ? "(ret_cpu,)" : "ret_cpu")
+    ret_gpu_tuple = isempty(scalar_args) ? "()" : (length(scalar_args) == 1 ? "(ret_gpu,)" : "ret_gpu")
+
+    push!(lines, "max_rel_err = 0.0")
+    push!(lines, "for __trial in 1:$(length(seeds))")
+    for a in array_float_args
+        push!(lines, "  $(a)_val_cpu = deepcopy(__base_$(a)); $(a)_sh_cpu = deepcopy(__seed_$(a)[__trial])")
+        push!(lines, "  $(a)_val_gpu = $(arrtype)(deepcopy(__base_$(a))); $(a)_sh_gpu = $(arrtype)(deepcopy(__seed_$(a)[__trial]))")
+    end
+    for a in array_int_args
+        push!(lines, "  $(a)_val_cpu = deepcopy(__base_$(a))")
+        push!(lines, "  $(a)_val_gpu = $(arrtype)(deepcopy(__base_$(a)))")
+    end
+    for a in scalar_args
+        push!(lines, "  $(a)_val_cpu = __base_$(a); $(a)_sh_cpu = __seed_$(a)[__trial]")
+        push!(lines, "  $(a)_val_gpu = __base_$(a); $(a)_sh_gpu = __seed_$(a)[__trial]")
+    end
+    push!(lines, "  stacks_cpu = _val_init_stacks_local($(cpu_init_name), Any[$(stack_extra_cpu)])")
+    push!(lines, "  stacks_gpu = _val_init_stacks_local($(gpu_init_name), Any[$(stack_extra_gpu)])")
+    push!(lines, "  ret_cpu = $(cpu_call)")
+    push!(lines, "  ret_gpu = $(gpu_call)")
+    push!(lines, "  ret_cpu_t = $(ret_cpu_tuple)")
+    push!(lines, "  ret_gpu_t = $(ret_gpu_tuple)")
+    push!(lines, "  local_max = 0.0")
+    for a in array_float_args
+        push!(lines, "  local_max = max(local_max, _relerr_arr($(a)_sh_cpu, Array($(a)_sh_gpu)))")
+        push!(lines, "  local_max = max(local_max, _relerr_arr($(a)_val_cpu, Array($(a)_val_gpu)))")
+    end
+    for a in array_int_args
+        push!(lines, "  local_max = max(local_max, _relerr_arr(Float64.($(a)_val_cpu), Float64.(Array($(a)_val_gpu))))")
+    end
+    for (i, _) in enumerate(scalar_args)
+        push!(lines, "  local_max = max(local_max, _relerr_scalar(ret_cpu_t[$(i)], ret_gpu_t[$(i)]))")
+    end
+    push!(lines, "  global max_rel_err = max(max_rel_err, local_max)")
+    push!(lines, "end")
+    push!(lines, "println(JSON3.write(Dict(\"ok\" => max_rel_err <= $(rtol), \"max_rel_err\" => max_rel_err, \"device\" => $(val_gpu_device_name_expr(backend)))))")
+
+    return join(lines, "\n") * "\n"
+end
+
+# Counts every `@atomic ...` site (backend.atomic_macro) anywhere within
+# a generated device kernel Expr, at any nesting depth -- used to scale
+# stade_validate_gpu_file's default tolerance (see its own comment).
+function val_count_atomic_sites(expr, atomic_macro)
+    expr isa Expr || return 0
+    n = (expr.head == :macrocall && !isempty(expr.args) && expr.args[1] == atomic_macro) ? 1 : 0
+    for a in expr.args
+        n += val_count_atomic_sites(a, atomic_macro)
+    end
+    return n
+end
+
+function stade_validate_gpu_file(in_path::String, out_path::String, backend;
+                                  yaml_path::Union{String,Nothing} = nothing,
+                                  scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                  trials::Int = 3, rtol::Union{Float64,Nothing} = nothing,
+                                  self_check::Bool = true,
+                                  keep_push_pop::Bool = false, fuse_ii_loops::Bool = false)
+    keep_push_pop &&
+        error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
+    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
+    primal_expr = io_read_corpus_entry(in_path)
+    kernel = parse_kernel(primal_expr)
+    baseline = io_read_baseline_yaml(yp)
+    val_coerce_int_arrays!(kernel, baseline.values)
+
+    adjoint_out = stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
+    gpu_init = stade_gpu(adjoint_out.initstacks, backend)
+    gpu_adj  = stade_gpu(adjoint_out.adjoint, backend)
+    stack_arg_names = Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
+    seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
+
+    # IEEE float addition isn't associative, so an atomic accumulation
+    # (CUDA.jl's own @atomic += against a shared array slot) sums its
+    # contributing threads in whatever order the scheduler happens to
+    # run them -- a DIFFERENT order than the CPU adjoint's own strictly
+    # sequential summation, even though both compute the mathematically
+    # identical sum. A kernel with one or two atomic sites (dotprod-
+    # style; the 16 kernels this tolerance was originally set against)
+    # reproduces to within ~1e-16 regardless. A kernel with dozens
+    # (unet: 35 atomic sites across its full encoder/decoder adjoint)
+    # accumulates that same per-site reordering noise repeatedly and
+    # measured ~2.5e-13 on a real run -- correct, not a bug (see
+    # stade_gpu_plan.md Item 2's unet fix), just past the tighter
+    # default. A default calibrated for the atomic-light case alone
+    # would misreport a numerically-fine, atomic-heavy kernel as
+    # failing. Scaling linearly with atomic-site count is a simple,
+    # conservative proxy for that reordering noise's growth -- verified
+    # against unet's own 35-site/~2.5e-13 case (2.5e-14 * 35 ≈ 8.8e-13,
+    # comfortably above what was actually measured) -- not a precise
+    # error-bound derivation. An explicit `rtol` always overrides this.
+    resolved_rtol = rtol
+    if resolved_rtol === nothing
+        atomic_sites = sum(val_count_atomic_sites(k, backend.atomic_macro) for k in gpu_adj.kernels; init = 0)
+        resolved_rtol = 2.5e-14 * max(1, atomic_sites)
+    end
+
+    script = val_gpu_parity_script(kernel, baseline.int_args, baseline.values, seeds,
+                                    adjoint_out, gpu_init, gpu_adj, stack_arg_names, backend; rtol = resolved_rtol)
+    open(out_path, "w") do f
+        write(f, script)
+    end
+    return (ok = false, max_rel_err = NaN, skipped = true, script_path = out_path)
+end
+
+stade_validate_cuda_file(in_path::String, out_path::String; kwargs...) =
+    stade_validate_gpu_file(in_path, out_path, cgen_backend_cuda(); kwargs...)
+
+# ==================== stade_validate_jacc_file (Item 4) ==============
+# See stade_gpu_plan.md Item 4: the jgen_/JACC target was entirely
+# unvalidated -- "the same harness should extend by swapping the
+# emitter, but that is untested and must not be assumed". This is that
+# extension: the SAME val_gpu_parity_script used for stade_validate_gpu_
+# file, just fed a JACC-generated plan (stade_jacc) instead of a
+# cgen_backend_*-generated one.
+#
+# stade_jacc takes no backend argument at all (JACC picks its actual
+# vendor at build/deploy time, outside this call entirely -- see its
+# own doc comment), so there's no real cgen_backend_jacc() to reuse the
+# way stade_validate_gpu_file reuses cgen_backend_cuda(). val_jacc_
+# backend() below is NOT a real backend registry entry -- it exists
+# purely to give val_gpu_parity_script the handful of text fields
+# (preamble/arrtype/atomic_macro/kernel_tag) it needs to build the
+# script, standing in for the `backend` argument stade_gpu's callers
+# pass but stade_jacc's callers never do.
+function val_jacc_backend()
+    return (
+        kernel_tag = "jacc",
+        arrtype = "JACC.array",
+        atomic_macro = Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))),
+        # jgen_preamble() now includes `using CUDA` itself (needed for
+        # jgen_emit's own default @allowscalar wrapping -- see its
+        # comment), which also happens to be exactly what val_gpu_
+        # device_name_expr's JACC case needs to query the device name.
+        preamble = jgen_preamble(),
+    )
+end
+
+function stade_validate_jacc_file(in_path::String, out_path::String;
+                                   yaml_path::Union{String,Nothing} = nothing,
+                                   scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                   trials::Int = 3, rtol::Union{Float64,Nothing} = nothing,
+                                   self_check::Bool = true,
+                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false)
+    keep_push_pop &&
+        error("stade_validate_jacc_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
+    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
+    primal_expr = io_read_corpus_entry(in_path)
+    kernel = parse_kernel(primal_expr)
+    baseline = io_read_baseline_yaml(yp)
+    val_coerce_int_arrays!(kernel, baseline.values)
+
+    adjoint_out = stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
+    backend = val_jacc_backend()
+    jacc_init = stade_jacc(adjoint_out.initstacks)
+    jacc_adj  = stade_jacc(adjoint_out.adjoint)
+    stack_arg_names = Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
+    seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
+
+    # same reasoning as stade_validate_gpu_file's own resolved_rtol --
+    # Atomix.@atomic's cross-thread reordering is the same non-
+    # associative-float-sum phenomenon regardless of which backend
+    # emits the atomic.
+    resolved_rtol = rtol
+    if resolved_rtol === nothing
+        atomic_sites = sum(val_count_atomic_sites(k, backend.atomic_macro) for k in jacc_adj.kernels; init = 0)
+        resolved_rtol = 2.5e-14 * max(1, atomic_sites)
+    end
+
+    script = val_gpu_parity_script(kernel, baseline.int_args, baseline.values, seeds,
+                                    adjoint_out, jacc_init, jacc_adj, stack_arg_names, backend; rtol = resolved_rtol)
+    open(out_path, "w") do f
+        write(f, script)
+    end
+    return (ok = false, max_rel_err = NaN, skipped = true, script_path = out_path)
+end
+
 
 # ============================================================
 # ii_* -- eligibility analysis and codegen for fusing iteration-
