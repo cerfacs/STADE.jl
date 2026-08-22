@@ -35,13 +35,13 @@ For now, the aforementioned goals come at the cost of supporting only a subset o
 
 ## Wishlist 💡
 
-- [ ] Replace reduction-related atomic writes with more performant alternatives
 - [ ] Wrap common subexpressions into temporary variables
 - [ ] Add `bgen_` stage for mini-batch execution code via GPU-aware MPI
 - [ ] Add support to `:while` statement
 - [ ] Add support to (binomial) checkpointing
 - [ ] Add support to efficient differentiation of fixed-point loops 
 - [ ] Add support to un-inlined call graphs
+- [ ] Benchmark against mainstream frameworks (e.g., JAX, PyTorch)
 
 ### Acknowledgements
 
