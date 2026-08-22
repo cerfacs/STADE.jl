@@ -178,16 +178,13 @@ unaffected — dominated by loops with no value-needed local scalar.
 
 ## Validation
 
-The corpus is **29 kernels** in `val-corpus/`. `validate_corpus.jl` runs
+The corpus is in `val-corpus/`. `validate_corpus.jl` runs
 four oracles per kernel — tangent, adjoint, HVP (all central differences,
 ~1e-8 floor) and the **exact tangent-vs-adjoint dot-product identity**
 `<Yb, J·Xd> == <J'·Yb, Xd>` (~1e-15, no epsilon). The exact oracle
 catches systematic adjoint errors two orders below what FD can see; it
 does *not* validate the tangent, since a bug shared by both codes
 cancels, so it complements rather than replaces.
-
-Current state: **116/116 in both stack modes**, 30 in-file self-test
-suites.
 
 - **Pass the flags you generated with** through to the *validator*, not
   only to generation. The validator's defaults will otherwise check a
