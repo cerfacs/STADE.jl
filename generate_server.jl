@@ -288,9 +288,16 @@ end
 # GitHub Pages and this API live on different origins, so browsers
 # will block the request unless we send CORS headers. "*" is fine for
 # a demo; for anything real, replace it with your exact Pages origin,
-# e.g. "https://YOUR_GITHUB_USERNAME.github.io".
+# e.g. "https://YOUR_GITHUB_USERNAME.github.io". Note this is scheme+host
+# ONLY -- browsers never send a path in the Origin header, so a project
+# page served at "https://OWNER.github.io/REPO/..." still sends Origin:
+# "https://OWNER.github.io" (no "/REPO" suffix). Including the repo path
+# here means the comparison can never match, and every request gets
+# silently blocked by CORS -- surfacing in the browser as a generic
+# "Failed to fetch" with no further detail, indistinguishable from the
+# backend simply being down.
 # ------------------------------------------------------------------
-const ALLOWED_ORIGIN = "https://cerfacs.github.io/STADE.jl"
+const ALLOWED_ORIGIN = "https://cerfacs.github.io"
 # const ALLOWED_ORIGIN = "*"
 
 function cors_headers()
