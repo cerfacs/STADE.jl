@@ -1,21 +1,20 @@
 ---
-name: skill-stade
+name: skill-stade-dev
 description: >
   Use whenever writing, reviewing, or refactoring Julia code that is part
-  of STADE itself (the automatic differentiation engine for skill-stade-kernels
+  of STADE itself (the automatic differentiation engine for skill-stade
   kernels) — as opposed to the numerical kernels STADE differentiates,
-  which are governed by skill-stade-kernels instead. Trigger any time the user
+  which are governed by skill-stade instead. Trigger any time the user
   asks for code implementing or modifying a STADE pipeline stage (parse,
   shape inference, activity analysis, snapshot/TBR analysis, derivative
   rules, linearization, tangent or adjoint codegen, GPU codegen, file
-  I/O, validation), even without naming "skill-stade" or STADE
-  explicitly.
+  I/O, validation).
 ---
 
-# skill-stade: house style and architecture contract for STADE
+# skill-stade-dev: house style and architecture contract for STADE
 
 STADE is a single-file (`STADE.jl`), function-only Julia AD engine for
-kernels compliant with skill-stade-kernels. This skill is the contract
+kernels compliant with skill-stade. This skill is the contract
 that keeps independently-developed pieces mergeable.
 
 ## Installing Julia
@@ -69,7 +68,7 @@ subsequent `bash_tool` call needing Julia.
 9. **No corpus-specific code in `STADE.jl`.** Nothing may name a kernel
    in `val-corpus/`.
 10. **A loop nest is whatever `for` structure the source contains.**
-    skill-stade-kernels fuses a rectangular nest into one `for idx = 1:n*m` with
+    skill-stade fuses a rectangular nest into one `for idx = 1:n*m` with
     indices recovered by `div`/`mod`. Treat that as a depth-1 nest with
     tripcount `n*m`. **Never pattern-match body-level `div`/`mod` to
     reconstruct a synthetic nest** — those are ordinary assignments, not
