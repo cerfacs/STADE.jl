@@ -107,6 +107,17 @@
 #     empty ret means `return nothing`. jgen_emit consumes the same shape.
 
 
+module STADE
+
+export stade_tangent_file
+export stade_adjoint_file
+export stade_hvp_file
+
+export stade_cuda_file
+export stade_amdgpu_file
+export stade_metal_file
+export stade_jacc_file
+
 
 # ==================== inl_* ====================================
 # Multi-kernel call graphs, inlined before parse_kernel runs. A call is a
@@ -7921,3 +7932,5 @@ function stade_ii_plan_check(kernel)
     @assert a == b "snap_ii_plan and agen_ii_plan disagree for kernel $(kernel.sig.name): $a vs $b"
     return a
 end
+
+end # module STADE
