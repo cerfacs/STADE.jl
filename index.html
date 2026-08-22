@@ -866,15 +866,37 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* ---------- Call the Julia backend ----------
-   POSTs the source pane's text as { content, keep_push_pop }. The backend
+   POSTs the source pane's text as { content, keep_push_pop, float32,
+   generated_at }. generated_at is computed here (in the browser) rather
+   than on the server, since the server has no idea what time zone the
+   person making the request is actually in -- Intl/Date do. The backend
    runs it through every stade_*_file generator (tangent, adjoint, hvp,
    then -- unless keep_push_pop is true -- the cuda/amdgpu/metal/jacc GPU
    ports) and sends back their concatenation as { result }, one
-   banner-commented section per generator -- which we drop straight into
-   the generated-output pane below. A generator that fails on this input
+   banner-commented section per generator (prefixed with a provenance
+   comment using generated_at) -- which we drop straight into the
+   generated-output pane below. A generator that fails on this input
    (e.g. GPU porting on a multi-kernel corpus, a known gap) still shows up
    as its own section with an error message in place of code, rather than
    failing the whole request. */
+function localTimestampWithZone(){
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const timePart = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  const offsetMin = -now.getTimezoneOffset(); // JS reports UTC-local; flip to the conventional UTC+/- sign
+  const offsetSign = offsetMin >= 0 ? '+' : '-';
+  const offsetAbs = Math.abs(offsetMin);
+  const offsetStr = `UTC${offsetSign}${pad(Math.floor(offsetAbs / 60))}:${pad(offsetAbs % 60)}`;
+  let zoneName = '';
+  try{
+    zoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  }catch(err){ /* Intl unavailable — fall back to just the numeric offset below */ }
+  return zoneName
+    ? `${datePart} ${timePart} ${zoneName} (${offsetStr})`
+    : `${datePart} ${timePart} ${offsetStr}`;
+}
+
 async function generate(){
   // Baseline values are tied to a specific source/derivative pairing --
   // once Differentiate is pressed the old baseline no longer necessarily
@@ -899,7 +921,7 @@ async function generate(){
     const res = await fetch(CONFIG.BACKEND_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, keep_push_pop: keepPushPop, float32 }),
+      body: JSON.stringify({ content, keep_push_pop: keepPushPop, float32, generated_at: localTimestampWithZone() }),
     });
     if(!res.ok) throw new Error(`backend responded ${res.status}`);
     const data = await res.json();
