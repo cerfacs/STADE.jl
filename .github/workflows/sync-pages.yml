@@ -1,0 +1,41 @@
+name: Sync src/STADE.jl and README.md to pages
+
+# This file must live on `main` -- for a `push` trigger, GitHub reads the
+# workflow definition from the branch being pushed to, not from `pages`.
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/STADE.jl
+      - README.md
+
+# GITHUB_TOKEN needs write access to push the mirrored commit to `pages`.
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need every branch ref, not just main's tip
+
+      - name: Mirror the two files onto pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git switch pages
+          # Pull just these two files' *content* from main's tip into the
+          # pages worktree/index -- everything else on pages is untouched.
+          git checkout origin/main -- src/STADE.jl README.md
+
+          if git diff --staged --quiet; then
+            echo "no changes to mirror"
+            exit 0
+          fi
+
+          git commit -m "sync: mirror src/STADE.jl and README.md from main@$(git rev-parse --short origin/main)"
+          git push origin pages
