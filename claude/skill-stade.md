@@ -210,12 +210,6 @@ a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
 
-Status: 16/16 tested kernels validated exactly on real hardware. Four
-(`mpnn`, `ttgc`, `transformer`, `unet`) blocked on shadow scalars a
-kernel reads without receiving as parameters; Tier B blocked because
-`cgen_ingest` rejects its own emitted indirect index. See
-`stade_gpu_plan.md`.
-
 Measure **loops offloaded**, never device-kernel count — adjacent
 splittable loops merge, so fewer kernels can mean more offloaded.
 
