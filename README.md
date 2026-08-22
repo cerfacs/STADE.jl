@@ -33,7 +33,24 @@ For now, the aforementioned goals come at the cost of supporting only a subset o
 ## First use
 
 ```bash
-julia -e ''
+julia -e ' \
+begin
+  import Pkg
+  Pkg.add(url="https://github.com/cerfacs/STADE.jl")
+  using STADE
+  in_   = pkgdir(STADE, "test", "val-corpus", "affine_loss.jl")
+  out_b = in_[1:end-3]   * "_b.jl"
+  out_c = out_b[1:end-3] * "_cuda.jl"
+  try
+    stade_adjoint_file(in_, out_b)
+    stade_cuda_file(out_b, out_c)
+    println(read(out_b, String))
+    println(read(out_c, String))
+  catch e
+    error("STADE.jl failed: $e")
+  end
+end
+'
 ```
 
 ## Wishlist 💡
