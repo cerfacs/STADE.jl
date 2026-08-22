@@ -1,4 +1,7 @@
 # STADE.jl 🏟️
+
+<!-- [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.16995764.svg)](https://doi.org/10.5281/zenodo.16995764) -->
+
 *Low entry ticket to Scalable Differentiable Computing*
 
 **Source Transformation Automatic Differentiation Engine** (STADE) generates source-verifiable GPU-ported (CUDA, AMDGPU, Metal, JACC)
