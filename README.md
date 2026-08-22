@@ -35,7 +35,7 @@ For now, the aforementioned goals come at the cost of supporting only a subset o
 
 ## Wishlist 💡
 
-- [ ] Wrap common subexpressions into temporary variables
+- [ ] Wrap common subexpressions into auxiliary variables
 - [ ] Add `bgen_` stage for mini-batch execution code via GPU-aware MPI
 - [ ] Add support to `:while` statement
 - [ ] Add support to (binomial) checkpointing
