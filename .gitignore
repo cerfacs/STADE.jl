@@ -1,17 +1,7 @@
 # DS_Store
 .DS_Store
 
-# ZIP files
-*.zip
-
-# Some folders
-val-corpus-gpu-split/
-# claude/
-
-# STADE-generated files
-# *_b.jl
-# *_d.jl
-# *_hv.jl
+# Validation-related YAML files
 *.yaml
 
 # Coverage and Profile files
