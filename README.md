@@ -77,7 +77,7 @@ This project has been mainly inspired by [Inria Tapenade AD engine](https://team
   title        = {STADE.jl: Source Transformation Automatic Differentiation Engine},
   year         = 2026,
   publisher    = {Zenodo},
-  doi          = {},
-  url          = {},
+  doi          = {https://doi.org/10.5281/zenodo.22061808},
+  url          = {https://github.com/cerfacs/STADE.jl},
 }
 ```
