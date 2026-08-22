@@ -4417,7 +4417,240 @@ function cgen_collect_all_assigned!(body::Vector{NamedTuple}, names::Set{Symbol}
     end
 end
 
-function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
+# ---- array-privacy proof: is a written array confined to a private, non-overlapping
+#      slice per outer iteration, regardless of how many sub-loops touch it? ----
+# The pairwise write/read-index check below (cgen_reduction_only_loop's own tail) treats every
+# access to an array as one undifferentiated set, so it cannot tell "three sub-loops each write
+# their own disjoint slice of a per-edge scratch buffer, a fourth reads the assembled whole" apart
+# from a genuine value recurrence -- both look like "a write index that doesn't match some read
+# index of the same array". This section adds a narrower, additive proof for exactly the safe
+# shape, scoped per sub-loop rather than globally: an array is accepted here only when every
+# access decomposes cleanly into (an outer-loop-invariant base, an inner loop's own additive index),
+# and the group structure matches one of two provably-safe patterns (see cgen_array_private_to_loop).
+# Anything that doesn't decompose this way falls straight back to the pairwise check, unchanged.
+
+# canonicalizes an additive/subtractive expression into a sign-tagged multiset of leaf terms --
+# `+`/`-` flatten at any depth, and a literal-integer multiplier expands into repeated leaves
+# (`2*n` becomes two copies of `n`), so `n_in_msg` and `n_node_feat+n_node_feat+n_edge_feat` can be
+# compared on equal footing once `n_in_msg`'s own definition is substituted in (see
+# cgen_expand_additive_terms). Bounded to a sane literal range so a stray large constant can't blow
+# this up.
+function cgen_flatten_additive_terms(expr, sign::Int = 1, out::Vector{Tuple{Int,Any}} = Tuple{Int,Any}[])
+    if expr isa Expr && expr.head == :call && expr.args[1] == :+
+        for a in expr.args[2:end]
+            cgen_flatten_additive_terms(a, sign, out)
+        end
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :- && length(expr.args) == 2
+        cgen_flatten_additive_terms(expr.args[2], -sign, out)
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :- && length(expr.args) == 3
+        cgen_flatten_additive_terms(expr.args[2], sign, out)
+        cgen_flatten_additive_terms(expr.args[3], -sign, out)
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :* && length(expr.args) == 3 &&
+           expr.args[2] isa Integer && 0 <= expr.args[2] <= 64
+        for _ in 1:expr.args[2]
+            cgen_flatten_additive_terms(expr.args[3], sign, out)
+        end
+    elseif expr isa Integer && expr == 0
+        # drop zero terms
+    else
+        push!(out, (sign, expr))
+    end
+    return out
+end
+
+cgen_additive_key(terms) = sort([(s, string(t)) for (s, t) in terms])
+
+# a scalar's traced definition, for substitution below -- only ever a plain `x = expr` with no
+# array read and no self-reference, so substituting it can never hide an aliasing hazard behind a
+# name; anything else (conditional, array-derived, self-referential) is simply absent from the map,
+# and cgen_expand_additive_terms leaves such a symbol as an opaque leaf instead of guessing.
+function cgen_scalar_def_map(body::Vector{NamedTuple})
+    defs = Dict{Symbol,Any}()
+    for stmt in body
+        stmt.kind == :assign && stmt.lhs isa Symbol || continue
+        var = stmt.lhs
+        if cgen_expr_has_ref(stmt.rhs) || cgen_expr_contains(stmt.rhs, var)
+            delete!(defs, var)
+        else
+            defs[var] = stmt.rhs
+        end
+    end
+    return defs
+end
+
+# fully expands expr into a canonical multiset, substituting any leaf symbol that has a traced
+# definition, recursively, to a bounded depth (mirrors shape_propagate_int!'s own bounded-iteration
+# convention elsewhere in this file)
+function cgen_expand_additive_terms(expr, defs::Dict{Symbol,Any}, depth::Int = 8)
+    out = Tuple{Int,Any}[]
+    for (sign, term) in cgen_flatten_additive_terms(expr)
+        if depth > 0 && term isa Symbol && haskey(defs, term)
+            for (s2, t2) in cgen_expand_additive_terms(defs[term], defs, depth - 1)
+                push!(out, (sign * s2, t2))
+            end
+        else
+            push!(out, (sign, term))
+        end
+    end
+    return out
+end
+
+cgen_additive_terms_equal(a, b, defs::Dict{Symbol,Any}) =
+    cgen_additive_key(cgen_expand_additive_terms(a, defs)) == cgen_additive_key(cgen_expand_additive_terms(b, defs))
+
+# strips `localvar` as a clean top-level additive term from expr (e.g. `in_off + k` strips to
+# `in_off` for localvar=k), refusing if any OTHER chain variable also appears -- a mixed index like
+# `base + i_loc + i_k` naming two different sub-loops' variables in one expression isn't a shape this
+# proof attempts to reason about, so it's left to the pairwise fallback instead of guessed at.
+function cgen_strip_local_additive_term(expr, localvar::Symbol, other_chain_vars::Vector{Symbol})
+    any(v -> cgen_expr_contains(expr, v), other_chain_vars) && return (nothing, false)
+    if expr === localvar
+        return (0, true)
+    elseif expr isa Expr && expr.head == :call && expr.args[1] == :+
+        args = expr.args[2:end]
+        idx = findfirst(a -> a === localvar, args)
+        idx === nothing && return (nothing, false)
+        rest = [args[i] for i in eachindex(args) if i != idx]
+        isempty(rest) && return (0, true)
+        length(rest) == 1 && return (rest[1], true)
+        return (Expr(:call, :+, rest...), true)
+    else
+        return (nothing, false)
+    end
+end
+
+# collects every occurrence of `arr` within one top-level statement of the candidate loop, at any
+# nesting depth, tagged with the full chain of enclosing loop vars paired with their own `.hi`
+# (never just the variable name -- sibling sub-loops routinely reuse the same loop-variable name
+# with different trip counts, e.g. three separate `for k = 1:...` loops in the same kernel, so a
+# name-keyed trip-count table would silently collide). Bails (returns `nothing`) the moment `arr`
+# is touched inside an `:if` -- reasoning through a conditional's effect on which slice gets
+# written is out of scope here, so that case is left to the pairwise fallback -- or a for-loop
+# whose bounds aren't a literal `1:hi` step-1 range, since the additive stripping below assumes
+# that shape.
+function cgen_deep_array_occurrences!(stmts, arr::Symbol, chain::Vector{Tuple{Symbol,Any}}, out)
+    for stmt in stmts
+        if stmt.kind == :assign
+            if stmt.lhs isa Expr && stmt.lhs.head == :ref && stmt.lhs.args[1] == arr
+                length(stmt.lhs.args) == 2 || return nothing
+                push!(out, (:write, stmt.lhs.args[2], copy(chain)))
+            end
+            refs = Dict{Any,Vector{Any}}()
+            cgen_collect_refs!(stmt.rhs, refs)
+            for idxs in get(refs, arr, Any[])
+                length(idxs) == 1 || return nothing
+                push!(out, (:read, idxs[1], copy(chain)))
+            end
+        elseif stmt.kind == :for
+            (stmt.lo isa Integer && stmt.lo == 1 && stmt.step isa Integer && stmt.step == 1) || return nothing
+            cgen_deep_array_occurrences!(stmt.body, arr, vcat(chain, [(stmt.var, stmt.hi)]), out) === nothing && return nothing
+        elseif stmt.kind == :if
+            writes = Dict{Any,Vector{Any}}(); reads = Dict{Any,Vector{Any}}()
+            cgen_collect_array_accesses!(NamedTuple[stmt], writes, reads)
+            (haskey(writes, arr) || haskey(reads, arr)) && return nothing
+        end
+    end
+    return out
+end
+
+# picks the one chain variable actually present in idx_expr (requiring exactly one -- an index
+# mixing two different sub-loop variables isn't attempted here) and strips it, returning
+# (base, trip) -- trip is `nothing` for a top-level occurrence with no enclosing sub-loop at all.
+function cgen_classify_array_occurrence(idx_expr, chain::Vector{Tuple{Symbol,Any}})
+    isempty(chain) && return (idx_expr, nothing)
+    present = [(v, t) for (v, t) in chain if cgen_expr_contains(idx_expr, v)]
+    length(present) == 1 || return nothing
+    (v, trip) = present[1]
+    others = [c for (c, _) in chain if c != v]
+    (base, ok) = cgen_strip_local_additive_term(idx_expr, v, others)
+    ok || return nothing
+    return (base, trip)
+end
+
+# The proof itself. Groups every occurrence of `arr` within the candidate loop's body by which
+# top-level statement it came from (a plain assignment, or an immediately- or more-deeply-nested
+# sub-loop), requires each group to be internally self-consistent (its own write and read indices,
+# after stripping any local sub-loop variable, all agree -- the same requirement the pairwise check
+# already makes, just scoped per group instead of globally), then accepts the whole array under
+# either of two provably-safe patterns:
+#
+#   1. No group is a pure reader (every group either only writes, or reads back exactly what it
+#      itself just wrote). Cross-group relationships never matter for thread safety in this case --
+#      each group is independently either a self-contained accumulation or a write nothing else in
+#      this loop depends on -- so whether different groups' bases could coincide across different
+#      outer iterations is cgen_device_assign's job (atomic vs plain), never this proof's.
+#   2. Every group shares the exact same (base, trip) -- repeatedly touching one already-established
+#      sub-region (write, then read-modify-write, then plain read, all at the same offset).
+#   3. A cumulative-assembly pattern: one reading group (optionally also writing, already
+#      self-consistent) consumes a base plus some trip-sized range; zero or more write-only groups,
+#      each earlier in program order, each add their own trip to a running total starting from that
+#      same base; the reader's own range must equal that running total exactly. This is the shape
+#      that lets `msg_input[in_off+k]`, `msg_input[in_off+n_node_feat+k]`, and
+#      `msg_input[in_off+2n_node_feat+k]` (three private sub-ranges) be proven to add up to exactly
+#      what `msg_input[in_off+i_seq_i]` (for i_seq_i = 1:n_in_msg) reads back, once n_in_msg's own
+#      definition is expanded and matches term-for-term.
+#
+# Anything not covered -- multiple pure-reader groups, a reader before some of its writers, a
+# group whose own accesses don't line up, a multi-dimensional ref, arr touched inside an `:if` --
+# returns `nothing`, meaning "not proven either way", and the caller falls back to the pairwise
+# check for that array exactly as before this proof existed.
+function cgen_array_private_to_loop(body::Vector{NamedTuple}, arr::Symbol, defs::Dict{Symbol,Any})
+    occ = Tuple{Symbol,Any,Any,Int}[]   # (kind, base, trip_or_nothing, group_id)
+    for (gi, stmt) in enumerate(body)
+        raw = Tuple{Symbol,Any,Vector{Tuple{Symbol,Any}}}[]
+        if stmt.kind in (:assign, :for)
+            cgen_deep_array_occurrences!([stmt], arr, Tuple{Symbol,Any}[], raw) === nothing && return nothing
+        elseif stmt.kind == :if
+            writes = Dict{Any,Vector{Any}}(); reads = Dict{Any,Vector{Any}}()
+            cgen_collect_array_accesses!(NamedTuple[stmt], writes, reads)
+            (haskey(writes, arr) || haskey(reads, arr)) && return nothing
+            continue
+        end
+        isempty(raw) && continue
+        bases = Any[]; trips = Any[]; kinds = Symbol[]
+        for (k, idx, chain) in raw
+            cls = cgen_classify_array_occurrence(idx, chain)
+            cls === nothing && return nothing
+            (base, trip) = cls
+            push!(bases, base); push!(trips, trip); push!(kinds, k)
+        end
+        length(unique(cgen_additive_key(cgen_expand_additive_terms(b, defs)) for b in bases)) == 1 || return nothing
+        length(unique(t === nothing ? nothing : cgen_additive_key(cgen_expand_additive_terms(t, defs)) for t in trips)) == 1 || return nothing
+        haswrite = :write in kinds; hasread = :read in kinds
+        push!(occ, (haswrite && hasread ? :both : haswrite ? :write : :read, bases[1], trips[1], gi))
+    end
+    isempty(occ) && return true
+
+    # pattern 1: no pure-reader group
+    any(o -> o[1] == :read, occ) || return true
+
+    # pattern 2: every group is the same sub-region
+    same_base = unique(cgen_additive_key(cgen_expand_additive_terms(o[2], defs)) for o in occ)
+    same_trip = unique(o[3] === nothing ? nothing : cgen_additive_key(cgen_expand_additive_terms(o[3], defs)) for o in occ)
+    (length(same_base) == 1 && length(same_trip) == 1) && return true
+
+    # pattern 3: cumulative assembly, one reader, writers strictly earlier
+    readers = filter(o -> o[1] in (:read, :both), occ)
+    length(readers) == 1 || return nothing
+    R = readers[1]
+    writers = filter(o -> o[1] == :write, occ)
+    all(w -> w[4] < R[4], writers) || return nothing
+    sort!(writers, by = w -> w[4])
+    cum = 0
+    for w in writers
+        expected_base = cum == 0 ? R[2] : Expr(:call, :+, R[2], cum)
+        cgen_additive_terms_equal(w[2], expected_base, defs) || return nothing
+        cum = cum == 0 ? w[3] : Expr(:call, :+, cum, w[3])
+    end
+    if R[3] === nothing
+        cum == 0 || return nothing
+    else
+        cgen_additive_terms_equal(R[3], cum, defs) || return nothing
+    end
+    return true
+end
+
+function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
     local_names = cgen_locally_assigned_scalars(body)
 # A locally-assigned scalar that fails the plain use-before-def walk below may still be safe if it provably converges to
 # the same literal on every control-flow path, PROVIDED that constant matches the value known coming into the loop
@@ -4438,8 +4671,14 @@ function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, kno
 # recurrence can carry its cross-iteration coupling through an inner loop's index, with no mention of
 # the outer i_seq_ variable at all. The loop var doesn't have to appear in an index for reading and
 # writing the same array at two indices to be a genuine recurrence -- any structural mismatch between
-# a write and read index of the same array disqualifies the loop, unconditionally.
+# a write and read index of the same array disqualifies the loop, unconditionally -- UNLESS
+# cgen_array_private_to_loop can prove that array's whole access pattern is confined to a private,
+# non-overlapping per-outer-iteration region despite the mismatch (see that function's own comment).
+# Only tried for a written array; a purely-read array never reaches this loop at all, and never needed
+# proving in the first place, since concurrent reads of shared memory are always safe on their own.
+    array_defs = merge(outer_defs, cgen_scalar_def_map(body))
     for (arr, widxs) in writes
+        cgen_array_private_to_loop(body, arr, array_defs) === true && continue
         ridxs = get(reads, arr, Any[])
         for w in widxs, r in ridxs
             w == r && continue
@@ -4843,7 +5082,12 @@ end
 # left-over statement touching a device array is what CUDA.allowscalar(false) rejects -- confirmed as a live-GPU crash. Fix: each run of consecutive
 # :assign statements is wrapped in one allowscalar_macro block if any touches an array, else emitted unwrapped. keep_all_atomic=false additionally
 # offers a splittable loop to cgen_idiomatic_scalar_reduction, replacing it with one dot/sum/mapreduce call when it matches that narrow shape.
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true)
+# outer_defs: scalar definitions from the whole kernel's own top-level body (see
+# cgen_scalar_def_map), built once by cgen_emit and threaded through unchanged at every
+# recursion level -- cgen_reduction_only_loop's array-privacy proof needs it to see through a
+# kernel-level size relationship like `n_in_msg = 2 * n_node_feat + n_edge_feat`, defined well
+# outside any candidate loop's own body.
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
     exprs = Any[]
     known_consts = Dict{Symbol,Any}()
     pending = Any[]
@@ -4882,7 +5126,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic)))
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -4893,7 +5137,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # loop boundary (a reverse-mode reduction shadow reset each iteration but never freshly initialized at the
             # first). Running the check unconditionally costs nothing when no such scalar exists, and otherwise either
             # recovers it via synth or refuses to split -- never silently emitting a kernel reading an undefined value.
-            synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+            synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts, outer_defs)
             # A var cgen_scalar_reduction_vars calls reduction-worthy is only safe for cgen_emit's global box-once/unbox-once treatment when it's a
             # whole-function-lifetime entity (a top-level argument like `cb`). An internal scratch scalar can satisfy the same shape by accident when
             # an enclosing loop demotes for an unrelated reason, its true reset ending up a sibling statement one level up. Globally boxing it is
@@ -4916,7 +5160,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs)))
             end
             delete!(known_consts, stmt.var)
         end
@@ -5114,7 +5358,8 @@ function cgen_emit(gk, backend; keep_all_atomic::Bool = true)
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
-    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; keep_all_atomic)
+    outer_defs = cgen_scalar_def_map(gk.body)
+    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs)
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     # Every scalar cross-thread reduction free var must already be a 1-element device array
     # before the first kernel launch that atomically writes it, and must be unboxed to a plain
@@ -5180,7 +5425,8 @@ end
 # plain host scalar, but writing it back into `target` (a device-array-backed ref at runtime) via a bare host assignment is a host setindex!
 # against a device array. Unlike CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch, raising 'Scalar indexing is disallowed'. Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true)
+# outer_defs: see cgen_body's identical parameter -- kept in sync for the JACC target.
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
     exprs = Any[]
     known_consts = Dict{Symbol,Any}()
     pending = Any[]
@@ -5213,7 +5459,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             end
         elseif stmt.kind == :if
             flush_pending!()
-            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic)))
+            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -5222,7 +5468,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # see cgen_body's identical fix (stade_gpu_plan.md Item 2) --
             # same bug, same reasoning, kept in sync since jgen_body is
             # this same host-splitting logic for the JACC target.
-            synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+            synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts, outer_defs)
             # see cgen_body's identical fn_args scope gate (stade_gpu_plan.md
             # Item 2) -- same reasoning, kept in sync for the JACC target.
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
@@ -5265,7 +5511,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs)))
             end
             delete!(known_consts, stmt.var)
         end
@@ -5379,7 +5625,8 @@ function jgen_emit(gk; keep_all_atomic::Bool = true, allowscalar_macro = jgen_de
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
-    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic)
+    outer_defs = cgen_scalar_def_map(gk.body)
+    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs)
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the
     # reverse -- see the "JACC v1.x API" section of
@@ -7459,7 +7706,10 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # It does not rule out :recompute, which leaves every adjoint where
     # it was and only replaces snapshots with re-execution.
     has_escape = ii_body_has_escaping_array_write(kernel.body, stmt.body, kernel.sig.kinds, active_map)
-    synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+    # kernel.body is already in scope here, so the array-privacy proof gets the same kernel-level
+    # scalar defs (e.g. `n_in_msg = 2*n_node_feat+n_edge_feat`) as the cgen_/jgen_ splitting path --
+    # no separate threading needed, unlike cgen_body/jgen_body's own outer_defs parameter.
+    synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts, cgen_scalar_def_map(kernel.body))
     synth === nothing && return :none
     local_names = cgen_locally_assigned_scalars(stmt.body)
     redvars = cgen_scalar_reduction_vars(stmt.body)
@@ -7530,7 +7780,10 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # It does not rule out :recompute, which leaves every adjoint where
     # it was and only replaces snapshots with re-execution.
     has_escape = ii_body_has_escaping_array_write(kernel.body, stmt.body, kernel.sig.kinds, active_map)
-    synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts)
+    # kernel.body is already in scope here, so the array-privacy proof gets the same kernel-level
+    # scalar defs (e.g. `n_in_msg = 2*n_node_feat+n_edge_feat`) as the cgen_/jgen_ splitting path --
+    # no separate threading needed, unlike cgen_body/jgen_body's own outer_defs parameter.
+    synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts, cgen_scalar_def_map(kernel.body))
     synth === nothing && return :none
     local_names = cgen_locally_assigned_scalars(stmt.body)
     redvars = cgen_scalar_reduction_vars(stmt.body)
