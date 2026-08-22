@@ -54,24 +54,32 @@ add `export PATH="/home/claude/julia-1.10.11/bin:$PATH"` first.
 ## The rules, and why they matter
 
 1. **A sequential loop's variable must start with `i_seq_`. An ordinary
-   loop's variable must not.** This is the one naming rule STADE depends
-   on. It is the only signal that tells STADE whether a loop carries a
-   value across iterations. That signal decides whether the adjoint
-   sweep runs the loop in reverse.
+   loop's variable must not.** Write each loop so that iteration `i`
+   reads inputs and writes outputs only at indices derived from `i`.
+   When a loop's body reads a value a previous iteration wrote, a
+   running sum, a scan, any accumulator, prefix its variable with
+   `i_seq_`. For example, write `i_seq_k`. Tag it even where the
+   accumulation looks commutative. The cost of tagging is zero. The cost
+   of skipping it by mistake is not.
 
-   Get this wrong and STADE raises no error. It silently generates a
-   wrong derivative instead. A running sum tagged as ordinary can still
-   look correct by coincidence, because addition does not care about
-   order. A prefix scan such as `y[k] = y[k - 1] + x[k]`, tagged as
-   ordinary, is silently wrong. The reverse sweep needs to run from `n`
-   down to `1`, and only the `i_seq_` tag tells STADE to do that.
+   Here is the exact mechanism. STADE's adjoint reversal decision is
+   `stmt.sequential || agen_body_has_snapshot(...)`. If the carried
+   value is already snapshotted for some other reason, typically because
+   it feeds a later multiplication, the loop reverses correctly either
+   way. There the tag is redundant. But when the coupling runs through
+   an array rather than a snapshotted scalar, a prefix scan such as
+   `y[k] = y[k - 1] + x[k]`, no fallback exists. The tag is then the
+   only thing telling STADE to reverse the loop. Get it wrong there and
+   STADE raises no error. It silently returns a wrong gradient.
 
-   Write each loop so that iteration `i` reads inputs and writes outputs
-   only at indices derived from `i`. Never read a value a previous
-   iteration wrote, unless the math needs a running value. When it does,
-   prefix the loop variable with `i_seq_`, for example `i_seq_k`. Outside
-   this one prefix, name variables and functions however you want. STADE
-   tracks a variable by its symbol, never by its spelling.
+   `fuse_ii_loops` and the GPU codegen stages (`cgen_*`/`jgen_*`) never
+   read this tag. Each one reproves, from the loop's own structure,
+   which loops are safe to fuse or run in parallel. Tagging a loop
+   `i_seq_` never blocks an optimization the loop would otherwise
+   qualify for.
+
+   Outside this one prefix, name variables and functions however you
+   want. STADE tracks a variable by its symbol, never by its spelling.
 
 2. **Fuse a rectangular nest of independent loops into one loop over the
    flattened range.** If an outer independent loop's body is only
