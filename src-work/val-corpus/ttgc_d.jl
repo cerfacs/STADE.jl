@@ -59,24 +59,20 @@ function ttgc_d(u, ud, uref, urefd, i_cell_to_node, cell_vol, cell_vold, node_vo
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
-            i_node1d = 0.0
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2d = 0.0
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3d = 0.0
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4d = 0.0
-            i_node4 = i_cell_to_node[4, i_cell]
-            auxud = ((upd[i_node1] + upd[i_node2]) + upd[i_node3]) + upd[i_node4]
-            auxu = up[i_node1] + up[i_node2] + up[i_node3] + up[i_node4]
-            mupd[i_node1] = mupd[i_node1] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node1]) + (auxu + up[i_node1]) * cell_vold[i_cell])
-            mup[i_node1] = mup[i_node1] + ((auxu + up[i_node1]) * cell_vol[i_cell]) / 20.0
-            mupd[i_node2] = mupd[i_node2] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node2]) + (auxu + up[i_node2]) * cell_vold[i_cell])
-            mup[i_node2] = mup[i_node2] + ((auxu + up[i_node2]) * cell_vol[i_cell]) / 20.0
-            mupd[i_node3] = mupd[i_node3] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node3]) + (auxu + up[i_node3]) * cell_vold[i_cell])
-            mup[i_node3] = mup[i_node3] + ((auxu + up[i_node3]) * cell_vol[i_cell]) / 20.0
-            mupd[i_node4] = mupd[i_node4] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node4]) + (auxu + up[i_node4]) * cell_vold[i_cell])
-            mup[i_node4] = mup[i_node4] + ((auxu + up[i_node4]) * cell_vol[i_cell]) / 20.0
+            auxud = 0.0
+            auxu = 0.0
+            for i_seq_loc = 1:4
+                i_lnoded = 0.0
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxud = auxud + upd[i_lnode]
+                auxu = auxu + up[i_lnode]
+            end
+            for i_seq_loc = 1:4
+                i_lnoded = 0.0
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mupd[i_lnode] = mupd[i_lnode] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * cell_vold[i_cell])
+                mup[i_lnode] = mup[i_lnode] + ((auxu + up[i_lnode]) * cell_vol[i_cell]) / 20.0
+            end
         end
         for i_node = 1:i_nnode
             upd[i_node] = upd[i_node] + ((1.0 / node_vol[i_node]) * (resd[i_node] + -(mupd[i_node])) + -((res[i_node] - mup[i_node]) / node_vol[i_node] ^ 2) * node_vold[i_node])
@@ -109,24 +105,20 @@ function ttgc_d(u, ud, uref, urefd, i_cell_to_node, cell_vol, cell_vold, node_vo
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
-            i_node1d = 0.0
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2d = 0.0
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3d = 0.0
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4d = 0.0
-            i_node4 = i_cell_to_node[4, i_cell]
-            auxud = ((upd[i_node1] + upd[i_node2]) + upd[i_node3]) + upd[i_node4]
-            auxu = up[i_node1] + up[i_node2] + up[i_node3] + up[i_node4]
-            mupd[i_node1] = mupd[i_node1] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node1]) + (auxu + up[i_node1]) * cell_vold[i_cell])
-            mup[i_node1] = mup[i_node1] + ((auxu + up[i_node1]) * cell_vol[i_cell]) / 20.0
-            mupd[i_node2] = mupd[i_node2] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node2]) + (auxu + up[i_node2]) * cell_vold[i_cell])
-            mup[i_node2] = mup[i_node2] + ((auxu + up[i_node2]) * cell_vol[i_cell]) / 20.0
-            mupd[i_node3] = mupd[i_node3] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node3]) + (auxu + up[i_node3]) * cell_vold[i_cell])
-            mup[i_node3] = mup[i_node3] + ((auxu + up[i_node3]) * cell_vol[i_cell]) / 20.0
-            mupd[i_node4] = mupd[i_node4] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node4]) + (auxu + up[i_node4]) * cell_vold[i_cell])
-            mup[i_node4] = mup[i_node4] + ((auxu + up[i_node4]) * cell_vol[i_cell]) / 20.0
+            auxud = 0.0
+            auxu = 0.0
+            for i_seq_loc = 1:4
+                i_lnoded = 0.0
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxud = auxud + upd[i_lnode]
+                auxu = auxu + up[i_lnode]
+            end
+            for i_seq_loc = 1:4
+                i_lnoded = 0.0
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mupd[i_lnode] = mupd[i_lnode] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * cell_vold[i_cell])
+                mup[i_lnode] = mup[i_lnode] + ((auxu + up[i_lnode]) * cell_vol[i_cell]) / 20.0
+            end
         end
         for i_node = 1:i_nnode
             upd[i_node] = upd[i_node] + ((1.0 / node_vol[i_node]) * (res2d[i_node] + -(mupd[i_node])) + -((res2[i_node] - mup[i_node]) / node_vol[i_node] ^ 2) * node_vold[i_node])
@@ -178,15 +170,15 @@ function ttgc(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i_ncel
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4 = i_cell_to_node[4, i_cell]
-            auxu = up[i_node1] + up[i_node2] + up[i_node3] + up[i_node4]
-            mup[i_node1] = mup[i_node1] + ((auxu + up[i_node1]) * cell_vol[i_cell]) / 20.0
-            mup[i_node2] = mup[i_node2] + ((auxu + up[i_node2]) * cell_vol[i_cell]) / 20.0
-            mup[i_node3] = mup[i_node3] + ((auxu + up[i_node3]) * cell_vol[i_cell]) / 20.0
-            mup[i_node4] = mup[i_node4] + ((auxu + up[i_node4]) * cell_vol[i_cell]) / 20.0
+            auxu = 0.0
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxu = auxu + up[i_lnode]
+            end
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mup[i_lnode] = mup[i_lnode] + ((auxu + up[i_lnode]) * cell_vol[i_cell]) / 20.0
+            end
         end
         for i_node = 1:i_nnode
             up[i_node] = up[i_node] + (res[i_node] - mup[i_node]) / node_vol[i_node]
@@ -211,15 +203,15 @@ function ttgc(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i_ncel
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4 = i_cell_to_node[4, i_cell]
-            auxu = up[i_node1] + up[i_node2] + up[i_node3] + up[i_node4]
-            mup[i_node1] = mup[i_node1] + ((auxu + up[i_node1]) * cell_vol[i_cell]) / 20.0
-            mup[i_node2] = mup[i_node2] + ((auxu + up[i_node2]) * cell_vol[i_cell]) / 20.0
-            mup[i_node3] = mup[i_node3] + ((auxu + up[i_node3]) * cell_vol[i_cell]) / 20.0
-            mup[i_node4] = mup[i_node4] + ((auxu + up[i_node4]) * cell_vol[i_cell]) / 20.0
+            auxu = 0.0
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxu = auxu + up[i_lnode]
+            end
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mup[i_lnode] = mup[i_lnode] + ((auxu + up[i_lnode]) * cell_vol[i_cell]) / 20.0
+            end
         end
         for i_node = 1:i_nnode
             up[i_node] = up[i_node] + (res2[i_node] - mup[i_node]) / node_vol[i_node]

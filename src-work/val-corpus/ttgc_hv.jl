@@ -9,8 +9,8 @@ function initstacks_ttgc_b(i_ncell, i_njac, i_nnode)
     aerez_stack = Vector{Float64}(undef, ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + 1)
     aeresk_stack = Vector{Float64}(undef, (((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
     factor_stack = Vector{Float64}(undef, (((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1)
-    mup_stack = Vector{Float64}(undef, (((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1))
-    auxu_stack = Vector{Float64}(undef, ((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1)
+    mup_stack = Vector{Float64}(undef, (((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1))
+    auxu_stack = Vector{Float64}(undef, ((((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1)
     up_stack = Vector{Float64}(undef, ((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1))
     return (cavgx_stack, cavgy_stack, cavgz_stack, vere_stack, re_stack, aerex_stack, aerey_stack, aerez_stack, aeresk_stack, factor_stack, mup_stack, auxu_stack, up_stack)
 end
@@ -144,30 +144,24 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4 = i_cell_to_node[4, i_cell]
             auxu_stack_d[((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1] = auxud
             auxu_stack[((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1] = auxu
-            auxud = ((upd[i_node1] + upd[i_node2]) + upd[i_node3]) + upd[i_node4]
-            auxu = up[i_node1] + up[i_node2] + up[i_node3] + up[i_node4]
-            mup_stack_d[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mupd[i_node1]
-            mup_stack[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mup[i_node1]
-            mupd[i_node1] = mupd[i_node1] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node1]) + (auxu + up[i_node1]) * cell_vold[i_cell])
-            mup[i_node1] = mup[i_node1] + ((auxu + up[i_node1]) * cell_vol[i_cell]) / 20.0
-            mup_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mupd[i_node2]
-            mup_stack[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mup[i_node2]
-            mupd[i_node2] = mupd[i_node2] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node2]) + (auxu + up[i_node2]) * cell_vold[i_cell])
-            mup[i_node2] = mup[i_node2] + ((auxu + up[i_node2]) * cell_vol[i_cell]) / 20.0
-            mup_stack_d[(((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mupd[i_node3]
-            mup_stack[(((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mup[i_node3]
-            mupd[i_node3] = mupd[i_node3] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node3]) + (auxu + up[i_node3]) * cell_vold[i_cell])
-            mup[i_node3] = mup[i_node3] + ((auxu + up[i_node3]) * cell_vol[i_cell]) / 20.0
-            mup_stack_d[((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mupd[i_node4]
-            mup_stack[((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mup[i_node4]
-            mupd[i_node4] = mupd[i_node4] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node4]) + (auxu + up[i_node4]) * cell_vold[i_cell])
-            mup[i_node4] = mup[i_node4] + ((auxu + up[i_node4]) * cell_vol[i_cell]) / 20.0
+            auxud = 0.0
+            auxu = 0.0
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxud = auxud + upd[i_lnode]
+                auxu = auxu + up[i_lnode]
+            end
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mup_stack_d[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (((i_seq_ - 1) * ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (i_cell - 1) * (div(4 - 1, 1) + 1) + (i_seq_loc - 1)) + 1)] = mupd[i_lnode]
+                mup_stack[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (((i_seq_ - 1) * ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (i_cell - 1) * (div(4 - 1, 1) + 1) + (i_seq_loc - 1)) + 1)] = mup[i_lnode]
+                mupd[i_lnode] = mupd[i_lnode] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * cell_vold[i_cell])
+                mup[i_lnode] = mup[i_lnode] + ((auxu + up[i_lnode]) * cell_vol[i_cell]) / 20.0
+            end
+            auxu_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = auxud
+            auxu_stack[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = auxu
         end
         for i_node = 1:i_nnode
             up_stack_d[((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1] = upd[i_node]
@@ -175,8 +169,8 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             upd[i_node] = upd[i_node] + ((1.0 / node_vol[i_node]) * (resd[i_node] + -(mupd[i_node])) + -((res[i_node] - mup[i_node]) / node_vol[i_node] ^ 2) * node_vold[i_node])
             up[i_node] = up[i_node] + (res[i_node] - mup[i_node]) / node_vol[i_node]
         end
-        auxu_stack_d[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_seq_ - 1) + 1)] = auxud
-        auxu_stack[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_seq_ - 1) + 1)] = auxu
+        auxu_stack_d[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)] = auxud
+        auxu_stack[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)] = auxu
     end
     for i_cell = 1:i_ncell
         for i_seq_loc = 1:4
@@ -204,36 +198,30 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
     end
     for i_seq_ = 1:i_njac
         for i_node = 1:i_nnode
-            mup_stack_d[(((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)] = mupd[i_node]
-            mup_stack[(((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)] = mup[i_node]
+            mup_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)] = mupd[i_node]
+            mup_stack[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)] = mup[i_node]
             mupd[i_node] = 0.0
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4 = i_cell_to_node[4, i_cell]
-            auxu_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = auxud
-            auxu_stack[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = auxu
-            auxud = ((upd[i_node1] + upd[i_node2]) + upd[i_node3]) + upd[i_node4]
-            auxu = up[i_node1] + up[i_node2] + up[i_node3] + up[i_node4]
-            mup_stack_d[((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mupd[i_node1]
-            mup_stack[((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mup[i_node1]
-            mupd[i_node1] = mupd[i_node1] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node1]) + (auxu + up[i_node1]) * cell_vold[i_cell])
-            mup[i_node1] = mup[i_node1] + ((auxu + up[i_node1]) * cell_vol[i_cell]) / 20.0
-            mup_stack_d[(((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mupd[i_node2]
-            mup_stack[(((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mup[i_node2]
-            mupd[i_node2] = mupd[i_node2] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node2]) + (auxu + up[i_node2]) * cell_vold[i_cell])
-            mup[i_node2] = mup[i_node2] + ((auxu + up[i_node2]) * cell_vol[i_cell]) / 20.0
-            mup_stack_d[((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mupd[i_node3]
-            mup_stack[((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mup[i_node3]
-            mupd[i_node3] = mupd[i_node3] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node3]) + (auxu + up[i_node3]) * cell_vold[i_cell])
-            mup[i_node3] = mup[i_node3] + ((auxu + up[i_node3]) * cell_vol[i_cell]) / 20.0
-            mup_stack_d[(((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mupd[i_node4]
-            mup_stack[(((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = mup[i_node4]
-            mupd[i_node4] = mupd[i_node4] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_node4]) + (auxu + up[i_node4]) * cell_vold[i_cell])
-            mup[i_node4] = mup[i_node4] + ((auxu + up[i_node4]) * cell_vol[i_cell]) / 20.0
+            auxu_stack_d[((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = auxud
+            auxu_stack[((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = auxu
+            auxud = 0.0
+            auxu = 0.0
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxud = auxud + upd[i_lnode]
+                auxu = auxu + up[i_lnode]
+            end
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mup_stack_d[(((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (i_cell - 1) * (div(4 - 1, 1) + 1) + (i_seq_loc - 1)) + 1)] = mupd[i_lnode]
+                mup_stack[(((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (i_cell - 1) * (div(4 - 1, 1) + 1) + (i_seq_loc - 1)) + 1)] = mup[i_lnode]
+                mupd[i_lnode] = mupd[i_lnode] + 0.05 * (cell_vol[i_cell] * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * cell_vold[i_cell])
+                mup[i_lnode] = mup[i_lnode] + ((auxu + up[i_lnode]) * cell_vol[i_cell]) / 20.0
+            end
+            auxu_stack_d[((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = auxud
+            auxu_stack[((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)] = auxu
         end
         for i_node = 1:i_nnode
             up_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)] = upd[i_node]
@@ -241,19 +229,19 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             upd[i_node] = upd[i_node] + ((1.0 / node_vol[i_node]) * (res2d[i_node] + -(mupd[i_node])) + -((res2[i_node] - mup[i_node]) / node_vol[i_node] ^ 2) * node_vold[i_node])
             up[i_node] = up[i_node] + (res2[i_node] - mup[i_node]) / node_vol[i_node]
         end
-        auxu_stack_d[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)] = auxud
-        auxu_stack[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)] = auxu
+        auxu_stack_d[(((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)] = auxud
+        auxu_stack[(((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)] = auxu
     end
     for i_seq_node = 1:i_nnode
         lossd[1] = lossd[1] + (2 * ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node])) * ((ud[i_seq_node] + upd[i_seq_node]) + -(urefd[i_seq_node]))
         loss[1] = loss[1] + ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node]) ^ 2
     end
-    auxu_stack_d[((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1] = auxud
-    auxu_stack[((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1] = auxu
+    auxu_stack_d[((((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1] = auxud
+    auxu_stack[((((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1] = auxu
     vere_stack_d[((((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1] = vered
     vere_stack[((((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1] = vere
-    auxud = auxu_stack_d[((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1]
-    auxu = auxu_stack[((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1]
+    auxud = auxu_stack_d[((((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1]
+    auxu = auxu_stack[((((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + 1]
     vered = vere_stack_d[((((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1]
     vere = vere_stack[((((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1) + (div(i_ncell - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_ncell - 1, 1) + 1)) + 1]
     for i_seq_node = i_nnode:-1:1
@@ -265,8 +253,8 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
         urefb[i_seq_node] = urefb[i_seq_node] + -((2 * ((u[i_seq_node] + up[i_seq_node]) - uref[i_seq_node])) * lossb[1])
     end
     for i_seq_ = i_njac:-1:1
-        auxud = auxu_stack_d[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)]
-        auxu = auxu_stack[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)]
+        auxud = auxu_stack_d[(((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)]
+        auxu = auxu_stack[(((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)]
         for i_node = i_nnode:-1:1
             upd[i_node] = up_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)]
             up[i_node] = up_stack[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)]
@@ -278,58 +266,35 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             node_volb[i_node] = node_volb[i_node] + -((res2[i_node] - mup[i_node]) / node_vol[i_node] ^ 2) * upb[i_node]
         end
         for i_cell = i_ncell:-1:1
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4 = i_cell_to_node[4, i_cell]
-            mupd[i_node4] = mup_stack_d[(((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            mup[i_node4] = mup_stack[(((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxubd = auxubd + ((0.05 * mupb[i_node4]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node4]))
-            auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_node4])
-            upbd[i_node4] = upbd[i_node4] + ((0.05 * mupb[i_node4]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node4]))
-            upb[i_node4] = upb[i_node4] + cell_vol[i_cell] * (0.05 * mupb[i_node4])
-            cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_node4]) * (auxud + upd[i_node4]) + (auxu + up[i_node4]) * (0.05 * mupbd[i_node4]))
-            cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_node4]) * (0.05 * mupb[i_node4])
-            mupd[i_node3] = mup_stack_d[((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            mup[i_node3] = mup_stack[((((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxubd = auxubd + ((0.05 * mupb[i_node3]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node3]))
-            auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_node3])
-            upbd[i_node3] = upbd[i_node3] + ((0.05 * mupb[i_node3]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node3]))
-            upb[i_node3] = upb[i_node3] + cell_vol[i_cell] * (0.05 * mupb[i_node3])
-            cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_node3]) * (auxud + upd[i_node3]) + (auxu + up[i_node3]) * (0.05 * mupbd[i_node3]))
-            cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_node3]) * (0.05 * mupb[i_node3])
-            mupd[i_node2] = mup_stack_d[(((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            mup[i_node2] = mup_stack[(((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxubd = auxubd + ((0.05 * mupb[i_node2]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node2]))
-            auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_node2])
-            upbd[i_node2] = upbd[i_node2] + ((0.05 * mupb[i_node2]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node2]))
-            upb[i_node2] = upb[i_node2] + cell_vol[i_cell] * (0.05 * mupb[i_node2])
-            cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_node2]) * (auxud + upd[i_node2]) + (auxu + up[i_node2]) * (0.05 * mupbd[i_node2]))
-            cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_node2]) * (0.05 * mupb[i_node2])
-            mupd[i_node1] = mup_stack_d[((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            mup[i_node1] = mup_stack[((((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxubd = auxubd + ((0.05 * mupb[i_node1]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node1]))
-            auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_node1])
-            upbd[i_node1] = upbd[i_node1] + ((0.05 * mupb[i_node1]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node1]))
-            upb[i_node1] = upb[i_node1] + cell_vol[i_cell] * (0.05 * mupb[i_node1])
-            cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_node1]) * (auxud + upd[i_node1]) + (auxu + up[i_node1]) * (0.05 * mupbd[i_node1]))
-            cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_node1]) * (0.05 * mupb[i_node1])
-            auxud = auxu_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxu = auxu_stack[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            upbd[i_node1] = upbd[i_node1] + auxubd
-            upb[i_node1] = upb[i_node1] + auxub
-            upbd[i_node2] = upbd[i_node2] + auxubd
-            upb[i_node2] = upb[i_node2] + auxub
-            upbd[i_node3] = upbd[i_node3] + auxubd
-            upb[i_node3] = upb[i_node3] + auxub
-            upbd[i_node4] = upbd[i_node4] + auxubd
-            upb[i_node4] = upb[i_node4] + auxub
+            auxud = auxu_stack_d[((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
+            auxu = auxu_stack[((((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
+            for i_seq_loc = 4:-1:1
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mupd[i_lnode] = mup_stack_d[(((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (i_cell - 1) * (div(4 - 1, 1) + 1) + (i_seq_loc - 1)) + 1)]
+                mup[i_lnode] = mup_stack[(((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1)) + (((i_seq_ - 1) * ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (i_cell - 1) * (div(4 - 1, 1) + 1) + (i_seq_loc - 1)) + 1)]
+                auxubd = auxubd + ((0.05 * mupb[i_lnode]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_lnode]))
+                auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_lnode])
+                upbd[i_lnode] = upbd[i_lnode] + ((0.05 * mupb[i_lnode]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_lnode]))
+                upb[i_lnode] = upb[i_lnode] + cell_vol[i_cell] * (0.05 * mupb[i_lnode])
+                cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_lnode]) * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * (0.05 * mupbd[i_lnode]))
+                cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_lnode]) * (0.05 * mupb[i_lnode])
+            end
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxud = auxud + upd[i_lnode]
+                auxu = auxu + up[i_lnode]
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                upbd[i_lnode] = upbd[i_lnode] + auxubd
+                upb[i_lnode] = upb[i_lnode] + auxub
+            end
+            auxud = auxu_stack_d[((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
+            auxu = auxu_stack[((((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
             auxubd = 0.0
             auxub = 0.0
         end
         for i_node = i_nnode:-1:1
-            mupd[i_node] = mup_stack_d[(((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)]
-            mup[i_node] = mup_stack[(((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)]
+            mupd[i_node] = mup_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)]
+            mup[i_node] = mup_stack[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)]
             mupbd[i_node] = 0.0
             mupb[i_node] = 0.0
         end
@@ -379,8 +344,8 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
         end
     end
     for i_seq_ = i_njac:-1:1
-        auxud = auxu_stack_d[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_seq_ - 1) + 1)]
-        auxu = auxu_stack[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_seq_ - 1) + 1)]
+        auxud = auxu_stack_d[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)]
+        auxu = auxu_stack[(((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + ((i_seq_ - 1) + 1)]
         for i_node = i_nnode:-1:1
             upd[i_node] = up_stack_d[((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1]
             up[i_node] = up_stack[((i_seq_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1]
@@ -392,52 +357,29 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             node_volb[i_node] = node_volb[i_node] + -((res[i_node] - mup[i_node]) / node_vol[i_node] ^ 2) * upb[i_node]
         end
         for i_cell = i_ncell:-1:1
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4 = i_cell_to_node[4, i_cell]
-            mupd[i_node4] = mup_stack_d[((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            mup[i_node4] = mup_stack[((((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxubd = auxubd + ((0.05 * mupb[i_node4]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node4]))
-            auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_node4])
-            upbd[i_node4] = upbd[i_node4] + ((0.05 * mupb[i_node4]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node4]))
-            upb[i_node4] = upb[i_node4] + cell_vol[i_cell] * (0.05 * mupb[i_node4])
-            cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_node4]) * (auxud + upd[i_node4]) + (auxu + up[i_node4]) * (0.05 * mupbd[i_node4]))
-            cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_node4]) * (0.05 * mupb[i_node4])
-            mupd[i_node3] = mup_stack_d[(((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            mup[i_node3] = mup_stack[(((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxubd = auxubd + ((0.05 * mupb[i_node3]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node3]))
-            auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_node3])
-            upbd[i_node3] = upbd[i_node3] + ((0.05 * mupb[i_node3]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node3]))
-            upb[i_node3] = upb[i_node3] + cell_vol[i_cell] * (0.05 * mupb[i_node3])
-            cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_node3]) * (auxud + upd[i_node3]) + (auxu + up[i_node3]) * (0.05 * mupbd[i_node3]))
-            cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_node3]) * (0.05 * mupb[i_node3])
-            mupd[i_node2] = mup_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            mup[i_node2] = mup_stack[((div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxubd = auxubd + ((0.05 * mupb[i_node2]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node2]))
-            auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_node2])
-            upbd[i_node2] = upbd[i_node2] + ((0.05 * mupb[i_node2]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node2]))
-            upb[i_node2] = upb[i_node2] + cell_vol[i_cell] * (0.05 * mupb[i_node2])
-            cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_node2]) * (auxud + upd[i_node2]) + (auxu + up[i_node2]) * (0.05 * mupbd[i_node2]))
-            cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_node2]) * (0.05 * mupb[i_node2])
-            mupd[i_node1] = mup_stack_d[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            mup[i_node1] = mup_stack[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
-            auxubd = auxubd + ((0.05 * mupb[i_node1]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node1]))
-            auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_node1])
-            upbd[i_node1] = upbd[i_node1] + ((0.05 * mupb[i_node1]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_node1]))
-            upb[i_node1] = upb[i_node1] + cell_vol[i_cell] * (0.05 * mupb[i_node1])
-            cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_node1]) * (auxud + upd[i_node1]) + (auxu + up[i_node1]) * (0.05 * mupbd[i_node1]))
-            cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_node1]) * (0.05 * mupb[i_node1])
+            auxud = auxu_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
+            auxu = auxu_stack[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1)]
+            for i_seq_loc = 4:-1:1
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mupd[i_lnode] = mup_stack_d[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (((i_seq_ - 1) * ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (i_cell - 1) * (div(4 - 1, 1) + 1) + (i_seq_loc - 1)) + 1)]
+                mup[i_lnode] = mup_stack[(div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1) + (((i_seq_ - 1) * ((div(i_ncell - 1, 1) + 1) * (div(4 - 1, 1) + 1)) + (i_cell - 1) * (div(4 - 1, 1) + 1) + (i_seq_loc - 1)) + 1)]
+                auxubd = auxubd + ((0.05 * mupb[i_lnode]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_lnode]))
+                auxub = auxub + cell_vol[i_cell] * (0.05 * mupb[i_lnode])
+                upbd[i_lnode] = upbd[i_lnode] + ((0.05 * mupb[i_lnode]) * cell_vold[i_cell] + cell_vol[i_cell] * (0.05 * mupbd[i_lnode]))
+                upb[i_lnode] = upb[i_lnode] + cell_vol[i_cell] * (0.05 * mupb[i_lnode])
+                cell_volbd[i_cell] = cell_volbd[i_cell] + ((0.05 * mupb[i_lnode]) * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * (0.05 * mupbd[i_lnode]))
+                cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_lnode]) * (0.05 * mupb[i_lnode])
+            end
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxud = auxud + upd[i_lnode]
+                auxu = auxu + up[i_lnode]
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                upbd[i_lnode] = upbd[i_lnode] + auxubd
+                upb[i_lnode] = upb[i_lnode] + auxub
+            end
             auxud = auxu_stack_d[((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1]
             auxu = auxu_stack[((i_seq_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1]
-            upbd[i_node1] = upbd[i_node1] + auxubd
-            upb[i_node1] = upb[i_node1] + auxub
-            upbd[i_node2] = upbd[i_node2] + auxubd
-            upb[i_node2] = upb[i_node2] + auxub
-            upbd[i_node3] = upbd[i_node3] + auxubd
-            upb[i_node3] = upb[i_node3] + auxub
-            upbd[i_node4] = upbd[i_node4] + auxubd
-            upb[i_node4] = upb[i_node4] + auxub
             auxubd = 0.0
             auxub = 0.0
         end
@@ -687,15 +629,15 @@ function ttgc(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i_ncel
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4 = i_cell_to_node[4, i_cell]
-            auxu = up[i_node1] + up[i_node2] + up[i_node3] + up[i_node4]
-            mup[i_node1] = mup[i_node1] + ((auxu + up[i_node1]) * cell_vol[i_cell]) / 20.0
-            mup[i_node2] = mup[i_node2] + ((auxu + up[i_node2]) * cell_vol[i_cell]) / 20.0
-            mup[i_node3] = mup[i_node3] + ((auxu + up[i_node3]) * cell_vol[i_cell]) / 20.0
-            mup[i_node4] = mup[i_node4] + ((auxu + up[i_node4]) * cell_vol[i_cell]) / 20.0
+            auxu = 0.0
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxu = auxu + up[i_lnode]
+            end
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mup[i_lnode] = mup[i_lnode] + ((auxu + up[i_lnode]) * cell_vol[i_cell]) / 20.0
+            end
         end
         for i_node = 1:i_nnode
             up[i_node] = up[i_node] + (res[i_node] - mup[i_node]) / node_vol[i_node]
@@ -720,15 +662,15 @@ function ttgc(u, uref, i_cell_to_node, cell_vol, node_vol, skx, sky, skz, i_ncel
             mup[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
-            i_node1 = i_cell_to_node[1, i_cell]
-            i_node2 = i_cell_to_node[2, i_cell]
-            i_node3 = i_cell_to_node[3, i_cell]
-            i_node4 = i_cell_to_node[4, i_cell]
-            auxu = up[i_node1] + up[i_node2] + up[i_node3] + up[i_node4]
-            mup[i_node1] = mup[i_node1] + ((auxu + up[i_node1]) * cell_vol[i_cell]) / 20.0
-            mup[i_node2] = mup[i_node2] + ((auxu + up[i_node2]) * cell_vol[i_cell]) / 20.0
-            mup[i_node3] = mup[i_node3] + ((auxu + up[i_node3]) * cell_vol[i_cell]) / 20.0
-            mup[i_node4] = mup[i_node4] + ((auxu + up[i_node4]) * cell_vol[i_cell]) / 20.0
+            auxu = 0.0
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                auxu = auxu + up[i_lnode]
+            end
+            for i_seq_loc = 1:4
+                i_lnode = i_cell_to_node[i_seq_loc, i_cell]
+                mup[i_lnode] = mup[i_lnode] + ((auxu + up[i_lnode]) * cell_vol[i_cell]) / 20.0
+            end
         end
         for i_node = 1:i_nnode
             up[i_node] = up[i_node] + (res2[i_node] - mup[i_node]) / node_vol[i_node]
