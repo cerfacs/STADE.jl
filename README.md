@@ -1,4 +1,7 @@
 # STADE.jl 🏟️
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22061808.svg)](https://doi.org/10.5281/zenodo.22061808)
+
 *Low entry ticket to Scalable Differentiable Computing*
 
 **Source Transformation Automatic Differentiation Engine** (STADE) generates source-verifiable GPU-ported (CUDA, AMDGPU, Metal, JACC)
@@ -74,7 +77,7 @@ This project has been mainly inspired by [Inria Tapenade AD engine](https://team
   title        = {STADE.jl: Source Transformation Automatic Differentiation Engine},
   year         = 2026,
   publisher    = {Zenodo},
-  doi          = {},
-  url          = {},
+  doi          = {https://doi.org/10.5281/zenodo.22061808},
+  url          = {https://github.com/cerfacs/STADE.jl},
 }
 ```
