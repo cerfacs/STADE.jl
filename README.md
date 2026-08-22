@@ -32,6 +32,9 @@ For now, the aforementioned goals come at the cost of supporting only a subset o
 
 ## First use
 
+```bash
+julia -e ''
+```
 
 ## Wishlist 💡
 
