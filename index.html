@@ -538,7 +538,13 @@
   <section class="pane">
     <div class="pane-header">
       <span><span class="dot" style="background:var(--julia-blue);"></span>source</span>
-      <span id="source-meta"></span>
+      <div class="pane-header-actions">
+        <span id="source-meta"></span>
+        <button type="button" id="clear-source-btn" class="report-issue-btn" title="Clear the source pane">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>
+          Clear Source
+        </button>
+      </div>
     </div>
     <div class="pane-body">
       <div class="code-editor">
@@ -595,6 +601,12 @@
         </span>
         <span class="options-menu-label">Keep push!/pop!<span class="options-menu-sublabel">(for debugging)</span></span>
       </button>
+      <button type="button" class="options-menu-item" id="float32-option" role="menuitemcheckbox" aria-checked="false">
+        <span class="options-menu-check">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </span>
+        <span class="options-menu-label">Float32<span class="options-menu-sublabel">(single precision)</span></span>
+      </button>
     </div>
   </div>
 </div>
@@ -613,7 +625,13 @@
   <section class="pane">
     <div class="pane-header">
       <span><span class="dot" style="background:var(--julia-blue);"></span>baseline input (yaml)</span>
-      <span id="yaml-meta"></span>
+      <div class="pane-header-actions">
+        <span id="yaml-meta"></span>
+        <button type="button" id="clear-baseline-btn" class="report-issue-btn" title="Clear the baseline input (YAML) pane">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>
+          Clear Baseline
+        </button>
+      </div>
     </div>
     <div class="pane-body">
       <div class="code-editor">
@@ -701,6 +719,7 @@ const CONFIG = {
 };
 
 const sourceInput   = document.getElementById('source-input');
+const clearSourceBtn = document.getElementById('clear-source-btn');
 const generatedOut   = document.getElementById('generated-output');
 const galleryBar     = document.getElementById('gallery-bar');
 const galleryStatus  = document.getElementById('gallery-status');
@@ -709,12 +728,14 @@ const differentiateWrap        = document.getElementById('differentiate-wrap');
 const differentiateOptionsBtn  = document.getElementById('differentiate-options-btn');
 const differentiateOptionsMenu = document.getElementById('differentiate-options-menu');
 const keepPushPopOption        = document.getElementById('keep-push-pop-option');
+const float32Option            = document.getElementById('float32-option');
 const statusBar      = document.getElementById('status-bar');
 const sourceMeta     = document.getElementById('source-meta');
 const generatedMeta  = document.getElementById('generated-meta');
 
 const yamlInput      = document.getElementById('yaml-input');
 const yamlMeta       = document.getElementById('yaml-meta');
+const clearBaselineBtn = document.getElementById('clear-baseline-btn');
 const validateOutput    = document.getElementById('validate-output');
 const validateBtn       = document.getElementById('validate-btn');
 const validateStatusBar = document.getElementById('validate-status-bar');
@@ -803,15 +824,19 @@ async function selectFile(file, btnEl){
 }
 
 /* ---------- Differentiate options dropdown ----------
-   A single option so far: "Keep push!/pop!" -- maps straight to STADE.jl's
-   own `keep_push_pop` kwarg on stade_tangent_file/stade_adjoint_file/
-   stade_hvp_file. Unchecked (default) sends keep_push_pop=false, matching
-   what the "Differentiate" button should default to per product policy
-   (push!/pop! stacks aren't GPU-portable, so the default should be the one
-   that keeps the GPU ports available); checked sends keep_push_pop=true,
-   and the backend skips cuda/amdgpu/metal/jacc generation entirely in that
-   case rather than running it against non-portable code. */
+   "Keep push!/pop!" -- maps straight to STADE.jl's own `keep_push_pop`
+   kwarg on stade_tangent_file/stade_adjoint_file/stade_hvp_file. Unchecked
+   (default) sends keep_push_pop=false, matching what the "Differentiate"
+   button should default to per product policy (push!/pop! stacks aren't
+   GPU-portable, so the default should be the one that keeps the GPU ports
+   available); checked sends keep_push_pop=true, and the backend skips
+   cuda/amdgpu/metal/jacc generation entirely in that case rather than
+   running it against non-portable code.
+
+   "Float32" -- sent alongside as float32=true/false; unchecked (default)
+   leaves the kernel's own declared types alone. */
 let keepPushPop = false;
+let float32 = false;
 
 function closeDifferentiateOptions(){
   differentiateWrap.classList.remove('open');
@@ -828,6 +853,10 @@ differentiateOptionsBtn.addEventListener('click', (e) => {
 keepPushPopOption.addEventListener('click', () => {
   keepPushPop = !keepPushPop;
   keepPushPopOption.setAttribute('aria-checked', String(keepPushPop));
+});
+float32Option.addEventListener('click', () => {
+  float32 = !float32;
+  float32Option.setAttribute('aria-checked', String(float32));
 });
 document.addEventListener('click', (e) => {
   if(!differentiateWrap.contains(e.target)) closeDifferentiateOptions();
@@ -870,7 +899,7 @@ async function generate(){
     const res = await fetch(CONFIG.BACKEND_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, keep_push_pop: keepPushPop }),
+      body: JSON.stringify({ content, keep_push_pop: keepPushPop, float32 }),
     });
     if(!res.ok) throw new Error(`backend responded ${res.status}`);
     const data = await res.json();
@@ -899,7 +928,7 @@ async function generate(){
     }
   }catch(err){
     generatedOut.classList.add('placeholder');
-    generatedOut.textContent = `Request failed: ${err.message}\n\nCheck that BACKEND_URL in index.html points to a running instance of backend/generate_server.jl, and that CORS is enabled there.`;
+    generatedOut.textContent = `Request failed: ${err.message}\n\nCheck that BACKEND_URL in index.html points to a running instance of generate_server.jl, and that CORS is enabled there.`;
     setStatus(`error — ${err.message}`, 'error');
   }finally{
     generateBtn.disabled = false;
@@ -1040,6 +1069,21 @@ reportIssueBtn.addEventListener('click', () => {
   const body = buildIssueBody();
   const params = new URLSearchParams({ title, body });
   reportIssueBtn.href = `${REPORT_ISSUE_BASE_URL}?${params.toString()}`;
+});
+
+/* ---------- Clear Source: void the source pane ---------- */
+clearSourceBtn.addEventListener('click', () => {
+  sourceInput.value = '';
+  highlightEditor(sourceInput, sourceHighlight, 'julia');
+  sourceMeta.textContent = '';
+});
+
+/* ---------- Clear Baseline: void the baseline input (YAML) pane ---------- */
+clearBaselineBtn.addEventListener('click', () => {
+  yamlInput.value = '';
+  highlightEditor(yamlInput, yamlHighlight, 'yaml');
+  yamlMeta.textContent = '';
+  yamlMeta.title = '';
 });
 
 generateBtn.addEventListener('click', generate);

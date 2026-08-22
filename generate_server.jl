@@ -7,13 +7,21 @@ using Random # STADE.jl's val_* finite-difference oracle calls randn/randn -- it
              # actually called, same as src/validate_corpus.jl already does.
 
 # ------------------------------------------------------------------
-# Load STADE.jl itself. backend/ and src/ are siblings in the repo, so
-# resolve the path relative to this file (not the process's current
-# working directory) so it works the same whether the server is
-# started as `julia generate_server.jl` from backend/, or from
-# anywhere else (e.g. a Docker CMD).
+# Load STADE.jl itself. generate_server.jl now lives in the repo root,
+# a sibling of src/, so resolve the path relative to this file (not
+# the process's current working directory) so it works the same
+# whether the server is started as `julia generate_server.jl` from
+# the repo root, or from anywhere else (e.g. a Docker CMD).
+#
+# STADE.jl now wraps its code in `module STADE ... end`. `using .STADE`
+# brings the exported stade_*_file entry points into scope; everything
+# else this file uses (io_read_kernel_bundle, parse_signature,
+# io_expr_to_source, inl_build_call_graph, the stade_validate_*_file
+# trio) is internal to the module and not exported, so those are
+# referenced with an explicit `STADE.` prefix below instead.
 # ------------------------------------------------------------------
-include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
+include(joinpath(@__DIR__, "src", "STADE.jl"))
+using .STADE
 
 # ------------------------------------------------------------------
 # Web-friendly version of the "generate everything" flow.
@@ -87,17 +95,26 @@ function merged_differentiated_bundle(ad_output_paths::Vector{String})::String
     parts = String[]
     for path in ad_output_paths
         isfile(path) || continue
-        for expr in io_read_kernel_bundle(path)
-            name, _ = parse_signature(expr.args[1])
+        for expr in STADE.io_read_kernel_bundle(path)
+            name, _ = STADE.parse_signature(expr.args[1])
             name in seen && continue
             push!(seen, name)
-            push!(parts, io_expr_to_source(expr))
+            push!(parts, STADE.io_expr_to_source(expr))
         end
     end
     return join(parts, "\n")
 end
 
-function generate_content(original_content::AbstractString; keep_push_pop::Bool = false)::String
+function generate_content(original_content::AbstractString; keep_push_pop::Bool = false, float32::Bool = false)::String
+    # precision=nothing (float32=false) leaves every backend at its own
+    # default_precision (Float64 for CUDA/AMDGPU, Float32 for Metal --
+    # Metal is precision_locked to Float32 regardless, so this is a no-op
+    # there either way). precision=Float32 (float32=true) converts the
+    # CUDA/AMDGPU/JACC ports down to single precision too; passing Float32
+    # to stade_metal_file never trips precision_locked's error since it
+    # already equals Metal's own default_precision.
+    precision = float32 ? Float32 : nothing
+
     mktempdir() do dir
         entry = try
             corpus_entry_name(original_content)
@@ -136,7 +153,7 @@ function generate_content(original_content::AbstractString; keep_push_pop::Bool 
             for (label, fn) in GPU_GENERATORS
                 out_path = joinpath(dir, "output_$(label).jl")
                 body = try
-                    fn(gpu_in_path, out_path)
+                    fn(gpu_in_path, out_path; precision = precision)
                     read(out_path, String)
                 catch err
                     "# generation failed: $(sprint(showerror, err))\n"
@@ -169,9 +186,9 @@ end
 # and hvp are all checked against the same input values.
 # ------------------------------------------------------------------
 const VALIDATORS = [
-    (:tangent, stade_validate_tangent_file),
-    (:adjoint, stade_validate_adjoint_file),
-    (:hvp,     stade_validate_hvp_file),
+    (:tangent, STADE.stade_validate_tangent_file),
+    (:adjoint, STADE.stade_validate_adjoint_file),
+    (:hvp,     STADE.stade_validate_hvp_file),
 ]
 
 # a multi-kernel corpus needs its temp file named after its own entry
@@ -187,12 +204,12 @@ function corpus_entry_name(content::AbstractString)::String
     isempty(defs) && return "input"
     kernels = Dict{Symbol,Expr}()
     for def in defs
-        name, _ = parse_signature(def.args[1])
+        name, _ = STADE.parse_signature(def.args[1])
         haskey(kernels, name) && return "input" # duplicate name -- let the real read fail with a clearer error
         kernels[name] = def
     end
     length(kernels) == 1 && return string(first(keys(kernels)))
-    graph, _ = inl_build_call_graph(kernels)
+    graph, _ = STADE.inl_build_call_graph(kernels)
     called = union(values(graph)...)
     roots = [k for k in keys(kernels) if !(k in called)]
     length(roots) == 1 && return string(roots[1])
@@ -231,7 +248,7 @@ function validate_content(source_content::AbstractString, yaml_content::Abstract
         sections = String[]
         for (label, fn) in VALIDATORS
             body = try
-                result = fn(in_path; yaml_path = yaml_path)
+                result = fn(in_path; yaml_path = yaml_path, trials = 4)
                 format_validation_result(result)
             catch err
                 "generation failed: $(sprint(showerror, err))"
@@ -276,8 +293,10 @@ function handle_generate(req::HTTP.Request)
         end
         keep_push_pop = get(body, :keep_push_pop, false)
         keep_push_pop isa Bool || (keep_push_pop = false)
+        float32 = get(body, :float32, false)
+        float32 isa Bool || (float32 = false)
 
-        result = generate_content(content; keep_push_pop = keep_push_pop)
+        result = generate_content(content; keep_push_pop = keep_push_pop, float32 = float32)
         return HTTP.Response(200, cors_headers(),
                               body = JSON3.write((; result = result)))
     catch err
