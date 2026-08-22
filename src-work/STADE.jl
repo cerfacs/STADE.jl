@@ -1,6 +1,6 @@
 # ============================================================
-# STADE.jl -- source-to-source AD for skill-jade-compliant Julia
-# kernels. See skill-stade.md for the full house-style contract.
+# STADE.jl -- source-to-source AD for skill-stade-compliant Julia
+# kernels. See skill-stade-dev.md for the full house-style contract.
 #
 # Pipeline stages, in the order data flows through them:
 #
@@ -11,7 +11,7 @@
 #                         below already understands. No-op for a
 #                         single kernel with no calls.
 #   parse_  Parse        raw Expr -> validated (sig, body) kernel;
-#                         rejects anything violating skill-jade.
+#                         rejects anything violating skill-stade.
 #   shape_  Shape infer   each variable's kind: scalar_float,
 #                         scalar_int, array_float, array_int.
 #   der_    Derivatives   rule table -- how to differentiate each
@@ -36,7 +36,7 @@
 #                         into a device kernel + launch call, for
 #                         whichever GPU vendor a `gpu_backend` describes
 #                         (CUDA/AMDGPU/Metal). Consumes a plain
-#                         skill-jade kernel OR one of tgen_/agen_'s own
+#                         skill-stade kernel OR one of tgen_/agen_'s own
 #                         generated functions (see cgen_ingest) -- never
 #                         a multi-kernel corpus with un-inlined calls,
 #                         see the cgen_* section header for that gap.
@@ -76,7 +76,7 @@
 #     (kind=:assign, lhs, rhs)                                  # lhs/rhs :: Expr|Symbol|Number
 #     (kind=:for, var::Symbol, lo, hi, step, sequential::Bool, body)  # body :: statement_list
 #     (kind=:if, cond, then::statement_list, els::statement_list)
-#     -- :while intentionally unsupported for now, see skill-stade.md
+#     -- :while intentionally unsupported for now, see skill-stade-dev.md
 #     -- lo/hi/step are all Expr|Symbol|Number; a plain `lo:hi` header
 #        parses with `step` set to the Int64 literal `1`.
 # statement_list :: Vector{NamedTuple}
@@ -189,7 +189,7 @@ end
 
 # every bare-statement call anywhere in body_block (recursing through
 # :for/:if), naming caller+callee on an unresolved reference -- a
-# bare :call statement is never legal skill-jade input on its own, so
+# bare :call statement is never legal skill-stade input on its own, so
 # by construction the only thing it can be is a call to another
 # kernel in the corpus
 function inl_collect_calls!(body_block::Expr, caller_name::Symbol, callees::Set{Symbol}, kernels::Dict{Symbol,Expr})
@@ -396,7 +396,7 @@ end
 
 
 # ==================== parse_* ================================
-# Raw Expr -> validated kernel. Hard-errors on every skill-jade rule visible
+# Raw Expr -> validated kernel. Hard-errors on every skill-stade rule visible
 # at the Expr level: keyword args, the four variable shapes, indirect
 # indexing, broadcasting, i_seq_ prefix, div-not-÷, and the intrinsic
 # whitelist; comment-header and `for`-style are source-text-only.
@@ -473,7 +473,7 @@ end
 # ---- statement-list plumbing ----
 
 # Drops LineNumberNodes. If the last statement is a bare `return nothing`
-# (the only body-level return skill-jade allows), drops it too; any other
+# (the only body-level return skill-stade allows), drops it too; any other
 # `return` is a hard error. `nothing` in source parses to the Symbol
 # :nothing, not the singleton, so both forms are checked -- a caller could
 # hand parse_kernel a programmatically built Expr.
@@ -491,7 +491,7 @@ function parse_strip_lines(block_expr)
     if !isempty(stmts) && stmts[end] isa Expr && stmts[end].head == :return
         last_stmt = stmts[end]
         length(last_stmt.args) == 1 && parse_is_nothing_literal(last_stmt.args[1]) ||
-            error("parse_kernel: the only body-level `return` skill-jade allows is exactly `return nothing`")
+            error("parse_kernel: the only body-level `return` skill-stade allows is exactly `return nothing`")
         stmts = stmts[1:end-1]
     end
     for s in stmts
@@ -514,7 +514,7 @@ function parse_statement(stmt)
     elseif stmt.head == :if
         return parse_if(stmt)
     elseif stmt.head == :while
-        error("parse_kernel: `while` loops aren't supported yet (see skill-stade.md)")
+        error("parse_kernel: `while` loops aren't supported yet (see skill-stade-dev.md)")
     elseif stmt.head in (:+=, :-=, :*=, :/=, :^=)
         return parse_assign(parse_desugar_compound(stmt))
     elseif stmt.head in (:÷=, :%=, Symbol("\\="), :.=)
@@ -616,7 +616,7 @@ end
 
 # ---- expression validity ----
 # built fresh per call rather than as top-level consts -- see
-# skill-stade.md rule 3.
+# skill-stade-dev.md rule 3.
 
 function parse_arith_ops()
     return Set{Symbol}([:+, :-, :*, :/, :^])
@@ -635,7 +635,7 @@ function parse_intrinsic_whitelist()
 end
 
 # walk an expression (assignment rhs, index, loop bound, or if
-# condition) and hard-error on anything skill-jade forbids.
+# condition) and hard-error on anything skill-stade forbids.
 # in_condition allows the comparison operators -- they may only
 # appear directly in an if/while header, never stored in a variable.
 function parse_check_expr(expr, in_condition::Bool)
@@ -1077,7 +1077,7 @@ function der_adjoint_generic(op::Symbol, args, out_adjoint)
     return [der_mul(p, out_adjoint) for p in partials]
 end
 
-# ---- local partials, one function per skill-jade-whitelisted op ------
+# ---- local partials, one function per skill-stade-whitelisted op ------
 
 function der_partials(op::Symbol, args)
     op === :+     && return der_partials_add(args)
@@ -1139,7 +1139,7 @@ end
 # x^y: d/dx = y*x^(y-1), d/dy = x^y*log(x)  -- the y-branch is only
 # meaningful for x>0, same caveat any AD tool has for a non-integer
 # or negative base; y is almost always an inactive Int64 literal in
-# skill-jade kernels, so that branch is usually dropped upstream
+# skill-stade kernels, so that branch is usually dropped upstream
 function der_partials_pow(args)
     length(args) == 2 || error("der_partials_pow: ^ takes exactly 2 args")
     x, y = args[1], args[2]
@@ -1248,7 +1248,7 @@ function der_partials_mod(args)
 end
 
 # div(x,y): integer floor division -- piecewise constant, derivative 0
-# a.e. w.r.t. both args (skill-jade rule 12: div is for Int64
+# a.e. w.r.t. both args (skill-stade rule 12: div is for Int64
 # loop-counter/size arithmetic, never applied to active floats)
 function der_partials_intdiv(args)
     length(args) == 2 || error("der_partials_intdiv: div takes exactly 2 args")
@@ -1498,7 +1498,7 @@ end
 
 # if cond ... else ... end -- omits the else clause entirely when
 # else_exprs is empty (rather than emitting an empty `else end`
-# block), matching skill-jade's "keep if/else to the strict minimum"
+# block), matching skill-stade's "keep if/else to the strict minimum"
 # spirit, and round-tripping parse_if's els = NamedTuple[] for a
 # source `if` with no `else`.
 function emit_if(cond, then_exprs::Vector, else_exprs::Vector)
@@ -1522,7 +1522,7 @@ function emit_return_scalars(vars::Vector{Symbol})
     return Expr(:return, Expr(:tuple, vars...))
 end
 
-# Builds the skill-jade rule-14 #-comment header: a `# name(args...)` line, a
+# Builds the skill-stade rule-14 #-comment header: a `# name(args...)` line, a
 # blank #, the summary (possibly multi-line), a blank #, then one `# arg: doc`
 # line per argument. `args` and `arg_docs` must be the same length and order.
 # Returns a String (an Expr can't hold comments); prepend it at file-write time.
@@ -1584,7 +1584,7 @@ end
 # lhs becomes active the first time its rhs reads an already-active
 # variable. Int64-kinded targets (loop counters, branch selectors,
 # sizes) never become active -- only Float64/Array{Float64} can
-# carry a derivative at all (skill-jade rule 7).
+# carry a derivative at all (skill-stade rule 7).
 function act_propagate_assign!(stmt::NamedTuple, active_map::Dict{Symbol,Bool}, kinds::Dict{Symbol,Symbol})
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     kinds[var] in (:scalar_int, :array_int) && return false
@@ -2367,7 +2367,7 @@ function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = noth
     end
     # under keep_push_pop=false, `initstacks_*`'s signature grows to
     # accept the minimal set of kernel arguments any stack's size
-    # expression actually references -- see skill-stade.md's
+    # expression actually references -- see skill-stade-dev.md's
     # keep_push_pop entry for why the minimal set (rather than the
     # kernel's full argument list) was chosen
     fargs = keep_push_pop ? Symbol[] : layout.free_vars
@@ -2703,7 +2703,7 @@ end
 # True if `expr` contains a ref (`arr[...]`) to an array-kinded var, used by the Tier B
 # sizing pass to decide if a scalar assign is safe to replicate into a data-free skeleton:
 # an array-free RHS is exactly the set of assigns that can matter to a loop bound or branch
-# condition downstream, since skill-jade never lets a bound/condition reference an array
+# condition downstream, since skill-stade never lets a bound/condition reference an array
 # directly.
 function agen_expr_reads_array(expr, kinds)
     if expr isa Expr
@@ -3737,7 +3737,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             # single shared stack pointer in sync -- :indexed mode has
             # no such pointer, so it's simply omitted there; the
             # pushed slot goes unread, a harmless over-snapshot (see
-            # skill-stade.md's keep_push_pop entry)
+            # skill-stade-dev.md's keep_push_pop entry)
             if ectx.keep_push_pop
                 if then_pushed && els_pushed
                     push!(exprs, Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing, exprs)))
@@ -3937,7 +3937,7 @@ end
 
 # every ACTIVE local (non-argument) scalar variable needs its shadow
 # declared and zeroed before the backward sweep can accumulate into
-# it -- arrays can never be local under skill-jade (rule 8: no
+# it -- arrays can never be local under skill-stade (rule 8: no
 # in-kernel allocation, so any array must be a caller-supplied arg),
 # so this only ever has scalars to handle
 function agen_local_shadow_inits(kernel, active_map)
@@ -4056,7 +4056,7 @@ end
 
 # Zero-initialize every local scalar's second-layer shadow and its adjoint-shadow's shadow -- exactly
 # agen_local_primal_inits/agen_local_shadow_inits's job, one layer further out. Arrays can never be
-# local (skill-jade rule 8); every float arg's own xd/xbd is a function parameter, never locally
+# local (skill-stade rule 8); every float arg's own xd/xbd is a function parameter, never locally
 # initialized. Unlike agen_'s own local-init functions, this does not gate on active_map: the forward
 # sweep always replays every primal statement regardless of activity.
 function hvp_local_second_inits(kernel, shadow_of)
@@ -4149,7 +4149,7 @@ end
 
 # ==================== cgen_* =====================================
 # CUDA codegen: turns a validated kernel, or a STADE-generated function, into a host launcher plus one `@cuda` device kernel per data-parallel
-# (sequential=false) loop -- a loop-nest transform, independent of act_/snap_/lin_. Ingests via cgen_from_kernel (plain skill-jade) or
+# (sequential=false) loop -- a loop-nest transform, independent of act_/snap_/lin_. Ingests via cgen_from_kernel (plain skill-stade) or
 # cgen_parse_generated (STADE's own vocabulary). Stack safety: a loop with push!/pop! anywhere is never split, since LIFO order can't survive
 # concurrent threads. Race safety: a split write is atomic-free only if the thread var occurs in its index, else CUDA.@atomic.
 
@@ -4295,7 +4295,7 @@ function cgen_ingest(expr::Expr)
     try
         return cgen_parse_generated(expr)
     catch generated_err
-        error("cgen_ingest: `$(expr.args[1])` is neither a valid skill-jade kernel ($(kernel_err)) nor recognizable STADE-generated code ($(generated_err))")
+        error("cgen_ingest: `$(expr.args[1])` is neither a valid skill-stade kernel ($(kernel_err)) nor recognizable STADE-generated code ($(generated_err))")
     end
 end
 
@@ -4317,7 +4317,7 @@ function cgen_contains_stackop(body::Vector{NamedTuple})
 end
 
 # ---- free-variable collection (duplicated from shape_/snap_/agen_'s
-#      own copies rather than calling them -- see skill-stade.md rule
+#      own copies rather than calling them -- see skill-stade-dev.md rule
 #      7 and agen_collect_expr_vars!'s own comment for precedent) ----
 
 # Collects from the loop's bounds as well as its body -- a device kernel's bounds check
@@ -4336,7 +4336,7 @@ function cgen_free_vars(stmt, exclude::Symbol)
 end
 
 # A scalar assigned anywhere inside a loop's body is always a local temporary, never a caller-supplied argument -- true because the loop is
-# iteration-independent, so it's guaranteed fresh-initialized before any read. Array names never qualify (skill-jade forbids in-kernel allocation).
+# iteration-independent, so it's guaranteed fresh-initialized before any read. Array names never qualify (skill-stade forbids in-kernel allocation).
 # EXCEPTION: a self-referencing assignment (`cb = cb + ...`) is a cross-thread scalar reduction, the pattern cgen_device_assign special-cases for
 # an array-indexed lhs; excluding it keeps it a free var, passed as a kernel argument, with the atomic rewrite in
 # cgen_device_assign/jgen_device_assign.
@@ -5299,7 +5299,7 @@ function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, i
                 return Expr(:macrocall, backend.atomic_macro, nothing,
                             Expr(:(+=), stmt.lhs, other))
             end
-            thread_invariant && error("cgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade.md's cgen_device_assign hardening note.")
+            thread_invariant && error("cgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade-dev.md's cgen_device_assign hardening note.")
         end
     end
     return Expr(:(=), stmt.lhs, stmt.rhs)
@@ -5381,7 +5381,7 @@ end
 
 # Opt-in, applied only when the caller passes precision=T: converts every Float64 literal to T, leaving Int-typed
 # loop/index arithmetic untouched. Just a literal walk, no operand-forcing rewrite, since every array/scalar is caller-
-# supplied (skill-jade rule 8) -- precision is the caller's job. Caveat: a handful of Base operations return Float64
+# supplied (skill-stade rule 8) -- precision is the caller's job. Caveat: a handful of Base operations return Float64
 # unconditionally when both operands are Integer (true division, transcendentals), so index arithmetic can stay Float64
 # even under precision=Float32 -- on Metal this fails to compile rather than silently running in double precision.
 function cgen_convert_precision(expr, ::Type{T}) where {T<:AbstractFloat}
@@ -5465,12 +5465,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             end
         elseif stmt.kind == :for
             flush_pending!()
-            # see cgen_body's identical fix (stade_gpu_plan.md Item 2) --
-            # same bug, same reasoning, kept in sync since jgen_body is
-            # this same host-splitting logic for the JACC target.
             synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts, outer_defs)
-            # see cgen_body's identical fn_args scope gate (stade_gpu_plan.md
-            # Item 2) -- same reasoning, kept in sync for the JACC target.
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
             safe_scope = issubset(loop_reduce_vars, fn_args)
             if synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
@@ -5606,7 +5601,7 @@ function jgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, i
                 return Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
                             Expr(:(+=), stmt.lhs, other))
             end
-            thread_invariant && error("jgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade.md's cgen_device_assign hardening note.")
+            thread_invariant && error("jgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade-dev.md's cgen_device_assign hardening note.")
         end
     end
     return Expr(:(=), stmt.lhs, stmt.rhs)
@@ -5628,9 +5623,7 @@ function jgen_emit(gk; keep_all_atomic::Bool = true, allowscalar_macro = jgen_de
     outer_defs = cgen_scalar_def_map(gk.body)
     host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs)
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
-    # for a host->device whole-array transfer, JACC.to_host for the
-    # reverse -- see the "JACC v1.x API" section of
-    # skill-runpod-julia-cuda-jacc's SKILL.md.
+    # for a host->device whole-array transfer, JACC.to_host for the reverse.
     reduce_vars_sorted = sort(collect(reduce_vars); by = string)
     for v in reverse(reduce_vars_sorted)
         pushfirst!(host_body, Expr(:(=), v, Expr(:call, Expr(:., :JACC, QuoteNode(:array)), Expr(:vect, v))))
@@ -5687,7 +5680,7 @@ end
 
 
 # ==================== val_* (baseline-driven FD/JVP/VJP validation) =
-# Extends the val_ oracle to work generically on any skill-jade kernel's generated _d/_b/_hv code, not just a hand-built fixture. Three identities
+# Extends the val_ oracle to work generically on any skill-stade kernel's generated _d/_b/_hv code, not just a hand-built fixture. Three identities
 # reuse the same two oracles: tangent (_d) is a direct JVP check against central FD of the primal; adjoint (_b) is <y,Jx>==<J'y,x>, reusing
 # val_finite_diff_check on a scalar closure; hvp (_hv) is a JVP check one layer out, the same val_finite_diff_check_jvp oracle applied to the
 # adjoint instead of the primal. x and y always share one flattened space of dimension n.
@@ -5786,7 +5779,7 @@ function val_collect_reassigned_scalar_float!(body, arg_set, kinds, out)
 end
 
 # Rebuilds the primal with an appended `return` of every scalar_float arg's final value --
-# skill-jade kernels never contain their own `return` (only :assign/:for/:if), so appending
+# skill-stade kernels never contain their own `return` (only :assign/:for/:if), so appending
 # one at the end is safe, and it's the only way a caller can observe a reassigned scalar the
 # way it already observes array arguments (in-place mutation).
 function val_primal_observing_expr(kernel, primal_expr::Expr)
@@ -5839,7 +5832,7 @@ function val_find_def(defs::Vector{Expr}, name::Symbol)
 end
 
 # the positional argument names of a raw function-definition Expr, as
-# parsed straight from source (not a skill-jade sig) -- used to learn
+# parsed straight from source (not a skill-stade sig) -- used to learn
 # what a third-party initstacks function expects (STADE's own always
 # takes zero args; other tools' may take one or more primal arrays).
 val_def_arg_names(expr::Expr) = Symbol[a for a in expr.args[1].args[2:end]]
@@ -6758,7 +6751,7 @@ function stade_hvp_file(in_path::String, out_path::String; keep_push_pop::Bool=t
     return out_path
 end
 
-# Expr in, cuda_plan out -- accepts a plain skill-jade kernel or one of STADE's own generated functions, for
+# Expr in, cuda_plan out -- accepts a plain skill-stade kernel or one of STADE's own generated functions, for
 # whichever GPU backend descriptor is passed in. precision=nothing means use the backend's own default_precision
 # (Float64 for CUDA/AMDGPU, Float32 for Metal); an explicit precision overrides that, except for a precision_locked
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
