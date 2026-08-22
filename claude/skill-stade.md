@@ -1,5 +1,5 @@
 ---
-name: skill-stade-kernels
+name: skill-stade
 description: >
   Use whenever writing, reviewing, or refactoring a Julia numerical kernel
   meant to be fed into STADE (the automatic differentiation engine) for
@@ -10,7 +10,7 @@ description: >
   other STADE-parseability constraints below.
 ---
 
-# skill-stade-kernels: house style for kernels STADE differentiates
+# skill-stade: house style for kernels STADE differentiates
 
 STADE parses a kernel's `Expr` tree, infers every variable's shape
 (`Float64` / `Int64` / `Array{Float64}` / `Array{Int64}`) from how the
