@@ -1,4 +1,4 @@
-# advection(u, du, c, dx, dt, i_nstep, i_nnode)
+# upwind(u, du, c, dx, dt, i_nstep, i_nnode)
 #
 # i_nstep explicit first-order upwind time steps of the 1D linear
 # advection equation: each step differences u backward onto du, then
@@ -12,7 +12,7 @@
 # dt: time step size
 # i_nstep: number of time steps to take
 # i_nnode: number of nodes
-function advection(u, du, c, dx, dt, i_nstep, i_nnode)
+function upwind(u, du, c, dx, dt, i_nstep, i_nnode)
     for i_seq_ = 1:i_nstep
         for i_x = 2:i_nnode
             du[i_x] = u[i_x] - u[i_x - 1]
@@ -22,15 +22,4 @@ function advection(u, du, c, dx, dt, i_nstep, i_nnode)
         end
     end
     return nothing
-end
-
-function advection(u, du, c, dx, dt, i_nstep, i_nnode)
-    for i_seq_ = 1:i_nstep
-        for i_x = 2:i_nnode
-            du[i_x] = u[i_x] - u[i_x - 1]
-        end
-        for i_x = 2:i_nnode
-            u[i_x] = u[i_x] - (c * dt * du[i_x]) / dx
-        end
-    end
 end
