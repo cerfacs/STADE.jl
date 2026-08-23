@@ -174,7 +174,7 @@ function generate_content(original_content::AbstractString; keep_push_pop::Bool 
             for (label, fn) in GPU_GENERATORS
                 out_path = joinpath(dir, "output_$(label).jl")
                 body = try
-                    fn(gpu_in_path, out_path; precision = precision, keep_all_atomic = false)
+                    fn(gpu_in_path, out_path; precision = precision, keep_all_atomic = true)
                     read(out_path, String)
                 catch err
                     "# generation failed: $(sprint(showerror, err))\n"
