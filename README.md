@@ -41,9 +41,10 @@ begin
   import Pkg
   Pkg.add(url="https://github.com/cerfacs/STADE.jl")
   using STADE
-  in_   = pkgdir(STADE, "test", "val-corpus", "affine_loss.jl")
-  out_b = in_[1:end-3]   * "_b.jl"
-  out_c = out_b[1:end-3] * "_cuda.jl"
+  in_    = pkgdir(STADE, "test", "val-corpus", "affine_loss.jl")
+  outdir = mktempdir()
+  out_b  = joinpath(outdir, "affine_loss_b.jl")
+  out_c  = joinpath(outdir, "affine_loss_b_cuda.jl")
   try
     stade_adjoint_file(in_, out_b)
     stade_cuda_file(out_b, out_c)
