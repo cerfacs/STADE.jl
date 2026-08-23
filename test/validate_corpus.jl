@@ -1,21 +1,24 @@
-include("STADE.jl")
+include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 using Random
 
 """
     validate_corpus(dir="val-corpus"; trials::Int = 8, keep_push_pop::Bool = false, fuse_ii_loops::Bool = true)
 
-For every `.jl` kernel in `dir`: generates its tangent (`_d.jl`), adjoint
-(`_b.jl`), and hvp (`_hv.jl`) files alongside it, then runs finite-difference
-/ JVP / VJP validation on each against a random baseline.
+Run the tangent, adjoint, HVP, and dot-product oracles on every kernel in `dir`.
 
-Before doing so, removes any pre-existing `_b.jl` / `_d.jl` / `_hv.jl` /
-`.yaml` files already in `dir` -- these are all derived/cached artifacts
-(generated code and cached random baselines) from prior runs, and a stale
-one lying around silently short-circuits regeneration (baseline `.yaml`
-files are only (re)written when absent) and can validate a kernel against
-a baseline or against generated code left over from a different STADE.jl
-revision than the one currently loaded. Only kernel source `.jl` files are
-the real inputs here, so everything else in `dir` is disposable.
+For each `.jl` kernel, this function generates a tangent file (`_d.jl`), an
+adjoint file (`_b.jl`), and an HVP file (`_hv.jl`) next to it. It then checks
+each generated file against a random baseline with finite differences (tangent,
+adjoint, HVP) and, separately, against the exact identity
+`<Yb, J*Xd> == <J'*Yb, Xd>` (dot-product mode).
+
+Before it runs, the function deletes any `_b.jl`, `_d.jl`, `_hv.jl`, or `.yaml`
+file already in `dir`. These files are derived output from an earlier run. A
+stale copy can hide regeneration, since a baseline `.yaml` file is written only
+when one is absent, or it can validate a kernel against generated code from a
+different STADE revision than the one this script loads. Only the kernel
+source `.jl` files are real input, so this script treats everything else in
+`dir` as disposable.
 """
 function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_pop::Bool = false, fuse_ii_loops::Bool = true)
     for f in readdir(dir)
@@ -23,9 +26,9 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_
             rm(joinpath(dir, f))
         end
     end
-    generators = Dict(:tangent => (stade_tangent_file, "_d.jl"),
-                       :adjoint => (stade_adjoint_file, "_b.jl"),
-                       :hvp     => (stade_hvp_file, "_hv.jl"))
+    generators = Dict(:tangent => (STADE.stade_tangent_file, "_d.jl"),
+                       :adjoint => (STADE.stade_adjoint_file, "_b.jl"),
+                       :hvp     => (STADE.stade_hvp_file, "_hv.jl"))
     results = NamedTuple[]
     for f in sort(
         filter(
@@ -35,7 +38,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_
     )
         name = splitext(f)[1]
         path = joinpath(dir, f)
-        Random.seed!(hash(name))   # reproducible baseline per kernel across runs
+        Random.seed!(hash(name))   # gives a reproducible baseline per kernel across runs
         for mode in (:tangent, :adjoint, :hvp)
             gen_fn, suffix = generators[mode]
             out_path = joinpath(dir, name * suffix)
@@ -46,37 +49,33 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_
                 continue
             end
 
-            fn = mode == :tangent ? stade_validate_tangent_file :
-                 mode == :adjoint ? stade_validate_adjoint_file : stade_validate_hvp_file
+            fn = mode == :tangent ? STADE.stade_validate_tangent_file :
+                 mode == :adjoint ? STADE.stade_validate_adjoint_file : STADE.stade_validate_hvp_file
             try
-                # must match the flags the file was GENERATED with just
-                # above -- the validator's own defaults would otherwise
-                # regenerate and check unfused math regardless, so the
-                # fused path would never actually be exercised here.
+                # Pass the SAME flags used above for generation -- the validator's own
+                # defaults would otherwise check a different mode's math than the one
+                # under test, and the flagged path would go unexercised.
                 r = fn(path; trials = trials, keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
                 push!(results, (kernel = name, mode = mode, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
             catch e
-                println("  !! ", name, " [", mode, "] ", first(split(sprint(showerror, e), "
-"))[1:min(end,150)])
+                println("  !! ", name, " [", mode, "] ", first(split(sprint(showerror, e), "\n"))[1:min(end,150)])
                 push!(results, (kernel = name, mode = mode, status = :error, max_rel_err = NaN))
             end
         end
 
         # Exact tangent-vs-adjoint identity <Yb, J*Xd> == <J'*Yb, Xd>.
-        # Generates nothing -- it cross-checks the two derivative codes
-        # against each other rather than against the primal, so it needs
-        # no file of its own. No epsilon and no truncation: it agrees to
-        # ~1e-15 where the finite-difference oracles cap out around
-        # 1e-8, which is what lets it see a systematic error the others
-        # cannot. It does NOT validate the tangent (a bug shared by both
-        # codes cancels in the identity), so it complements the three
-        # checks above rather than replacing any of them.
+        # This mode generates no file -- it cross-checks the two derivative codes
+        # against each other instead of against the primal, so it needs no file of
+        # its own. It carries no epsilon and no truncation: it agrees to ~1e-15,
+        # where the finite-difference oracles cap out around 1e-8, so it catches a
+        # systematic error the others cannot. It does NOT validate the tangent (a
+        # bug shared by both codes cancels in the identity), so it complements the
+        # three checks above instead of replacing any of them.
         try
-            r = stade_validate_dotprod_file(path; trials = trials, keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
+            r = STADE.stade_validate_dotprod_file(path; trials = trials, keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
             push!(results, (kernel = name, mode = :dotprod, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
         catch e
-            println("  !! ", name, " [dotprod] ", first(split(sprint(showerror, e), "
-"))[1:min(end,150)])
+            println("  !! ", name, " [dotprod] ", first(split(sprint(showerror, e), "\n"))[1:min(end,150)])
             push!(results, (kernel = name, mode = :dotprod, status = :error, max_rel_err = NaN))
         end
     end

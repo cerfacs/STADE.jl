@@ -1,72 +1,70 @@
 # ==================== validate_corpus_gpu.jl ========================
-# GPU analog of validate_corpus.jl. Same corpus, same "differentiate
-# every primal, then check the result" shape -- but where
-# validate_corpus.jl checks the CPU tangent/adjoint/hvp/dotprod paths,
-# this checks CUDA and JACC device parity, LIVE, on whatever GPU is
-# actually attached to the machine running this script.
+# GPU counterpart to validate_corpus.jl. It walks the same corpus and
+# follows the same "differentiate every primal, then check the result"
+# shape, but where validate_corpus.jl checks the CPU tangent, adjoint,
+# HVP, and dot-product paths, this script checks CUDA and JACC device
+# parity, LIVE, on the GPU attached to the machine that runs it.
 #
-# This is NOT stade_validate_gpu_file/stade_validate_jacc_file (see
-# STADE.jl's own Item 1/Item 4 comments): those exist because the
-# Claude sandbox this codebase was developed in has no GPU at all, so
-# they only ever emit a self-contained script for someone else to run
-# elsewhere (e.g. via the runpod-julia-cuda-jacc skill's relay). This
-# script assumes the OPPOSITE: it's running somewhere with a real CUDA
-# device already attached (a local workstation, a cloud VM you're
-# ssh'd into, etc.), and JACC's backend already set to CUDA. It never
-# writes a script for later submission and never touches RunPod at
-# all -- it builds real CuArray/JACC.array values, calls the real
-# generated functions with Base.invokelatest, and compares in-process.
+# This script does not call STADE.stade_validate_gpu_file or
+# STADE.stade_jacc_file. Those functions exist because the sandbox
+# this codebase was developed in has no GPU, so they only emit a
+# self-contained script for someone else to run elsewhere (for example
+# through the runpod-julia-cuda-jacc skill's relay). This script
+# assumes the opposite: it runs somewhere with a real CUDA device
+# already attached (a local workstation, a cloud VM you are logged
+# into), and with JACC's backend already set to CUDA. It never writes
+# a script for later submission and never touches RunPod. It builds
+# real CuArray/JACC.array values, calls the generated functions with
+# Base.invokelatest, and compares the results in-process.
 #
-# Flow per corpus kernel, matching the plan's own phrasing:
-#   1. differentiate the monoprocessor primal -- stade_adjoint on the
-#      plain, single-threaded kernel source, keep_push_pop=false (the
-#      only mode with a GPU target at all: :stack mode's push!/pop! is
-#      inherently host-only).
-#   2. GPU codegen -- stade_gpu(..., cgen_backend_cuda()) for CUDA,
-#      stade_jacc(...) for JACC, on both the adjoint and its
-#      initstacks.
-#   3. execute -- eval every generated device kernel + host function
-#      into Main, run the CPU adjoint and the device host function
-#      against the SAME random baseline (and the SAME per-trial
-#      reverse-mode seed), and compare every mutated array and
-#      returned scalar element-wise.
+# Flow per corpus kernel:
+#   1. Differentiate the monoprocessor primal -- STADE.stade_adjoint on
+#      the plain, single-threaded kernel source, with keep_push_pop =
+#      false. This is the only mode with a GPU target at all, since
+#      :stack mode's push!/pop! calls are host-only by nature.
+#   2. Run GPU codegen -- STADE.stade_gpu(..., STADE.cgen_backend_cuda())
+#      for CUDA, STADE.stade_jacc(...) for JACC, on both the adjoint
+#      and its initstacks function.
+#   3. Execute: evaluate every generated device kernel and host
+#      function into Main, run the CPU adjoint and the device host
+#      function against the SAME random baseline and the SAME
+#      per-trial reverse-mode seed, then compare every mutated array
+#      and returned scalar element-wise.
 #
-# Usage: `julia validate_corpus_gpu.jl` from the directory containing
-# this file and the corpus directory (default "val-corpus"), or
-# `include("validate_corpus_gpu.jl")` then call
-# `validate_corpus_gpu(dir; kwargs...)` directly for a specific subset
-# (validate_corpus_gpu_sel.jl-style kernel-name filtering can be added
-# the same way validate_corpus.jl's own _sel variants work, by passing
-# `only = ["name1", "name2"]`).
+# Usage: run `julia validate_corpus_gpu.jl` from this directory, with
+# the corpus directory (default "val-corpus") alongside it. Or include
+# this file and call `validate_corpus_gpu(dir; kwargs...)` directly for
+# a specific subset -- pass `only = ["name1", "name2"]` to select
+# kernels by name.
 
-include("STADE.jl")
+include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
-# The generated code (both CUDA's and JACC's) references CUDA.*/
-# JACC.*/Atomix.* by name -- Core.eval'ing it into Main requires these
-# already bound there, exactly like stade_gpu_plan.md's own generated-
-# script preambles (see cgen_backend_cuda()'s `preamble` field and
-# jgen_preamble()) do for a REMOTELY-submitted script. `using` here is
-# the live-execution equivalent of that preamble text.
+# The generated code (both CUDA's and JACC's) refers to CUDA.*, JACC.*,
+# and Atomix.* by name. Core.eval'ing it into Main needs these already
+# bound there, exactly like the preamble STADE.cgen_backend_cuda's
+# `preamble` field and STADE.jgen_preamble() build for a remotely
+# submitted script. The `using`/`import` lines below are the live-
+# execution equivalent of that preamble text.
 using CUDA
 import JACC
 JACC.@init_backend
 import Atomix
 
-# Matches cgen_backend_cuda()'s own preamble (`CUDA.allowscalar(false)`):
-# any accidental scalar touch on a CuArray should fail loudly here,
-# not silently succeed slowly, exactly as it would for a remotely
-# submitted script built from the same preamble.
+# Matches STADE.cgen_backend_cuda's own preamble
+# (`CUDA.allowscalar(false)`): any accidental scalar touch on a
+# CuArray must fail here, not succeed slowly, exactly as it would for
+# a remotely submitted script built from the same preamble.
 CUDA.allowscalar(false)
 
-# ---- live-execution helpers (the in-process analog of
-#      val_gpu_parity_script's TEXT-generation helpers in STADE.jl --
-#      same shapes, real values instead of literal source) -----------
+# ---- live-execution helpers (mirror STADE.val_gpu_parity_script's
+#      text-generation helpers, but with real values instead of
+#      literal source) --------------------------------------------
 
-# mirrors _val_init_stacks_local in every stade_validate_gpu_file/
-# stade_validate_jacc_file-emitted script: a Tier A/no-stack kernel's
-# initstacks_* returns `nothing` (call it with zero stacks), a
+# Mirrors _val_init_stacks_local in every script STADE.stade_validate_gpu_file
+# or STADE.stade_validate_jacc_file emits: a Tier A / no-stack kernel's
+# initstacks_* function returns `nothing` (call it with zero stacks), a
 # single-stack kernel returns a bare value (not a tuple), and every
-# other kernel returns a tuple already in the right call order.
+# other kernel returns a tuple already in call order.
 function gval_live_init_stacks(fn, extra_args)
     r = Base.invokelatest(fn, extra_args...)
     r === nothing && return ()
@@ -74,29 +72,30 @@ function gval_live_init_stacks(fn, extra_args)
     return (r,)
 end
 
-# a stack_arg_name is either a scalar_int kernel argument (shared
-# verbatim, unwrapped, between the CPU and device calls) or a values-
-# Dict entry of its own -- and that entry might itself be a scalar or
-# an array, so `wrap` is only applied when it actually is one. `wrap`
-# is `identity` for the CPU side, CuArray/JACC.array for the device
-# side.
+# A stack_arg_name is either a scalar_int kernel argument (shared
+# verbatim, unwrapped, between the CPU and device calls) or its own
+# entry in a values Dict -- and that entry can itself be a scalar or
+# an array, so `wrap` applies only when the entry is an array. `wrap`
+# is `identity` on the CPU side, and CuArray or JACC.array on the
+# device side.
 function gval_stack_extra(names::Vector{Symbol}, int_args::Dict, values::Dict, wrap)
     return Any[haskey(int_args, n) ? int_args[n] :
                (values[n] isa AbstractArray ? wrap(deepcopy(values[n])) : values[n])
                for n in names]
 end
 
-# Builds one call's positional argument list AND a name-keyed dict of
-# the actual (mutable) array objects passed in, so they can be
-# re-inspected after the call completes without needing to reconstruct
-# anything -- a Julia Array/CuArray/JACC.array is passed by reference,
-# so whatever the callee wrote into it is already visible through the
-# SAME object we still hold a handle to here. `wrap` is `identity` for
-# the CPU call, CuArray/JACC.array for the device call -- everything
-# else about the argument-ordering rule is backend-independent (see
-# val_gpu_call_args's identical ordering in STADE.jl): scalar_int bare,
-# scalar_float/array_float as a (value, shadow) pair, array_int as a
-# bare value only (never differentiated).
+# Builds one call's positional argument list and a name-keyed dict of
+# the actual mutable array objects passed in, so the caller can
+# inspect them again after the call without reconstructing anything --
+# a Julia Array, CuArray, or JACC.array is passed by reference, so
+# whatever the callee wrote into it is visible through the SAME object
+# already held here. `wrap` is `identity` for the CPU call and
+# CuArray/JACC.array for the device call. Everything else about the
+# argument order is backend-independent (see STADE.val_gpu_call_args's
+# matching order): scalar_int arguments pass bare, scalar_float and
+# array_float arguments pass as a (value, shadow) pair, and array_int
+# arguments pass as a bare value only, since STADE never differentiates
+# them.
 function gval_build_call(sig, int_args::Dict, values::Dict, seed::Dict, wrap)
     args = Any[]
     tracked = Dict{Symbol,Any}()
@@ -125,13 +124,14 @@ end
 gval_relerr_scalar(a, b) = abs(a - b) / max(abs(a), abs(b), 1.0)
 gval_relerr_arr(a, b) = maximum(abs.(a .- b) ./ max.(abs.(a), abs.(b), 1.0))
 
-# `dev_to_host` brings a device array back before comparing -- Array
-# for CUDA, JACC.to_host for JACC. Compares EVERY mutated float array's
-# shadow (the actual quantity of interest, the adjoint) and its value
-# (mutated in place by the forward re-execution keep_push_pop=false
-# checkpoints, so should also be bit-identical modulo the device's own
-# floating-point reordering) -- and, for a read-only array_int table,
-# its value too (should never differ at all; a cheap extra check).
+# `dev_to_host` brings a device array back before the comparison --
+# `Array` for CUDA, `JACC.to_host` for JACC. This checks every mutated
+# float array's shadow (the adjoint itself, the actual quantity of
+# interest) and its value (mutated in place by the forward
+# re-execution keep_push_pop=false checkpoints, so it should also be
+# bit-identical modulo the device's own floating-point reordering).
+# For a read-only array_int table it also checks the value, which
+# should never differ at all -- a cheap extra check.
 function gval_compare(cpu_tracked::Dict, dev_tracked::Dict, dev_to_host)
     m = 0.0
     for (a, ct) in cpu_tracked
@@ -143,12 +143,12 @@ function gval_compare(cpu_tracked::Dict, dev_tracked::Dict, dev_to_host)
 end
 
 # Runs `trials` reverse-mode seeds through both the CPU adjoint and one
-# device plan (CUDA's or JACC's -- whichever (wrap, dev_to_host,
-# atomic_macro) triple is passed in), eval'ing every kernel/host
+# device plan (CUDA's or JACC's, whichever (wrap, dev_to_host,
+# atomic_macro) triple is passed in), evaluating every kernel and host
 # function into Main first. Returns the same (ok, max_rel_err) shape
-# stade_validate_gpu_file/stade_validate_jacc_file's REMOTE verdict
-# uses, just computed in-process instead of parsed from a pushed-back
-# result.
+# that the verdict from STADE.stade_validate_gpu_file or
+# STADE.stade_validate_jacc_file uses, computed here in-process instead
+# of parsed back from a pushed result.
 function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
                              adjoint_out, plan_init, plan_adj, stack_arg_names::Vector{Symbol},
                              wrap, dev_to_host, atomic_macro)
@@ -168,11 +168,10 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
 
     sig = kernel.sig
     scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
-    # same non-associative-atomic-summation reasoning as
-    # stade_validate_gpu_file's resolved_rtol in STADE.jl -- scale the
-    # default tolerance by how many @atomic/Atomix.@atomic sites the
-    # generated adjoint actually has.
-    atomic_sites = sum(val_count_atomic_sites(k, atomic_macro) for k in plan_adj.kernels; init = 0)
+    # Same non-associative-atomic-summation reasoning as the resolved_rtol in
+    # STADE.stade_validate_gpu_file: scale the default tolerance by the number of
+    # @atomic/Atomix.@atomic sites the generated adjoint actually has.
+    atomic_sites = sum(STADE.val_count_atomic_sites(k, atomic_macro) for k in plan_adj.kernels; init = 0)
     rtol = 2.5e-14 * max(1, atomic_sites)
 
     max_err = 0.0
@@ -216,23 +215,23 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                     endswith(f, "_cuda.jl") || endswith(f, "_jacc.jl"))])
     only !== nothing && (names = filter(n -> n in only, names))
 
-    cuda_backend = cgen_backend_cuda()
+    cuda_backend = STADE.cgen_backend_cuda()
     jacc_atomic_macro = Expr(:., :Atomix, QuoteNode(Symbol("@atomic")))
 
     results = NamedTuple[]
     for name in names
         path = joinpath(dir, name * ".jl")
-        yp = io_default_yaml_path(path)
-        isfile(yp) || stade_generate_baseline_file(path; yaml_path = yp)
-        primal_expr = io_read_corpus_entry(path)
-        kernel = parse_kernel(primal_expr)
-        baseline = io_read_baseline_yaml(yp)
-        val_coerce_int_arrays!(kernel, baseline.values)
+        yp = STADE.io_default_yaml_path(path)
+        isfile(yp) || STADE.stade_generate_baseline_file(path; yaml_path = yp)
+        primal_expr = STADE.io_read_corpus_entry(path)
+        kernel = STADE.parse_kernel(primal_expr)
+        baseline = STADE.io_read_baseline_yaml(yp)
+        STADE.val_coerce_int_arrays!(kernel, baseline.values)
 
         # ---- step 1: differentiate the monoprocessor primal ---------
         local adjoint_out
         try
-            adjoint_out = stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
+            adjoint_out = STADE.stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
         catch e
             println("  !! ", name, " [adjoint] ", first(split(sprint(showerror, e), "\n")))
             push!(results, (kernel = name, backend = :adjoint, status = :gen_error, max_rel_err = NaN))
@@ -240,28 +239,28 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         end
         if write_generated
             open(joinpath(dir, name * "_b.jl"), "w") do f
-                write(f, io_expr_to_source(adjoint_out.initstacks))
-                write(f, io_expr_to_source(adjoint_out.adjoint))
+                write(f, STADE.io_expr_to_source(adjoint_out.initstacks))
+                write(f, STADE.io_expr_to_source(adjoint_out.adjoint))
             end
         end
         stack_arg_names = Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
-        seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
+        seeds = [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials]
 
         # ---- step 2 + 3: CUDA codegen, then execute ------------------
         if run_cuda
             try
-                plan_init = stade_gpu(adjoint_out.initstacks, cuda_backend)
-                plan_adj  = stade_gpu(adjoint_out.adjoint, cuda_backend)
+                plan_init = STADE.stade_gpu(adjoint_out.initstacks, cuda_backend)
+                plan_adj  = STADE.stade_gpu(adjoint_out.adjoint, cuda_backend)
                 if write_generated
                     open(joinpath(dir, name * "_cuda.jl"), "w") do f
                         for k in plan_init.kernels
-                            write(f, io_expr_to_source(k))
+                            write(f, STADE.io_expr_to_source(k))
                         end
-                        write(f, io_expr_to_source(plan_init.host))
+                        write(f, STADE.io_expr_to_source(plan_init.host))
                         for k in plan_adj.kernels
-                            write(f, io_expr_to_source(k))
+                            write(f, STADE.io_expr_to_source(k))
                         end
-                        write(f, io_expr_to_source(plan_adj.host))
+                        write(f, STADE.io_expr_to_source(plan_adj.host))
                     end
                 end
                 r = gval_check_backend(kernel, baseline.int_args, baseline.values, seeds,
@@ -277,18 +276,18 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         # ---- step 2 + 3: JACC codegen, then execute ------------------
         if run_jacc
             try
-                plan_init = stade_jacc(adjoint_out.initstacks)
-                plan_adj  = stade_jacc(adjoint_out.adjoint)
+                plan_init = STADE.stade_jacc(adjoint_out.initstacks)
+                plan_adj  = STADE.stade_jacc(adjoint_out.adjoint)
                 if write_generated
                     open(joinpath(dir, name * "_jacc.jl"), "w") do f
                         for k in plan_init.kernels
-                            write(f, io_expr_to_source(k))
+                            write(f, STADE.io_expr_to_source(k))
                         end
-                        write(f, io_expr_to_source(plan_init.host))
+                        write(f, STADE.io_expr_to_source(plan_init.host))
                         for k in plan_adj.kernels
-                            write(f, io_expr_to_source(k))
+                            write(f, STADE.io_expr_to_source(k))
                         end
-                        write(f, io_expr_to_source(plan_adj.host))
+                        write(f, STADE.io_expr_to_source(plan_adj.host))
                     end
                 end
                 r = gval_check_backend(kernel, baseline.int_args, baseline.values, seeds,
