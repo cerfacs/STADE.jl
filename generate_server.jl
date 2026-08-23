@@ -150,7 +150,7 @@ function generate_content(original_content::AbstractString; keep_push_pop::Bool 
         for (label, fn) in AD_GENERATORS
             out_path = joinpath(dir, "output_$(label).jl")
             body = try
-                fn(in_path, out_path; keep_push_pop = keep_push_pop)
+                fn(in_path, out_path; keep_push_pop = keep_push_pop, fuse_ii_loops = true)
                 push!(ad_output_paths, out_path)
                 read(out_path, String)
             catch err

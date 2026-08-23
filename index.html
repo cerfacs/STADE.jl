@@ -570,7 +570,7 @@
       <span id="generated-meta"></span>
     </div>
     <div class="pane-body">
-      <pre id="generated-output" class="placeholder">Output will appear here after you click Differentiate — stade_tangent_file, stade_adjoint_file, and stade_hvp_file run against the source on the left, then (unless "Keep push!/pop!" is checked) stade_cuda_file, stade_amdgpu_file, stade_metal_file, and stade_jacc_file port that differentiated code — not the original source — to each backend, each section marked with a banner comment.</pre>
+      <pre id="generated-output" class="placeholder">Output will appear here after you click Differentiate — stade_tangent_file, stade_adjoint_file, and stade_hvp_file run against the source on the left, then (unless "Keep push!/pop!" is checked) stade_cuda_file, stade_amdgpu_file, stade_metal_file, and stade_jacc_file port a merged bundle of all of that — the original primal included, not just its tangent/adjoint/hvp — to each backend, each section marked with a banner comment.</pre>
       <button class="pane-icon-btn zoom-out-btn" type="button" aria-label="Zoom out" title="Zoom out">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>
       </button>
@@ -785,7 +785,9 @@ async function loadGallery(){
   try{
     const res = await fetch(api);
     if(!res.ok) throw new Error(`GitHub API responded ${res.status}`);
-    const files = (await res.json()).filter(f => f.type === 'file' && f.name.endsWith('.jl'));
+    const files = (await res.json())
+      .filter(f => f.type === 'file' && f.name.endsWith('.jl'))
+      .sort((a, b) => b.name.localeCompare(a.name)); // reverse-alphabetical, opposite of the API's default order
     galleryStatus.remove();
     if(files.length === 0){
       const span = document.createElement('span');
