@@ -1891,11 +1891,11 @@ function snap_count_expr_occurrences(expr, target)
     return total
 end
 
-# ---- site-level (forward-seen) TBR: shadow analysis ----
+# ---- site-level (forward-seen) TBR ----
 # `snap_value_needed_vars` decides whole-variable necessity; `snap_fwd_walk!` refines to a per-write
 # decision: w needs its pre-write value iff (a) w self-references, or (b) a nonlinear read of var
-# occurred strictly before w in forward order. Shadow-only; cross-checked against snap_plan (must be a
-# subset), not yet wired into codegen.
+# occurred strictly before w in forward order. This is the production path, reached via snap_plan's
+# site_needed kwarg; stade_site_level_tbr_check asserts it stays a subset of the whole-variable set.
 function snap_fwd_walk!(body, seen, active_map, decisions)
     for idx in eachindex(body)
         stmt = body[idx]
@@ -1939,14 +1939,37 @@ function snap_fwd_walk_loop!(body, in_seen, active_map, decisions)
     return snap_fwd_walk!(body, final_in, active_map, decisions)
 end
 
-# public entry point for the shadow analysis: per-site (not
-# per-variable) TBR decisions for every :assign in `kernel`, keyed by
-# agen_site_key(body, idx). Not yet consumed by snap_plan or
-# agen_needs_snapshot.
+# public entry point: per-site (not per-variable) TBR decisions for every :assign in
+# `kernel`, keyed by agen_site_key(body, idx). Consumed by snap_plan's site_needed and,
+# via stade_site_level_tbr_check, by agen_needs_snapshot.
 function snap_value_needed_sites(kernel)
     decisions = Dict{Any,Bool}()
     snap_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions)
     return decisions
+end
+
+# key -> var for every :assign site, keyed identically to snap_value_needed_sites (same
+# agen_site_key over the same body objects). Lets a per-site decision be traced back to
+# the variable it concerns, e.g. for the subset check in stade_site_level_tbr_check.
+function snap_site_vars(kernel)
+    vars = Dict{Any,Symbol}()
+    snap_site_vars_walk!(kernel.body, vars)
+    return vars
+end
+
+function snap_site_vars_walk!(body, vars)
+    for idx in eachindex(body)
+        stmt = body[idx]
+        if stmt.kind == :assign
+            vars[agen_site_key(body, idx)] = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+        elseif stmt.kind == :for
+            snap_site_vars_walk!(stmt.body, vars)
+        elseif stmt.kind == :if
+            snap_site_vars_walk!(stmt.then, vars)
+            snap_site_vars_walk!(stmt.els, vars)
+        end
+    end
+    return nothing
 end
 
 
@@ -2626,10 +2649,9 @@ function agen_needs_snapshot(lhs, rhs, var, value_needed, key = nothing)
 end
 
 # Identical logic to snap_fwd_walk!, duplicated here for the same purity-rule reason as
-# every agen_/snap_ pair in this file. Shadow analysis only; must be checked against
-# snap_value_needed_sites for exact Dict equality (not just subset) before wiring into
-# codegen -- forward push and backward pop must decide identically at every site or push/pop
-# counts desync.
+# every agen_/snap_ pair in this file. stade_site_level_tbr_check asserts exact Dict
+# equality against snap_value_needed_sites on every call -- forward push and backward pop
+# must decide identically at every site or push/pop counts desync.
 function agen_fwd_walk!(body, seen, active_map, decisions)
     for idx in eachindex(body)
         stmt = body[idx]
@@ -6742,7 +6764,9 @@ end
 
 # Computes the site-level TBR decision from both independently duplicated implementations (snap_* and
 # agen_*) and asserts they agree exactly before returning either -- the permanent guard, so a future
-# silent divergence fails loudly here instead of corrupting a gradient. Returns (snap_sites,
+# silent divergence fails loudly here instead of corrupting a gradient. Also asserts every site-level
+# "needed" site is backed by the coarser whole-variable value_needed set that fuse_ii_loops still
+# relies on -- site-level must only ever refine that set, never diverge from it. Returns (snap_sites,
 # agen_sites): snap_plan consumes its own, agen_emit/hvp_emit consume theirs. Always run -- site-level
 # TBR is no longer opt-in, it's how every snapshot decision is made.
 function stade_site_level_tbr_check(kernel)
@@ -6750,6 +6774,12 @@ function stade_site_level_tbr_check(kernel)
     agen_sites = agen_value_needed_sites(kernel)
     @assert keys(snap_sites) == keys(agen_sites) "site_level_tbr: snap_* and agen_* site-level analyses produced different site keys for `$(kernel.sig.name)` -- this should never happen; the two stages walked the kernel differently somewhere"
     @assert snap_sites == agen_sites "site_level_tbr: snap_* and agen_* site-level analyses DISAGREE for `$(kernel.sig.name)` -- refusing to generate code that could desync push/pop counts. The two independently-duplicated implementations have drifted; see skill-stade's site-level TBR rollout notes."
+    value_needed = snap_value_needed_vars(kernel)
+    site_vars = snap_site_vars(kernel)
+    for (key, needed) in snap_sites
+        needed || continue
+        @assert site_vars[key] in value_needed "site_level_tbr: site-level analysis marked a write to `$(site_vars[key])` needed in `$(kernel.sig.name)`, but the whole-variable analysis does not -- site-level must be a subset"
+    end
     return snap_sites, agen_sites
 end
 
