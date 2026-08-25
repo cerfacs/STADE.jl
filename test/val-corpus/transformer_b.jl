@@ -14,17 +14,16 @@ function initstacks_transformer_b(dff, dk, h, n, n_layers)
     resid1_stack = Vector{Float64}(undef, (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1))
     row_mean_stack = Vector{Float64}(undef, (((div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1)) + 1)
     s2_stack = Vector{Float64}(undef, (((((((div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1)) + 1)
-    diff_stack = Vector{Float64}(undef, (((((div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(d - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1)) + 1)
     row_var_stack = Vector{Float64}(undef, (((div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1)) + 1)
     denom_stack = Vector{Float64}(undef, (((div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) + (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (div(n_layers - 1, 1) + 1)) + 1)
     normed1_stack = Vector{Float64}(undef, (div(n_layers - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(d - 1, 1) + 1))
     ff_hidden_stack = Vector{Float64}(undef, (div(n_layers - 1, 1) + 1) * (div(n_dff - 1, 1) + 1))
     resid2_stack = Vector{Float64}(undef, (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1))
     x_stack = Vector{Float64}(undef, (div(n_layers - 1, 1) + 1) * (div(n_d - 1, 1) + 1))
-    return (s_stack, q_stack, k_stack, v_stack, scores_stack, row_max_stack, probs_stack, row_sum_stack, ctx_stack, resid1_stack, row_mean_stack, s2_stack, diff_stack, row_var_stack, denom_stack, normed1_stack, ff_hidden_stack, resid2_stack, x_stack)
+    return (s_stack, q_stack, k_stack, v_stack, scores_stack, row_max_stack, probs_stack, row_sum_stack, ctx_stack, resid1_stack, row_mean_stack, s2_stack, row_var_stack, denom_stack, normed1_stack, ff_hidden_stack, resid2_stack, x_stack)
 end
 
-function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, bvb, wo, wob, bo, bob, ln1_gain, ln1_gainb, ln1_bias, ln1_biasb, w1, w1b, b1, b1b, w2, w2b, b2, b2b, ln2_gain, ln2_gainb, ln2_bias, ln2_biasb, q, qb, k, kb, v, vb, scores, scoresb, probs, probsb, ctx, ctxb, attn_out, attn_outb, resid1, resid1b, normed1, normed1b, ff_hidden, ff_hiddenb, ff_out, ff_outb, resid2, resid2b, x_next, x_nextb, n, dk, h, dff, n_layers, eps, epsb, s_stack, q_stack, k_stack, v_stack, scores_stack, row_max_stack, probs_stack, row_sum_stack, ctx_stack, resid1_stack, row_mean_stack, s2_stack, diff_stack, row_var_stack, denom_stack, normed1_stack, ff_hidden_stack, resid2_stack, x_stack)
+function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, bvb, wo, wob, bo, bob, ln1_gain, ln1_gainb, ln1_bias, ln1_biasb, w1, w1b, b1, b1b, w2, w2b, b2, b2b, ln2_gain, ln2_gainb, ln2_bias, ln2_biasb, q, qb, k, kb, v, vb, scores, scoresb, probs, probsb, ctx, ctxb, attn_out, attn_outb, resid1, resid1b, normed1, normed1b, ff_hidden, ff_hiddenb, ff_out, ff_outb, resid2, resid2b, x_next, x_nextb, n, dk, h, dff, n_layers, eps, epsb, s_stack, q_stack, k_stack, v_stack, scores_stack, row_max_stack, probs_stack, row_sum_stack, ctx_stack, resid1_stack, row_mean_stack, s2_stack, row_var_stack, denom_stack, normed1_stack, ff_hidden_stack, resid2_stack, x_stack)
     denom = 0.0
     diff = 0.0
     row_max = 0.0

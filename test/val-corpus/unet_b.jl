@@ -20,12 +20,6 @@ function initstacks_unet_b(c1, c2, c3, h, w)
     n_e2_out = c2 * hw2
     t_e1_stack = Vector{Float64}(undef, div(n_e1_mid - 1, 1) + 1)
     skip1_stack = Vector{Float64}(undef, div(n_e1_out - 1, 1) + 1)
-    a11_stack = Vector{Float64}(undef, ((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1)
-    a12_stack = Vector{Float64}(undef, ((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1)
-    a21_stack = Vector{Float64}(undef, ((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1)
-    a22_stack = Vector{Float64}(undef, ((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1)
-    m1_stack = Vector{Float64}(undef, ((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1)
-    m2_stack = Vector{Float64}(undef, ((div(c1 * hw2 - 1, 1) + 1) + (div(c2 * hw4 - 1, 1) + 1)) + 1)
     t_e2_stack = Vector{Float64}(undef, div(n_e2_mid - 1, 1) + 1)
     skip2_stack = Vector{Float64}(undef, div(n_e2_out - 1, 1) + 1)
     t_b_stack = Vector{Float64}(undef, div(n_b_mid - 1, 1) + 1)
@@ -34,10 +28,10 @@ function initstacks_unet_b(c1, c2, c3, h, w)
     dec2out_stack = Vector{Float64}(undef, div(n_d2_out - 1, 1) + 1)
     t_d1_stack = Vector{Float64}(undef, div(n_d1_mid - 1, 1) + 1)
     dec1out_stack = Vector{Float64}(undef, div(n_d1_out - 1, 1) + 1)
-    return (t_e1_stack, skip1_stack, a11_stack, a12_stack, a21_stack, a22_stack, m1_stack, m2_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
+    return (t_e1_stack, skip1_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
 end
 
-function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1ab, w_e1b, w_e1bb, b_e1b, b_e1bb, w_e2a, w_e2ab, b_e2a, b_e2ab, w_e2b, w_e2bb, b_e2b, b_e2bb, w_ba, w_bab, b_ba, b_bab, w_bb, w_bbb, b_bb, b_bbb, w_d2a, w_d2ab, b_d2a, b_d2ab, w_d2b, w_d2bb, b_d2b, b_d2bb, w_d1a, w_d1ab, b_d1a, b_d1ab, w_d1b, w_d1bb, b_d1b, b_d1bb, w_out, w_outb, b_out, b_outb, xpad0, xpad0b, t_e1, t_e1b, t_e1pad, t_e1padb, skip1, skip1b, p1, p1b, p1pad, p1padb, t_e2, t_e2b, t_e2pad, t_e2padb, skip2, skip2b, p2, p2b, p2pad, p2padb, t_b, t_bb, t_bpad, t_bpadb, bott, bottb, u2, u2b, cat2, cat2b, cat2pad, cat2padb, t_d2, t_d2b, t_d2pad, t_d2padb, dec2out, dec2outb, u1, u1b, cat1, cat1b, cat1pad, cat1padb, t_d1, t_d1b, t_d1pad, t_d1padb, dec1out, dec1outb, y, yb, t_e1_stack, skip1_stack, a11_stack, a12_stack, a21_stack, a22_stack, m1_stack, m2_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
+function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1ab, w_e1b, w_e1bb, b_e1b, b_e1bb, w_e2a, w_e2ab, b_e2a, b_e2ab, w_e2b, w_e2bb, b_e2b, b_e2bb, w_ba, w_bab, b_ba, b_bab, w_bb, w_bbb, b_bb, b_bbb, w_d2a, w_d2ab, b_d2a, b_d2ab, w_d2b, w_d2bb, b_d2b, b_d2bb, w_d1a, w_d1ab, b_d1a, b_d1ab, w_d1b, w_d1bb, b_d1b, b_d1bb, w_out, w_outb, b_out, b_outb, xpad0, xpad0b, t_e1, t_e1b, t_e1pad, t_e1padb, skip1, skip1b, p1, p1b, p1pad, p1padb, t_e2, t_e2b, t_e2pad, t_e2padb, skip2, skip2b, p2, p2b, p2pad, p2padb, t_b, t_bb, t_bpad, t_bpadb, bott, bottb, u2, u2b, cat2, cat2b, cat2pad, cat2padb, t_d2, t_d2b, t_d2pad, t_d2padb, dec2out, dec2outb, u1, u1b, cat1, cat1b, cat1pad, cat1padb, t_d1, t_d1b, t_d1pad, t_d1padb, dec1out, dec1outb, y, yb, t_e1_stack, skip1_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
     a11 = 0.0
     a12 = 0.0
     a21 = 0.0

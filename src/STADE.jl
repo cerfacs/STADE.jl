@@ -2122,10 +2122,9 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     value_needed = exempt = stacks = nothing
     if !keep_push_pop
         # Tier B kernels (a ragged/data-dependent loop bound) are no longer refused: agen_layout resolves as
-        # much as possible into closed-form ragged-block tables, falling back to plain :stack semantics only
-        # for what a block can't resolve. NOTE: ii_plan/fuse_ii_loops is untested with keep_push_pop=false --
-        # a fused var's stack is still allocated as if unfused, harmlessly unused; treat this as unsupported
-        # until exercised.
+        # much as possible into closed-form ragged-block tables, using plain :stack semantics only for what a
+        # block can't resolve. ii_plan/fuse_ii_loops is exercised with keep_push_pop=false against the full
+        # corpus; the Phase 3 cleanup below prunes a fused var's now-unused stack in this mode too.
         value_needed = agen_value_needed_vars(kernel)
         reassigned = agen_collect_reassigned(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
@@ -2137,19 +2136,12 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     tier_b_extra_args = vcat(table_names, tot_names, val_names)
     adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = push_pop,
                                       tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan)
-    # fuse_ii_loops can leave a stack with zero remaining push!/pop! calls anywhere in the
-    # generated body (every write-site that would have used it got fused away) -- checked from
-    # the actual generated code, never predicted ahead of time, since a var's ii_plan coverage
-    # does NOT by itself guarantee its stack is fully unused. Scoped to keep_push_pop=true,
-    # matching fuse_ii_loops's existing scope.
-    if keep_push_pop && ii_plan !== nothing
-        used = agen_used_stack_names(adjoint_expr)
-        unused_stacks = Set(nm for nm in agen_stack_names(snapshot_plan) if !(nm in used))
-        if !isempty(unused_stacks)
-            adjoint_expr = agen_drop_unused_stack_args(adjoint_expr, unused_stacks)
-            initstacks_expr = agen_drop_unused_stack_allocs(initstacks_expr, unused_stacks)
-        end
-    end
+    # fuse_ii_loops can leave a stack with zero remaining push!/pop!/indexed-ref references
+    # anywhere in the generated body (every site that would have used it got fused away) --
+    # checked from the actual generated code, never predicted ahead of time, since a var's
+    # ii_plan coverage does NOT by itself guarantee its stack is fully unused. Runs under both
+    # keep_push_pop values; agen_finalize_stacks detects use under either storage mode.
+    (adjoint_expr, initstacks_expr) = agen_finalize_stacks(adjoint_expr, initstacks_expr, snapshot_plan, ii_plan)
     return (adjoint = adjoint_expr, initstacks = initstacks_expr)
 end
 
@@ -3402,12 +3394,15 @@ end
 # ---- Phase 3 cleanup: drop stack args left unused by fusion ----
 # A var covered by an ii_plan site does not always mean its stack becomes fully unused -- agen_block_boundary_vars
 # can still need it. A blanket drop would be a real bug, so the safe approach generates the adjoint body first, then
-# drops only what provably has zero remaining push!/pop! calls in the actual output. Scoped to keep_push_pop=true,
-# matching fuse_ii_loops's own scope; under keep_push_pop=false a push/pop is an indexed ref, not a push!/pop! call.
+# drops only what provably has zero remaining stack references in the actual output. Covers both storage modes:
+# keep_push_pop=true reads/writes a stack through push!/pop!; keep_push_pop=false reads/writes it through an
+# indexed ref, nm[idx], on either side of an assignment.
 function agen_collect_used_stacks!(expr, used)
     if expr isa Expr
         if expr.head == :call && length(expr.args) >= 2 && expr.args[1] in (:push!, :pop!) && expr.args[2] isa Symbol
             push!(used, expr.args[2])
+        elseif expr.head == :ref && !isempty(expr.args) && expr.args[1] isa Symbol
+            push!(used, expr.args[1])
         end
         for a in expr.args
             agen_collect_used_stacks!(a, used)
@@ -3453,6 +3448,24 @@ function agen_drop_unused_stack_allocs(initstacks_expr, unused)
         end
     end
     return Expr(:function, initstacks_expr.args[1], Expr(:block, new_stmts...))
+end
+
+# Shared by agen_emit and stade_hvp: both need the identical post-fusion cleanup --
+# scan the generated function for real stack use (agen_used_stack_names, which covers
+# both push!/pop! and indexed-ref access), then drop whatever agen_stack_names(sites)
+# lists but the scan never found. `is_hvp` additionally drops hvp_emit's own orphaned
+# `<stack>_d` shadow allocs (see hvp_drop_unused_shadow_stack_allocs), since hvp_emit
+# builds one for every site regardless of fusion. A single shared function keeps the two
+# call sites from drifting the way two independently hand-edited copies eventually would.
+function agen_finalize_stacks(fn_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp::Bool = false)
+    ii_plan === nothing && return (fn_expr, initstacks_expr)
+    used = agen_used_stack_names(fn_expr)
+    unused_stacks = Set(nm for nm in agen_stack_names(snapshot_plan) if !(nm in used))
+    isempty(unused_stacks) && return (fn_expr, initstacks_expr)
+    fn_expr = agen_drop_unused_stack_args(fn_expr, unused_stacks)
+    is_hvp && (fn_expr = hvp_drop_unused_shadow_stack_allocs(fn_expr, unused_stacks))
+    initstacks_expr = agen_drop_unused_stack_allocs(initstacks_expr, unused_stacks)
+    return (fn_expr, initstacks_expr)
 end
 
 # ---- ii_* Phase 3 codegen: :independent fusion only ----
@@ -3987,6 +4000,27 @@ end
 
 hvp_fname(name::Symbol) = Symbol(string(name) * "_hv")
 hvp_stack_shadow(stack::Symbol) = Symbol(string(stack) * "_d")
+
+# Mirrors agen_drop_unused_stack_allocs, but for hvp_emit's OWN body: hvp_shadow_stack_inits
+# unconditionally allocates a `<stack>_d` shadow for every site, even one whose primal stack
+# turns out unused in this hvp_expr (fusion eliminated its only push/pop/ref). Once `nm` is
+# confirmed unused, its `nm_d` shadow alloc is dead too -- nothing else in hvp_expr can
+# reference it, since hvp_double_body only doubles statements that already exist.
+function hvp_drop_unused_shadow_stack_allocs(hvp_expr, unused)
+    shadow_unused = Set(hvp_stack_shadow(nm) for nm in unused)
+    body_block = hvp_expr.args[2]
+    new_stmts = Any[]
+    for stmt in body_block.args
+        if stmt isa Expr && stmt.head == :(=) && stmt.args[1] isa Symbol && stmt.args[1] in shadow_unused
+            continue
+        elseif stmt isa Expr && stmt.head == :call && stmt.args[1] == :sizehint! && stmt.args[2] isa Symbol && stmt.args[2] in shadow_unused
+            continue
+        else
+            push!(new_stmts, stmt)
+        end
+    end
+    return Expr(:function, hvp_expr.args[1], Expr(:block, new_stmts...))
+end
 
 # Every float variable this stage will encounter: primal args/locals (shadow = tgen_shadow, the same
 # "d" convention tgen_ already uses) and agen_'s own adjoint shadows (shadow = tgen_shadow of those --
@@ -6755,19 +6789,14 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     tier_b_extra_args = vcat(table_names, tot_names, val_names)
     hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites,
                          tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan)
-    # Mirrors agen_emit's own post-hoc cleanup, applied here independently because hvp_expr, not adjoint_expr, is what this
-    # function returns paired with initstacks_expr. Required for consistency: stade_adjoint's own initstacks_* already drops a
-    # stack once fusion leaves it unused, and validation code sharing initstacks_* across both adjoint and hvp calls needs
-    # hvp_expr's signature to match. hvp_expr's fwd/bwd use the same agen_forward_body/agen_backward_body calls as the adjoint
-    # path, so scanning it independently lands on the same unused set.
-    if keep_push_pop && ii_plan !== nothing
-        used = agen_used_stack_names(hvp_expr)
-        unused_stacks = Set(nm for nm in agen_stack_names(snapshot_plan) if !(nm in used))
-        if !isempty(unused_stacks)
-            hvp_expr = agen_drop_unused_stack_args(hvp_expr, unused_stacks)
-            initstacks_expr = agen_drop_unused_stack_allocs(initstacks_expr, unused_stacks)
-        end
-    end
+    # Mirrors agen_emit's own post-hoc cleanup, sharing agen_finalize_stacks so the two passes
+    # cannot drift out of sync. Required for consistency: stade_adjoint's own initstacks_* already
+    # drops a stack once fusion leaves it unused, and validation code sharing initstacks_* across
+    # both adjoint and hvp calls needs hvp_expr's signature to match. hvp_expr's fwd/bwd use the
+    # same agen_forward_body/agen_backward_body calls as the adjoint path, so scanning it
+    # independently lands on the same unused set. is_hvp=true additionally drops hvp_shadow_stack_inits'
+    # orphaned `<stack>_d` shadow alloc for each dropped stack (see hvp_drop_unused_shadow_stack_allocs).
+    (hvp_expr, initstacks_expr) = agen_finalize_stacks(hvp_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp = true)
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
 
