@@ -1,6 +1,6 @@
 name = "STADE"
 uuid = "bb4fcb4d-7b66-4cf0-a2d3-3034f78960eb"
 authors = ["Luciano Drozda <drozda@cerfacs.fr>"]
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
