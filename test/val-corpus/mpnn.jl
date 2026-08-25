@@ -72,9 +72,9 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
         for o = 1:n_msg_feat
             s = b_msg[o]
             # accumulate the dot product sequentially over the input features
-            for i_seq_i = 1:n_in_msg
-                widx = (o - 1) * n_in_msg + i_seq_i
-                s = s + w_msg[widx] * msg_input[in_off + i_seq_i]
+            for i_i = 1:n_in_msg
+                widx = (o - 1) * n_in_msg + i_i
+                s = s + w_msg[widx] * msg_input[in_off + i_i]
             end
             msg_scratch[msg_off + o] = s
         end
@@ -90,9 +90,9 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
     # step 2: sum messages at each receiver node
     # sequential: different edges can share the same receiver node, so
     # this loop carries a dependency through the shared agg array
-    for i_seq_e = 1:n_edges
-        d_node = dst[i_seq_e]
-        msg_off = (i_seq_e - 1) * n_msg_feat
+    for i_e = 1:n_edges
+        d_node = dst[i_e]
+        msg_off = (i_e - 1) * n_msg_feat
         agg_off = (d_node - 1) * n_msg_feat
         # add this edge's message into its receiver's running total
         for j = 1:n_msg_feat
@@ -120,9 +120,9 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
         for o = 1:n_node_feat
             s = b_upd[o]
             # accumulate the dot product sequentially over the input features
-            for i_seq_i = 1:n_in_upd
-                widx = (o - 1) * n_in_upd + i_seq_i
-                s = s + w_upd[widx] * upd_input[uin_off + i_seq_i]
+            for i_i = 1:n_in_upd
+                widx = (o - 1) * n_in_upd + i_i
+                s = s + w_upd[widx] * upd_input[uin_off + i_i]
             end
             upd_scratch[node_off + o] = s
         end

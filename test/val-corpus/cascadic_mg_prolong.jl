@@ -27,20 +27,20 @@ function cascadic_mg_prolong(u, rhs, h_coarse, nu, num_levels)
     nc = nl - 1
     hl2 = hl * hl
     # coarsest level: relax directly against the caller-supplied rhs
-    for i_seq_k = 1:nu
-        for i_seq_j = 1:nc
+    for i_k = 1:nu
+        for i_j = 1:nc
             left = 0.0
-            if i_seq_j > 1
-                left = u[i_seq_j - 1, 1]
+            if i_j > 1
+                left = u[i_j - 1, 1]
             end
             right = 0.0
-            if i_seq_j < nc
-                right = u[i_seq_j + 1, 1]
+            if i_j < nc
+                right = u[i_j + 1, 1]
             end
-            u[i_seq_j, 1] = 0.5 * (hl2 * rhs[i_seq_j, 1] + left + right)
+            u[i_j, 1] = 0.5 * (hl2 * rhs[i_j, 1] + left + right)
         end
     end
-    for i_seq_level = 2:num_levels
+    for i_level = 2:num_levels
         nl = nl * 2
         hl = hl / 2.0
         nc = nl - 1
@@ -49,33 +49,33 @@ function cascadic_mg_prolong(u, rhs, h_coarse, nu, num_levels)
         # prolong: even fine points copy the matching coarse point
         for j = 1:ncoarse
             jf = j * 2
-            u[jf, i_seq_level] = u[j, i_seq_level - 1]
+            u[jf, i_level] = u[j, i_level - 1]
         end
         # odd fine points get the average of their two coarse neighbors
         for j = 1:ncoarse + 1
             jf = j * 2 - 1
             cl = 0.0
             if j > 1
-                cl = u[j - 1, i_seq_level - 1]
+                cl = u[j - 1, i_level - 1]
             end
             cr = 0.0
             if j <= ncoarse
-                cr = u[j, i_seq_level - 1]
+                cr = u[j, i_level - 1]
             end
-            u[jf, i_seq_level] = 0.5 * (cl + cr)
+            u[jf, i_level] = 0.5 * (cl + cr)
         end
         # relax nu sweeps on the new, finer grid
-        for i_seq_k = 1:nu
-            for i_seq_j = 1:nc
+        for i_k = 1:nu
+            for i_j = 1:nc
                 left = 0.0
-                if i_seq_j > 1
-                    left = u[i_seq_j - 1, i_seq_level]
+                if i_j > 1
+                    left = u[i_j - 1, i_level]
                 end
                 right = 0.0
-                if i_seq_j < nc
-                    right = u[i_seq_j + 1, i_seq_level]
+                if i_j < nc
+                    right = u[i_j + 1, i_level]
                 end
-                u[i_seq_j, i_seq_level] = 0.5 * (hl2 * rhs[i_seq_j, i_seq_level] + left + right)
+                u[i_j, i_level] = 0.5 * (hl2 * rhs[i_j, i_level] + left + right)
             end
         end
     end

@@ -39,11 +39,11 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
         for o = 1:n_msg_feat
             sd = b_msgd[o]
             s = b_msg[o]
-            for i_seq_i = 1:n_in_msg
+            for i_i = 1:n_in_msg
                 widxd = 0.0
-                widx = (o - 1) * n_in_msg + i_seq_i
-                sd = sd + (msg_input[in_off + i_seq_i] * w_msgd[widx] + w_msg[widx] * msg_inputd[in_off + i_seq_i])
-                s = s + w_msg[widx] * msg_input[in_off + i_seq_i]
+                widx = (o - 1) * n_in_msg + i_i
+                sd = sd + (msg_input[in_off + i_i] * w_msgd[widx] + w_msg[widx] * msg_inputd[in_off + i_i])
+                s = s + w_msg[widx] * msg_input[in_off + i_i]
             end
             msg_scratchd[msg_off + o] = sd
             msg_scratch[msg_off + o] = s
@@ -57,11 +57,11 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
             messages[msg_off + k] = msg_scratch[msg_off + k]
         end
     end
-    for i_seq_e = 1:n_edges
+    for i_e = 1:n_edges
         d_noded = 0.0
-        d_node = dst[i_seq_e]
+        d_node = dst[i_e]
         msg_offd = 0.0
-        msg_off = (i_seq_e - 1) * n_msg_feat
+        msg_off = (i_e - 1) * n_msg_feat
         agg_offd = 0.0
         agg_off = (d_node - 1) * n_msg_feat
         for j = 1:n_msg_feat
@@ -87,11 +87,11 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
         for o = 1:n_node_feat
             sd = b_updd[o]
             s = b_upd[o]
-            for i_seq_i = 1:n_in_upd
+            for i_i = 1:n_in_upd
                 widxd = 0.0
-                widx = (o - 1) * n_in_upd + i_seq_i
-                sd = sd + (upd_input[uin_off + i_seq_i] * w_updd[widx] + w_upd[widx] * upd_inputd[uin_off + i_seq_i])
-                s = s + w_upd[widx] * upd_input[uin_off + i_seq_i]
+                widx = (o - 1) * n_in_upd + i_i
+                sd = sd + (upd_input[uin_off + i_i] * w_updd[widx] + w_upd[widx] * upd_inputd[uin_off + i_i])
+                s = s + w_upd[widx] * upd_input[uin_off + i_i]
             end
             upd_scratchd[node_off + o] = sd
             upd_scratch[node_off + o] = s
@@ -134,9 +134,9 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
         end
         for o = 1:n_msg_feat
             s = b_msg[o]
-            for i_seq_i = 1:n_in_msg
-                widx = (o - 1) * n_in_msg + i_seq_i
-                s = s + w_msg[widx] * msg_input[in_off + i_seq_i]
+            for i_i = 1:n_in_msg
+                widx = (o - 1) * n_in_msg + i_i
+                s = s + w_msg[widx] * msg_input[in_off + i_i]
             end
             msg_scratch[msg_off + o] = s
         end
@@ -147,9 +147,9 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
             messages[msg_off + k] = msg_scratch[msg_off + k]
         end
     end
-    for i_seq_e = 1:n_edges
-        d_node = dst[i_seq_e]
-        msg_off = (i_seq_e - 1) * n_msg_feat
+    for i_e = 1:n_edges
+        d_node = dst[i_e]
+        msg_off = (i_e - 1) * n_msg_feat
         agg_off = (d_node - 1) * n_msg_feat
         for j = 1:n_msg_feat
             agg[agg_off + j] = agg[agg_off + j] + messages[msg_off + j]
@@ -167,9 +167,9 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
         end
         for o = 1:n_node_feat
             s = b_upd[o]
-            for i_seq_i = 1:n_in_upd
-                widx = (o - 1) * n_in_upd + i_seq_i
-                s = s + w_upd[widx] * upd_input[uin_off + i_seq_i]
+            for i_i = 1:n_in_upd
+                widx = (o - 1) * n_in_upd + i_i
+                s = s + w_upd[widx] * upd_input[uin_off + i_i]
             end
             upd_scratch[node_off + o] = s
         end

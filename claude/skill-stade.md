@@ -5,9 +5,9 @@ description: >
   meant to be fed into STADE (the automatic differentiation engine) for
   tangent/adjoint/HVP generation -- stencils, linear algebra, integrators,
   elementwise/reduction kernels, and similar monoprocessor scientific-
-  computing code. Covers the `i_seq_` sequential-loop convention, fusing
-  rectangular nests of independent loops into one flattened loop, and the
-  other STADE-parseability constraints below.
+  computing code. Covers fusing rectangular nests of independent loops
+  into one flattened loop, and the other STADE-parseability constraints
+  below.
 ---
 
 # skill-stade: house style for kernels STADE differentiates
@@ -53,39 +53,21 @@ add `export PATH="/home/claude/julia-1.10.11/bin:$PATH"` first.
 
 ## The rules, and why they matter
 
-1. **A sequential loop's variable must start with `i_seq_`. An ordinary
-   loop's variable must not.** Write each loop so that iteration `i`
-   reads inputs and writes outputs only at indices derived from `i`.
-   When a loop's body reads a value a previous iteration wrote, a
-   running sum, a scan, any accumulator, prefix its variable with
-   `i_seq_`. For example, write `i_seq_k`. Tag it even where the
-   accumulation looks commutative. The cost of tagging is zero. The cost
-   of skipping it by mistake is not.
+1. **Prefer loops where iteration `i` reads inputs and writes outputs only at indices derived from `i`.**:
+   Such loops fuse (rule 2) and run as one GPU thread per
+   index. A loop that carries a value from one iteration to the next, a
+   running sum, a scan, any accumulator, does neither. Write one only
+   where the math needs it, and say so in a comment (rule 13).
 
-   Here is the exact mechanism. STADE's adjoint reversal decision is
-   `stmt.sequential || agen_body_has_snapshot(...)`. If the carried
-   value is already snapshotted for some other reason, typically because
-   it feeds a later multiplication, the loop reverses correctly either
-   way. There the tag is redundant. But when the coupling runs through
-   an array rather than a snapshotted scalar, a prefix scan such as
-   `y[k] = y[k - 1] + x[k]`, no fallback exists. The tag is then the
-   only thing telling STADE to reverse the loop. Get it wrong there and
-   STADE raises no error. It silently returns a wrong gradient.
-
-   `fuse_ii_loops` and the GPU codegen stages (`cgen_*`/`jgen_*`) never
-   read this tag. Each one reproves, from the loop's own structure,
-   which loops are safe to fuse or run in parallel. Tagging a loop
-   `i_seq_` never blocks an optimization the loop would otherwise
-   qualify for.
-
-   Outside this one prefix, name variables and functions however you
-   want. STADE tracks a variable by its symbol, never by its spelling.
+   `fuse_ii_loops` and the GPU codegen
+   stages (`cgen_*`/`jgen_*`) each reprove, from the loop's own
+   structure, which loops are safe to fuse or run in parallel.
 
 2. **Fuse a rectangular nest of independent loops into one loop over the
    flattened range.** If an outer independent loop's body is only
    another independent loop, optionally several, nested deeper, with no
-   `i_seq_` loop or branch between them, and the inner loop's trip count
-   does not depend on the outer variable, collapse the nest into one
+   value-carrying loop or branch between them, and the inner loop's trip
+   count does not depend on the outer variable, collapse the nest into one
    loop over `1:n * m` and recover each original index with `div`/`mod`
    (rule 10).
 
@@ -96,8 +78,9 @@ add `export PATH="/home/claude/julia-1.10.11/bin:$PATH"` first.
    unflattened, and only the outer `n` iterations become threads, each
    one running the whole inner `m`-iteration loop alone.
 
-   Do not fuse when a loop in the nest is sequential (`i_seq_...`, rule
-   1). Do not fuse when the inner bound depends on the outer variable, as
+   Do not fuse when a loop in the nest carries a value between its own
+   iterations (rule 1). Do not fuse when the inner bound depends on the
+   outer variable, as
    in a triangular loop with no fixed trip count to flatten against. Do
    not fuse when a boundary/interior split (rule 4) needs to separate two
    loops in the nest. Split first, then fuse each resulting rectangular
@@ -240,8 +223,7 @@ add `export PATH="/home/claude/julia-1.10.11/bin:$PATH"` first.
 ## Worked examples
 
 **Naming and type-annotation freedom.** The interior loop below is
-iteration-independent, so its variable carries no `i_seq_` prefix. The
-signature mixes a type annotation with a plain argument, and the unused
+iteration-independent. The signature mixes a type annotation with a plain argument, and the unused
 local uses camelCase, to show both are fine:
 
 ```julia
@@ -263,10 +245,10 @@ function stencil(x::Vector{Float64}, y, n::Int64)
 end
 ```
 
-**A sequential loop with compound assignment.** A dot product must
-accumulate a running sum, so its loop variable carries the `i_seq_`
-prefix and the result goes into a length-1 output array. The
-compound-assignment form (`+=`, `-=`, `*=`, `/=`, `^=`) desugars to a
+**A value-carrying loop with compound assignment.** A dot product must
+accumulate a running sum, so it cannot be fused, and its result goes
+into a length-1 output array.
+The compound-assignment form (`+=`, `-=`, `*=`, `/=`, `^=`) desugars to a
 plain assignment before STADE ever sees it, so it is allowed:
 
 ```julia
@@ -280,8 +262,9 @@ plain assignment before STADE ever sees it, so it is allowed:
 # out: length-1 output array; out[1] receives the result
 function dotprod(x, y, n, out)
     s = 0.0
-    for i_seq_k = 1:n
-        s += x[i_seq_k] * y[i_seq_k]
+    # running sum -- carried from one iteration to the next
+    for k = 1:n
+        s += x[k] * y[k]
     end
     out[1] = s
     return nothing
@@ -313,11 +296,9 @@ end
 Read the draft back and confirm all of the following, fixing anything
 that fails before you share it:
 
-- [ ] Every genuinely sequential loop's variable starts with `i_seq_`,
-      and no other loop's variable does
 - [ ] No rectangular nest of purely independent loops was left unfused:
       if the inner trip count does not depend on the outer variable, and
-      no `i_seq_` loop or boundary split needs to separate them, it
+      no value-carrying loop or boundary split needs to separate them, it
       is one loop with `div`/`mod`-recovered indices
 - [ ] Every loop header names its iteration variable explicitly (`_` is
       fine when genuinely unused). `=` and `in` are both fine

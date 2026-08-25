@@ -7,13 +7,13 @@ function initstacks_richardson_substep_b(dt_stage, num_stages, y_init)
     prefix_y_stack_1 = Vector{Int}(undef, div(num_stages - 1, 1) + 1)
     __tot_y_stack_1 = 0
     val_nsub_1 = Vector{Int64}(undef, div(num_stages - 1, 1) + 1)
-    for i_seq_stage = 1:num_stages
-        prefix_h_stack_1[(i_seq_stage - 1) + 1] = __tot_h_stack_1
-        prefix_tripcount_stack_1[(i_seq_stage - 1) + 1] = __tot_tripcount_stack_1
-        prefix_y_stack_1[(i_seq_stage - 1) + 1] = __tot_y_stack_1
+    for i_stage = 1:num_stages
+        prefix_h_stack_1[(i_stage - 1) + 1] = __tot_h_stack_1
+        prefix_tripcount_stack_1[(i_stage - 1) + 1] = __tot_tripcount_stack_1
+        prefix_y_stack_1[(i_stage - 1) + 1] = __tot_y_stack_1
         h = dt_stage / nsub
         y = y_init
-        val_nsub_1[(i_seq_stage - 1) + 1] = nsub
+        val_nsub_1[(i_stage - 1) + 1] = nsub
         __tot_h_stack_1 = __tot_h_stack_1 + 1
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + 1
         __tot_y_stack_1 = __tot_y_stack_1 + ((1 + (div(nsub - 1, 1) + 1)) + 1)
@@ -37,30 +37,30 @@ function richardson_substep_hv(y_init, y_initb, out, outb, a_coef, a_coefb, dt_s
     yd = 0.0
     ybd = 0.0
     nsub = 1
-    for i_seq_stage = 1:num_stages
-        __idx_h_stack_1_0 = prefix_h_stack_1[(i_seq_stage - 1) + 1] + 1
+    for i_stage = 1:num_stages
+        __idx_h_stack_1_0 = prefix_h_stack_1[(i_stage - 1) + 1] + 1
         h_stack_d[__idx_h_stack_1_0] = hd
         h_stack[__idx_h_stack_1_0] = h
         hd = (1.0 / nsub) * dt_staged
         h = dt_stage / nsub
-        __idx_y_stack_1_3 = prefix_y_stack_1[(i_seq_stage - 1) + 1] + 1
+        __idx_y_stack_1_3 = prefix_y_stack_1[(i_stage - 1) + 1] + 1
         y_stack_d[__idx_y_stack_1_3] = yd
         y_stack[__idx_y_stack_1_3] = y
         yd = y_initd
         y = y_init
-        __idx_tripcount_stack_1_6 = prefix_tripcount_stack_1[(i_seq_stage - 1) + 1] + 1
+        __idx_tripcount_stack_1_6 = prefix_tripcount_stack_1[(i_stage - 1) + 1] + 1
         tripcount_stack[__idx_tripcount_stack_1_6] = nsub
-        for i_seq_sub = 1:nsub
-            __idx_y_stack_1_0 = (prefix_y_stack_1[(i_seq_stage - 1) + 1] + 1) + ((i_seq_sub - 1) + 1)
+        for i_sub = 1:nsub
+            __idx_y_stack_1_0 = (prefix_y_stack_1[(i_stage - 1) + 1] + 1) + ((i_sub - 1) + 1)
             y_stack_d[__idx_y_stack_1_0] = yd
             y_stack[__idx_y_stack_1_0] = y
             yd = yd + -((((a_coef * y) * hd + (h * y) * a_coefd) + (h * a_coef) * yd))
             y = y - h * a_coef * y
         end
-        outd[i_seq_stage] = yd
-        out[i_seq_stage] = y
+        outd[i_stage] = yd
+        out[i_stage] = y
         nsub = nsub * 2
-        __idx_y_stack_1_11 = (prefix_y_stack_1[(i_seq_stage - 1) + 1] + (1 + (div(val_nsub_1[(i_seq_stage - 1) + 1] - 1, 1) + 1))) + 1
+        __idx_y_stack_1_11 = (prefix_y_stack_1[(i_stage - 1) + 1] + (1 + (div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1))) + 1
         y_stack_d[__idx_y_stack_1_11] = yd
         y_stack[__idx_y_stack_1_11] = y
     end
@@ -72,18 +72,18 @@ function richardson_substep_hv(y_init, y_initb, out, outb, a_coef, a_coefb, dt_s
     h = h_stack[__tot_h_stack_1 + 1]
     yd = y_stack_d[__tot_y_stack_1 + 1]
     y = y_stack[__tot_y_stack_1 + 1]
-    for i_seq_stage = num_stages:-1:1
-        __idx_y_stack_1_0 = (prefix_y_stack_1[(i_seq_stage - 1) + 1] + (1 + (div(val_nsub_1[(i_seq_stage - 1) + 1] - 1, 1) + 1))) + 1
+    for i_stage = num_stages:-1:1
+        __idx_y_stack_1_0 = (prefix_y_stack_1[(i_stage - 1) + 1] + (1 + (div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1))) + 1
         yd = y_stack_d[__idx_y_stack_1_0]
         y = y_stack[__idx_y_stack_1_0]
-        ybd = ybd + outbd[i_seq_stage]
-        yb = yb + outb[i_seq_stage]
-        outbd[i_seq_stage] = 0.0
-        outb[i_seq_stage] = 0.0
-        __idx_tripcount_stack_1_4 = prefix_tripcount_stack_1[(i_seq_stage - 1) + 1] + 1
+        ybd = ybd + outbd[i_stage]
+        yb = yb + outb[i_stage]
+        outbd[i_stage] = 0.0
+        outb[i_stage] = 0.0
+        __idx_tripcount_stack_1_4 = prefix_tripcount_stack_1[(i_stage - 1) + 1] + 1
         nsub = tripcount_stack[__idx_tripcount_stack_1_4]
-        for i_seq_sub = nsub:-1:1
-            __idx_y_stack_1_0 = (prefix_y_stack_1[(i_seq_stage - 1) + 1] + 1) + ((i_seq_sub - 1) + 1)
+        for i_sub = nsub:-1:1
+            __idx_y_stack_1_0 = (prefix_y_stack_1[(i_stage - 1) + 1] + 1) + ((i_sub - 1) + 1)
             yd = y_stack_d[__idx_y_stack_1_0]
             y = y_stack[__idx_y_stack_1_0]
             hbd = hbd + (-yb * (y * a_coefd + a_coef * yd) + (a_coef * y) * -ybd)
@@ -93,14 +93,14 @@ function richardson_substep_hv(y_init, y_initb, out, outb, a_coef, a_coefb, dt_s
             ybd = ybd + (-yb * (a_coef * hd + h * a_coefd) + (h * a_coef) * -ybd)
             yb = yb + (h * a_coef) * -yb
         end
-        __idx_y_stack_1_0 = prefix_y_stack_1[(i_seq_stage - 1) + 1] + 1
+        __idx_y_stack_1_0 = prefix_y_stack_1[(i_stage - 1) + 1] + 1
         yd = y_stack_d[__idx_y_stack_1_0]
         y = y_stack[__idx_y_stack_1_0]
         y_initbd = y_initbd + ybd
         y_initb = y_initb + yb
         ybd = 0.0
         yb = 0.0
-        __idx_h_stack_1_0 = prefix_h_stack_1[(i_seq_stage - 1) + 1] + 1
+        __idx_h_stack_1_0 = prefix_h_stack_1[(i_stage - 1) + 1] + 1
         hd = h_stack_d[__idx_h_stack_1_0]
         h = h_stack[__idx_h_stack_1_0]
         dt_stagebd = dt_stagebd + (1.0 / nsub) * hbd
@@ -113,13 +113,13 @@ end
 
 function richardson_substep(y_init, out, a_coef, dt_stage, num_stages)
     nsub = 1
-    for i_seq_stage = 1:num_stages
+    for i_stage = 1:num_stages
         h = dt_stage / nsub
         y = y_init
-        for i_seq_sub = 1:nsub
+        for i_sub = 1:nsub
             y = y - h * a_coef * y
         end
-        out[i_seq_stage] = y
+        out[i_stage] = y
         nsub = nsub * 2
     end
 end

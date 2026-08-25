@@ -153,8 +153,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c_in * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c_in * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -197,8 +197,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c1 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c1 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -264,8 +264,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w2) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c1 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c1 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -308,8 +308,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w2) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c2 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c2 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -375,8 +375,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w4) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c2 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c2 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -419,8 +419,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w4) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c3 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c3 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -485,8 +485,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w2) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c32 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c32 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -529,8 +529,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w2) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c2 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c2 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -595,8 +595,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c21 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c21 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -639,8 +639,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c1 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c1 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -669,8 +669,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         j = mod(rem, w) + 1
         sd = 0.0
         s = 0.0
-        for i_seq_k = 1:c1 * khkw_out
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c1 * khkw_out
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw_out) + 1
             rem2 = mod(kseqm1, khkw_out)
             ki = div(rem2, kw_out) + 1
@@ -730,7 +730,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
     n_d1_mid = c1 * hw
     n_d1_midpad = c1 * hp1 * wp1
     n_d1_out = c1 * hw
-    for idx = 1:c_out * hw
+    for idx = c_out * hw:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -742,8 +742,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_outb[co] = b_outb[co] + yb[idx]
         ybd[idx] = 0.0
         yb[idx] = 0.0
-        for i_seq_k = c1 * khkw_out:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c1 * khkw_out:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw_out) + 1
             rem2 = mod(kseqm1, khkw_out)
             ki = div(rem2, kw_out) + 1
@@ -766,7 +766,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         dec1outbd[i] = (0.5 * (1.0 + sign(dec1out[i] - zero_val))) * dec1outbd[i]
         dec1outb[i] = (0.5 * (1.0 + sign(dec1out[i] - zero_val))) * dec1outb[i]
     end
-    for idx = 1:c1 * hw
+    for idx = c1 * hw:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -778,8 +778,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_d1bb[co] = b_d1bb[co] + dec1outb[idx]
         dec1outbd[idx] = 0.0
         dec1outb[idx] = 0.0
-        for i_seq_k = c1 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c1 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -796,7 +796,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c1 * hw
+    for idx = c1 * hw:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -808,7 +808,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_d1padbd[yi] = 0.0
         t_d1padb[yi] = 0.0
     end
-    for i = 1:n_d1_midpad
+    for i = n_d1_midpad:-1:1
         t_d1padbd[i] = 0.0
         t_d1padb[i] = 0.0
     end
@@ -818,7 +818,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_d1bd[i] = (0.5 * (1.0 + sign(t_d1[i] - zero_val))) * t_d1bd[i]
         t_d1b[i] = (0.5 * (1.0 + sign(t_d1[i] - zero_val))) * t_d1b[i]
     end
-    for idx = 1:c1 * hw
+    for idx = c1 * hw:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -830,8 +830,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_d1ab[co] = b_d1ab[co] + t_d1b[idx]
         t_d1bd[idx] = 0.0
         t_d1b[idx] = 0.0
-        for i_seq_k = c21 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c21 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -848,7 +848,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c21 * hw
+    for idx = c21 * hw:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -860,23 +860,23 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         cat1padbd[yi] = 0.0
         cat1padb[yi] = 0.0
     end
-    for i = 1:n_cat1pad
+    for i = n_cat1pad:-1:1
         cat1padbd[i] = 0.0
         cat1padb[i] = 0.0
     end
-    for idx = 1:c1 * hw
+    for idx = c1 * hw:-1:1
         skip1bd[idx] = skip1bd[idx] + cat1bd[c2 * hw + idx]
         skip1b[idx] = skip1b[idx] + cat1b[c2 * hw + idx]
         cat1bd[c2 * hw + idx] = 0.0
         cat1b[c2 * hw + idx] = 0.0
     end
-    for idx = 1:c2 * hw
+    for idx = c2 * hw:-1:1
         u1bd[idx] = u1bd[idx] + cat1bd[idx]
         u1b[idx] = u1b[idx] + cat1b[idx]
         cat1bd[idx] = 0.0
         cat1b[idx] = 0.0
     end
-    for idx = 1:c2 * hw
+    for idx = c2 * hw:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -898,7 +898,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         dec2outbd[i] = (0.5 * (1.0 + sign(dec2out[i] - zero_val))) * dec2outbd[i]
         dec2outb[i] = (0.5 * (1.0 + sign(dec2out[i] - zero_val))) * dec2outb[i]
     end
-    for idx = 1:c2 * hw2
+    for idx = c2 * hw2:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -910,8 +910,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_d2bb[co] = b_d2bb[co] + dec2outb[idx]
         dec2outbd[idx] = 0.0
         dec2outb[idx] = 0.0
-        for i_seq_k = c2 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c2 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -928,7 +928,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c2 * hw2
+    for idx = c2 * hw2:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -940,7 +940,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_d2padbd[yi] = 0.0
         t_d2padb[yi] = 0.0
     end
-    for i = 1:n_d2_midpad
+    for i = n_d2_midpad:-1:1
         t_d2padbd[i] = 0.0
         t_d2padb[i] = 0.0
     end
@@ -950,7 +950,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_d2bd[i] = (0.5 * (1.0 + sign(t_d2[i] - zero_val))) * t_d2bd[i]
         t_d2b[i] = (0.5 * (1.0 + sign(t_d2[i] - zero_val))) * t_d2b[i]
     end
-    for idx = 1:c2 * hw2
+    for idx = c2 * hw2:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -962,8 +962,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_d2ab[co] = b_d2ab[co] + t_d2b[idx]
         t_d2bd[idx] = 0.0
         t_d2b[idx] = 0.0
-        for i_seq_k = c32 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c32 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -980,7 +980,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c32 * hw2
+    for idx = c32 * hw2:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -992,23 +992,23 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         cat2padbd[yi] = 0.0
         cat2padb[yi] = 0.0
     end
-    for i = 1:n_cat2pad
+    for i = n_cat2pad:-1:1
         cat2padbd[i] = 0.0
         cat2padb[i] = 0.0
     end
-    for idx = 1:c2 * hw2
+    for idx = c2 * hw2:-1:1
         skip2bd[idx] = skip2bd[idx] + cat2bd[c3 * hw2 + idx]
         skip2b[idx] = skip2b[idx] + cat2b[c3 * hw2 + idx]
         cat2bd[c3 * hw2 + idx] = 0.0
         cat2b[c3 * hw2 + idx] = 0.0
     end
-    for idx = 1:c3 * hw2
+    for idx = c3 * hw2:-1:1
         u2bd[idx] = u2bd[idx] + cat2bd[idx]
         u2b[idx] = u2b[idx] + cat2b[idx]
         cat2bd[idx] = 0.0
         cat2b[idx] = 0.0
     end
-    for idx = 1:c3 * hw2
+    for idx = c3 * hw2:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -1030,7 +1030,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         bottbd[i] = (0.5 * (1.0 + sign(bott[i] - zero_val))) * bottbd[i]
         bottb[i] = (0.5 * (1.0 + sign(bott[i] - zero_val))) * bottb[i]
     end
-    for idx = 1:c3 * hw4
+    for idx = c3 * hw4:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw4) + 1
         rem = mod(idxm1, hw4)
@@ -1042,8 +1042,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_bbb[co] = b_bbb[co] + bottb[idx]
         bottbd[idx] = 0.0
         bottb[idx] = 0.0
-        for i_seq_k = c3 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c3 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1060,7 +1060,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c3 * hw4
+    for idx = c3 * hw4:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw4) + 1
         rem = mod(idxm1, hw4)
@@ -1072,7 +1072,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_bpadbd[yi] = 0.0
         t_bpadb[yi] = 0.0
     end
-    for i = 1:n_b_midpad
+    for i = n_b_midpad:-1:1
         t_bpadbd[i] = 0.0
         t_bpadb[i] = 0.0
     end
@@ -1082,7 +1082,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_bbd[i] = (0.5 * (1.0 + sign(t_b[i] - zero_val))) * t_bbd[i]
         t_bb[i] = (0.5 * (1.0 + sign(t_b[i] - zero_val))) * t_bb[i]
     end
-    for idx = 1:c3 * hw4
+    for idx = c3 * hw4:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw4) + 1
         rem = mod(idxm1, hw4)
@@ -1094,8 +1094,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_bab[co] = b_bab[co] + t_bb[idx]
         t_bbd[idx] = 0.0
         t_bb[idx] = 0.0
-        for i_seq_k = c2 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c2 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1112,7 +1112,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c2 * hw4
+    for idx = c2 * hw4:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw4) + 1
         rem = mod(idxm1, hw4)
@@ -1124,7 +1124,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         p2padbd[yi] = 0.0
         p2padb[yi] = 0.0
     end
-    for i = 1:n_p2pad
+    for i = n_p2pad:-1:1
         p2padbd[i] = 0.0
         p2padb[i] = 0.0
     end
@@ -1196,7 +1196,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         skip2bd[i] = (0.5 * (1.0 + sign(skip2[i] - zero_val))) * skip2bd[i]
         skip2b[i] = (0.5 * (1.0 + sign(skip2[i] - zero_val))) * skip2b[i]
     end
-    for idx = 1:c2 * hw2
+    for idx = c2 * hw2:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -1208,8 +1208,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_e2bb[co] = b_e2bb[co] + skip2b[idx]
         skip2bd[idx] = 0.0
         skip2b[idx] = 0.0
-        for i_seq_k = c2 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c2 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1226,7 +1226,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c2 * hw2
+    for idx = c2 * hw2:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -1238,7 +1238,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_e2padbd[yi] = 0.0
         t_e2padb[yi] = 0.0
     end
-    for i = 1:n_e2_midpad
+    for i = n_e2_midpad:-1:1
         t_e2padbd[i] = 0.0
         t_e2padb[i] = 0.0
     end
@@ -1248,7 +1248,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_e2bd[i] = (0.5 * (1.0 + sign(t_e2[i] - zero_val))) * t_e2bd[i]
         t_e2b[i] = (0.5 * (1.0 + sign(t_e2[i] - zero_val))) * t_e2b[i]
     end
-    for idx = 1:c2 * hw2
+    for idx = c2 * hw2:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -1260,8 +1260,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_e2ab[co] = b_e2ab[co] + t_e2b[idx]
         t_e2bd[idx] = 0.0
         t_e2b[idx] = 0.0
-        for i_seq_k = c1 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c1 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1278,7 +1278,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c1 * hw2
+    for idx = c1 * hw2:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw2) + 1
         rem = mod(idxm1, hw2)
@@ -1290,7 +1290,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         p1padbd[yi] = 0.0
         p1padb[yi] = 0.0
     end
-    for i = 1:n_p1pad
+    for i = n_p1pad:-1:1
         p1padbd[i] = 0.0
         p1padb[i] = 0.0
     end
@@ -1362,7 +1362,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         skip1bd[i] = (0.5 * (1.0 + sign(skip1[i] - zero_val))) * skip1bd[i]
         skip1b[i] = (0.5 * (1.0 + sign(skip1[i] - zero_val))) * skip1b[i]
     end
-    for idx = 1:c1 * hw
+    for idx = c1 * hw:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -1374,8 +1374,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_e1bb[co] = b_e1bb[co] + skip1b[idx]
         skip1bd[idx] = 0.0
         skip1b[idx] = 0.0
-        for i_seq_k = c1 * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c1 * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1392,7 +1392,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c1 * hw
+    for idx = c1 * hw:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -1404,7 +1404,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_e1padbd[yi] = 0.0
         t_e1padb[yi] = 0.0
     end
-    for i = 1:n_e1_midpad
+    for i = n_e1_midpad:-1:1
         t_e1padbd[i] = 0.0
         t_e1padb[i] = 0.0
     end
@@ -1414,7 +1414,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         t_e1bd[i] = (0.5 * (1.0 + sign(t_e1[i] - zero_val))) * t_e1bd[i]
         t_e1b[i] = (0.5 * (1.0 + sign(t_e1[i] - zero_val))) * t_e1b[i]
     end
-    for idx = 1:c1 * hw
+    for idx = c1 * hw:-1:1
         idxm1 = idx - 1
         co = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -1426,8 +1426,8 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         b_e1ab[co] = b_e1ab[co] + t_e1b[idx]
         t_e1bd[idx] = 0.0
         t_e1b[idx] = 0.0
-        for i_seq_k = c_in * khkw:-1:1
-            kseqm1 = i_seq_k - 1
+        for i_k = c_in * khkw:-1:1
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1444,7 +1444,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         sbd = 0.0
         sb = 0.0
     end
-    for idx = 1:c_in * hw
+    for idx = c_in * hw:-1:1
         idxm1 = idx - 1
         ci = div(idxm1, hw) + 1
         rem = mod(idxm1, hw)
@@ -1456,7 +1456,7 @@ function unet_hv(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e
         xpad0bd[yi] = 0.0
         xpad0b[yi] = 0.0
     end
-    for i = 1:n_xpad0
+    for i = n_xpad0:-1:1
         xpad0bd[i] = 0.0
         xpad0b[i] = 0.0
     end
@@ -1531,8 +1531,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
         s = 0.0
-        for i_seq_k = 1:c_in * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c_in * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1567,8 +1567,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
         s = 0.0
-        for i_seq_k = 1:c1 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c1 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1619,8 +1619,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w2) + 1
         j = mod(rem, w2) + 1
         s = 0.0
-        for i_seq_k = 1:c1 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c1 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1655,8 +1655,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w2) + 1
         j = mod(rem, w2) + 1
         s = 0.0
-        for i_seq_k = 1:c2 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c2 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1707,8 +1707,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w4) + 1
         j = mod(rem, w4) + 1
         s = 0.0
-        for i_seq_k = 1:c2 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c2 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1743,8 +1743,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w4) + 1
         j = mod(rem, w4) + 1
         s = 0.0
-        for i_seq_k = 1:c3 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c3 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1798,8 +1798,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w2) + 1
         j = mod(rem, w2) + 1
         s = 0.0
-        for i_seq_k = 1:c32 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c32 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1834,8 +1834,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w2) + 1
         j = mod(rem, w2) + 1
         s = 0.0
-        for i_seq_k = 1:c2 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c2 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1889,8 +1889,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
         s = 0.0
-        for i_seq_k = 1:c21 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c21 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1925,8 +1925,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
         s = 0.0
-        for i_seq_k = 1:c1 * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c1 * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -1949,8 +1949,8 @@ function unet(x, h, w, c_in, c1, c2, c3, c_out, w_e1a, b_e1a, w_e1b, b_e1b, w_e2
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
         s = 0.0
-        for i_seq_k = 1:c1 * khkw_out
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c1 * khkw_out
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw_out) + 1
             rem2 = mod(kseqm1, khkw_out)
             ki = div(rem2, kw_out) + 1

@@ -106,8 +106,9 @@ key, `agen_site_key(body, idx[, bv])`, never a running counter —
 branch-scalar hoisting already reorders pops, which silently breaks
 counters.
 
-**Tier B**: a loop whose bound is reassigned inside an ancestor
-sequential loop has no closed-form trip count. `agen_ragged_block`
+**Tier B**: a loop whose bound is reassigned inside *any* ancestor loop
+has no closed-form trip count. The ancestor does not have to carry a
+value between its own iterations. `agen_ragged_block`
 resolves it into per-ancestor-iteration prefix/value tables, keeping the
 site indexed and mutation-free; a narrow per-*stack* (never
 per-occurrence) `push!`/`pop!` fallback remains for what can't resolve.

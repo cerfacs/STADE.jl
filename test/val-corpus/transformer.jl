@@ -49,15 +49,15 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
     n_dff = n * dff
 
     # layers form a genuine sequential chain: layer l+1 consumes layer l's output
-    for i_seq_l = 1:n_layers
-        w_offset = (i_seq_l - 1) * d * d
-        b_offset = (i_seq_l - 1) * d
-        ln_offset = (i_seq_l - 1) * d
-        w1_offset = (i_seq_l - 1) * d * dff
-        b1_offset = (i_seq_l - 1) * dff
-        w2_offset = (i_seq_l - 1) * dff * d
-        b2_offset = (i_seq_l - 1) * d
-        ln2_offset = (i_seq_l - 1) * d
+    for i_l = 1:n_layers
+        w_offset = (i_l - 1) * d * d
+        b_offset = (i_l - 1) * d
+        ln_offset = (i_l - 1) * d
+        w1_offset = (i_l - 1) * d * dff
+        b1_offset = (i_l - 1) * dff
+        w2_offset = (i_l - 1) * dff * d
+        b2_offset = (i_l - 1) * d
+        ln2_offset = (i_l - 1) * d
 
         # --- query projection: q = x * Wq + bq ---
         # every (token, out-dim) entry is independent and d is fixed, so fuse
@@ -66,8 +66,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             j = mod(idx - 1, d) + 1
             s = 0.0
             # contraction over the model width is a genuine accumulation
-            for i_seq_p = 1:d
-                s = s + x[(i - 1) * d + i_seq_p] * wq[w_offset + (i_seq_p - 1) * d + j]
+            for i_p = 1:d
+                s = s + x[(i - 1) * d + i_p] * wq[w_offset + (i_p - 1) * d + j]
             end
             q[(i - 1) * d + j] = s + bq[b_offset + j]
         end
@@ -77,8 +77,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             i = div(idx - 1, d) + 1
             j = mod(idx - 1, d) + 1
             s = 0.0
-            for i_seq_p = 1:d
-                s = s + x[(i - 1) * d + i_seq_p] * wk[w_offset + (i_seq_p - 1) * d + j]
+            for i_p = 1:d
+                s = s + x[(i - 1) * d + i_p] * wk[w_offset + (i_p - 1) * d + j]
             end
             k[(i - 1) * d + j] = s + bk[b_offset + j]
         end
@@ -88,8 +88,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             i = div(idx - 1, d) + 1
             j = mod(idx - 1, d) + 1
             s = 0.0
-            for i_seq_p = 1:d
-                s = s + x[(i - 1) * d + i_seq_p] * wv[w_offset + (i_seq_p - 1) * d + j]
+            for i_p = 1:d
+                s = s + x[(i - 1) * d + i_p] * wv[w_offset + (i_p - 1) * d + j]
             end
             v[(i - 1) * d + j] = s + bv[b_offset + j]
         end
@@ -112,8 +112,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 j = mod(idx2 - 1, n) + 1
                 s = 0.0
                 # the dot product over the head's dk dims is a genuine accumulation
-                for i_seq_p = 1:dk
-                    s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
+                for i_p = 1:dk
+                    s = s + q[(i - 1) * d + head_offset + i_p] * k[(j - 1) * d + head_offset + i_p]
                 end
                 scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
             end
@@ -123,8 +123,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             for i = 1:n
                 row_max = scores[score_off + (i - 1) * n + 1]
                 # running max requires a sequential scan; max() avoids a branch
-                for i_seq_j = 2:n
-                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
+                for i_j = 2:n
+                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_j])
                 end
                 # shifted exponentials are independent across columns
                 for j = 1:n
@@ -133,8 +133,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 end
                 row_sum = 0.0
                 # normalizing sum requires a running total, so it stays sequential
-                for i_seq_j = 1:n
-                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
+                for i_j = 1:n
+                    row_sum = row_sum + probs[score_off + (i - 1) * n + i_j]
                 end
                 # final division is independent across columns
                 for j = 1:n
@@ -150,8 +150,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
                 p = mod(idx3 - 1, dk) + 1
                 s = 0.0
                 # summing over the attended tokens is a genuine accumulation
-                for i_seq_j = 1:n
-                    s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+                for i_j = 1:n
+                    s = s + probs[score_off + (i - 1) * n + i_j] * v[(i_j - 1) * d + head_offset + p]
                 end
                 ctx[(i - 1) * d + head_offset + p] = s
             end
@@ -162,8 +162,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             i = div(idx - 1, d) + 1
             j = mod(idx - 1, d) + 1
             s = 0.0
-            for i_seq_p = 1:d
-                s = s + ctx[(i - 1) * d + i_seq_p] * wo[w_offset + (i_seq_p - 1) * d + j]
+            for i_p = 1:d
+                s = s + ctx[(i - 1) * d + i_p] * wo[w_offset + (i_p - 1) * d + j]
             end
             attn_out[(i - 1) * d + j] = s + bo[b_offset + j]
         end
@@ -178,14 +178,14 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
         for i = 1:n
             s = 0.0
             # mean requires a running sum, so this inner loop is sequential
-            for i_seq_j = 1:d
-                s = s + resid1[(i - 1) * d + i_seq_j]
+            for i_j = 1:d
+                s = s + resid1[(i - 1) * d + i_j]
             end
             row_mean = s / d
             s2 = 0.0
             # variance likewise accumulates sequentially
-            for i_seq_j = 1:d
-                diff = resid1[(i - 1) * d + i_seq_j] - row_mean
+            for i_j = 1:d
+                diff = resid1[(i - 1) * d + i_j] - row_mean
                 s2 = s2 + diff * diff
             end
             row_var = s2 / d
@@ -202,8 +202,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             i = div(idx - 1, dff) + 1
             j = mod(idx - 1, dff) + 1
             s = 0.0
-            for i_seq_p = 1:d
-                s = s + normed1[(i - 1) * d + i_seq_p] * w1[w1_offset + (i_seq_p - 1) * dff + j]
+            for i_p = 1:d
+                s = s + normed1[(i - 1) * d + i_p] * w1[w1_offset + (i_p - 1) * dff + j]
             end
             ff_hidden[(i - 1) * dff + j] = max(s + b1[b1_offset + j], 0.0)
         end
@@ -213,8 +213,8 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             i = div(idx - 1, d) + 1
             j = mod(idx - 1, d) + 1
             s = 0.0
-            for i_seq_p = 1:dff
-                s = s + ff_hidden[(i - 1) * dff + i_seq_p] * w2[w2_offset + (i_seq_p - 1) * d + j]
+            for i_p = 1:dff
+                s = s + ff_hidden[(i - 1) * dff + i_p] * w2[w2_offset + (i_p - 1) * d + j]
             end
             ff_out[(i - 1) * d + j] = s + b2[b2_offset + j]
         end
@@ -227,13 +227,13 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
         # --- second layer norm: x_next = LayerNorm(resid2) ---
         for i = 1:n
             s = 0.0
-            for i_seq_j = 1:d
-                s = s + resid2[(i - 1) * d + i_seq_j]
+            for i_j = 1:d
+                s = s + resid2[(i - 1) * d + i_j]
             end
             row_mean = s / d
             s2 = 0.0
-            for i_seq_j = 1:d
-                diff = resid2[(i - 1) * d + i_seq_j] - row_mean
+            for i_j = 1:d
+                diff = resid2[(i - 1) * d + i_j] - row_mean
                 s2 = s2 + diff * diff
             end
             row_var = s2 / d

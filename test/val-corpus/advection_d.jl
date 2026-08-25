@@ -1,5 +1,5 @@
 function advection_d(u, ud, du, dud, c, cd, dx, dxd, dt, dtd, i_nstep, i_nnode)
-    for i_seq_ = 1:i_nstep
+    for i_ = 1:i_nstep
         for i_x = 2:i_nnode
             dud[i_x] = ud[i_x] + -(ud[i_x - 1])
             du[i_x] = u[i_x] - u[i_x - 1]
@@ -13,7 +13,7 @@ function advection_d(u, ud, du, dud, c, cd, dx, dxd, dt, dtd, i_nstep, i_nnode)
 end
 
 function advection(u, du, c, dx, dt, i_nstep, i_nnode)
-    for i_seq_ = 1:i_nstep
+    for i_ = 1:i_nstep
         for i_x = 2:i_nnode
             du[i_x] = u[i_x] - u[i_x - 1]
         end

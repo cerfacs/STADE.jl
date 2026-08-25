@@ -5,7 +5,7 @@
 # if-branch handling) -- not a named textbook algorithm. Relaxes a 1-D
 # array over an active window of width w, where w is retired by one
 # point every OTHER pass rather than every pass: w is reassigned inside
-# an `if` nested directly in the ancestor sequential i_seq_pass loop
+# an `if` nested directly in the ancestor sequential i_pass loop
 # (mg_vcycle/mg_vcycle_multi/cascadic_mg_prolong/richardson_substep all
 # reassign their ragged bound unconditionally on every outer iteration;
 # none exercise the conditional case). w is then used as the bound of
@@ -25,23 +25,23 @@
 function windowed_relax_retire(u, f, w0, num_passes, dx, n)
     w = w0
     dx2 = dx * dx
-    for i_seq_pass = 1:num_passes
+    for i_pass = 1:num_passes
         # retire the outermost active point every other pass
-        if mod(i_seq_pass, 2) == 0
+        if mod(i_pass, 2) == 0
             w = w - 1
         end
         # relax the currently-active leading window only; points beyond
         # w are treated as already retired/converged for this pass
-        for i_seq_j = 1:w
+        for i_j = 1:w
             left = 0.0
-            if i_seq_j > 1
-                left = u[i_seq_j - 1]
+            if i_j > 1
+                left = u[i_j - 1]
             end
             right = 0.0
-            if i_seq_j < n
-                right = u[i_seq_j + 1]
+            if i_j < n
+                right = u[i_j + 1]
             end
-            u[i_seq_j] = 0.5 * (dx2 * f[i_seq_j] + left + right)
+            u[i_j] = 0.5 * (dx2 * f[i_j] + left + right)
         end
     end
     return nothing

@@ -22,7 +22,7 @@
 # out: single-element output
 function coarsen_retire(x, y, n, levels, out)
     cur = n
-    for i_seq_l = 1:levels
+    for i_l = 1:levels
         for i = 1:cur
             t = x[i] * x[i]
             y[i] = y[i] + t * t

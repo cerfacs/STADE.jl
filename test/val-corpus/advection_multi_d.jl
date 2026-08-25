@@ -1,5 +1,5 @@
 function advection_multi_d(u, ud, du, dud, c, cd, dx, dxd, dt, dtd, i_nstep, i_nnode)
-    for i_seq_ = 1:i_nstep
+    for i_ = 1:i_nstep
         for i_x_advection_diff_c1 = 2:i_nnode
             dud[i_x_advection_diff_c1] = ud[i_x_advection_diff_c1] + -(ud[i_x_advection_diff_c1 - 1])
             du[i_x_advection_diff_c1] = u[i_x_advection_diff_c1] - u[i_x_advection_diff_c1 - 1]
@@ -13,7 +13,7 @@ function advection_multi_d(u, ud, du, dud, c, cd, dx, dxd, dt, dtd, i_nstep, i_n
 end
 
 function advection_multi(u, du, c, dx, dt, i_nstep, i_nnode)
-    for i_seq_ = 1:i_nstep
+    for i_ = 1:i_nstep
         for i_x_advection_diff_c1 = 2:i_nnode
             du[i_x_advection_diff_c1] = u[i_x_advection_diff_c1] - u[i_x_advection_diff_c1 - 1]
         end

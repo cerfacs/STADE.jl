@@ -5,10 +5,10 @@ end
 
 function advection_hv(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode, ud, ubd, dud, dubd, cd, cbd, dxd, dxbd, dtd, dtbd, du_stack)
     du_stack_d = Vector{Float64}(undef, length(du_stack))
-    for i_seq_ = 1:i_nstep
+    for i_ = 1:i_nstep
         for i_x = 2:i_nnode
-            du_stack_d[((i_seq_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1] = dud[i_x]
-            du_stack[((i_seq_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1] = du[i_x]
+            du_stack_d[((i_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1] = dud[i_x]
+            du_stack[((i_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1] = du[i_x]
             dud[i_x] = ud[i_x] + -(ud[i_x - 1])
             du[i_x] = u[i_x] - u[i_x - 1]
         end
@@ -17,8 +17,8 @@ function advection_hv(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode,
             u[i_x] = u[i_x] - (c * dt * du[i_x]) / dx
         end
     end
-    for i_seq_ = i_nstep:-1:1
-        for i_x = 2:i_nnode
+    for i_ = i_nstep:-1:1
+        for i_x = i_nnode:-1:2
             cbd = cbd + (((1.0 / dx) * -(ub[i_x])) * (du[i_x] * dtd + dt * dud[i_x]) + (dt * du[i_x]) * (-(ub[i_x]) * (-(1.0 / dx ^ 2) * dxd) + (1.0 / dx) * -(ubd[i_x])))
             cb = cb + (dt * du[i_x]) * ((1.0 / dx) * -(ub[i_x]))
             dtbd = dtbd + (((1.0 / dx) * -(ub[i_x])) * (du[i_x] * cd + c * dud[i_x]) + (c * du[i_x]) * (-(ub[i_x]) * (-(1.0 / dx ^ 2) * dxd) + (1.0 / dx) * -(ubd[i_x])))
@@ -29,8 +29,8 @@ function advection_hv(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode,
             dxb = dxb + -((c * dt * du[i_x]) / dx ^ 2) * -(ub[i_x])
         end
         for i_x = i_nnode:-1:2
-            dud[i_x] = du_stack_d[((i_seq_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1]
-            du[i_x] = du_stack[((i_seq_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1]
+            dud[i_x] = du_stack_d[((i_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1]
+            du[i_x] = du_stack[((i_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1]
             ubd[i_x] = ubd[i_x] + dubd[i_x]
             ub[i_x] = ub[i_x] + dub[i_x]
             ubd[i_x - 1] = ubd[i_x - 1] + -(dubd[i_x])
@@ -43,7 +43,7 @@ function advection_hv(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode,
 end
 
 function advection(u, du, c, dx, dt, i_nstep, i_nnode)
-    for i_seq_ = 1:i_nstep
+    for i_ = 1:i_nstep
         for i_x = 2:i_nnode
             du[i_x] = u[i_x] - u[i_x - 1]
         end

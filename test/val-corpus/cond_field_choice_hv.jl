@@ -17,24 +17,24 @@ function cond_field_choice_hv(loss, lossb, u, ub, v, vb, w, wb, i_branch, i_n, l
             w[i_x] = v[i_x] ^ 2
         end
     end
-    for i_seq_x = 1:i_n
-        lossd[1] = lossd[1] + wd[i_seq_x]
-        loss[1] = loss[1] + w[i_seq_x]
+    for i_x2 = 1:i_n
+        lossd[1] = lossd[1] + wd[i_x2]
+        loss[1] = loss[1] + w[i_x2]
     end
-    for i_seq_x = i_n:-1:1
-        wbd[i_seq_x] = wbd[i_seq_x] + lossbd[1]
-        wb[i_seq_x] = wb[i_seq_x] + lossb[1]
+    for i_x2 = i_n:-1:1
+        wbd[i_x2] = wbd[i_x2] + lossbd[1]
+        wb[i_x2] = wb[i_x2] + lossb[1]
     end
     __branch = branch_stack[1]
     if __branch == 1
-        for i_x = 1:i_n
+        for i_x = i_n:-1:1
             ubd[i_x] = ubd[i_x] + (wb[i_x] * (2 * ud[i_x]) + (2 * u[i_x]) * wbd[i_x])
             ub[i_x] = ub[i_x] + (2 * u[i_x]) * wb[i_x]
             wbd[i_x] = 0.0
             wb[i_x] = 0.0
         end
     else
-        for i_x = 1:i_n
+        for i_x = i_n:-1:1
             vbd[i_x] = vbd[i_x] + (wb[i_x] * (2 * vd[i_x]) + (2 * v[i_x]) * wbd[i_x])
             vb[i_x] = vb[i_x] + (2 * v[i_x]) * wb[i_x]
             wbd[i_x] = 0.0
@@ -54,7 +54,7 @@ function cond_field_choice(loss, u, v, w, i_branch, i_n)
             w[i_x] = v[i_x] ^ 2
         end
     end
-    for i_seq_x = 1:i_n
-        loss[1] = loss[1] + w[i_seq_x]
+    for i_x2 = 1:i_n
+        loss[1] = loss[1] + w[i_x2]
     end
 end

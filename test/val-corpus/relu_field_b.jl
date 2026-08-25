@@ -13,11 +13,11 @@ function relu_field_b(loss, lossb, u, ub, v, vb, i_n, branch_stack)
             v[i_x] = 0.0
         end
     end
-    for i_seq_x = 1:i_n
-        loss[1] = loss[1] + v[i_seq_x]
+    for i_x2 = 1:i_n
+        loss[1] = loss[1] + v[i_x2]
     end
-    for i_seq_x = i_n:-1:1
-        vb[i_seq_x] = vb[i_seq_x] + lossb[1]
+    for i_x2 = i_n:-1:1
+        vb[i_x2] = vb[i_x2] + lossb[1]
     end
     for i_x = i_n:-1:1
         __branch = branch_stack[(i_x - 1) + 1]
@@ -39,7 +39,7 @@ function relu_field(loss, u, v, i_n)
             v[i_x] = 0.0
         end
     end
-    for i_seq_x = 1:i_n
-        loss[1] = loss[1] + v[i_seq_x]
+    for i_x2 = 1:i_n
+        loss[1] = loss[1] + v[i_x2]
     end
 end

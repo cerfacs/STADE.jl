@@ -32,7 +32,7 @@
 #                         pass over agen_'s own generated code, for
 #                         Hessian-vector products.
 #   cgen_   GPU codegen   loop-nest transform (not a derivative): splits
-#                         each iteration-independent (non-i_seq_) loop
+#                         each provably iteration-independent loop
 #                         into a device kernel + launch call, for
 #                         whichever GPU vendor a `gpu_backend` describes
 #                         (CUDA/AMDGPU/Metal). Consumes a plain
@@ -74,7 +74,7 @@
 #     float-kinded arg. Override via parse_override_indep_dep if needed.
 # statement     :: one of
 #     (kind=:assign, lhs, rhs)                                  # lhs/rhs :: Expr|Symbol|Number
-#     (kind=:for, var::Symbol, lo, hi, step, sequential::Bool, body)  # body :: statement_list
+#     (kind=:for, var::Symbol, lo, hi, step, body)               # body :: statement_list
 #     (kind=:if, cond, then::statement_list, els::statement_list)
 #     -- :while intentionally unsupported for now, see skill-stade-dev.md
 #     -- lo/hi/step are all Expr|Symbol|Number; a plain `lo:hi` header
@@ -409,7 +409,7 @@ end
 # ==================== parse_* ================================
 # Raw Expr -> validated kernel. Hard-errors on every skill-stade rule visible
 # at the Expr level: keyword args, the four variable shapes, indirect
-# indexing, broadcasting, i_seq_ prefix, div-not-÷, and the intrinsic
+# indexing, broadcasting, div-not-÷, and the intrinsic
 # whitelist; comment-header and `for`-style are source-text-only.
 
 function parse_kernel(expr::Expr)
@@ -439,15 +439,6 @@ function parse_override_indep_dep(kernel, independents, dependents)
                independents = independents === nothing ? sig.independents : independents,
                dependents = dependents === nothing ? sig.dependents : dependents)
     return (sig = new_sig, body = kernel.body)
-end
-
-# the reserved i_seq_ prefix marks a genuinely sequential loop --
-# the prefix and the sequential flag must agree. Case/style is
-# otherwise unconstrained: STADE identifies variables by symbol
-# identity only, never by how the name is spelled.
-function parse_check_loop_prefix(var::Symbol, sequential::Bool)
-    has_prefix = startswith(String(var), "i_seq_")
-    return has_prefix == sequential
 end
 
 # ---- function signature: name + positional arguments ----
@@ -593,12 +584,8 @@ function parse_for(stmt::Expr)
     parse_check_expr(step, false)
     parse_check_expr(hi, false)
 
-    sequential = startswith(String(var), "i_seq_")
-    parse_check_loop_prefix(var, sequential) ||
-        error("parse_kernel: loop variable :$var doesn't follow the i_seq_ prefix convention")
-
     body = parse_statements(parse_strip_lines(stmt.args[2]))
-    return (kind = :for, var = var, lo = lo, hi = hi, step = step, sequential = sequential, body = body)
+    return (kind = :for, var = var, lo = lo, hi = hi, step = step, body = body)
 end
 
 # ---- if statement (plain if/else only -- no elseif chains yet) ----
@@ -1987,7 +1974,7 @@ function lin_build_stmt(stmt, active_map)
         return (kind = :assign, lhs = stmt.lhs, active = tree.active, tree = tree)
     elseif stmt.kind == :for
         return (kind = :for, var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step,
-                sequential = stmt.sequential, body = lin_build_body(stmt.body, active_map))
+                body = lin_build_body(stmt.body, active_map))
     elseif stmt.kind == :if
         return (kind = :if, cond = stmt.cond,
                 then = lin_build_body(stmt.then, active_map),
@@ -2855,10 +2842,12 @@ function agen_local_position(loop_ctx)
 end
 
 # ---- Tier B detection ------------------------------------------------
-# A loop's bound-determining symbol is ever an assignment target inside an ancestor
-# sequential loop (a multigrid solver's ragged level-size halving sequence is the confirmed
-# real instance). Returns the offending bound var, or `nothing` if the kernel is fully Tier
-# A.
+# A loop's bound-determining symbol is ever an assignment target inside ANY ancestor loop
+# (a multigrid solver's ragged level-size halving sequence is the confirmed real instance).
+# The ancestor does not have to carry a value between its own iterations: `w = m0 + i` in an
+# iteration-independent outer loop varies the inner trip count just as much, and gating this
+# walk on that made STADE size such a stack from a body-local variable. Returns the offending
+# bound var, or `nothing` if the kernel is fully Tier A.
 function agen_tier_b_offender(kernel)
     return agen_tier_b_walk(kernel.body, Set{Symbol}())
 end
@@ -2870,7 +2859,7 @@ function agen_tier_b_walk(body, seq_reassigned)
             for bv in bound_vars
                 bv in seq_reassigned && return bv
             end
-            inner_seq = stmt.sequential ? union(seq_reassigned, agen_collect_reassigned(stmt.body, true)) : seq_reassigned
+            inner_seq = union(seq_reassigned, agen_collect_reassigned(stmt.body, true))
             found = agen_tier_b_walk(stmt.body, inner_seq)
             found === nothing || return found
         elseif stmt.kind == :if
@@ -2948,7 +2937,7 @@ function agen_layout_walk!(body, kinds, active_map, value_needed, reassigned, ex
             end
             bound_vars = agen_for_bound_vars(stmt)
             this_ragged = in_ragged || any(bv -> bv in seq_reassigned, bound_vars)
-            inner_seq = stmt.sequential ? union(seq_reassigned, agen_collect_reassigned(stmt.body, true)) : seq_reassigned
+            inner_seq = union(seq_reassigned, agen_collect_reassigned(stmt.body, true))
             push!(loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
             agen_layout_walk!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, occ_mult, key_order, tainted_stacks, inner_seq, this_ragged, push_pop)
             pop!(loop_ctx)
@@ -2977,12 +2966,12 @@ function agen_layout_record!(occ_mult, key_order, tainted_stacks, stack_name, lo
 end
 
 # ---- Tier B ragged-block layout (closed-form, GPU-eligible) ----
-# A 'ragged block' = an ancestor sequential loop AL whose body contains a ragged descendant it alone governs. Returns
-# `nothing` if `stmt` isn't a genuine AL. AL's body is laid out via agen_indexed_layout reused as the AL-scoped sub-
+# A 'ragged block' = an ancestor loop AL whose body contains a ragged descendant it alone governs. Returns
+# `nothing` if `stmt` isn't a genuine AL -- raggedness of the descendant is the whole test, so AL needs no
+# property of its own. AL's body is laid out via agen_indexed_layout reused as the AL-scoped sub-
 # engine, seeded with the incoming reassignments (not AL's own top-level ones), so only genuine AL-within-AL
 # raggedness taints. Returns `(header, local_offsets, local_sizes, ineligible_stacks)`, scoped to AL's own frame.
 function agen_ragged_block(stmt, kinds, active_map, value_needed, reassigned, exempt, stacks, seq_reassigned; push_pop = nothing)
-    stmt.sequential || return nothing
     own_reassigned = agen_collect_reassigned(stmt.body, true)
     agen_tier_b_walk(stmt.body, own_reassigned) === nothing && return nothing
     sub = agen_indexed_layout((body = stmt.body,), kinds, active_map, value_needed, reassigned, exempt, stacks;
@@ -3085,7 +3074,7 @@ function agen_layout_walk_top!(body, kinds, active_map, value_needed, reassigned
             end
             blk = agen_ragged_block(stmt, kinds, active_map, value_needed, reassigned, exempt, stacks, seq_reassigned; push_pop = push_pop)
             if blk === nothing
-                inner_seq = stmt.sequential ? union(seq_reassigned, agen_collect_reassigned(stmt.body, true)) : seq_reassigned
+                inner_seq = union(seq_reassigned, agen_collect_reassigned(stmt.body, true))
                 push!(loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
                 agen_layout_walk_top!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, inner_seq, block_counter, push_pop)
                 pop!(loop_ctx)
@@ -3356,7 +3345,7 @@ function agen_site_index(exprs, ectx, key)
         # agen_local_position's own formula can ALSO reference a
         # block-local scalar directly -- an inner frame's `hi` is
         # literally the loop bound symbol (e.g. n, for `for
-        # i_seq_j = 1:n`) -- so it needs the identical substitution,
+        # j = 1:n`) -- so it needs the identical substitution,
         # not just `local_offset` above.
         local_position = agen_substitute_vars(agen_local_position(inner_ctx), subst)
         # `blk.base[stack]` is the offset this whole block starts at (0, or a prior block's
@@ -3806,10 +3795,13 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                 push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
                 inner = agen_backward_body(stmt.body, primal_body[idx].body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
                 pop!(ectx.loop_ctx)
-                reverse_it = stmt.sequential || agen_body_has_snapshot(stmt.body, primal_body[idx].body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx)
-                loop_expr = reverse_it ?
-                    emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner) :
-                    emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner)
+                # Every backward loop reverses. A loop that carries a value from one iteration to
+                # the next must reverse to be correct, and STADE cannot see that coupling when it
+                # runs through an array with no snapshot (a purely additive prefix scan). An
+                # independent loop computes the same adjoint in either direction, so reversing it
+                # costs nothing. Over-reversal is always right, under-reversal is a silent wrong
+                # gradient, so the decision is not worth an analysis.
+                loop_expr = emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner)
                 for bv in agen_tripcount_bound_vars(stmt, reassigned)
                     push!(exprs, Expr(:(=), bv, agen_emit_pop(stacks[(:tripcount, bv)], ectx, agen_site_key(primal_body, idx, bv), exprs)))
                 end
@@ -3829,33 +3821,6 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
         end
     end
     return exprs
-end
-
-# A loop must be reversed in the backward sweep whenever any push happens inside it, at any nesting
-# depth -- not just when this loop is itself sequential. LIFO stack discipline requires every
-# enclosing loop to run in exact reverse, full stop; reversal is about stack order, not mathematical
-# dependency. Also true whenever `body` itself has a block-boundary var (see
-# agen_block_boundary_vars).
-function agen_body_has_snapshot(body, primal_body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx)
-    !isempty(agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan)) && return true
-    for (idx, stmt) in enumerate(body)
-        if stmt.kind == :assign
-            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            # gate on active_map[var], matching agen_forward_body's own
-            # push gate (not stmt.active) -- see its comment: a write
-            # can need a push (and hence force this loop to reverse)
-            # even when its own rhs is a plain inactive literal.
-            if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), agen_site_key(primal_body, idx)) && !(var in exempt)
-                return true
-            end
-        elseif stmt.kind == :for
-            !isempty(agen_tripcount_bound_vars(stmt, reassigned)) && return true
-            agen_body_has_snapshot(stmt.body, primal_body[idx].body, kinds, active_map, value_needed, reassigned, exempt, stacks, ectx) && return true
-        elseif stmt.kind == :if
-            return true   # every `if` pushes a branch flag, unconditionally
-        end
-    end
-    return false
 end
 
 function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, skip_restore = Set{Symbol}(); ectx = agen_ectx_stack(), key = nothing)
@@ -4160,7 +4125,9 @@ end
 
 # ==================== cgen_* =====================================
 # CUDA codegen: turns a validated kernel, or a STADE-generated function, into a host launcher plus one `@cuda` device kernel per data-parallel
-# (sequential=false) loop -- a loop-nest transform, independent of act_/snap_/lin_. Ingests via cgen_from_kernel (plain skill-stade) or
+# loop -- a loop-nest transform, independent of act_/snap_/lin_. Parallelism is proved from the loop's own structure via
+# cgen_reduction_only_loop, never declared by the source.
+# Ingests via cgen_from_kernel (plain skill-stade) or
 # cgen_parse_generated (STADE's own vocabulary). Stack safety: a loop with push!/pop! anywhere is never split, since LIFO order can't survive
 # concurrent threads. Race safety: a split write is atomic-free only if the thread var occurs in its index, else CUDA.@atomic.
 
@@ -4272,10 +4239,9 @@ function cgen_parse_generated_for(stmt::Expr)
     lo, step, hi = length(range_args) == 2 ? (range_args[1], 1, range_args[2]) :
                    length(range_args) == 3 ? (range_args[1], range_args[2], range_args[3]) :
                    error("cgen_parse_generated: unsupported range arity in `$(range_expr)`")
-    sequential = startswith(String(var), "i_seq_")
     body_stmts = [s for s in stmt.args[2].args if !(s isa LineNumberNode)]
     body = cgen_parse_generated_statements(body_stmts)
-    return (kind = :for, var = var, lo = lo, hi = hi, step = step, sequential = sequential, body = body)
+    return (kind = :for, var = var, lo = lo, hi = hi, step = step, body = body)
 end
 
 function cgen_parse_generated_if(stmt::Expr)
@@ -4404,8 +4370,8 @@ function cgen_collect_scalar_reductions!(body::Vector{NamedTuple}, names::Set{Sy
     return nothing
 end
 
-# ---- sequential-loop reduction-eligibility check --------------------
-# A sequential (i_seq_) loop is normally kept host-side, but is split when its only cross-iteration coupling is a commutative
+# ---- reduction-eligibility check ------------------------------------
+# A loop that carries a value between iterations is normally kept host-side, but is split when its only cross-iteration coupling is a commutative
 # accumulation at a fixed index (safe, like an independent loop's atomic add), never a genuine value recurrence (same array read/written
 # at different loop-var-dependent indices, e.g. `u[i]=c*u[i-1]`, always refused). A scatter-style accumulation with a data-dependent
 # target is allowed through unproven, the same trade-off cgen_device_assign accepts for independent loops.
@@ -4553,8 +4519,14 @@ function cgen_deep_array_occurrences!(stmts, arr::Symbol, chain::Vector{Tuple{Sy
                 push!(out, (:read, idxs[1], copy(chain)))
             end
         elseif stmt.kind == :for
-            (stmt.lo isa Integer && stmt.lo == 1 && stmt.step isa Integer && stmt.step == 1) || return nothing
-            cgen_deep_array_occurrences!(stmt.body, arr, vcat(chain, [(stmt.var, stmt.hi)]), out) === nothing && return nothing
+            # `1:hi` and its mirror `hi:-1:1` touch the identical index set, so the additive
+            # stripping below is the same for both. Only the ascending form used to be accepted,
+            # which refused every backward sweep -- an adjoint reverses each loop, so no
+            # sub-loop of a backward-sweep body is ever ascending.
+            up = stmt.lo isa Integer && stmt.lo == 1 && stmt.step isa Integer && stmt.step == 1
+            down = stmt.hi isa Integer && stmt.hi == 1 && stmt.step isa Integer && stmt.step == -1
+            (up || down) || return nothing
+            cgen_deep_array_occurrences!(stmt.body, arr, vcat(chain, [(stmt.var, up ? stmt.hi : stmt.lo)]), out) === nothing && return nothing
         elseif stmt.kind == :if
             writes = Dict{Any,Vector{Any}}(); reads = Dict{Any,Vector{Any}}()
             cgen_collect_array_accesses!(NamedTuple[stmt], writes, reads)
@@ -4594,20 +4566,66 @@ end
 #      sub-region (write, then read-modify-write, then plain read, all at the same offset).
 #   3. A cumulative-assembly pattern: one reading group (optionally also writing, already
 #      self-consistent) consumes a base plus some trip-sized range; zero or more write-only groups,
-#      each earlier in program order, each add their own trip to a running total starting from that
-#      same base; the reader's own range must equal that running total exactly. This is the shape
+#      all on the same side of the reader in program order, each add their own trip to a running
+#      total starting from that same base; the reader's own range must equal that running total exactly. This is the shape
 #      that lets `msg_input[in_off+k]`, `msg_input[in_off+n_node_feat+k]`, and
 #      `msg_input[in_off+2n_node_feat+k]` (three private sub-ranges) be proven to add up to exactly
-#      what `msg_input[in_off+i_seq_i]` (for i_seq_i = 1:n_in_msg) reads back, once n_in_msg's own
+#      what `msg_input[in_off+i]` (for i = 1:n_in_msg) reads back, once n_in_msg's own
 #      definition is expanded and matches term-for-term.
 #
 # Anything not covered -- multiple pure-reader groups, a reader before some of its writers, a
 # group whose own accesses don't line up, a multi-dimensional ref, arr touched inside an `:if` --
 # returns `nothing`, meaning "not proven either way", and the caller falls back to the pairwise
 # check for that array exactly as before this proof existed.
+# ---- save-then-overwrite elision -------------------------------------
+# An adjoint's destructive write to an active array is preceded by a save of the value it
+# overwrites: `stack[...] = arr[i]` immediately before `arr[i] = ...`. That read touches exactly
+# the element the write on the next line already accounts for, so it adds no region of its own.
+# Left in place it turns a pure-writer group into a mixed one, and the cumulative-assembly
+# pattern below (which allows exactly one reader group) then refuses every assemble-then-consume
+# loop an adjoint produces. The rewrite below drops only that read, and is narrow on purpose:
+# same body, immediately adjacent statement, structurally identical index, and the saved value
+# goes straight into a different array. A read anywhere else, or at any other index, stays.
+function cgen_elide_snapshot_saves(stmt, arr::Symbol)
+    if stmt.kind == :for
+        return (kind = :for, var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step,
+                body = cgen_elide_snapshot_saves_body(stmt.body, arr))
+    elseif stmt.kind == :if
+        return (kind = :if, cond = stmt.cond,
+                then = cgen_elide_snapshot_saves_body(stmt.then, arr),
+                els = cgen_elide_snapshot_saves_body(stmt.els, arr))
+    end
+    return stmt
+end
+
+function cgen_elide_snapshot_saves_body(body::Vector{NamedTuple}, arr::Symbol)
+    out = NamedTuple[]
+    for (i, st) in enumerate(body)
+        if i < length(body) && cgen_is_snapshot_save(st, arr) &&
+           cgen_overwrites_same_element(body[i + 1], arr, st.rhs.args[2])
+            push!(out, (kind = :assign, lhs = st.lhs, rhs = 0.0))
+        else
+            push!(out, cgen_elide_snapshot_saves(st, arr))
+        end
+    end
+    return out
+end
+
+cgen_is_snapshot_save(st, arr::Symbol) =
+    st.kind == :assign &&
+    st.lhs isa Expr && st.lhs.head == :ref && length(st.lhs.args) == 2 &&
+    st.lhs.args[1] isa Symbol && st.lhs.args[1] != arr &&
+    st.rhs isa Expr && st.rhs.head == :ref && length(st.rhs.args) == 2 && st.rhs.args[1] == arr
+
+cgen_overwrites_same_element(nxt, arr::Symbol, idx) =
+    nxt.kind == :assign &&
+    nxt.lhs isa Expr && nxt.lhs.head == :ref && length(nxt.lhs.args) == 2 &&
+    nxt.lhs.args[1] == arr && nxt.lhs.args[2] == idx
+
 function cgen_array_private_to_loop(body::Vector{NamedTuple}, arr::Symbol, defs::Dict{Symbol,Any})
     occ = Tuple{Symbol,Any,Any,Int}[]   # (kind, base, trip_or_nothing, group_id)
-    for (gi, stmt) in enumerate(body)
+    for (gi, stmt0) in enumerate(body)
+        stmt = cgen_elide_snapshot_saves(stmt0, arr)
         raw = Tuple{Symbol,Any,Vector{Tuple{Symbol,Any}}}[]
         if stmt.kind in (:assign, :for)
             cgen_deep_array_occurrences!([stmt], arr, Tuple{Symbol,Any}[], raw) === nothing && return nothing
@@ -4645,8 +4663,14 @@ function cgen_array_private_to_loop(body::Vector{NamedTuple}, arr::Symbol, defs:
     length(readers) == 1 || return nothing
     R = readers[1]
     writers = filter(o -> o[1] == :write, occ)
-    all(w -> w[4] < R[4], writers) || return nothing
+    # The tiling argument below is about regions, not program order. A backward sweep is the
+    # forward sweep mirrored, so the consumer runs first and the assembly groups after, in
+    # reverse order -- requiring writers-before-reader refused every such loop. Order must
+    # still be uniform: writers on both sides of the reader tile nothing.
+    writers_after = !isempty(writers) && all(w -> w[4] > R[4], writers)
+    (writers_after || all(w -> w[4] < R[4], writers)) || return nothing
     sort!(writers, by = w -> w[4])
+    writers_after && reverse!(writers)
     cum = 0
     for w in writers
         expected_base = cum == 0 ? R[2] : Expr(:call, :+, R[2], cum)
@@ -4659,6 +4683,34 @@ function cgen_array_private_to_loop(body::Vector{NamedTuple}, arr::Symbol, defs:
         cgen_additive_terms_equal(R[3], cum, defs) || return nothing
     end
     return true
+end
+
+# ---- two multi-dimensional relaxations of the pairwise fallback ----------
+# Both exist because the additive-decomposition proof above reads a 1-D linear index only
+# (cgen_deep_array_occurrences! bails on any other rank), so a kernel written with genuine 2-D
+# fields gets no proof at all and falls straight to the pairwise check.
+
+# Every access to this array pins one fixed dimension to the candidate loop's own variable, so
+# iteration i touches only slice [.., i, ..] and two iterations never overlap. This is the
+# multi-dimensional counterpart of an index that reduces to `base + i`: `skx[i_loc, i_cell]`
+# inside `for i_cell` is private for exactly the same reason as `x[off + k]` is. Sound because a
+# split loop runs its whole body in one thread, so ordering within an iteration is preserved and
+# only cross-iteration overlap has to be ruled out.
+function cgen_array_sliced_by_loopvar(widxs, ridxs, loopvar::Symbol)
+    idxs = vcat(collect(widxs), collect(ridxs))
+    isempty(idxs) && return false
+    n = length(first(idxs))
+    n >= 2 && all(v -> length(v) == n, idxs) || return false
+    return any(d -> all(v -> v[d] === loopvar, idxs), 1:n)
+end
+
+# Two index vectors that disagree at a position where both are integer literals address
+# different memory whatever the rest holds -- `cb[1, i_node]` and `cb[2, i_node]` are separate
+# components of one vector field and can never alias. Without this the pairwise check reads a
+# component mismatch as a value recurrence and refuses the loop.
+function cgen_indices_cannot_alias(a, b)
+    length(a) == length(b) || return false
+    return any(i -> a[i] isa Integer && b[i] isa Integer && a[i] != b[i], eachindex(a))
 end
 
 function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
@@ -4680,7 +4732,7 @@ function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, kno
     cgen_collect_array_accesses!(body, writes, reads)
 # Deliberately not scoped to index expressions mentioning the loop's own variable: a sweep-style
 # recurrence can carry its cross-iteration coupling through an inner loop's index, with no mention of
-# the outer i_seq_ variable at all. The loop var doesn't have to appear in an index for reading and
+# the outer loop's variable at all. The loop var doesn't have to appear in an index for reading and
 # writing the same array at two indices to be a genuine recurrence -- any structural mismatch between
 # a write and read index of the same array disqualifies the loop, unconditionally -- UNLESS
 # cgen_array_private_to_loop can prove that array's whole access pattern is confined to a private,
@@ -4691,8 +4743,10 @@ function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, kno
     for (arr, widxs) in writes
         cgen_array_private_to_loop(body, arr, array_defs) === true && continue
         ridxs = get(reads, arr, Any[])
+        cgen_array_sliced_by_loopvar(widxs, ridxs, loopvar) && continue
         for w in widxs, r in ridxs
             w == r && continue
+            cgen_indices_cannot_alias(w, r) && continue
             return nothing
         end
     end
@@ -5218,7 +5272,13 @@ end
 
 function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
-    nblocks = Expr(:call, :cld, n_iter, :nthread_per_block)
+    # A zero-trip loop is a legal no-op on the CPU (`for i = 1:0` just does not run), but
+    # `cld(0, nthread) == 0` and a launch with zero blocks is a hard CUDA error, so the same
+    # kernel and inputs would run on the host and crash on the device. A multigrid solver
+    # coarsened until a level has no points reaches exactly this. One block is launched
+    # instead: every thread in it fails the `__tid > trip_count` guard the device kernel
+    # already opens with, and returns immediately.
+    nblocks = Expr(:call, :max, 1, Expr(:call, :cld, n_iter, :nthread_per_block))
     call = Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...)
     return Expr(:macrocall, backend.launch_macro, nothing,
                 Expr(:(=), backend.threads_kw, :nthread_per_block),
@@ -5999,7 +6059,7 @@ end
 # semantically degenerate. No general way to detect that up front; instead a tangent-vs-FD check runs against
 # the candidate, discarding and redrawing the whole triple if it fails.
 function val_generate_baseline(kernel, primal_expr::Expr;
-                                scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                 grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 16,
                                 self_check::Bool = true, self_check_trials::Int = 2,
                                 self_check_epsilon::Float64 = 1e-6, self_check_rtol::Float64 = 1e-3,
@@ -6849,7 +6909,7 @@ end
 # otherwise validate a different mode's math than the one under test -- the same trap
 # documented for keep_push_pop).
 function stade_validate_dotprod_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
-                                      scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                      scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                       trials::Int = 10, rtol::Float64 = 1e-11, self_check::Bool = true,
                                       keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
@@ -6908,7 +6968,7 @@ end
 # `yaml_path` if given. Exposed standalone so a caller can generate
 # once, hand-edit the result, then validate repeatedly against it.
 function stade_generate_baseline_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
-                                       scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                       scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                        self_check::Bool = true,
                                        divisible_by::Union{Dict{Symbol,Int},Nothing} = nothing)
     primal_expr = io_read_corpus_entry(in_path)
@@ -6921,7 +6981,7 @@ function stade_generate_baseline_file(in_path::String; yaml_path::Union{String,N
 end
 
 function stade_validate_tangent_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
-                                      scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                      scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
                                       self_check::Bool = true, keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
@@ -6931,7 +6991,7 @@ function stade_validate_tangent_file(in_path::String; yaml_path::Union{String,No
 end
 
 function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
-                                      scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                      scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                       trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
                                       self_check::Bool = true, keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
@@ -6941,7 +7001,7 @@ function stade_validate_adjoint_file(in_path::String; yaml_path::Union{String,No
 end
 
 function stade_validate_hvp_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
-                                  scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                  scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                   trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3,
                                   self_check::Bool = true, keep_push_pop::Bool = true, fuse_ii_loops::Bool = false)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
@@ -6957,7 +7017,7 @@ end
 # bundle a <name>_b function and an initstacks_<name>_b function, matching Tapenade's naming convention.
 function stade_validate_adjoint_against_file(primal_path::String, adjoint_path::String;
                                               yaml_path::Union{String,Nothing} = nothing,
-                                              scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                              scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                               trials::Int = 10, epsilon::Float64 = 1e-6, rtol::Float64 = 1e-3)
     primal_expr = io_read_corpus_entry(primal_path)
     kernel = parse_kernel(primal_expr)
@@ -7162,7 +7222,7 @@ end
 
 function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   yaml_path::Union{String,Nothing} = nothing,
-                                  scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                  scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                   trials::Int = 3, rtol::Union{Float64,Nothing} = nothing,
                                   self_check::Bool = true,
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false)
@@ -7223,7 +7283,7 @@ end
 
 function stade_validate_jacc_file(in_path::String, out_path::String;
                                    yaml_path::Union{String,Nothing} = nothing,
-                                   scale::Float64 = 1.0, int_lo::Int = 2, int_hi::Int = 5,
+                                   scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                    trials::Int = 3, rtol::Union{Float64,Nothing} = nothing,
                                    self_check::Bool = true,
                                    keep_push_pop::Bool = false, fuse_ii_loops::Bool = false)

@@ -1,13 +1,13 @@
 # richardson_substep(y_init, out, a_coef, dt_stage, num_stages)
 #
 # Richardson-extrapolation staging for the scalar linear decay
-# dy/dt = -a_coef*y: at stage i_seq_stage the number of explicit-Euler
+# dy/dt = -a_coef*y: at stage i_stage the number of explicit-Euler
 # substeps doubles (nsub = 1, 2, 4, ... across stages), so each stage
 # re-integrates the same fixed time interval dt_stage with a finer step
 # size dt_stage/nsub than the stage before it. The value reached at the
 # end of each stage's integration is written into out[stage], ready for
 # a (separate) Richardson combination step. Because nsub is reassigned
-# once per outer i_seq_stage iteration and then used as the nested
+# once per outer i_stage iteration and then used as the nested
 # substep loop's trip count, this is a Tier B instance from a genuinely
 # different domain (time integration, not spatial grid coarsening) than
 # mg_vcycle/mg_vcycle_multi/cascadic_mg_prolong. See
@@ -21,14 +21,14 @@
 # num_stages: number of Richardson stages
 function richardson_substep(y_init, out, a_coef, dt_stage, num_stages)
     nsub = 1
-    for i_seq_stage = 1:num_stages
+    for i_stage = 1:num_stages
         h = dt_stage / nsub
         y = y_init
         # advance nsub explicit-Euler substeps across this stage's interval
-        for i_seq_sub = 1:nsub
+        for i_sub = 1:nsub
             y = y - h * a_coef * y
         end
-        out[i_seq_stage] = y
+        out[i_stage] = y
         nsub = nsub * 2
     end
     return nothing

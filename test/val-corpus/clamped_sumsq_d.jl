@@ -1,8 +1,8 @@
 function clamped_sumsq_d(loss, lossd, u, ud, i_n)
-    for i_seq_x = 1:i_n
-        if u[i_seq_x] > 0.0
-            wd = (2 * u[i_seq_x]) * ud[i_seq_x]
-            w = u[i_seq_x] ^ 2
+    for i_x = 1:i_n
+        if u[i_x] > 0.0
+            wd = (2 * u[i_x]) * ud[i_x]
+            w = u[i_x] ^ 2
         else
             wd = 0.0
             w = 0.0
@@ -14,9 +14,9 @@ function clamped_sumsq_d(loss, lossd, u, ud, i_n)
 end
 
 function clamped_sumsq(loss, u, i_n)
-    for i_seq_x = 1:i_n
-        if u[i_seq_x] > 0.0
-            w = u[i_seq_x] ^ 2
+    for i_x = 1:i_n
+        if u[i_x] > 0.0
+            w = u[i_x] ^ 2
         else
             w = 0.0
         end

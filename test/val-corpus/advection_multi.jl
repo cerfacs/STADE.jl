@@ -11,7 +11,7 @@ function advection_update(u, du, c, dx, dt, i_nnode)
 end
 
 function advection_multi(u, du, c, dx, dt, i_nstep, i_nnode)
-    for i_seq_ = 1:i_nstep
+    for i_ = 1:i_nstep
         advection_diff(u, du, i_nnode)
         advection_update(u, du, c, dx, dt, i_nnode)
     end
