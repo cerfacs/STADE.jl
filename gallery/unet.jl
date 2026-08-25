@@ -71,8 +71,8 @@ function conv3x3(src_pad, weight, bias, dst, c_in, c_out, h, w, pad)
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
         s = 0.0
-        for i_seq_k = 1:c_in * khkw
-            kseqm1 = i_seq_k - 1
+        for i_k = 1:c_in * khkw
+            kseqm1 = i_k - 1
             ci = div(kseqm1, khkw) + 1
             rem2 = mod(kseqm1, khkw)
             ki = div(rem2, kw) + 1
@@ -241,9 +241,9 @@ function conv1x1(src, weight, bias, dst, c_in, c_out, hw)
         co = div(idxm1, hw) + 1
         p = mod(idxm1, hw) + 1
         s = 0.0
-        for i_seq_ci = 1:c_in
-            xi = (i_seq_ci - 1) * hw + p
-            wi = (co - 1) * c_in + i_seq_ci
+        for i_ci = 1:c_in
+            xi = (i_ci - 1) * hw + p
+            wi = (co - 1) * c_in + i_ci
             s = s + src[xi] * weight[wi]
         end
         dst[idx] = s + bias[co]

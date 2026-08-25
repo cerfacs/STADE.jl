@@ -19,8 +19,8 @@ function dense_linear(x, w, b, y, n, d_in, d_out, w_off, b_off)
         j = mod(idx - 1, d_out) + 1
         s = 0.0
         # contraction over the input width is a genuine accumulation
-        for i_seq_p = 1:d_in
-            s = s + x[(i - 1) * d_in + i_seq_p] * w[w_off + (i_seq_p - 1) * d_out + j]
+        for i_p = 1:d_in
+            s = s + x[(i - 1) * d_in + i_p] * w[w_off + (i_p - 1) * d_out + j]
         end
         y[(i - 1) * d_out + j] = s + b[b_off + j]
     end
@@ -95,14 +95,14 @@ function layernorm(x, gain, bias, y, n, d, off, eps)
     for i = 1:n
         s = 0.0
         # mean requires a running sum, so this inner loop is sequential
-        for i_seq_j = 1:d
-            s = s + x[(i - 1) * d + i_seq_j]
+        for i_j = 1:d
+            s = s + x[(i - 1) * d + i_j]
         end
         row_mean = s / d
         s2 = 0.0
         # variance likewise accumulates sequentially
-        for i_seq_j = 1:d
-            diff = x[(i - 1) * d + i_seq_j] - row_mean
+        for i_j = 1:d
+            diff = x[(i - 1) * d + i_j] - row_mean
             s2 = s2 + diff * diff
         end
         row_var = s2 / d
@@ -156,8 +156,8 @@ function attention_head(q, k, v, scores, probs, ctx, head_offset, score_off, n, 
         j = mod(idx2 - 1, n) + 1
         s = 0.0
         # the dot product over the head's dk dims is a genuine accumulation
-        for i_seq_p = 1:dk
-            s = s + q[(i - 1) * d + head_offset + i_seq_p] * k[(j - 1) * d + head_offset + i_seq_p]
+        for i_p = 1:dk
+            s = s + q[(i - 1) * d + head_offset + i_p] * k[(j - 1) * d + head_offset + i_p]
         end
         scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
     end
@@ -166,8 +166,8 @@ function attention_head(q, k, v, scores, probs, ctx, head_offset, score_off, n, 
     for i = 1:n
         row_max = scores[score_off + (i - 1) * n + 1]
         # running max requires a sequential scan; max() avoids a branch
-        for i_seq_j = 2:n
-            row_max = max(row_max, scores[score_off + (i - 1) * n + i_seq_j])
+        for i_j = 2:n
+            row_max = max(row_max, scores[score_off + (i - 1) * n + i_j])
         end
         # shifted exponentials are independent across columns
         for j = 1:n
@@ -176,8 +176,8 @@ function attention_head(q, k, v, scores, probs, ctx, head_offset, score_off, n, 
         end
         row_sum = 0.0
         # normalizing sum requires a running total, so it stays sequential
-        for i_seq_j = 1:n
-            row_sum = row_sum + probs[score_off + (i - 1) * n + i_seq_j]
+        for i_j = 1:n
+            row_sum = row_sum + probs[score_off + (i - 1) * n + i_j]
         end
         # final division is independent across columns
         for j = 1:n
@@ -193,8 +193,8 @@ function attention_head(q, k, v, scores, probs, ctx, head_offset, score_off, n, 
         p = mod(idx3 - 1, dk) + 1
         s = 0.0
         # summing over the attended tokens is a genuine accumulation
-        for i_seq_j = 1:n
-            s = s + probs[score_off + (i - 1) * n + i_seq_j] * v[(i_seq_j - 1) * d + head_offset + p]
+        for i_j = 1:n
+            s = s + probs[score_off + (i - 1) * n + i_j] * v[(i_j - 1) * d + head_offset + p]
         end
         ctx[(i - 1) * d + head_offset + p] = s
     end
@@ -353,15 +353,15 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
 
     # layers form a genuine sequential chain: layer l+1 consumes layer
     # l's output, carried through x
-    for i_seq_l = 1:n_layers
-        w_offset = (i_seq_l - 1) * d * d
-        b_offset = (i_seq_l - 1) * d
-        ln_offset = (i_seq_l - 1) * d
-        w1_offset = (i_seq_l - 1) * d * dff
-        b1_offset = (i_seq_l - 1) * dff
-        w2_offset = (i_seq_l - 1) * dff * d
-        b2_offset = (i_seq_l - 1) * d
-        ln2_offset = (i_seq_l - 1) * d
+    for i_l = 1:n_layers
+        w_offset = (i_l - 1) * d * d
+        b_offset = (i_l - 1) * d
+        ln_offset = (i_l - 1) * d
+        w1_offset = (i_l - 1) * d * dff
+        b1_offset = (i_l - 1) * dff
+        w2_offset = (i_l - 1) * dff * d
+        b2_offset = (i_l - 1) * d
+        ln2_offset = (i_l - 1) * d
         transformer_layer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, b1, w2, b2, ln2_gain, ln2_bias, q, k, v, scores, probs, ctx, attn_out, resid1, normed1, ff_hidden, ff_out, resid2, x_next, n, dk, h, dff, eps, d, n_d, inv_sqrt_dk, w_offset, b_offset, ln_offset, w1_offset, b1_offset, w2_offset, b2_offset, ln2_offset)
     end
 

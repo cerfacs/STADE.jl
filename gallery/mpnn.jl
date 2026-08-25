@@ -61,9 +61,9 @@ function mpnn_build_message(node_feat, edge_feat, src, dst, w_msg, b_msg, msg_in
     for o = 1:n_msg_feat
         s = b_msg[o]
         # accumulate the dot product sequentially over the input features
-        for i_seq_i = 1:n_in_msg
-            widx = (o - 1) * n_in_msg + i_seq_i
-            s = s + w_msg[widx] * msg_input[in_off + i_seq_i]
+        for i_i = 1:n_in_msg
+            widx = (o - 1) * n_in_msg + i_i
+            s = s + w_msg[widx] * msg_input[in_off + i_i]
         end
         msg_scratch[msg_off + o] = s
     end
@@ -137,9 +137,9 @@ function mpnn_update_node(node_feat, agg, w_upd, b_upd, upd_input, upd_scratch, 
     for o = 1:n_node_feat
         s = b_upd[o]
         # accumulate the dot product sequentially over the input features
-        for i_seq_i = 1:n_in_upd
-            widx = (o - 1) * n_in_upd + i_seq_i
-            s = s + w_upd[widx] * upd_input[uin_off + i_seq_i]
+        for i_i = 1:n_in_upd
+            widx = (o - 1) * n_in_upd + i_i
+            s = s + w_upd[widx] * upd_input[uin_off + i_i]
         end
         upd_scratch[node_off + o] = s
     end
@@ -202,8 +202,8 @@ function mpnn(node_feat, edge_feat, src, dst, w_msg, b_msg, w_upd, b_upd, n_node
     # step 2: sum messages at each receiver node -- sequential, since
     # different edges can share the same receiver node and every call
     # updates the shared agg array
-    for i_seq_e = 1:n_edges
-        mpnn_accumulate(messages, dst, agg, i_seq_e, n_msg_feat)
+    for i_e = 1:n_edges
+        mpnn_accumulate(messages, dst, agg, i_e, n_msg_feat)
     end
 
     # step 3: update every node feature from its old value and its
