@@ -5208,9 +5208,18 @@ end
 # recursion level -- cgen_reduction_only_loop's array-privacy proof needs it to see through a
 # kernel-level size relationship like `n_in_msg = 2 * n_node_feat + n_edge_feat`, defined well
 # outside any candidate loop's own body.
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
     exprs = Any[]
-    known_consts = Dict{Symbol,Any}()
+    # Seeded from the enclosing body's own known_consts at the point this body was reached (never
+    # written back) -- a scalar reset at the *tail* of a non-split ancestor loop's body converges
+    # by induction to the same literal on every one of that loop's own iterations, so a literal
+    # known several nesting levels up remains valid here even though nothing in *this* body's own
+    # statement list re-establishes it. Without this, cgen_reduction_only_loop only ever sees a
+    # known_consts entry when the resetting literal sits immediately before the loop in the same
+    # statement list -- which fails for any reduction scalar whose reset lives one nesting level
+    # below its true initializer, e.g. an adjoint accumulator zeroed at the end of an inner loop's
+    # body but declared outside an outer sequential loop entirely.
+    known_consts = copy(outer_known_consts)
     pending = Any[]
     pending_has_array = false
     flush_pending! = () -> begin
@@ -5247,7 +5256,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs)))
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -5281,9 +5290,23 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
             end
             delete!(known_consts, stmt.var)
+            # Blind invalidation here would throw away entries that remain true: if this loop's own
+            # body provably converges an assigned scalar to a literal by the walk cgen_reduction_only_loop
+            # already trusts (cgen_loop_convergent_constant), that literal holds after the loop regardless
+            # of whether the loop itself split -- update rather than erase, so a later sibling statement
+            # (or a further sibling loop, per mpnn's `sb` scratch reused across two separate loop nests)
+            # can still see it. Only truly unprovable scalars get deleted.
+            for v in cgen_all_assigned_scalars(stmt.body)
+                c = cgen_loop_convergent_constant(stmt.body, v)
+                if c === nothing
+                    delete!(known_consts, v)
+                else
+                    known_consts[v] = c
+                end
+            end
         end
     end
     flush_pending!()
@@ -5553,9 +5576,12 @@ end
 # against a device array. Unlike CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch, raising 'Scalar indexing is disallowed'. Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
 # outer_defs: see cgen_body's identical parameter -- kept in sync for the JACC target.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
     exprs = Any[]
-    known_consts = Dict{Symbol,Any}()
+    # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
+    # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
+    # this many nesting levels down, not just when the resetting literal is an immediate sibling.
+    known_consts = copy(outer_known_consts)
     pending = Any[]
     pending_has_array = false
     flush_pending! = () -> begin
@@ -5586,7 +5612,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             end
         elseif stmt.kind == :if
             flush_pending!()
-            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs)))
+            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -5633,9 +5659,20 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
             end
             delete!(known_consts, stmt.var)
+            # See cgen_body's matching comment: update via cgen_loop_convergent_constant rather
+            # than blindly deleting -- a scalar that provably converges to a literal by this loop's
+            # own tail stays known for statements (or further sibling loops) that follow.
+            for v in cgen_all_assigned_scalars(stmt.body)
+                c = cgen_loop_convergent_constant(stmt.body, v)
+                if c === nothing
+                    delete!(known_consts, v)
+                else
+                    known_consts[v] = c
+                end
+            end
         end
     end
     flush_pending!()
