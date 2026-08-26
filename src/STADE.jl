@@ -5198,6 +5198,20 @@ function cgen_expr_has_ref(e)
     return any(cgen_expr_has_ref, e.args)
 end
 
+# True iff `stmt`'s entire body is one nested `:for` that is itself split-eligible by the same test
+# cgen_body's own :for branch applies. Splitting `stmt` here would leave that inner loop serialized
+# inside every thread; deferring one level lets the inner loop become the thread-mapped one instead,
+# which is usually the loop that actually carries the trip count.
+function cgen_prefer_inner_split(stmt, known_consts::Dict{Symbol,Any}, outer_defs::Dict{Symbol,Any}, fn_args::Set{Symbol})
+    length(stmt.body) == 1 || return false
+    inner = stmt.body[1]
+    inner.kind == :for || return false
+    inner_synth = cgen_reduction_only_loop(inner.body, inner.var, known_consts, outer_defs)
+    inner_synth === nothing && return false
+    issubset(cgen_scalar_reduction_vars(inner.body), fn_args) || return false
+    return !cgen_contains_stackop(inner.body)
+end
+
 # ---- host-side body walk: splits device kernels off ----
 # Host-side body walk: splits off one device kernel per eligible iteration-independent loop; anything left over runs as ordinary host-side Julia. A
 # left-over statement touching a device array is what CUDA.allowscalar(false) rejects -- confirmed as a live-GPU crash. Fix: each run of consecutive
@@ -5208,7 +5222,7 @@ end
 # recursion level -- cgen_reduction_only_loop's array-privacy proof needs it to see through a
 # kernel-level size relationship like `n_in_msg = 2 * n_node_feat + n_edge_feat`, defined well
 # outside any candidate loop's own body.
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), already_deferred::Bool = false)
     exprs = Any[]
     # Seeded from the enclosing body's own known_consts at the point this body was reached (never
     # written back) -- a scalar reset at the *tail* of a non-split ancestor loop's body converges
@@ -5275,7 +5289,11 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # meant to start fresh. Refusing to split is the same conservative choice as any unprovable case: slower, never wrong.
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
             safe_scope = issubset(loop_reduce_vars, fn_args)
-            if synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
+            eligible = synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
+            # Defer at most one level: once deferred into, this same check is skipped so a longer lone-child
+            # chain doesn't get chased past its second loop.
+            defer = eligible && !already_deferred && cgen_prefer_inner_split(stmt, known_consts, outer_defs, fn_args)
+            if eligible && !defer
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
                     target, op, arrs, term = red
@@ -5290,7 +5308,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, already_deferred = defer)))
             end
             delete!(known_consts, stmt.var)
             # Blind invalidation here would throw away entries that remain true: if this loop's own
@@ -5576,7 +5594,7 @@ end
 # against a device array. Unlike CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch, raising 'Scalar indexing is disallowed'. Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
 # outer_defs: see cgen_body's identical parameter -- kept in sync for the JACC target.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), already_deferred::Bool = false)
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
     # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
@@ -5621,7 +5639,11 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts, outer_defs)
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
             safe_scope = issubset(loop_reduce_vars, fn_args)
-            if synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
+            eligible = synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
+            # Defer at most one level: once deferred into, this same check is skipped so a longer lone-child
+            # chain doesn't get chased past its second loop.
+            defer = eligible && !already_deferred && cgen_prefer_inner_split(stmt, known_consts, outer_defs, fn_args)
+            if eligible && !defer
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
                     target, op, arrs, term = red
@@ -5659,7 +5681,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, already_deferred = defer)))
             end
             delete!(known_consts, stmt.var)
             # See cgen_body's matching comment: update via cgen_loop_convergent_constant rather
