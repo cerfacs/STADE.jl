@@ -1,69 +1,58 @@
-function initstacks_raggedii_b(m0, n)
-    __sz_s_stack = 0
-    for i_x = 1:n
-        __sz_s_stack += 1
-        s = 0.0
-        for i_y = 1:2
-            w = m0 + i_y
-            for i_j = 1:w
-                __sz_s_stack += 1
-            end
-            __sz_s_stack += 1
-        end
-        __sz_s_stack += 1
-    end
-    __sz_s_stack += 1
+function initstacks_raggedii_b(n)
+    prefix_s_stack_1 = Vector{Int}(undef, div(n - 1, 1) + 1)
+    __tot_s_stack_1 = 0
     prefix_tripcount_stack_1 = Vector{Int}(undef, div(n - 1, 1) + 1)
     __tot_tripcount_stack_1 = 0
     for i_x = 1:n
+        prefix_s_stack_1[(i_x - 1) + 1] = __tot_s_stack_1
         prefix_tripcount_stack_1[(i_x - 1) + 1] = __tot_tripcount_stack_1
         s = 0.0
+        __tot_s_stack_1 = __tot_s_stack_1 + ((div(2 - 1, 1) + 1) + 1)
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + (div(2 - 1, 1) + 1)
     end
-    s_stack = Vector{Float64}()
-    sizehint!(s_stack, __sz_s_stack)
     tripcount_stack = Vector{Int64}(undef, __tot_tripcount_stack_1)
-    return (s_stack, tripcount_stack, prefix_tripcount_stack_1, __tot_tripcount_stack_1)
+    s_stack = Vector{Float64}(undef, __tot_s_stack_1 + 1)
+    return (tripcount_stack, s_stack, prefix_s_stack_1, prefix_tripcount_stack_1, __tot_s_stack_1, __tot_tripcount_stack_1)
 end
 
-function raggedii_b(out, outb, u, ub, x, xb, n, m0, s_stack, tripcount_stack, prefix_tripcount_stack_1, __tot_tripcount_stack_1)
+function raggedii_b(out, outb, u, ub, x, xb, n, m0, tripcount_stack, s_stack, prefix_s_stack_1, prefix_tripcount_stack_1, __tot_s_stack_1, __tot_tripcount_stack_1)
     s = 0.0
     sb = 0.0
     for i_x = 1:n
-        push!(s_stack, s)
         s = 0.0
         for i_y = 1:2
             w = m0 + i_y
             __idx_tripcount_stack_1_1 = prefix_tripcount_stack_1[(i_x - 1) + 1] + ((i_y - 1) + 1)
             tripcount_stack[__idx_tripcount_stack_1_1] = w
             for i_j = 1:w
-                push!(s_stack, s)
                 s = s + x[i_j] * u[i_x]
             end
-            push!(s_stack, s)
+            __idx_s_stack_1_4 = prefix_s_stack_1[(i_x - 1) + 1] + ((i_y - 1) + 1)
+            s_stack[__idx_s_stack_1_4] = s
         end
         out[i_x] = s * s
-        push!(s_stack, s)
+        __idx_s_stack_1_3 = (prefix_s_stack_1[(i_x - 1) + 1] + (div(2 - 1, 1) + 1)) + 1
+        s_stack[__idx_s_stack_1_3] = s
     end
-    push!(s_stack, s)
-    s = pop!(s_stack)
+    s_stack[__tot_s_stack_1 + 1] = s
+    s = s_stack[__tot_s_stack_1 + 1]
     for i_x = n:-1:1
-        s = pop!(s_stack)
+        __idx_s_stack_1_0 = (prefix_s_stack_1[(i_x - 1) + 1] + (div(2 - 1, 1) + 1)) + 1
+        s = s_stack[__idx_s_stack_1_0]
         sb = sb + s * outb[i_x]
         sb = sb + s * outb[i_x]
         outb[i_x] = 0.0
         for i_y = 2:-1:1
-            s = pop!(s_stack)
+            __idx_s_stack_1_0 = prefix_s_stack_1[(i_x - 1) + 1] + ((i_y - 1) + 1)
+            s = s_stack[__idx_s_stack_1_0]
             w = m0 + i_y
-            __idx_tripcount_stack_1_2 = prefix_tripcount_stack_1[(i_x - 1) + 1] + ((i_y - 1) + 1)
-            w = tripcount_stack[__idx_tripcount_stack_1_2]
+            __idx_tripcount_stack_1_3 = prefix_tripcount_stack_1[(i_x - 1) + 1] + ((i_y - 1) + 1)
+            w = tripcount_stack[__idx_tripcount_stack_1_3]
             for i_j = w:-1:1
-                s = pop!(s_stack)
                 xb[i_j] = xb[i_j] + u[i_x] * sb
                 ub[i_x] = ub[i_x] + x[i_j] * sb
             end
         end
-        s = pop!(s_stack)
         sb = 0.0
     end
     return nothing

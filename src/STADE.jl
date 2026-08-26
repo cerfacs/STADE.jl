@@ -1622,6 +1622,17 @@ function snap_plan(kernel, active_map; site_needed = nothing)
     counter = Ref(0)
     snap_walk!(kernel.body, active_map, kernel.sig.kinds, reassigned, value_needed, sites, counter,
                false, assign_counts, kernel.body, site_needed)
+    # A block-boundary push owns its stack outright instead of borrowing one an :assign site
+    # happened to create. The boundary kill in snap_fwd_walk! retires exactly those sites, and
+    # agen_block_boundary_vars SKIPS a var with no (:value, var) stack -- so without this the
+    # push and its matching pop would both vanish silently rather than raise. A stack with no
+    # remaining reference is pruned later by agen_finalize_stacks, so registering one that
+    # ii_plan or `exempt` turns out to retire costs nothing.
+    for var in sort(collect(snap_boundary_snapshot_vars(kernel)); by = string)
+        any(s -> s.kind == :value && s.array == var, sites) && continue
+        counter[] = counter[] + 1
+        push!(sites, (kind = :value, array = var, at = counter[]))
+    end
     return sites
 end
 
@@ -1891,12 +1902,101 @@ function snap_count_expr_occurrences(expr, target)
     return total
 end
 
+# ---- block-boundary snapshot bookkeeping ----
+# Everything below describes the extra end-of-body push agen_forward_body emits (see
+# agen_block_boundary_vars), duplicated on the snap_ side for the same purity reason as every
+# other snap_/agen_ pair here. Two consumers: snap_plan gives each such var a :value site of
+# its own, and snap_fwd_walk! kills it from `seen` at the end of the body it covers.
+
+# agen_exempt_vars' twin: vars whose sole kernel-wide write qualifies for the iteration-
+# independent elision, so no site -- and hence no boundary push -- is emitted for them.
+function snap_exempt_vars(kernel, value_needed)
+    assign_counts = snap_count_assign_sites(kernel.body)
+    exempt = Set{Symbol}()
+    snap_collect_exempt_vars!(kernel.body, value_needed, assign_counts, kernel.body, false, exempt)
+    return exempt
+end
+
+function snap_collect_exempt_vars!(body, value_needed, assign_counts, full_body, in_loop, exempt)
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            self_ref = snap_count_var_refs(stmt.rhs, var) > 0
+            if !self_ref && var in value_needed && !in_loop && get(assign_counts, var, 0) == 1 &&
+               !snap_read_before(full_body, stmt, var)
+                push!(exempt, var)
+            end
+        elseif stmt.kind == :for
+            snap_collect_exempt_vars!(stmt.body, value_needed, assign_counts, full_body, true, exempt)
+        elseif stmt.kind == :if
+            snap_collect_exempt_vars!(stmt.then, value_needed, assign_counts, full_body, in_loop, exempt)
+            snap_collect_exempt_vars!(stmt.els, value_needed, assign_counts, full_body, in_loop, exempt)
+        end
+    end
+    return nothing
+end
+
+# The float scalars a boundary push can cover at all: agen_block_boundary_vars' own filters
+# minus its per-body structural test. Computed once per kernel and threaded through the walk
+# so the per-body test stays a cheap structural one.
+function snap_boundary_stack_vars(kernel)
+    value_needed = snap_value_needed_vars(kernel)
+    exempt = snap_exempt_vars(kernel, value_needed)
+    return Set(v for v in value_needed if get(kernel.sig.kinds, v, :none) == :scalar_float && !(v in exempt))
+end
+
+# Vars this body's own boundary push is GUARANTEED to store: written inside a nested :for/:if,
+# which is what puts it on agen_block_boundary_vars' candidate list, AND written by a top-level
+# statement of this same body. The second condition is what makes the guarantee hold under
+# fuse_ii_loops: agen_ii_covered_write_check can never call a top-level write covered, so no
+# ii_plan retires this push. Without it the kill below could rest on a push already fused away.
+function snap_boundary_kill_vars(body, bvars)
+    isempty(bvars) && return Set{Symbol}()
+    nested = Set{Symbol}()
+    top = Set{Symbol}()
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(top, stmt.lhs)
+        elseif stmt.kind == :for
+            union!(nested, snap_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :if
+            union!(nested, snap_collect_reassigned(stmt.then, true))
+            union!(nested, snap_collect_reassigned(stmt.els, true))
+        end
+    end
+    return intersect(nested, top, bvars)
+end
+
+# Every var some body's boundary push stores, anywhere in the kernel. Deliberately NOT
+# restricted to snap_boundary_kill_vars' guaranteed subset: a stack is needed whenever the
+# push CAN be emitted, while the kill needs it to be certain.
+function snap_boundary_snapshot_vars(kernel)
+    out = Set{Symbol}()
+    snap_boundary_walk!(kernel.body, snap_boundary_stack_vars(kernel), out)
+    return out
+end
+
+function snap_boundary_walk!(body, bvars, out)
+    for stmt in body
+        if stmt.kind == :for
+            union!(out, intersect(snap_collect_reassigned(stmt.body, true), bvars))
+            snap_boundary_walk!(stmt.body, bvars, out)
+        elseif stmt.kind == :if
+            union!(out, intersect(snap_collect_reassigned(stmt.then, true), bvars))
+            union!(out, intersect(snap_collect_reassigned(stmt.els, true), bvars))
+            snap_boundary_walk!(stmt.then, bvars, out)
+            snap_boundary_walk!(stmt.els, bvars, out)
+        end
+    end
+    return nothing
+end
+
 # ---- site-level (forward-seen) TBR ----
 # `snap_value_needed_vars` decides whole-variable necessity; `snap_fwd_walk!` refines to a per-write
 # decision: w needs its pre-write value iff (a) w self-references, or (b) a nonlinear read of var
 # occurred strictly before w in forward order. This is the production path, reached via snap_plan's
 # site_needed kwarg; stade_site_level_tbr_check asserts it stays a subset of the whole-variable set.
-function snap_fwd_walk!(body, seen, active_map, decisions)
+function snap_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}())
     for idx in eachindex(body)
         stmt = body[idx]
         if stmt.kind == :assign
@@ -1912,14 +2012,25 @@ function snap_fwd_walk!(body, seen, active_map, decisions)
             seen = union(seen, local_reads)
         elseif stmt.kind == :if
             snap_var_value_needed!(stmt.cond, seen, true)   # cond always conservative
-            seen_then = snap_fwd_walk!(stmt.then, copy(seen), active_map, decisions)
-            seen_els  = snap_fwd_walk!(stmt.els,  copy(seen), active_map, decisions)
+            seen_then = snap_fwd_walk!(stmt.then, copy(seen), active_map, decisions, bvars)
+            seen_els  = snap_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars)
             seen = union(seen_then, seen_els)
         elseif stmt.kind == :for
-            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions)
+            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
         end
     end
-    return seen
+    # This body's block-boundary push re-establishes each of these vars at the head of its own
+    # reverse body, so every read INSIDE `body` is served by that pop plus this body's own
+    # sites, never by a site outside it. Dropping them here is what stops the loop back edge
+    # (snap_fwd_walk_loop!) demanding a redundant push at the first write of a body that
+    # already has a boundary snapshot -- the cell-loop `aux = 0.0` shape, whose push is what
+    # makes the whole loop look loop-carried to cgen_. A read placed BEFORE that write, in this
+    # same body, re-adds the var during the walk, so the within-iteration need is untouched;
+    # so is a read in an enclosing body, which arrives via in_seen and is restored by this
+    # body's own first site.
+    kill = snap_boundary_kill_vars(body, bvars)
+    isempty(kill) && return seen
+    return setdiff(seen, kill)
 end
 
 # Loop forward fixed point: a read near the top of a loop body is, for every iteration but
@@ -1927,16 +2038,16 @@ end
 # need a snapshot due to a read near the bottom, one iteration back. `seen` only grows
 # across passes, so this terminates; a final pass re-walks with the converged set so
 # `decisions` reflects the fixed point.
-function snap_fwd_walk_loop!(body, in_seen, active_map, decisions)
+function snap_fwd_walk_loop!(body, in_seen, active_map, decisions, bvars = Set{Symbol}())
     seen = copy(in_seen)
     while true
         scratch = Dict{Any,Bool}()
-        out_seen = snap_fwd_walk!(body, union(seen, in_seen), active_map, scratch)
+        out_seen = snap_fwd_walk!(body, union(seen, in_seen), active_map, scratch, bvars)
         out_seen == seen && break
         seen = out_seen
     end
     final_in = union(seen, in_seen)
-    return snap_fwd_walk!(body, final_in, active_map, decisions)
+    return snap_fwd_walk!(body, final_in, active_map, decisions, bvars)
 end
 
 # public entry point: per-site (not per-variable) TBR decisions for every :assign in
@@ -1944,7 +2055,7 @@ end
 # via stade_site_level_tbr_check, by agen_needs_snapshot.
 function snap_value_needed_sites(kernel)
     decisions = Dict{Any,Bool}()
-    snap_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions)
+    snap_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions, snap_boundary_stack_vars(kernel))
     return decisions
 end
 
@@ -2535,6 +2646,36 @@ function agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_
                           !(ii_plan !== nothing && agen_ii_covered_write_check(body, v, ii_plan, false))); by = string)
 end
 
+# The float scalars a boundary push can cover at all: the filters above minus the per-body
+# structural test. See snap_boundary_stack_vars -- identical logic, duplicated for the same
+# purity-rule reason as every other agen_/snap_ pair in this file.
+function agen_boundary_stack_vars(kernel)
+    value_needed = agen_value_needed_vars(kernel)
+    exempt = agen_exempt_vars(kernel, value_needed)
+    return Set(v for v in value_needed if get(kernel.sig.kinds, v, :none) == :scalar_float && !(v in exempt))
+end
+
+# Vars this body's own boundary push is GUARANTEED to store: a nested write, which puts it on
+# agen_block_boundary_vars' candidate list, AND a top-level write of this same body, which
+# agen_ii_covered_write_check can never call covered -- so no ii_plan retires this push. See
+# snap_boundary_kill_vars.
+function agen_boundary_kill_vars(body, bvars)
+    isempty(bvars) && return Set{Symbol}()
+    nested = Set{Symbol}()
+    top = Set{Symbol}()
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(top, stmt.lhs)
+        elseif stmt.kind == :for
+            union!(nested, agen_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :if
+            union!(nested, agen_collect_reassigned(stmt.then, true))
+            union!(nested, agen_collect_reassigned(stmt.els, true))
+        end
+    end
+    return intersect(nested, top, bvars)
+end
+
 function agen_collect_expr_vars!(expr, vars)
     if expr isa Symbol
         push!(vars, expr)
@@ -2652,7 +2793,7 @@ end
 # every agen_/snap_ pair in this file. stade_site_level_tbr_check asserts exact Dict
 # equality against snap_value_needed_sites on every call -- forward push and backward pop
 # must decide identically at every site or push/pop counts desync.
-function agen_fwd_walk!(body, seen, active_map, decisions)
+function agen_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}())
     for idx in eachindex(body)
         stmt = body[idx]
         if stmt.kind == :assign
@@ -2663,31 +2804,34 @@ function agen_fwd_walk!(body, seen, active_map, decisions)
             seen = union(seen, local_reads)
         elseif stmt.kind == :if
             agen_var_value_needed!(stmt.cond, seen, true)
-            seen_then = agen_fwd_walk!(stmt.then, copy(seen), active_map, decisions)
-            seen_els  = agen_fwd_walk!(stmt.els,  copy(seen), active_map, decisions)
+            seen_then = agen_fwd_walk!(stmt.then, copy(seen), active_map, decisions, bvars)
+            seen_els  = agen_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars)
             seen = union(seen_then, seen_els)
         elseif stmt.kind == :for
-            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions)
+            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
         end
     end
-    return seen
+    # end-of-body block-boundary kill -- see snap_fwd_walk!'s comment for the full argument
+    kill = agen_boundary_kill_vars(body, bvars)
+    isempty(kill) && return seen
+    return setdiff(seen, kill)
 end
 
-function agen_fwd_walk_loop!(body, in_seen, active_map, decisions)
+function agen_fwd_walk_loop!(body, in_seen, active_map, decisions, bvars = Set{Symbol}())
     seen = copy(in_seen)
     while true
         scratch = Dict{Any,Bool}()
-        out_seen = agen_fwd_walk!(body, union(seen, in_seen), active_map, scratch)
+        out_seen = agen_fwd_walk!(body, union(seen, in_seen), active_map, scratch, bvars)
         out_seen == seen && break
         seen = out_seen
     end
     final_in = union(seen, in_seen)
-    return agen_fwd_walk!(body, final_in, active_map, decisions)
+    return agen_fwd_walk!(body, final_in, active_map, decisions, bvars)
 end
 
 function agen_value_needed_sites(kernel)
     decisions = Dict{Any,Bool}()
-    agen_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions)
+    agen_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions, agen_boundary_stack_vars(kernel))
     return decisions
 end
 
@@ -3704,6 +3848,25 @@ function agen_if_branch_scalar_vars(stmt, kinds, value_needed)
     return vars
 end
 
+# Did agen_forward_body actually push this branch's write to `var` onto its value stack? The
+# forward gate is reproduced here in full, INCLUDING the site-level TBR decision -- lin_plan
+# activity alone is not it. Keyed on the primal branch body, the same object agen_forward_body
+# recursed into, so agen_site_key matches. Getting this wrong desyncs push!/pop!'s single
+# shared stack pointer under keep_push_pop=true: the discard-pop below would consume an entry
+# nothing ever pushed.
+function agen_branch_pushed(primal_branch, var, kinds, active_map, exempt, site_source)
+    for i in eachindex(primal_branch)
+        s = primal_branch[i]
+        s.kind == :assign || continue
+        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
+        v == var || continue
+        return kinds[v] in (:scalar_float, :array_float) && get(active_map, v, false) &&
+               agen_needs_snapshot(s.lhs, s.rhs, v, site_source, agen_site_key(primal_branch, i)) &&
+               !(v in exempt)
+    end
+    return false
+end
+
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
@@ -3753,12 +3916,15 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             then_expr = then_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : then_stmt.tree.expr
             els_expr = els_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : els_stmt.tree.expr
             (then_expr === nothing || els_expr === nothing) && continue   # can't safely recompute -- leave to the normal (imperfectly-timed) restore
-            # a branch only pushed onto the value stack (forward sweep)
-            # if its own rhs was active -- a literal-constant branch
-            # (like the `then_expr`/`els_expr` fallback case) never
-            # does, matching agen_forward_body's own push gate exactly
-            then_pushed = then_stmt !== nothing && then_stmt.active
-            els_pushed = els_stmt !== nothing && els_stmt.active
+            # a branch only pushed onto the value stack (forward sweep) if its own rhs was
+            # active AND its site-level TBR decision said so -- a literal-constant branch
+            # (like the `then_expr`/`els_expr` fallback case) never does. agen_branch_pushed
+            # reproduces agen_forward_body's push gate; `.active` alone is not that gate.
+            src = agen_push_pop_source(value_needed, ectx)
+            then_pushed = then_stmt !== nothing && then_stmt.active &&
+                          agen_branch_pushed(primal_body[idx].then, var, kinds, active_map, exempt, src)
+            els_pushed = els_stmt !== nothing && els_stmt.active &&
+                         agen_branch_pushed(primal_body[idx].els, var, kinds, active_map, exempt, src)
             push!(resolved, (var, then_expr, els_expr, then_pushed, els_pushed))
         end
         isempty(resolved) && continue

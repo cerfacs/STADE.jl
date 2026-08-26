@@ -20,8 +20,8 @@ function initstacks_windowed_relax_retire_b(dx, num_passes, w0)
         end
         val_w_1[(i_pass - 1) + 1] = w
         __tot_branch_stack_1 = __tot_branch_stack_1 + ((1 + (div(w - 1, 1) + 1)) + (div(w - 1, 1) + 1))
-        __tot_left_stack_1 = __tot_left_stack_1 + ((((div(w - 1, 1) + 1) + (div(w - 1, 1) + 1)) + (div(w - 1, 1) + 1)) + 1)
-        __tot_right_stack_1 = __tot_right_stack_1 + ((((div(w - 1, 1) + 1) + (div(w - 1, 1) + 1)) + (div(w - 1, 1) + 1)) + 1)
+        __tot_left_stack_1 = __tot_left_stack_1 + ((div(w - 1, 1) + 1) + 1)
+        __tot_right_stack_1 = __tot_right_stack_1 + ((div(w - 1, 1) + 1) + 1)
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + 1
     end
     branch_stack = Vector{Int64}(undef, __tot_branch_stack_1)
@@ -61,34 +61,22 @@ function windowed_relax_retire_hv(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, 
         __idx_tripcount_stack_1_1 = prefix_tripcount_stack_1[(i_pass - 1) + 1] + 1
         tripcount_stack[__idx_tripcount_stack_1_1] = w
         for i_j = 1:w
-            __idx_left_stack_1_0 = prefix_left_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
-            left_stack_d[__idx_left_stack_1_0] = leftd
-            left_stack[__idx_left_stack_1_0] = left
             leftd = 0.0
             left = 0.0
             if i_j > 1
                 __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_pass - 1) + 1] + 1) + ((i_j - 1) + 1)
                 branch_stack[__idx_branch_stack_1_0] = 1
-                __idx_left_stack_1_0 = (prefix_left_stack_1[(i_pass - 1) + 1] + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + ((i_j - 1) + 1)
-                left_stack_d[__idx_left_stack_1_0] = leftd
-                left_stack[__idx_left_stack_1_0] = left
                 leftd = ud[i_j - 1]
                 left = u[i_j - 1]
             else
                 __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_pass - 1) + 1] + 1) + ((i_j - 1) + 1)
                 branch_stack[__idx_branch_stack_1_0] = 0
             end
-            __idx_right_stack_1_4 = prefix_right_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
-            right_stack_d[__idx_right_stack_1_4] = rightd
-            right_stack[__idx_right_stack_1_4] = right
             rightd = 0.0
             right = 0.0
             if i_j < n
                 __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_pass - 1) + 1] + (1 + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + ((i_j - 1) + 1)
                 branch_stack[__idx_branch_stack_1_0] = 1
-                __idx_right_stack_1_0 = (prefix_right_stack_1[(i_pass - 1) + 1] + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + ((i_j - 1) + 1)
-                right_stack_d[__idx_right_stack_1_0] = rightd
-                right_stack[__idx_right_stack_1_0] = right
                 rightd = ud[i_j + 1]
                 right = u[i_j + 1]
             else
@@ -97,17 +85,17 @@ function windowed_relax_retire_hv(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, 
             end
             ud[i_j] = 0.5 * (((f[i_j] * dx2d + dx2 * fd[i_j]) + leftd) + rightd)
             u[i_j] = 0.5 * (dx2 * f[i_j] + left + right)
-            __idx_left_stack_1_9 = (prefix_left_stack_1[(i_pass - 1) + 1] + ((div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + ((i_j - 1) + 1)
-            left_stack_d[__idx_left_stack_1_9] = leftd
-            left_stack[__idx_left_stack_1_9] = left
-            __idx_right_stack_1_11 = (prefix_right_stack_1[(i_pass - 1) + 1] + ((div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + ((i_j - 1) + 1)
-            right_stack_d[__idx_right_stack_1_11] = rightd
-            right_stack[__idx_right_stack_1_11] = right
+            __idx_left_stack_1_5 = prefix_left_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
+            left_stack_d[__idx_left_stack_1_5] = leftd
+            left_stack[__idx_left_stack_1_5] = left
+            __idx_right_stack_1_7 = prefix_right_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
+            right_stack_d[__idx_right_stack_1_7] = rightd
+            right_stack[__idx_right_stack_1_7] = right
         end
-        __idx_left_stack_1_4 = (prefix_left_stack_1[(i_pass - 1) + 1] + (((div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + 1
+        __idx_left_stack_1_4 = (prefix_left_stack_1[(i_pass - 1) + 1] + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + 1
         left_stack_d[__idx_left_stack_1_4] = leftd
         left_stack[__idx_left_stack_1_4] = left
-        __idx_right_stack_1_6 = (prefix_right_stack_1[(i_pass - 1) + 1] + (((div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + 1
+        __idx_right_stack_1_6 = (prefix_right_stack_1[(i_pass - 1) + 1] + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + 1
         right_stack_d[__idx_right_stack_1_6] = rightd
         right_stack[__idx_right_stack_1_6] = right
     end
@@ -120,19 +108,19 @@ function windowed_relax_retire_hv(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, 
     rightd = right_stack_d[__tot_right_stack_1 + 1]
     right = right_stack[__tot_right_stack_1 + 1]
     for i_pass = num_passes:-1:1
-        __idx_left_stack_1_0 = (prefix_left_stack_1[(i_pass - 1) + 1] + (((div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + 1
+        __idx_left_stack_1_0 = (prefix_left_stack_1[(i_pass - 1) + 1] + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + 1
         leftd = left_stack_d[__idx_left_stack_1_0]
         left = left_stack[__idx_left_stack_1_0]
-        __idx_right_stack_1_2 = (prefix_right_stack_1[(i_pass - 1) + 1] + (((div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + 1
+        __idx_right_stack_1_2 = (prefix_right_stack_1[(i_pass - 1) + 1] + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1)) + 1
         rightd = right_stack_d[__idx_right_stack_1_2]
         right = right_stack[__idx_right_stack_1_2]
         __idx_tripcount_stack_1_4 = prefix_tripcount_stack_1[(i_pass - 1) + 1] + 1
         w = tripcount_stack[__idx_tripcount_stack_1_4]
         for i_j = w:-1:1
-            __idx_left_stack_1_0 = (prefix_left_stack_1[(i_pass - 1) + 1] + ((div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + ((i_j - 1) + 1)
+            __idx_left_stack_1_0 = prefix_left_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
             leftd = left_stack_d[__idx_left_stack_1_0]
             left = left_stack[__idx_left_stack_1_0]
-            __idx_right_stack_1_2 = (prefix_right_stack_1[(i_pass - 1) + 1] + ((div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1) + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + ((i_j - 1) + 1)
+            __idx_right_stack_1_2 = prefix_right_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
             rightd = right_stack_d[__idx_right_stack_1_2]
             right = right_stack[__idx_right_stack_1_2]
             __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_pass - 1) + 1] + (1 + (div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + ((i_j - 1) + 1)
@@ -173,9 +161,6 @@ function windowed_relax_retire_hv(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, 
                 rightbd = 0.0
                 rightb = 0.0
             end
-            __idx_right_stack_1_0 = prefix_right_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
-            rightd = right_stack_d[__idx_right_stack_1_0]
-            right = right_stack[__idx_right_stack_1_0]
             rightbd = 0.0
             rightb = 0.0
             if __branch_pre_2 == 1
@@ -184,9 +169,6 @@ function windowed_relax_retire_hv(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, 
                 leftbd = 0.0
                 leftb = 0.0
             end
-            __idx_left_stack_1_0 = prefix_left_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
-            leftd = left_stack_d[__idx_left_stack_1_0]
-            left = left_stack[__idx_left_stack_1_0]
             leftbd = 0.0
             leftb = 0.0
         end

@@ -28,14 +28,17 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # this adjoint at all, which is correct when a stack stays growable.
     EXPECTED = Dict{String,Any}(
         "advection" => 3, "advection_multi" => 3, "affine_loss" => 0,
-        "bilinear" => 0, "branchsel" => 0, "cascadic_mg_prolong" => 22,
+        "bilinear" => 0, "bnd_branch" => 3, "bnd_carried" => 0,
+        "bnd_nested_only" => 5, "bnd_readfirst" => 6,
+        "branchsel" => 0, "cascadic_mg_prolong" => 22,
+        "cellscatter" => 3,
         "clamped_sumsq" => 0, "coarsen_retire" => 4, "cond_field_choice" => 0,
         "cond_loop_choice" => 0, "dotprod" => 0, "geomrecur" => 3,
-        "matvec_loss" => 0, "mg_vcycle" => 29, "mg_vcycle_multi" => 29,
+        "matvec_loss" => 0, "mg_vcycle" => 28, "mg_vcycle_multi" => 28,
         "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
-        "quadloss" => 0, "raggedii" => :refused, "raggedind" => 3,
+        "quadloss" => 0, "raggedii" => 1, "raggedind" => 1,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,
-        "sumsq_shifted" => 0, "transformer" => 63, "ttgc" => 18,
+        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 8,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,
         "windowed_relax_retire" => 7,
     )

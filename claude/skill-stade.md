@@ -53,11 +53,31 @@ add `export PATH="/home/claude/julia-1.10.11/bin:$PATH"` first.
 
 ## The rules, and why they matter
 
-1. **Prefer loops where iteration `i` reads inputs and writes outputs only at indices derived from `i`.**:
-   Such loops fuse (rule 2) and run as one GPU thread per
-   index. A loop that carries a value from one iteration to the next, a
-   running sum, a scan, any accumulator, does neither. Write one only
-   where the math needs it, and say so in a comment (rule 13).
+1. **Prefer loops where iteration `i` reads inputs and writes outputs only at indices derived from `i`.**
+   Such loops fuse (rule 2) and run as one GPU thread per index.
+
+   A loop stops qualifying when it **carries a value between its own
+   iterations**: iteration `i` reads something an earlier iteration wrote
+   at a *different* location, so the iterations only produce the right
+   answer in order. A scan, a prefix sum, a recurrence like `u[i] = c *
+   u[i - 1]`, an in-place Gauss-Seidel relaxation, and an outer loop
+   counting sweeps of one are all of this kind. Write one only where the
+   math needs it, and say so in a comment (rule 13). This is the property
+   rule 2 means when it refuses to fuse such a nest.
+
+   A **commutative accumulation is not that**, even though it too writes
+   a location every iteration touches. Both `loss[1] = loss[1] + f(i)`,
+   accumulating at a fixed index, and a scatter-accumulate `v[j] = v[j] +
+   f(i)` whose target `j` is derived from `i`, give the same result in
+   any iteration order. STADE compiles each to an atomic add, so a loop
+   whose only cross-iteration coupling is one of these fuses under rule 2
+   and runs one thread per index like any other. The test that matters is
+   order-dependence, not whether the word "accumulator" fits.
+
+   Reassociating a sum does change floating-point rounding, so a fused
+   reduction agrees with its sequential form to within rounding rather
+   than bit for bit. Where a kernel needs bitwise reproducibility instead,
+   keep the loop sequential and say so in a comment (rule 13).
 
    `fuse_ii_loops` and the GPU codegen
    stages (`cgen_*`/`jgen_*`) each reprove, from the loop's own
