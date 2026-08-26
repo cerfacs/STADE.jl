@@ -5206,6 +5206,10 @@ function cgen_prefer_inner_split(stmt, known_consts::Dict{Symbol,Any}, outer_def
     length(stmt.body) == 1 || return false
     inner = stmt.body[1]
     inner.kind == :for || return false
+    # A fully literal bound marks a fixed-size local loop -- corners, components,
+    # stencil taps -- never the dimension that needs to scale. Deferring into one undoes the point of
+    # deferring at all, so such a loop is left as the split target rather than chased past.
+    (inner.lo isa Number && inner.hi isa Number) && return false
     inner_synth = cgen_reduction_only_loop(inner.body, inner.var, known_consts, outer_defs)
     inner_synth === nothing && return false
     issubset(cgen_scalar_reduction_vars(inner.body), fn_args) || return false
