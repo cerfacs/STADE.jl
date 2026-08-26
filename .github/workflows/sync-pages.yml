@@ -23,6 +23,7 @@ jobs:
           fetch-depth: 0 # need every branch ref, not just main's tip
 
       - name: Mirror the two files onto pages
+        id: mirror
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -34,8 +35,42 @@ jobs:
 
           if git diff --staged --quiet; then
             echo "no changes to mirror"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git commit -m "sync: mirror src/STADE.jl and README.md from main@$(git rev-parse --short origin/main)"
           git push origin pages
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      # Only runs when the step above actually pushed a new commit to pages --
+      # this job IS the github-actions[bot] push we care about, so there's no
+      # separate webhook/author check needed: getting here already means it
+      # just happened. SSH_HOST/SSH_USER/SSH_KEY/REMOTE_PATH are repo secrets
+      # (Settings -> Secrets and variables -> Actions); SSH_KEY is the private
+      # half of a keypair whose public half is in the VPS's ~/.ssh/authorized_keys.
+      - name: Pull the new pages commit onto the VPS
+        if: steps.mirror.outputs.pushed == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy_key "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" '
+            set -e
+            cd "${{ secrets.REMOTE_PATH }}"
+            git fetch origin pages
+            git checkout pages
+            git reset --hard origin/pages
+
+            sudo systemctl stop generate-server
+            sudo systemctl disable generate-server
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now generate-server
+
+            # -f (follow) would tail forever and hang this CI job -- print
+            # the most recent lines instead, non-interactively (--no-pager),
+            # just to confirm it came back up.
+            sudo journalctl -u generate-server -n 20 --no-pager
+          '
