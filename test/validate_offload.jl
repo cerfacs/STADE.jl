@@ -52,7 +52,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "geomrecur" => 3,
         "fixed_sweeps" => 3, "ii_kill" => 6, "ii_readbefore" => 4, "ii_readnested" => 2,
         "matvec_loss" => 0, "mg_vcycle" => 28, "mg_vcycle_multi" => 28,
-        "mpnn" => 1, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
+        "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
         "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
         "retire_empty" => 4,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,

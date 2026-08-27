@@ -5012,7 +5012,7 @@ function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, kno
     synth = Dict{Symbol,Any}()
     for v in local_names
         haskey(known_consts, v) || continue
-        c = cgen_loop_convergent_constant(body, v)
+        c = cgen_loop_convergent_constant(body, v, get(known_consts, v, nothing))
         c !== nothing && c == known_consts[v] && (synth[v] = c)
     end
     cgen_use_before_def(body, local_names, synth)[1] || return nothing
@@ -5064,18 +5064,21 @@ end
 # running state: :unchanged (not touched yet), :unknown (touched but not provably a single
 # literal), or a Number (every touch since the last branch point agrees on this exact
 # literal).
-function cgen_loop_convergent_constant(body::Vector{NamedTuple}, var::Symbol)
-    state = cgen_terminal_value_walk(body, var, :unchanged)
+# `entry` is the value `var` is known to hold coming INTO this body, or nothing if unknown. It
+# matters only for a nested loop that might not run: see cgen_terminal_value_walk.
+function cgen_loop_convergent_constant(body::Vector{NamedTuple}, var::Symbol, entry = nothing)
+    state = cgen_terminal_value_walk(body, var, :unchanged, entry)
+    state === :unchanged && return entry
     return state isa Number ? state : nothing
 end
 
-function cgen_terminal_value_walk(body::Vector{NamedTuple}, var::Symbol, state)
+function cgen_terminal_value_walk(body::Vector{NamedTuple}, var::Symbol, state, entry = nothing)
     for stmt in body
         if stmt.kind == :assign && stmt.lhs === var
             state = stmt.rhs isa Number ? stmt.rhs : :unknown
         elseif stmt.kind == :if
-            then_state = cgen_terminal_value_walk(stmt.then, var, state)
-            els_state = cgen_terminal_value_walk(stmt.els, var, state)
+            then_state = cgen_terminal_value_walk(stmt.then, var, state, entry)
+            els_state = cgen_terminal_value_walk(stmt.els, var, state, entry)
             state = if then_state isa Number && els_state isa Number && then_state == els_state
                 then_state
             elseif then_state == :unchanged && els_state == :unchanged
@@ -5088,10 +5091,25 @@ function cgen_terminal_value_walk(body::Vector{NamedTuple}, var::Symbol, state)
                 # A var touched inside a nested loop isn't automatically :unknown -- if that nested loop's
                 # own body provably converges `var` to the same literal on every one of its control-flow
                 # paths too (recursing exactly as the top-level caller does), that literal is what `var`
-                # holds after the nested loop finishes, regardless of what it held entering it. Needed once
-                # this proof runs on loops whose reset lives one level deeper than the reduction itself.
-                inner = cgen_loop_convergent_constant(stmt.body, var)
-                state = inner === nothing ? :unknown : inner
+                # holds after the nested loop finishes. Needed once this proof runs on loops whose reset
+                # lives one level deeper than the reduction itself.
+                #
+                # But only when the nested loop is GUARANTEED to run. With a runtime bound there are two
+                # outcomes -- the loop's constant, or the value already held -- and the claim survives
+                # only if they agree. mpnn's reverse node loop agrees (`sb` enters at 0.0, the feature
+                # loop converges it back to 0.0, so an empty feature loop leaves 0.0 either way);
+                # entry_empty does not (`sb` has already been accumulated into before the loop that would
+                # reset it, so an empty one leaves a live value). Taking `inner` unconditionally is what
+                # made entry_empty's GPU adjoint wrong by 1.43 while its CPU adjoint was correct.
+                held = state === :unchanged ? entry : state
+                inner = cgen_loop_convergent_constant(stmt.body, var, held)
+                state = if cgen_loop_runs_once(stmt)
+                    inner === nothing ? :unknown : inner
+                elseif inner !== nothing && held isa Number && held == inner
+                    inner
+                else
+                    :unknown
+                end
             end
         end
     end
@@ -5479,10 +5497,18 @@ end
 # Depends on the block-boundary collapse (agen_boundary_push_redundant) having already removed
 # the redundant outer pushes: those were the reads, and without the collapse this gate refuses
 # nine corpus kernels instead of three.
-function cgen_liveout_is_zeroed(stmt, root_body, loop_vars)
+function cgen_liveout_is_zeroed(stmt, root_body, loop_vars, synth = Dict{Symbol,Any}())
     locals = setdiff(cgen_locally_assigned_scalars(stmt.body), loop_vars)
     isempty(locals) && return true
     for v in ii_escapes_nested(root_body, stmt.body, locals)
+        # A var in `synth` is not a hazard however the escape looks. synth[v] = c means the value
+        # coming INTO the loop is already c and every path through the body converges back to c,
+        # so after the split the host copy still holds c -- which is exactly what the sequential
+        # loop leaves, on any iteration count including zero. mpnn's reverse node loop is this
+        # case: `sb` enters at 0.0 and the body's last write to it is 0.0, but that write sits
+        # inside a runtime-bounded feature loop, so cgen_last_assign_is_zero cannot prove it and
+        # the whole n_nodes loop was stranded on the host.
+        haskey(synth, v) && continue
         cgen_last_assign_is_zero(stmt.body, v) || return false
     end
     return true
@@ -5623,7 +5649,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             eligible = eligible && cgen_kernel_def_ok(() -> cgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), backend, loop_reduce_vars, synth))
             # see cgen_liveout_is_zeroed -- refuses a split whose local scalars a later host
             # statement reads, which would read them stale
-            eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()))
+            eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth)
             if eligible
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
@@ -5649,7 +5675,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # (or a further sibling loop, per mpnn's `sb` scratch reused across two separate loop nests)
             # can still see it. Only truly unprovable scalars get deleted.
             for v in cgen_all_assigned_scalars(stmt.body)
-                c = cgen_loop_convergent_constant(stmt.body, v)
+                c = cgen_loop_convergent_constant(stmt.body, v, get(known_consts, v, nothing))
                 # The convergent constant only describes the value AFTER the loop if the loop
                 # actually ran. A runtime bound may give zero iterations, in which case `v` still
                 # holds whatever it held coming in -- unless that was already the same constant,
@@ -6029,7 +6055,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # than blindly deleting -- a scalar that provably converges to a literal by this loop's
             # own tail stays known for statements (or further sibling loops) that follow.
             for v in cgen_all_assigned_scalars(stmt.body)
-                c = cgen_loop_convergent_constant(stmt.body, v)
+                c = cgen_loop_convergent_constant(stmt.body, v, get(known_consts, v, nothing))
                 # The convergent constant only describes the value AFTER the loop if the loop
                 # actually ran. A runtime bound may give zero iterations, in which case `v` still
                 # holds whatever it held coming in -- unless that was already the same constant,
@@ -6555,8 +6581,13 @@ function val_generate_baseline(kernel, primal_expr::Expr;
 # A scalar_int arg is very often an iteration count -- more iterations means more chances for per-step amplification to
 # compound into a blow-up under otherwise reasonable random data. Narrowing the upper end of the range after a divergence --
 # rather than redrawing at the same range -- targets that directly, without assuming what any particular arg means. Allowed to
-# fall below the caller's own int_lo down to 1 (never 0, since a zero-iteration loop would trivially pass): a smaller working
-# baseline beats none. Reset for a non-divergence failure.
+# fall below the caller's own int_lo down to 1: a smaller working baseline beats none. Reset for a non-divergence failure.
+# The floor stays at 1 only because THIS path is a divergence remedy, not a coverage mechanism -- an int_lo of 0 passed in by
+# the caller is honoured, and is how a zero-trip loop gets drawn deliberately (see validate_zerotrip.jl). It used to say a
+# zero-iteration loop "would trivially pass"; that turned out to be exactly backwards. Six separate analyses treated a loop
+# that may not run as having run, every one of them producing silently wrong gradients, and none was reachable at all until a
+# kernel was hand-written to retire a bound past zero. What IS true is that a draw carrying no signal passes trivially, and
+# that is now a rejection criterion below rather than an assumption here.
     cur_hi = int_hi
     for attempt in 1:attempts
         int_args = val_random_int_args(kernel.sig; lo = min(int_lo, cur_hi), hi = cur_hi, divisible_by = divisible_by)
@@ -6581,6 +6612,15 @@ function val_generate_baseline(kernel, primal_expr::Expr;
 # so the FD reference itself is garbage, not the exactly-computed adjoint/tangent being
 # compared against it. Reject and redraw before even reaching the tangent self-check below.
                 y0 = f_eval_vec(x0)
+# A candidate whose observed output is identically zero exercises nothing: every derivative check
+# compares 0 against 0 and passes whatever the generated code does. That is the real hazard behind
+# the old "trivially pass" worry, and it bites hardest at small int args, where a kernel can
+# degenerate to running no iterations at all. Rejecting here is what makes int_lo = 0 usable: the
+# draws that keep some loops running survive, the ones that flatten the whole kernel are redrawn.
+                if maximum(abs.(y0); init = 0.0) == 0.0
+                    error("candidate baseline's observed primal output is identically zero -- " *
+                          "nothing would be exercised, so every derivative check would pass vacuously")
+                end
                 if !(all(isfinite, y0) && maximum(abs.(y0); init = 0.0) <= max_output_magnitude)
                     cur_hi = max(1, div(cur_hi + 1, 2))
                     error("candidate baseline's own primal output is non-finite or too large " *

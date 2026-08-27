@@ -257,16 +257,38 @@ splittable loops merge, so fewer kernels can mean more offloaded.
     destroys anything established earlier, so it must clear the fact
     rather than be skipped.
 
-    This exact bug has been written five separate times, in
+    This exact bug has been written six separate times, in
     `norm_first_touch`, `cgen_last_assign_is_zero`,
-    `ii_kill_and_collect!`, and the post-loop `known_consts` update in
-    both `cgen_body` and `jgen_body`. Every instance produced silently
-    wrong gradients; none was caught by the corpus unaided, and two
-    needed a GPU run. Grep any new analysis for it before merging.
+    `ii_kill_and_collect!`, `cgen_loop_convergent_constant`, and the
+    post-loop `known_consts` update in both `cgen_body` and `jgen_body`.
+    Every instance produced silently wrong gradients; none was caught by
+    the corpus unaided, and two needed a GPU run. The sixth was found by
+    the fix for the fifth, not by the audit that followed it -- so audit
+    by construction, not by recall.
 
-    It hides because the baseline generator only draws positive integer
-    bounds, so no corpus kernel reaches a zero-trip loop by accident. A
-    witness has to be built deliberately -- retire a width past zero
-    (`w = w - 3`, or `i_w0 - 5`) so every draw in the generator's range
-    empties the loop. `retire_empty`, `entry_empty` and `ii_kill` are
-    the three that exist; copy their shape rather than inventing one.
+    The audit that works: grep for a recursion into `stmt.body` whose
+    result is ASSIGNED to accumulated state (`state = f(stmt.body, ...)`).
+    That is the shape every instance took. Pure collectors that union,
+    existence searches that return early, and codegen walkers that emit
+    statements are all immune -- an unexecuted loop can only remove
+    things from a union, never add a false fact. What is left after that
+    filter is small enough to read line by line.
+
+    Two ways to reach it. `test/validate_zerotrip.jl` runs the whole
+    corpus with `int_lo = 0`, so any loop whose bound IS an integer
+    argument executes zero times -- 19 kernels draw one, deterministically
+    (validate_corpus seeds per kernel name). Run it alongside the ordinary
+    corpus when touching any of these analyses.
+
+    That does not reach a bound computed INSIDE the kernel, which is
+    where all six were actually found. For those, retire a width past
+    zero (`w = w - 3`, or `i_w0 - 5`) so every draw in the generator's
+    range empties the loop. `retire_empty`, `entry_empty` and `ii_kill`
+    are the three that exist; copy their shape rather than inventing one.
+
+    The generator used to floor its draws at 1, on the stated grounds
+    that "a zero-iteration loop would trivially pass". That is backwards:
+    a zero-trip loop is where these bugs live. What passes trivially is a
+    draw carrying NO SIGNAL -- every derivative check comparing 0 to 0 --
+    and `val_generate_baseline` now rejects those explicitly instead,
+    which is what makes `int_lo = 0` usable.

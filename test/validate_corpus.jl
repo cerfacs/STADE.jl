@@ -20,7 +20,8 @@ different STADE revision than the one this script loads. Only the kernel
 source `.jl` files are real input, so this script treats everything else in
 `dir` as disposable.
 """
-function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_pop::Bool = false, fuse_ii_loops::Bool = true)
+function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_pop::Bool = false, fuse_ii_loops::Bool = true,
+                         int_lo::Int = 3, int_hi::Int = 5)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") || endswith(f, ".yaml")
             rm(joinpath(dir, f))
@@ -55,7 +56,8 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_
                 # Pass the SAME flags used above for generation -- the validator's own
                 # defaults would otherwise check a different mode's math than the one
                 # under test, and the flagged path would go unexercised.
-                r = fn(path; trials = trials, keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
+                r = fn(path; trials = trials, keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops,
+                       int_lo = int_lo, int_hi = int_hi)
                 push!(results, (kernel = name, mode = mode, status = r.ok ? :ok : :FAIL, max_rel_err = r.max_rel_err))
             catch e
                 println("  !! ", name, " [", mode, "] ", first(split(sprint(showerror, e), "\n"))[1:min(end,150)])
