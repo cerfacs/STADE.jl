@@ -249,3 +249,24 @@ splittable loops merge, so fewer kernels can mean more offloaded.
     executed, and an unexecuted path is where defects survive. When
     adding a mechanism, enumerate the shapes it can meet and check one
     of each is represented.
+11. **A loop that may not run has not run.** Any analysis concluding
+    "this write establishes X" must prove the write executes: at the
+    body's own top level, in BOTH arms of an `:if`, or inside a loop
+    whose LITERAL bounds prove an iteration. A runtime bound proves
+    nothing. The same applies in reverse -- an unprovable write also
+    destroys anything established earlier, so it must clear the fact
+    rather than be skipped.
+
+    This exact bug has been written five separate times, in
+    `norm_first_touch`, `cgen_last_assign_is_zero`,
+    `ii_kill_and_collect!`, and the post-loop `known_consts` update in
+    both `cgen_body` and `jgen_body`. Every instance produced silently
+    wrong gradients; none was caught by the corpus unaided, and two
+    needed a GPU run. Grep any new analysis for it before merging.
+
+    It hides because the baseline generator only draws positive integer
+    bounds, so no corpus kernel reaches a zero-trip loop by accident. A
+    witness has to be built deliberately -- retire a width past zero
+    (`w = w - 3`, or `i_w0 - 5`) so every draw in the generator's range
+    empties the loop. `retire_empty`, `entry_empty` and `ii_kill` are
+    the three that exist; copy their shape rather than inventing one.
