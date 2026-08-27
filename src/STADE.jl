@@ -5488,22 +5488,53 @@ function cgen_liveout_is_zeroed(stmt, root_body, loop_vars)
     return true
 end
 
-# Is the LAST assignment to `v` on every path through `body` the literal 0.0?
+# Is the LAST assignment to `v` on every path through `body` the literal 0.0? A write only counts
+# when it is GUARANTEED to run: at this body's own top level, in both arms of an `:if`, or inside
+# a loop whose literal bounds prove at least one iteration. A write that might not happen cannot
+# establish the zero, and -- worse -- a write that might happen destroys a zero established
+# earlier, so an unprovable nested write clears the flag rather than being ignored.
+#
+# entry_empty is why: its adjoint zeroes the shadow inside `for i_j = w:-1:1`, which runs zero
+# times once the window retires, leaving `sb` holding a live accumulation. Accepting that as
+# "zeroed at exit" exempted the loop from the live-out gate, the pass loop was split, and the
+# host then read a stale `sb`. Caught on a live GPU at 1.43 relative error while the CPU adjoint
+# was correct -- the sequential path never exposes it.
 function cgen_last_assign_is_zero(body, v)
     found = false
-    function walk(stmts)
-        for st in stmts
-            if st.kind == :assign && st.lhs isa Symbol && st.lhs == v
-                found = st.rhs isa Number && st.rhs == 0.0
-            elseif st.kind == :for
-                walk(st.body)
-            elseif st.kind == :if
-                walk(st.then); walk(st.els)
+    for st in body
+        if st.kind == :assign && st.lhs isa Symbol && st.lhs == v
+            found = st.rhs isa Number && st.rhs == 0.0
+        elseif st.kind == :for
+            if cgen_writes_var(st.body, v)
+                found = cgen_loop_runs_once(st) && cgen_last_assign_is_zero(st.body, v)
+            end
+        elseif st.kind == :if
+            tw = cgen_writes_var(st.then, v)
+            ew = cgen_writes_var(st.els, v)
+            if tw || ew
+                found = tw && ew && cgen_last_assign_is_zero(st.then, v) &&
+                        cgen_last_assign_is_zero(st.els, v)
             end
         end
     end
-    walk(body)
     return found
+end
+
+cgen_loop_runs_once(st) =
+    st.lo isa Number && st.hi isa Number && st.step isa Number &&
+    (st.step > 0 ? st.hi >= st.lo : st.hi <= st.lo)
+
+function cgen_writes_var(body, v)
+    for st in body
+        if st.kind == :assign && st.lhs isa Symbol && st.lhs == v
+            return true
+        elseif st.kind == :for
+            cgen_writes_var(st.body, v) && return true
+        elseif st.kind == :if
+            (cgen_writes_var(st.then, v) || cgen_writes_var(st.els, v)) && return true
+        end
+    end
+    return false
 end
 
 # every loop's index variable, at any depth -- a `for` header rebinds these host-side, so they are
@@ -5619,7 +5650,17 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # can still see it. Only truly unprovable scalars get deleted.
             for v in cgen_all_assigned_scalars(stmt.body)
                 c = cgen_loop_convergent_constant(stmt.body, v)
-                if c === nothing
+                # The convergent constant only describes the value AFTER the loop if the loop
+                # actually ran. A runtime bound may give zero iterations, in which case `v` still
+                # holds whatever it held coming in -- unless that was already the same constant,
+                # which makes the claim true either way. Recording it unconditionally lets
+                # cgen_reduction_only_loop synthesise `v = c` as a split kernel's first statement
+                # for a LATER loop, and every thread then starts from c instead of the value the
+                # sequential code carried in. ii_kill is the witness: its reverse shadow enters
+                # the pass loop holding 2*v*outb[1], the zeroing i_j loop above it is empty once
+                # the width retires, and the GPU adjoint came out wrong by 0.98 while the CPU one
+                # was correct.
+                if c === nothing || !(cgen_loop_runs_once(stmt) || get(known_consts, v, nothing) == c)
                     delete!(known_consts, v)
                 else
                     known_consts[v] = c
@@ -5989,7 +6030,17 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # own tail stays known for statements (or further sibling loops) that follow.
             for v in cgen_all_assigned_scalars(stmt.body)
                 c = cgen_loop_convergent_constant(stmt.body, v)
-                if c === nothing
+                # The convergent constant only describes the value AFTER the loop if the loop
+                # actually ran. A runtime bound may give zero iterations, in which case `v` still
+                # holds whatever it held coming in -- unless that was already the same constant,
+                # which makes the claim true either way. Recording it unconditionally lets
+                # cgen_reduction_only_loop synthesise `v = c` as a split kernel's first statement
+                # for a LATER loop, and every thread then starts from c instead of the value the
+                # sequential code carried in. ii_kill is the witness: its reverse shadow enters
+                # the pass loop holding 2*v*outb[1], the zeroing i_j loop above it is empty once
+                # the width retires, and the GPU adjoint came out wrong by 0.98 while the CPU one
+                # was correct.
+                if c === nothing || !(cgen_loop_runs_once(stmt) || get(known_consts, v, nothing) == c)
                     delete!(known_consts, v)
                 else
                     known_consts[v] = c
@@ -7142,10 +7193,97 @@ function stade_site_level_tbr_check(kernel)
     return snap_sites, agen_sites
 end
 
+
+# ---- dead loop-entry scalars ----------------------------------------------------------------
+# A scalar assigned only INSIDE a nested block of `body`, and written there before anything reads
+# it, carries a value in from the previous iteration that nothing ever uses. The primal does not
+# say so, and the adjoint's pre-write snapshot then READS that carried value -- which makes the
+# enclosing loop look loop-carried to cgen_use_before_def and blocks the split, however dead the
+# value actually is. ttgc's second cell nest is the case in point: `vere` is assigned in every
+# i_loc iteration before use, but without a reset the cell loop stays on the host, at a cost of
+# i_ncell scalar round-trips per Jacobi sweep.
+#
+# Writing `var = 0.0` at the top of `body` states the kill the primal already implies. It is
+# numerically inert exactly when norm_first_touch says :write. Note that suppressing the snapshot
+# instead does NOT work, measured: cgen_use_before_def refuses on the structure of the body, so a
+# read that precedes the definition still blocks the split even when guarded away.
+function norm_dead_entry_vars(body, kinds, value_needed)
+    locals = agen_collect_reassigned(body, true)
+    return sort(collect(v for v in intersect(locals, value_needed)
+                        if get(kinds, v, :none) == :scalar_float &&
+                           !agen_has_top_level_write(body, v) &&
+                           norm_first_touch(body, v) === :write); by = string)
+end
+
+# :read, :write or :none -- what happens to `v` FIRST along every path through `body`. A write
+# only counts when it is GUARANTEED: both arms of an `:if`, or a loop whose literal bounds prove
+# at least one iteration. Anything weaker and the entry value can survive to a later read, so the
+# conservative answer is to keep scanning rather than claim a kill.
+function norm_first_touch(body, v)
+    for st in body
+        if st.kind == :assign
+            reads = Set{Symbol}()
+            agen_var_value_needed!(st.rhs, reads, false)
+            if st.lhs isa Expr
+                for a in st.lhs.args[2:end]
+                    agen_var_value_needed!(a, reads, true)
+                end
+            end
+            v in reads && return :read
+            st.lhs isa Symbol && st.lhs == v && agen_count_var_refs(st.rhs, v) == 0 && return :write
+        elseif st.kind == :for
+            t = norm_first_touch(st.body, v)
+            t === :read && return :read
+            if t === :write && st.lo isa Number && st.hi isa Number && st.step isa Number
+                (st.step > 0 ? st.hi >= st.lo : st.hi <= st.lo) && return :write
+            end
+        elseif st.kind == :if
+            reads = Set{Symbol}()
+            agen_var_value_needed!(st.cond, reads, true)
+            v in reads && return :read
+            tt = norm_first_touch(st.then, v)
+            te = norm_first_touch(st.els, v)
+            (tt === :read || te === :read) && return :read
+            (tt === :write && te === :write) && return :write
+        end
+    end
+    return :none
+end
+
+# Rewrites `kernel` with those resets inserted, innermost bodies included. Applied once, before
+# any analysis runs, so every stage downstream -- TBR, snapshot layout, lin_plan, cgen_ -- sees
+# one consistent kernel. The finite-difference oracles still evaluate the ORIGINAL primal, so a
+# reset inserted where the entry value was in fact live shows up as a gradient mismatch.
+function norm_insert_dead_entry_resets(kernel)
+    kinds = kernel.sig.kinds
+    value_needed = agen_value_needed_vars(kernel)
+    return merge(kernel, (body = norm_reset_body(kernel.body, kinds, value_needed),))
+end
+
+function norm_reset_body(body, kinds, value_needed)
+    out = NamedTuple[]
+    for st in body
+        if st.kind == :for
+            inner = norm_reset_body(st.body, kinds, value_needed)
+            for v in reverse(norm_dead_entry_vars(st.body, kinds, value_needed))
+                pushfirst!(inner, (kind = :assign, lhs = v, rhs = 0.0))
+            end
+            push!(out, merge(st, (body = inner,)))
+        elseif st.kind == :if
+            push!(out, merge(st, (then = norm_reset_body(st.then, kinds, value_needed),
+                                  els = norm_reset_body(st.els, kinds, value_needed))))
+        else
+            push!(out, st)
+        end
+    end
+    return out
+end
+
 function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
                         keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
+    kernel = norm_insert_dead_entry_resets(kernel)   # see norm_dead_entry_vars
     active_map = act_analyze(kernel)
     snap_sites, agen_sites = stade_site_level_tbr_check(kernel)
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
@@ -7158,6 +7296,7 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
                     dependents::Union{Vector{Symbol},Nothing}=nothing,
                     keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
+    kernel = norm_insert_dead_entry_resets(kernel)   # see norm_dead_entry_vars
     active_map = act_analyze(kernel)
     snap_sites, agen_sites = stade_site_level_tbr_check(kernel)
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
@@ -7850,7 +7989,16 @@ function ii_kill_and_collect!(body, alive, escaped, value_only = false)
             alive_els  = ii_kill_and_collect!(stmt.els,  copy(alive), escaped, value_only)
             alive = intersect(alive_then, alive_els)
         elseif stmt.kind == :for
-            alive = ii_kill_and_collect!(stmt.body, alive, escaped, value_only)
+            # A kill inside a loop only counts when the loop is GUARANTEED to run -- a loop with
+            # a runtime bound may execute zero times, leaving the incoming value in place for a
+            # later read to observe. Reads are collected either way (they are the escapes we are
+            # looking for); only the kill is conditional. The `:if` arm above is the same rule
+            # expressed as an intersection: kill only when both branches kill.
+            #
+            # Getting this wrong under-reports escapes, so a loop gets fused whose scalar is
+            # still live, and the gradient is silently wrong -- ii_kill is the witness, at 0.39.
+            inner = ii_kill_and_collect!(stmt.body, copy(alive), escaped, value_only)
+            cgen_loop_runs_once(stmt) && (alive = inner)
         end
     end
     return alive

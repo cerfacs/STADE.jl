@@ -42,14 +42,21 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "branchsel" => 0, "cascadic_mg_prolong" => 22,
         "cellscatter" => 3,
         "clamped_sumsq" => 0, "coarsen_retire" => 4, "cond_field_choice" => 0,
-        "cond_loop_choice" => 0, "dotprod" => 0, "geomrecur" => 3,
-        "fixed_sweeps" => 3, "ii_readbefore" => 4, "ii_readnested" => 2,
+        "cond_loop_choice" => 0, "dotprod" => 0,
+    # entry_empty and mpnn sit one or two loops above what they reached before
+    # cgen_last_assign_is_zero started requiring the zeroing write to be GUARANTEED. For
+    # entry_empty the split it gave up was unsafe: the shadow is zeroed inside a loop that
+    # runs zero times once the window retires, and the GPU adjoint was wrong by 1.43 while
+    # the CPU one was correct. mpnn is the conservative residue of the same rule.
+        "entry_branch" => 3, "entry_dead" => 2, "entry_empty" => 7,
+        "geomrecur" => 3,
+        "fixed_sweeps" => 3, "ii_kill" => 6, "ii_readbefore" => 4, "ii_readnested" => 2,
         "matvec_loss" => 0, "mg_vcycle" => 28, "mg_vcycle_multi" => 28,
-        "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
+        "mpnn" => 1, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
         "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
         "retire_empty" => 4,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,
-        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 11,
+        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 6,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,
         "windowed_relax_retire" => 7,
     )
