@@ -2648,12 +2648,22 @@ function agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_
 end
 
 # This body's own boundary push is redundant when the body does not write `var` at its own top
-# level AND some body nested inside it is GUARANTEED to push `var`. That inner pop re-establishes
-# `var` at the head of every one of its reverse iterations, before any statement that could read
-# it, so the outer pop only ever restores a value the inner one immediately overwrites -- and the
-# outer PUSH, which reads `var` after a loop cgen_ may have split onto the device, is exactly
-# where a stale host scalar was being stored. Confirmed on a live GPU: cellscatter's gradients
-# were correct while its stacks differed by a full relative 1.0, entirely through this push.
+# level AND some body nested inside it is GUARANTEED to push `var`. The outer PUSH is the thing
+# worth removing: it reads `var` after a loop cgen_ may have split onto the device, so it stores
+# whatever stale value the host copy still holds. Confirmed on a live GPU -- cellscatter's
+# gradients were correct while its stacks differed by a full relative 1.0, entirely through this
+# push, and 2.2e-16 once it was gone.
+#
+# Note what the GUARANTEED condition is and is NOT for. It is NOT what makes dropping safe: the
+# site pushes inside `body` already form a complete chain, since the first one restores the
+# body's entering value, which is the previous iteration's final value, which is what the
+# previous reverse iteration needs at its start. Kernels where the outer push is kept and no
+# descendant qualifies drop it with bit-identical gradients. What the condition bounds is how
+# AGGRESSIVE the collapse gets. Drop more than this and the value need moves into per-iteration
+# site pushes inside the loop, cgen_contains_stackop then refuses to split it, and offload
+# coverage falls -- measured at ttgc 8 -> 14 host loops, coarsen_retire 4 -> 6, red_escape
+# 5 -> 6. So a mutation of this predicate fails validate_offload, NOT validate_corpus. Testing it
+# against the oracles alone reports it as dead weight, which is how it was nearly deleted.
 #
 # Keyed on the GUARANTEED condition (agen_boundary_kill_vars': a nested write plus a top-level
 # write, which no ii_plan can retire) rather than on agen_block_boundary_vars itself. The layout
