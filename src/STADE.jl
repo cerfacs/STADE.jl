@@ -1622,6 +1622,17 @@ function snap_plan(kernel, active_map; site_needed = nothing)
     counter = Ref(0)
     snap_walk!(kernel.body, active_map, kernel.sig.kinds, reassigned, value_needed, sites, counter,
                false, assign_counts, kernel.body, site_needed)
+    # A block-boundary push owns its stack outright instead of borrowing one an :assign site
+    # happened to create. The boundary kill in snap_fwd_walk! retires exactly those sites, and
+    # agen_block_boundary_vars SKIPS a var with no (:value, var) stack -- so without this the
+    # push and its matching pop would both vanish silently rather than raise. A stack with no
+    # remaining reference is pruned later by agen_finalize_stacks, so registering one that
+    # ii_plan or `exempt` turns out to retire costs nothing.
+    for var in sort(collect(snap_boundary_snapshot_vars(kernel)); by = string)
+        any(s -> s.kind == :value && s.array == var, sites) && continue
+        counter[] = counter[] + 1
+        push!(sites, (kind = :value, array = var, at = counter[]))
+    end
     return sites
 end
 
@@ -1891,12 +1902,101 @@ function snap_count_expr_occurrences(expr, target)
     return total
 end
 
+# ---- block-boundary snapshot bookkeeping ----
+# Everything below describes the extra end-of-body push agen_forward_body emits (see
+# agen_block_boundary_vars), duplicated on the snap_ side for the same purity reason as every
+# other snap_/agen_ pair here. Two consumers: snap_plan gives each such var a :value site of
+# its own, and snap_fwd_walk! kills it from `seen` at the end of the body it covers.
+
+# agen_exempt_vars' twin: vars whose sole kernel-wide write qualifies for the iteration-
+# independent elision, so no site -- and hence no boundary push -- is emitted for them.
+function snap_exempt_vars(kernel, value_needed)
+    assign_counts = snap_count_assign_sites(kernel.body)
+    exempt = Set{Symbol}()
+    snap_collect_exempt_vars!(kernel.body, value_needed, assign_counts, kernel.body, false, exempt)
+    return exempt
+end
+
+function snap_collect_exempt_vars!(body, value_needed, assign_counts, full_body, in_loop, exempt)
+    for stmt in body
+        if stmt.kind == :assign
+            var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            self_ref = snap_count_var_refs(stmt.rhs, var) > 0
+            if !self_ref && var in value_needed && !in_loop && get(assign_counts, var, 0) == 1 &&
+               !snap_read_before(full_body, stmt, var)
+                push!(exempt, var)
+            end
+        elseif stmt.kind == :for
+            snap_collect_exempt_vars!(stmt.body, value_needed, assign_counts, full_body, true, exempt)
+        elseif stmt.kind == :if
+            snap_collect_exempt_vars!(stmt.then, value_needed, assign_counts, full_body, in_loop, exempt)
+            snap_collect_exempt_vars!(stmt.els, value_needed, assign_counts, full_body, in_loop, exempt)
+        end
+    end
+    return nothing
+end
+
+# The float scalars a boundary push can cover at all: agen_block_boundary_vars' own filters
+# minus its per-body structural test. Computed once per kernel and threaded through the walk
+# so the per-body test stays a cheap structural one.
+function snap_boundary_stack_vars(kernel)
+    value_needed = snap_value_needed_vars(kernel)
+    exempt = snap_exempt_vars(kernel, value_needed)
+    return Set(v for v in value_needed if get(kernel.sig.kinds, v, :none) == :scalar_float && !(v in exempt))
+end
+
+# Vars this body's own boundary push is GUARANTEED to store: written inside a nested :for/:if,
+# which is what puts it on agen_block_boundary_vars' candidate list, AND written by a top-level
+# statement of this same body. The second condition is what makes the guarantee hold under
+# fuse_ii_loops: agen_ii_covered_write_check can never call a top-level write covered, so no
+# ii_plan retires this push. Without it the kill below could rest on a push already fused away.
+function snap_boundary_kill_vars(body, bvars)
+    isempty(bvars) && return Set{Symbol}()
+    nested = Set{Symbol}()
+    top = Set{Symbol}()
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(top, stmt.lhs)
+        elseif stmt.kind == :for
+            union!(nested, snap_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :if
+            union!(nested, snap_collect_reassigned(stmt.then, true))
+            union!(nested, snap_collect_reassigned(stmt.els, true))
+        end
+    end
+    return intersect(nested, top, bvars)
+end
+
+# Every var some body's boundary push stores, anywhere in the kernel. Deliberately NOT
+# restricted to snap_boundary_kill_vars' guaranteed subset: a stack is needed whenever the
+# push CAN be emitted, while the kill needs it to be certain.
+function snap_boundary_snapshot_vars(kernel)
+    out = Set{Symbol}()
+    snap_boundary_walk!(kernel.body, snap_boundary_stack_vars(kernel), out)
+    return out
+end
+
+function snap_boundary_walk!(body, bvars, out)
+    for stmt in body
+        if stmt.kind == :for
+            union!(out, intersect(snap_collect_reassigned(stmt.body, true), bvars))
+            snap_boundary_walk!(stmt.body, bvars, out)
+        elseif stmt.kind == :if
+            union!(out, intersect(snap_collect_reassigned(stmt.then, true), bvars))
+            union!(out, intersect(snap_collect_reassigned(stmt.els, true), bvars))
+            snap_boundary_walk!(stmt.then, bvars, out)
+            snap_boundary_walk!(stmt.els, bvars, out)
+        end
+    end
+    return nothing
+end
+
 # ---- site-level (forward-seen) TBR ----
 # `snap_value_needed_vars` decides whole-variable necessity; `snap_fwd_walk!` refines to a per-write
 # decision: w needs its pre-write value iff (a) w self-references, or (b) a nonlinear read of var
 # occurred strictly before w in forward order. This is the production path, reached via snap_plan's
 # site_needed kwarg; stade_site_level_tbr_check asserts it stays a subset of the whole-variable set.
-function snap_fwd_walk!(body, seen, active_map, decisions)
+function snap_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}())
     for idx in eachindex(body)
         stmt = body[idx]
         if stmt.kind == :assign
@@ -1912,14 +2012,25 @@ function snap_fwd_walk!(body, seen, active_map, decisions)
             seen = union(seen, local_reads)
         elseif stmt.kind == :if
             snap_var_value_needed!(stmt.cond, seen, true)   # cond always conservative
-            seen_then = snap_fwd_walk!(stmt.then, copy(seen), active_map, decisions)
-            seen_els  = snap_fwd_walk!(stmt.els,  copy(seen), active_map, decisions)
+            seen_then = snap_fwd_walk!(stmt.then, copy(seen), active_map, decisions, bvars)
+            seen_els  = snap_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars)
             seen = union(seen_then, seen_els)
         elseif stmt.kind == :for
-            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions)
+            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
         end
     end
-    return seen
+    # This body's block-boundary push re-establishes each of these vars at the head of its own
+    # reverse body, so every read INSIDE `body` is served by that pop plus this body's own
+    # sites, never by a site outside it. Dropping them here is what stops the loop back edge
+    # (snap_fwd_walk_loop!) demanding a redundant push at the first write of a body that
+    # already has a boundary snapshot -- the cell-loop `aux = 0.0` shape, whose push is what
+    # makes the whole loop look loop-carried to cgen_. A read placed BEFORE that write, in this
+    # same body, re-adds the var during the walk, so the within-iteration need is untouched;
+    # so is a read in an enclosing body, which arrives via in_seen and is restored by this
+    # body's own first site.
+    kill = snap_boundary_kill_vars(body, bvars)
+    isempty(kill) && return seen
+    return setdiff(seen, kill)
 end
 
 # Loop forward fixed point: a read near the top of a loop body is, for every iteration but
@@ -1927,16 +2038,16 @@ end
 # need a snapshot due to a read near the bottom, one iteration back. `seen` only grows
 # across passes, so this terminates; a final pass re-walks with the converged set so
 # `decisions` reflects the fixed point.
-function snap_fwd_walk_loop!(body, in_seen, active_map, decisions)
+function snap_fwd_walk_loop!(body, in_seen, active_map, decisions, bvars = Set{Symbol}())
     seen = copy(in_seen)
     while true
         scratch = Dict{Any,Bool}()
-        out_seen = snap_fwd_walk!(body, union(seen, in_seen), active_map, scratch)
+        out_seen = snap_fwd_walk!(body, union(seen, in_seen), active_map, scratch, bvars)
         out_seen == seen && break
         seen = out_seen
     end
     final_in = union(seen, in_seen)
-    return snap_fwd_walk!(body, final_in, active_map, decisions)
+    return snap_fwd_walk!(body, final_in, active_map, decisions, bvars)
 end
 
 # public entry point: per-site (not per-variable) TBR decisions for every :assign in
@@ -1944,7 +2055,7 @@ end
 # via stade_site_level_tbr_check, by agen_needs_snapshot.
 function snap_value_needed_sites(kernel)
     decisions = Dict{Any,Bool}()
-    snap_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions)
+    snap_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions, snap_boundary_stack_vars(kernel))
     return decisions
 end
 
@@ -2532,7 +2643,79 @@ end
 function agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = nothing)
     cand = agen_nested_write_vars(body, kinds)
     return sort(collect(v for v in cand if v in value_needed && !(v in exempt) && haskey(stacks, (:value, v)) &&
-                          !(ii_plan !== nothing && agen_ii_covered_write_check(body, v, ii_plan, false))); by = string)
+                          !(ii_plan !== nothing && agen_ii_covered_write_check(body, v, ii_plan, false)) &&
+                          !agen_boundary_push_redundant(body, v, kinds, value_needed, exempt)); by = string)
+end
+
+# This body's own boundary push is redundant when the body does not write `var` at its own top
+# level AND some body nested inside it is GUARANTEED to push `var`. That inner pop re-establishes
+# `var` at the head of every one of its reverse iterations, before any statement that could read
+# it, so the outer pop only ever restores a value the inner one immediately overwrites -- and the
+# outer PUSH, which reads `var` after a loop cgen_ may have split onto the device, is exactly
+# where a stale host scalar was being stored. Confirmed on a live GPU: cellscatter's gradients
+# were correct while its stacks differed by a full relative 1.0, entirely through this push.
+#
+# Keyed on the GUARANTEED condition (agen_boundary_kill_vars': a nested write plus a top-level
+# write, which no ii_plan can retire) rather than on agen_block_boundary_vars itself. The layout
+# walks call this without an ii_plan and the emit walks call it with one; a predicate that varied
+# between them would reserve a slot the emitter never writes, or drop one it does. Being keyed on
+# the same condition as the fwd-walk kill also means the two cannot disagree: the kill only ever
+# fires at a body with a top-level write, which is precisely a body that keeps its push.
+function agen_boundary_push_redundant(body, var, kinds, value_needed, exempt)
+    agen_has_top_level_write(body, var) && return false
+    return agen_boundary_guaranteed_below(body, var, kinds, value_needed, exempt)
+end
+
+agen_has_top_level_write(body, var) =
+    any(st -> st.kind == :assign && st.lhs isa Symbol && st.lhs == var, body)
+
+agen_boundary_guaranteed_here(body, var, kinds, value_needed, exempt) =
+    var in value_needed && !(var in exempt) && get(kinds, var, :none) == :scalar_float &&
+    var in agen_nested_write_vars(body, kinds) && agen_has_top_level_write(body, var)
+
+function agen_boundary_guaranteed_below(body, var, kinds, value_needed, exempt)
+    for st in body
+        if st.kind == :for
+            agen_boundary_guaranteed_here(st.body, var, kinds, value_needed, exempt) && return true
+            agen_boundary_guaranteed_below(st.body, var, kinds, value_needed, exempt) && return true
+        elseif st.kind == :if
+            for b in (st.then, st.els)
+                agen_boundary_guaranteed_here(b, var, kinds, value_needed, exempt) && return true
+                agen_boundary_guaranteed_below(b, var, kinds, value_needed, exempt) && return true
+            end
+        end
+    end
+    return false
+end
+
+# The float scalars a boundary push can cover at all: the filters above minus the per-body
+# structural test. See snap_boundary_stack_vars -- identical logic, duplicated for the same
+# purity-rule reason as every other agen_/snap_ pair in this file.
+function agen_boundary_stack_vars(kernel)
+    value_needed = agen_value_needed_vars(kernel)
+    exempt = agen_exempt_vars(kernel, value_needed)
+    return Set(v for v in value_needed if get(kernel.sig.kinds, v, :none) == :scalar_float && !(v in exempt))
+end
+
+# Vars this body's own boundary push is GUARANTEED to store: a nested write, which puts it on
+# agen_block_boundary_vars' candidate list, AND a top-level write of this same body, which
+# agen_ii_covered_write_check can never call covered -- so no ii_plan retires this push. See
+# snap_boundary_kill_vars.
+function agen_boundary_kill_vars(body, bvars)
+    isempty(bvars) && return Set{Symbol}()
+    nested = Set{Symbol}()
+    top = Set{Symbol}()
+    for stmt in body
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol && push!(top, stmt.lhs)
+        elseif stmt.kind == :for
+            union!(nested, agen_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :if
+            union!(nested, agen_collect_reassigned(stmt.then, true))
+            union!(nested, agen_collect_reassigned(stmt.els, true))
+        end
+    end
+    return intersect(nested, top, bvars)
 end
 
 function agen_collect_expr_vars!(expr, vars)
@@ -2652,7 +2835,7 @@ end
 # every agen_/snap_ pair in this file. stade_site_level_tbr_check asserts exact Dict
 # equality against snap_value_needed_sites on every call -- forward push and backward pop
 # must decide identically at every site or push/pop counts desync.
-function agen_fwd_walk!(body, seen, active_map, decisions)
+function agen_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}())
     for idx in eachindex(body)
         stmt = body[idx]
         if stmt.kind == :assign
@@ -2663,31 +2846,34 @@ function agen_fwd_walk!(body, seen, active_map, decisions)
             seen = union(seen, local_reads)
         elseif stmt.kind == :if
             agen_var_value_needed!(stmt.cond, seen, true)
-            seen_then = agen_fwd_walk!(stmt.then, copy(seen), active_map, decisions)
-            seen_els  = agen_fwd_walk!(stmt.els,  copy(seen), active_map, decisions)
+            seen_then = agen_fwd_walk!(stmt.then, copy(seen), active_map, decisions, bvars)
+            seen_els  = agen_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars)
             seen = union(seen_then, seen_els)
         elseif stmt.kind == :for
-            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions)
+            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
         end
     end
-    return seen
+    # end-of-body block-boundary kill -- see snap_fwd_walk!'s comment for the full argument
+    kill = agen_boundary_kill_vars(body, bvars)
+    isempty(kill) && return seen
+    return setdiff(seen, kill)
 end
 
-function agen_fwd_walk_loop!(body, in_seen, active_map, decisions)
+function agen_fwd_walk_loop!(body, in_seen, active_map, decisions, bvars = Set{Symbol}())
     seen = copy(in_seen)
     while true
         scratch = Dict{Any,Bool}()
-        out_seen = agen_fwd_walk!(body, union(seen, in_seen), active_map, scratch)
+        out_seen = agen_fwd_walk!(body, union(seen, in_seen), active_map, scratch, bvars)
         out_seen == seen && break
         seen = out_seen
     end
     final_in = union(seen, in_seen)
-    return agen_fwd_walk!(body, final_in, active_map, decisions)
+    return agen_fwd_walk!(body, final_in, active_map, decisions, bvars)
 end
 
 function agen_value_needed_sites(kernel)
     decisions = Dict{Any,Bool}()
-    agen_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions)
+    agen_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions, agen_boundary_stack_vars(kernel))
     return decisions
 end
 
@@ -2840,10 +3026,23 @@ function agen_stride(loop_ctx, i)
     return agen_prod_exprs(terms)
 end
 
+# A loop whose bound has fallen below its start runs zero times, but div(hi - lo, step) + 1 goes
+# NEGATIVE as soon as hi <= lo - 2. Inside a size SUM a negative term shrinks the allocation
+# rather than contributing nothing, so the stack comes out short and the reverse sweep runs off
+# the end of it. mg_vcycle at num_levels >= 4 reaches `for j = 1:nc` with nc = -1 and was
+# undersized by exactly that; retire_empty is the deterministic witness. Clamped here, at the one
+# place trip counts are summed into a size.
+#
+# agen_stride and cgen_kernel_def's bounds check deliberately keep the raw form. A stride is only
+# ever evaluated for a site that actually ran, so every factor in it is a loop that executed and
+# is therefore >= 1; and a negative bounds check already makes every thread return, which is the
+# correct behaviour for a loop with no iterations.
+agen_size_trip_count(lo, step, hi) = Expr(:call, :max, 0, cgen_trip_count(lo, step, hi))
+
 # product of trip counts of every frame in loop_ctx -- one
 # occurrence's own local multiplicity (§5's term), or 1 for a
 # non-loop site
-agen_local_multiplicity(loop_ctx) = agen_prod_exprs(Any[cgen_trip_count(f.lo, f.step, f.hi) for f in loop_ctx])
+agen_local_multiplicity(loop_ctx) = agen_prod_exprs(Any[agen_size_trip_count(f.lo, f.step, f.hi) for f in loop_ctx])
 
 # 1-based row-major flat position within one occurrence's own local block, from the current
 # enclosing loop nest (outermost first) -- degenerates to the literal 1 for a non-loop site.
@@ -3213,7 +3412,9 @@ end
 # resolve it by lookup instead of an unsafe bare reference.
 function agen_tier_b_block_stmts(block_id, blk, kinds)
     header = blk.header
-    tripcount_expr = cgen_trip_count(header.lo, header.step, header.hi)
+    # clamped: this table is indexed by agen_pos0(header) + 1, so its length must be the
+    # header's ACTUAL trip count -- a negative would be a Vector length, not just a bad sum
+    tripcount_expr = agen_size_trip_count(header.lo, header.step, header.hi)
     stack_names = sort(collect(keys(blk.local_sizes)); by = string)
     value_vars = sort(collect(blk.value_vars); by = string)
     table_name(s) = Symbol("prefix_" * string(s) * "_" * string(block_id))
@@ -3704,6 +3905,25 @@ function agen_if_branch_scalar_vars(stmt, kinds, value_needed)
     return vars
 end
 
+# Did agen_forward_body actually push this branch's write to `var` onto its value stack? The
+# forward gate is reproduced here in full, INCLUDING the site-level TBR decision -- lin_plan
+# activity alone is not it. Keyed on the primal branch body, the same object agen_forward_body
+# recursed into, so agen_site_key matches. Getting this wrong desyncs push!/pop!'s single
+# shared stack pointer under keep_push_pop=true: the discard-pop below would consume an entry
+# nothing ever pushed.
+function agen_branch_pushed(primal_branch, var, kinds, active_map, exempt, site_source)
+    for i in eachindex(primal_branch)
+        s = primal_branch[i]
+        s.kind == :assign || continue
+        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
+        v == var || continue
+        return kinds[v] in (:scalar_float, :array_float) && get(active_map, v, false) &&
+               agen_needs_snapshot(s.lhs, s.rhs, v, site_source, agen_site_key(primal_branch, i)) &&
+               !(v in exempt)
+    end
+    return false
+end
+
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
@@ -3753,12 +3973,15 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             then_expr = then_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : then_stmt.tree.expr
             els_expr = els_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : els_stmt.tree.expr
             (then_expr === nothing || els_expr === nothing) && continue   # can't safely recompute -- leave to the normal (imperfectly-timed) restore
-            # a branch only pushed onto the value stack (forward sweep)
-            # if its own rhs was active -- a literal-constant branch
-            # (like the `then_expr`/`els_expr` fallback case) never
-            # does, matching agen_forward_body's own push gate exactly
-            then_pushed = then_stmt !== nothing && then_stmt.active
-            els_pushed = els_stmt !== nothing && els_stmt.active
+            # a branch only pushed onto the value stack (forward sweep) if its own rhs was
+            # active AND its site-level TBR decision said so -- a literal-constant branch
+            # (like the `then_expr`/`els_expr` fallback case) never does. agen_branch_pushed
+            # reproduces agen_forward_body's push gate; `.active` alone is not that gate.
+            src = agen_push_pop_source(value_needed, ectx)
+            then_pushed = then_stmt !== nothing && then_stmt.active &&
+                          agen_branch_pushed(primal_body[idx].then, var, kinds, active_map, exempt, src)
+            els_pushed = els_stmt !== nothing && els_stmt.active &&
+                         agen_branch_pushed(primal_body[idx].els, var, kinds, active_map, exempt, src)
             push!(resolved, (var, then_expr, els_expr, then_pushed, els_pushed))
         end
         isempty(resolved) && continue
@@ -5198,22 +5421,28 @@ function cgen_expr_has_ref(e)
     return any(cgen_expr_has_ref, e.args)
 end
 
-# True iff `stmt`'s entire body is one nested `:for` that is itself split-eligible by the same test
-# cgen_body's own :for branch applies. Splitting `stmt` here would leave that inner loop serialized
-# inside every thread; deferring one level lets the inner loop become the thread-mapped one instead,
-# which is usually the loop that actually carries the trip count.
-function cgen_prefer_inner_split(stmt, known_consts::Dict{Symbol,Any}, outer_defs::Dict{Symbol,Any}, fn_args::Set{Symbol})
-    length(stmt.body) == 1 || return false
-    inner = stmt.body[1]
-    inner.kind == :for || return false
-    # A fully literal bound marks a fixed-size local loop -- corners, components,
-    # stencil taps -- never the dimension that needs to scale. Deferring into one undoes the point of
-    # deferring at all, so such a loop is left as the split target rather than chased past.
-    (inner.lo isa Number && inner.hi isa Number) && return false
-    inner_synth = cgen_reduction_only_loop(inner.body, inner.var, known_consts, outer_defs)
-    inner_synth === nothing && return false
-    issubset(cgen_scalar_reduction_vars(inner.body), fn_args) || return false
-    return !cgen_contains_stackop(inner.body)
+# Would splitting this loop actually produce a valid device kernel? cgen_reduction_only_loop's
+# array test is coarse by design: it admits a write and a read at the SAME index, which is right
+# for a commutative accumulation (cgen_device_assign rewrites it as an atomic add) and wrong for a
+# non-additive read-modify-write like `y[i] = 0.5 * y[i] + x[i]` that a repeating outer loop
+# re-applies -- threads running that concurrently race, and no atomic wrapper fixes it.
+# cgen_device_assign already refuses exactly this, but refusing THERE fails the whole conversion.
+# Asking here instead lets the loop stay on the host so its body can be split at a level that is
+# safe. `build` is the caller's own trial cgen_kernel_def/jgen_kernel_def call, so each backend
+# asks about its own codegen rather than a shared approximation of it.
+#
+# This replaced cgen_prefer_inner_split, which deferred into a lone inner child whenever BOTH
+# loops were eligible. That is a preference, not a fallback: it stranded every eligible outer loop
+# that happened to have one child on the host, including the Tier B sizing skeleton's
+# `for i_k = 1:nu; for i_j = 1:nc`, where splitting the outer is strictly better than nu host-side
+# launches of the inner. A fallback fires only when it is needed, so it witnesses itself.
+function cgen_kernel_def_ok(build)
+    try
+        build()
+        return true
+    catch
+        return false
+    end
 end
 
 # ---- host-side body walk: splits device kernels off ----
@@ -5226,7 +5455,61 @@ end
 # recursion level -- cgen_reduction_only_loop's array-privacy proof needs it to see through a
 # kernel-level size relationship like `n_in_msg = 2 * n_node_feat + n_edge_feat`, defined well
 # outside any candidate loop's own body.
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), already_deferred::Bool = false)
+
+# Splitting a loop moves its assignments onto the DEVICE, leaving the host's copy of every local
+# scalar behind. Any later HOST read of one of them then sees a stale value -- cgen_use_before_def
+# only checks reads that happen WITHIN the loop. This is the gate for reads that happen after it.
+#
+# An adjoint shadow is exempt, and provably so rather than by luck: agen_backward_assign ends
+# every consumed shadow with `vb = 0.0`, so the device leaves 0.0 behind and the host copy is
+# already 0.0. That exemption is what keeps the gate affordable -- 28 of the corpus's 41 live-out
+# sites are shadows. The rest are gathered accumulators, stencil taps and retired window bounds,
+# where the two values genuinely differ and the host stores the wrong number.
+#
+# Depends on the block-boundary collapse (agen_boundary_push_redundant) having already removed
+# the redundant outer pushes: those were the reads, and without the collapse this gate refuses
+# nine corpus kernels instead of three.
+function cgen_liveout_is_zeroed(stmt, root_body, loop_vars)
+    locals = setdiff(cgen_locally_assigned_scalars(stmt.body), loop_vars)
+    isempty(locals) && return true
+    for v in ii_escapes_nested(root_body, stmt.body, locals)
+        cgen_last_assign_is_zero(stmt.body, v) || return false
+    end
+    return true
+end
+
+# Is the LAST assignment to `v` on every path through `body` the literal 0.0?
+function cgen_last_assign_is_zero(body, v)
+    found = false
+    function walk(stmts)
+        for st in stmts
+            if st.kind == :assign && st.lhs isa Symbol && st.lhs == v
+                found = st.rhs isa Number && st.rhs == 0.0
+            elseif st.kind == :for
+                walk(st.body)
+            elseif st.kind == :if
+                walk(st.then); walk(st.els)
+            end
+        end
+    end
+    walk(body)
+    return found
+end
+
+# every loop's index variable, at any depth -- a `for` header rebinds these host-side, so they are
+# never stale and must not be mistaken for live-out locals
+function cgen_collect_loop_vars(body, acc)
+    for st in body
+        if st.kind == :for
+            push!(acc, st.var); cgen_collect_loop_vars(st.body, acc)
+        elseif st.kind == :if
+            cgen_collect_loop_vars(st.then, acc); cgen_collect_loop_vars(st.els, acc)
+        end
+    end
+    return acc
+end
+
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
     exprs = Any[]
     # Seeded from the enclosing body's own known_consts at the point this body was reached (never
     # written back) -- a scalar reset at the *tail* of a non-split ancestor loop's body converges
@@ -5274,7 +5557,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -5294,10 +5577,13 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
             safe_scope = issubset(loop_reduce_vars, fn_args)
             eligible = synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
-            # Defer at most one level: once deferred into, this same check is skipped so a longer lone-child
-            # chain doesn't get chased past its second loop.
-            defer = eligible && !already_deferred && cgen_prefer_inner_split(stmt, known_consts, outer_defs, fn_args)
-            if eligible && !defer
+            # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
+            # codegen rather than a structural approximation of it
+            eligible = eligible && cgen_kernel_def_ok(() -> cgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), backend, loop_reduce_vars, synth))
+            # see cgen_liveout_is_zeroed -- refuses a split whose local scalars a later host
+            # statement reads, which would read them stale
+            eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()))
+            if eligible
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
                     target, op, arrs, term = red
@@ -5312,7 +5598,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, already_deferred = defer)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
             end
             delete!(known_consts, stmt.var)
             # Blind invalidation here would throw away entries that remain true: if this loop's own
@@ -5598,7 +5884,7 @@ end
 # against a device array. Unlike CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch, raising 'Scalar indexing is disallowed'. Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
 # outer_defs: see cgen_body's identical parameter -- kept in sync for the JACC target.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), already_deferred::Bool = false)
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
     # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
@@ -5644,10 +5930,10 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
             safe_scope = issubset(loop_reduce_vars, fn_args)
             eligible = synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
-            # Defer at most one level: once deferred into, this same check is skipped so a longer lone-child
-            # chain doesn't get chased past its second loop.
-            defer = eligible && !already_deferred && cgen_prefer_inner_split(stmt, known_consts, outer_defs, fn_args)
-            if eligible && !defer
+            # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
+            # codegen rather than a structural approximation of it
+            eligible = eligible && cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth))
+            if eligible
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
                     target, op, arrs, term = red
@@ -5685,7 +5971,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, already_deferred = defer)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
             end
             delete!(known_consts, stmt.var)
             # See cgen_body's matching comment: update via cgen_loop_convergent_constant rather
@@ -7262,6 +7548,24 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
     push!(lines, "function _val_init_stacks_local(fn, extra_args)\n    r = fn(extra_args...)\n    r === nothing && return ()\n    r isa Tuple && return r\n    return (r,)\nend\n")
     push!(lines, "_relerr_scalar(a, b) = abs(a - b) / max(abs(a), abs(b), 1.0)\n" *
                  "_relerr_arr(a, b) = maximum(abs.(a .- b) ./ max.(abs.(a), abs.(b), 1.0))\n")
+    # Compares the SNAPSHOT STACKS, not just the arguments. A stack slot written from a stale
+    # host scalar -- one a split loop assigned on the device, leaving the host copy behind --
+    # shows up here and nowhere else, because the gradients stay correct whenever that slot's
+    # restore happens to be dead. That is a real condition on the corpus, confirmed on a live
+    # GPU for cellscatter (gradients to 5.5e-14, stacks off by a full relative 1.0) and for
+    # raggedii. It is reported rather than folded into `ok` for exactly that reason: a nonzero
+    # value means the kernel passes for a reason nothing in the codebase enforces, which is a
+    # finding, not a failure. Non-array tuple entries are skipped -- a Tier B initstacks_*
+    # returns prefix tables and scalar totals alongside the stacks themselves.
+    push!(lines, "function _val_stack_relerr(cpu_stacks, gpu_stacks)\n" *
+                 "    worst = 0.0\n    n = 0\n" *
+                 "    for (c, g) in zip(cpu_stacks, gpu_stacks)\n" *
+                 "        (c isa AbstractArray && g isa AbstractArray) || continue\n" *
+                 "        eltype(c) <: AbstractFloat || continue\n" *
+                 "        a = Array(g)\n" *
+                 "        length(c) == length(a) || continue\n" *
+                 "        n += 1\n        worst = max(worst, _relerr_arr(c, a))\n" *
+                 "    end\n    return (worst, n)\nend\n")
 
     for a in sig.args
         sig.kinds[a] == :scalar_int || continue
@@ -7292,7 +7596,7 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
     ret_cpu_tuple = isempty(scalar_args) ? "()" : (length(scalar_args) == 1 ? "(ret_cpu,)" : "ret_cpu")
     ret_gpu_tuple = isempty(scalar_args) ? "()" : (length(scalar_args) == 1 ? "(ret_gpu,)" : "ret_gpu")
 
-    push!(lines, "max_rel_err = 0.0")
+    push!(lines, "max_rel_err = 0.0", "stack_max_rel_err = 0.0", "stacks_compared = 0")
     push!(lines, "for __trial in 1:$(length(seeds))")
     for a in array_float_args
         push!(lines, "  $(a)_val_cpu = deepcopy(__base_$(a)); $(a)_sh_cpu = deepcopy(__seed_$(a)[__trial])")
@@ -7323,9 +7627,12 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
     for (i, _) in enumerate(scalar_args)
         push!(lines, "  local_max = max(local_max, _relerr_scalar(ret_cpu_t[$(i)], ret_gpu_t[$(i)]))")
     end
+    push!(lines, "  (__sworst, __sn) = _val_stack_relerr(stacks_cpu, stacks_gpu)")
+    push!(lines, "  global stack_max_rel_err = max(stack_max_rel_err, __sworst)")
+    push!(lines, "  global stacks_compared += __sn")
     push!(lines, "  global max_rel_err = max(max_rel_err, local_max)")
     push!(lines, "end")
-    push!(lines, "println(JSON3.write(Dict(\"ok\" => max_rel_err <= $(rtol), \"max_rel_err\" => max_rel_err, \"device\" => $(val_gpu_device_name_expr(backend)))))")
+    push!(lines, "println(JSON3.write(Dict(\"ok\" => max_rel_err <= $(rtol), \"max_rel_err\" => max_rel_err, \"stack_max_rel_err\" => stack_max_rel_err, \"stacks_compared\" => stacks_compared, \"device\" => $(val_gpu_device_name_expr(backend)))))")
 
     return join(lines, "\n") * "\n"
 end
@@ -7480,18 +7787,42 @@ function ii_expr_reads(expr, vars, acc)
     return nothing
 end
 
+# Value-needed variant of ii_expr_reads: counts only a read whose local partial actually requires
+# the variable's own VALUE, using the same top-down linearity rule as snap_var_value_needed!. The
+# canonical reduction write-back `out[i] = s` is linear in s and needs no restored primal, so it
+# must NOT count as an escape for a kind whose adjoint stays at the backward position -- counting
+# it would refuse every reduction loop there is. `out[i] = out[i] + s * s` does need it.
+function ii_value_reads(expr, vars, acc, needed)
+    if expr isa Expr && expr.head == :call
+        op = expr.args[1]
+        child = (op == :+ || op == :-) ? needed : true
+        for a in expr.args[2:end]
+            ii_value_reads(a, vars, acc, child)
+        end
+    elseif expr isa Expr && expr.head == :ref
+        needed && (expr.args[1] in vars) && push!(acc, expr.args[1])
+        for a in expr.args[2:end]
+            ii_value_reads(a, vars, acc, needed)
+        end
+    elseif expr isa Symbol
+        needed && (expr in vars) && push!(acc, expr)
+    end
+    return nothing
+end
+
 # Walks `body` in forward order, threading `alive` (vars still carrying `target`'s contribution) the way
 # snap_fwd_walk!/agen_fwd_walk_loop! thread `seen` -- returns the updated alive-set, accumulating escapes into `escaped`. A var
 # is removed from `alive` on a fresh (non-self-referencing) assignment; any read (linear or nonlinear) of a still-alive var is
 # an escape. `:if` is conservative: a var survives only if it survives both arms. A write's own lhs index expressions are
 # checked too -- an alive scalar used as an index elsewhere is still a genuine read.
-function ii_kill_and_collect!(body, alive, escaped)
+function ii_kill_and_collect!(body, alive, escaped, value_only = false)
     for stmt in body
         isempty(alive) && return alive
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             local_reads = Set{Symbol}()
-            ii_expr_reads(stmt.rhs, alive, local_reads)
+            value_only ? ii_value_reads(stmt.rhs, alive, local_reads, false) :
+                         ii_expr_reads(stmt.rhs, alive, local_reads)
             if stmt.lhs isa Expr
                 for a in stmt.lhs.args[2:end]
                     ii_expr_reads(a, alive, local_reads)
@@ -7505,11 +7836,11 @@ function ii_kill_and_collect!(body, alive, escaped)
             cond_reads = Set{Symbol}()
             ii_expr_reads(stmt.cond, alive, cond_reads)
             union!(escaped, cond_reads)
-            alive_then = ii_kill_and_collect!(stmt.then, copy(alive), escaped)
-            alive_els  = ii_kill_and_collect!(stmt.els,  copy(alive), escaped)
+            alive_then = ii_kill_and_collect!(stmt.then, copy(alive), escaped, value_only)
+            alive_els  = ii_kill_and_collect!(stmt.els,  copy(alive), escaped, value_only)
             alive = intersect(alive_then, alive_els)
         elseif stmt.kind == :for
-            alive = ii_kill_and_collect!(stmt.body, alive, escaped)
+            alive = ii_kill_and_collect!(stmt.body, alive, escaped, value_only)
         end
     end
     return alive
@@ -7549,7 +7880,7 @@ end
 # to 'before' siblings) detects every reachable read -- one pass suffices, since `alive` is fixed, not something that needs to
 # converge. What propagates outward uses only the 'after' segment's kill effect: a consumer outside this level only observes what
 # the last repetition's tail left behind. A non-repeating level skips the wraparound pass entirely.
-function ii_escapes_nested(kernel_body, target, vars)
+function ii_escapes_nested(kernel_body, target, vars, value_only = false)
     path = ii_find_ancestor_path(kernel_body, target, false)
     path === nothing && return copy(vars)
     escaped = Set{Symbol}()
@@ -7560,11 +7891,45 @@ function ii_escapes_nested(kernel_body, target, vars)
         after = body[idx+1:end]
         if repeating
             before = body[1:idx-1]
-            ii_kill_and_collect!(vcat(after, before), copy(alive), escaped)
-            alive = ii_kill_and_collect!(after, alive, escaped)
+            ii_kill_and_collect!(vcat(after, before), copy(alive), escaped, value_only)
+            alive = ii_kill_and_collect!(after, alive, escaped, value_only)
         else
-            alive = ii_kill_and_collect!(after, alive, escaped)
+            alive = ii_kill_and_collect!(after, alive, escaped, value_only)
         end
+    end
+    return escaped
+end
+
+
+# Value-needed reads of `vars` that are a genuine hazard for a kind whose adjoint stays at the
+# backward position. Same walk as ii_escapes_nested, value-needed only (see ii_value_reads),
+# EXCEPT at the innermost enclosing body: a var that body is guaranteed to block-boundary
+# snapshot is restored at the head of every one of its reverse iterations, before any of its
+# statements run, so a read there is already served. That is exactly what makes a cell-scatter
+# gather loop safe -- `auxu = 0.0` at the top of the cell body, gathered by one sub-loop and
+# consumed nonlinearly by the next -- and it is why snap_boundary_kill_vars' top-level-write
+# condition is load-bearing here: without it the guarantee does not hold and nothing restores
+# the accumulator. Outer levels get no such exemption; the boundary pop there restores a
+# per-iteration value, not the post-loop one an outer read needs.
+function ii_red_escapes(kernel_body, target, vars, bvars)
+    path = ii_find_ancestor_path(kernel_body, target, false)
+    path === nothing && return copy(vars)
+    escaped = Set{Symbol}()
+    alive = copy(vars)
+    for i in eachindex(path)
+        isempty(alive) && break
+        (body, idx, repeating) = path[i]
+        after = body[idx+1:end]
+        here = Set{Symbol}()
+        if repeating
+            before = body[1:idx-1]
+            ii_kill_and_collect!(vcat(after, before), copy(alive), here, true)
+            alive = ii_kill_and_collect!(after, alive, here, true)
+        else
+            alive = ii_kill_and_collect!(after, alive, here, true)
+        end
+        i == 1 && setdiff!(here, snap_boundary_kill_vars(body, bvars))
+        union!(escaped, here)
     end
     return escaped
 end
@@ -7806,8 +8171,12 @@ end
 function ii_fused_var_in_nested_for(body, vars, plan = nothing)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :for
-            # a nested loop that is ITSELF classified re-establishes its
-            # own scalars per inner iteration, so it is not a hazard.
+            # A nested loop that is ITSELF classified re-establishes its own scalars per inner
+            # iteration -- but only for a read INSIDE that loop. A read at THIS level that
+            # precedes the loop is reversed in the fused body's `bwd` half, which runs after the
+            # whole forward nest, so it sees the scalar's last inner-iteration value instead of
+            # the one it read going forward. A read that FOLLOWS the loop is safe for the same
+            # reason it is a hazard here: going forward it already read that last inner value.
             covered = plan !== nothing && haskey(plan, agen_site_key(body, idx))
             (!covered && ii_assigns_any(stmt.body, vars)) && return true
         elseif stmt.kind == :if
@@ -7816,6 +8185,76 @@ function ii_fused_var_in_nested_for(body, vars, plan = nothing)
         end
     end
     return false
+end
+
+# ---- reverse-direction escape: a read the loop is reversed BEFORE -------------------
+# ii_escapes_nested asks whether the loop's own output reaches a later read. This asks the
+# mirror question: does a read positioned BEFORE the loop still need the value the loop
+# overwrites? Such a read's adjoint runs AFTER the fused loop's backward code, and every fusing
+# kind elides its fused scalars' snapshots, so nothing re-establishes the value in between.
+# Walks each ancestor level's preceding siblings forward, accumulating vars that have been read,
+# and dropping one again on a fresh assignment -- that assignment's own snapshot site sits
+# outside the loop and is not elided, so it restores the read's value itself.
+function ii_pending_reads!(body, vars, pending, plan = nothing, limit = nothing)
+    for (idx, stmt) in enumerate(body)
+        # `limit` bounds this level to the statements BEFORE the candidate loop. Passed as an
+        # index rather than a slice on purpose: agen_site_key is keyed on objectid(body), so a
+        # slice would silently miss every plan entry and retire the exemption below.
+        limit !== nothing && idx >= limit && break
+        if stmt.kind == :assign
+            reads = Set{Symbol}()
+            ii_expr_reads(stmt.rhs, vars, reads)
+            if stmt.lhs isa Expr
+                for a in stmt.lhs.args[2:end]
+                    ii_expr_reads(a, vars, reads)
+                end
+            end
+            union!(pending, reads)
+            if stmt.lhs isa Symbol && stmt.lhs in vars && agen_count_var_refs(stmt.rhs, stmt.lhs) == 0
+                delete!(pending, stmt.lhs)
+            end
+        elseif stmt.kind == :for
+            # A read inside a loop that is ITSELF classified is not this candidate's problem
+            # for the scalars that loop assigns: its own fused body or backward-position
+            # recompute rebuilds them for its own reads, so nothing downstream has to preserve
+            # them. unet's two max-pool blocks are exactly this -- both name their taps a11/m1,
+            # and without the exemption the second block inherits the first block's reads.
+            own = plan !== nothing && haskey(plan, agen_site_key(body, idx)) ?
+                      Set{Symbol}(v for v in vars if ii_assigns_any(stmt.body, Set([v]))) :
+                      Set{Symbol}()
+            # A nested loop otherwise contributes its reads but never kills: it may run zero
+            # times, leaving the incoming value in place. Conservative in the safe direction,
+            # since an un-killed var only adds refusals.
+            ii_pending_reads!(stmt.body, setdiff(vars, own), pending, plan)
+            setdiff!(pending, own)
+        elseif stmt.kind == :if
+            cond_reads = Set{Symbol}()
+            ii_expr_reads(stmt.cond, vars, cond_reads)
+            union!(pending, cond_reads)
+            # a var stays pending unless BOTH arms re-establish it
+            then_p = copy(pending); els_p = copy(pending)
+            ii_pending_reads!(stmt.then, vars, then_p, plan)
+            ii_pending_reads!(stmt.els, vars, els_p, plan)
+            union!(pending, union(then_p, els_p))
+        end
+    end
+    return nothing
+end
+
+function ii_read_reaches_from_before(kernel_body, loop_body, vars, plan = nothing)
+    isempty(vars) && return Set{Symbol}()
+    path = ii_find_ancestor_path(kernel_body, loop_body, false)
+    path === nothing && return copy(vars)   # couldn't locate -- conservative
+    # ii_find_ancestor_path returns innermost-first; walk it OUTERMOST-first and carry `pending`
+    # inward, so a fresh assignment sitting between an outer level's read and this loop clears
+    # it. `s = 0.0` immediately before a contraction loop is exactly that: the previous block's
+    # read of the same scratch name is re-established before this loop ever runs, and checking
+    # each level in isolation would refuse every block after the first.
+    pending = Set{Symbol}()
+    for (level_body, idx, _) in reverse(path)
+        ii_pending_reads!(level_body, vars, pending, plan, idx)
+    end
+    return pending
 end
 
 # True iff some scalar assignment in `body` reads an array that `body` itself writes.
@@ -7909,6 +8348,11 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
     # when no fused var is live across a nested loop boundary.
     ii_fused_var_in_nested_for(stmt.body, vn_local, plan) && return :none
+    # see ii_read_reaches_from_before -- a read positioned before this loop is reversed AFTER
+    # its backward code, and every fusing kind elides the fused scalars' snapshots, so the
+    # value that read needs is gone. The forward-direction dual is the ii_escapes_nested gate
+    # below; this one has no kind it is safe for, so it is checked for the whole vn_local set.
+    isempty(ii_read_reaches_from_before(kernel.body, stmt.body, vn_local, plan)) || return :none
     # A loop whose own trip count is a reassigned scalar (`for i = 1:cur` with `cur` retired
     # each pass) carries a tripcount snapshot, and every fusing kind re-runs the header at the
     # backward position against whatever `cur` holds there rather than the value this iteration
@@ -7925,6 +8369,13 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
         inside_nonlinear = Set{Symbol}()
         snap_collect_value_needed!(stmt.body, inside_nonlinear)
         isempty(intersect(vn_red, inside_nonlinear)) || return :none
+        # Same question OUTSIDE the body. vn_red is excluded from push, and every kind carrying a
+        # vn_red defers its adjoint to the backward position -- so a read of the accumulator that
+        # sits AFTER this loop is reversed BEFORE the loop's backward code, with nothing having
+        # restored the accumulator's primal for it. Only a value-needed read matters here: the
+        # canonical `out[i] = s` write-back is linear and safe, which is why this uses
+        # ii_value_reads rather than the flat read test vn_ind gets below.
+        isempty(ii_red_escapes(kernel.body, stmt.body, vn_red, snap_boundary_stack_vars(kernel))) || return :none
     end
     if !isempty(vn_ind)
         escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
@@ -7978,6 +8429,11 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
     # when no fused var is live across a nested loop boundary.
     ii_fused_var_in_nested_for(stmt.body, vn_local, plan) && return :none
+    # see ii_read_reaches_from_before -- a read positioned before this loop is reversed AFTER
+    # its backward code, and every fusing kind elides the fused scalars' snapshots, so the
+    # value that read needs is gone. The forward-direction dual is the ii_escapes_nested gate
+    # below; this one has no kind it is safe for, so it is checked for the whole vn_local set.
+    isempty(ii_read_reaches_from_before(kernel.body, stmt.body, vn_local, plan)) || return :none
     # A loop whose own trip count is a reassigned scalar carries a tripcount snapshot, and every
     # fusing kind re-runs the header at the backward position against whatever the retired value
     # holds rather than what this iteration used. Gate 2 above only inspects the loop's body, so
@@ -7990,6 +8446,13 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
         inside_nonlinear = Set{Symbol}()
         agen_collect_value_needed!(stmt.body, inside_nonlinear)
         isempty(intersect(vn_red, inside_nonlinear)) || return :none
+        # Same question OUTSIDE the body. vn_red is excluded from push, and every kind carrying a
+        # vn_red defers its adjoint to the backward position -- so a read of the accumulator that
+        # sits AFTER this loop is reversed BEFORE the loop's backward code, with nothing having
+        # restored the accumulator's primal for it. Only a value-needed read matters here: the
+        # canonical `out[i] = s` write-back is linear and safe, which is why this uses
+        # ii_value_reads rather than the flat read test vn_ind gets below.
+        isempty(ii_red_escapes(kernel.body, stmt.body, vn_red, agen_boundary_stack_vars(kernel))) || return :none
     end
     if !isempty(vn_ind)
         escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
