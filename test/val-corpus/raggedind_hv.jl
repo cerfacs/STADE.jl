@@ -1,7 +1,7 @@
 function initstacks_raggedind_b(m0, n)
-    prefix_s_stack_1 = Vector{Int}(undef, div(n - 1, 1) + 1)
+    prefix_s_stack_1 = Vector{Int}(undef, max(0, div(n - 1, 1) + 1))
     __tot_s_stack_1 = 0
-    prefix_tripcount_stack_1 = Vector{Int}(undef, div(n - 1, 1) + 1)
+    prefix_tripcount_stack_1 = Vector{Int}(undef, max(0, div(n - 1, 1) + 1))
     __tot_tripcount_stack_1 = 0
     for i_x = 1:n
         prefix_s_stack_1[(i_x - 1) + 1] = __tot_s_stack_1
@@ -12,7 +12,7 @@ function initstacks_raggedind_b(m0, n)
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + 1
     end
     tripcount_stack = Vector{Int64}(undef, __tot_tripcount_stack_1)
-    s_stack = Vector{Float64}(undef, __tot_s_stack_1 + 1)
+    s_stack = Vector{Float64}(undef, __tot_s_stack_1)
     return (tripcount_stack, s_stack, prefix_s_stack_1, prefix_tripcount_stack_1, __tot_s_stack_1, __tot_tripcount_stack_1)
 end
 
@@ -38,10 +38,6 @@ function raggedind_hv(out, outb, u, ub, x, xb, n, m0, outd, outbd, ud, ubd, xd, 
         s_stack_d[__idx_s_stack_1_6] = sd
         s_stack[__idx_s_stack_1_6] = s
     end
-    s_stack_d[__tot_s_stack_1 + 1] = sd
-    s_stack[__tot_s_stack_1 + 1] = s
-    sd = s_stack_d[__tot_s_stack_1 + 1]
-    s = s_stack[__tot_s_stack_1 + 1]
     for i_x = n:-1:1
         __idx_s_stack_1_0 = prefix_s_stack_1[(i_x - 1) + 1] + 1
         sd = s_stack_d[__idx_s_stack_1_0]

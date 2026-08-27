@@ -1,5 +1,5 @@
 function initstacks_advection_b(i_nnode, i_nstep)
-    du_stack = Vector{Float64}(undef, (div(i_nstep - 1, 1) + 1) * (div(i_nnode - 2, 1) + 1))
+    du_stack = Vector{Float64}(undef, max(0, div(i_nstep - 1, 1) + 1) * max(0, div(i_nnode - 2, 1) + 1))
     return du_stack
 end
 

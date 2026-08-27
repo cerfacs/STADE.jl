@@ -1,6 +1,6 @@
 function initstacks_bnd_branch_b(i_n)
-    branch_stack = Vector{Int64}(undef, div(i_n - 1, 1) + 1)
-    s_stack = Vector{Float64}(undef, ((div(i_n - 1, 1) + 1) + (div(i_n - 1, 1) + 1)) + 1)
+    branch_stack = Vector{Int64}(undef, max(0, div(i_n - 1, 1) + 1))
+    s_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + 1)
     return (branch_stack, s_stack)
 end
 
@@ -31,8 +31,8 @@ function bnd_branch_b(x, xb, flag, flagb, i_n, i_m, out, outb, branch_stack, s_s
             sb = 0.0
         end
     end
-    s_stack[((div(i_n - 1, 1) + 1) + (div(i_n - 1, 1) + 1)) + 1] = s
-    s = s_stack[((div(i_n - 1, 1) + 1) + (div(i_n - 1, 1) + 1)) + 1]
+    s_stack[max(0, div(i_n - 1, 1) + 1) + 1] = s
+    s = s_stack[max(0, div(i_n - 1, 1) + 1) + 1]
     sb = 0.0
     return nothing
 end

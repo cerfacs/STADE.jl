@@ -1,5 +1,5 @@
 function initstacks_geomrecur_b(i_n)
-    u_stack = Vector{Float64}(undef, div(i_n - 2, 1) + 1)
+    u_stack = Vector{Float64}(undef, max(0, div(i_n - 2, 1) + 1))
     return u_stack
 end
 

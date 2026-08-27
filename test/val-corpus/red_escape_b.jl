@@ -1,0 +1,53 @@
+function initstacks_red_escape_b(i_m, i_n)
+    s_stack = Vector{Float64}(undef, ((max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1)) + 1) + 1)
+    return s_stack
+end
+
+function red_escape_b(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, s_stack)
+    s = 0.0
+    sb = 0.0
+    s = 0.0
+    for i_i = 1:i_n
+        for i_j = 1:i_m
+            s_stack[((i_i - 1) * (div(i_m - 1, 1) + 1) + (i_j - 1)) + 1] = s
+            s = s + x[i_j] * y[i_i]
+        end
+        out[i_i] = out[i_i] + s * s
+        s_stack[max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 1) + 1)] = s
+    end
+    s_stack[(max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1)) + 1] = s
+    s = x[1] * y[1]
+    acc[1] = acc[1] + s * s
+    s_stack[((max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1)) + 1) + 1] = s
+    s = s_stack[((max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1)) + 1) + 1]
+    sb = sb + s * accb[1]
+    sb = sb + s * accb[1]
+    s = s_stack[(max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1)) + 1]
+    xb[1] = xb[1] + y[1] * sb
+    yb[1] = yb[1] + x[1] * sb
+    sb = 0.0
+    for i_i = i_n:-1:1
+        s = s_stack[max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 1) + 1)]
+        sb = sb + s * outb[i_i]
+        sb = sb + s * outb[i_i]
+        for i_j = i_m:-1:1
+            s = s_stack[((i_i - 1) * (div(i_m - 1, 1) + 1) + (i_j - 1)) + 1]
+            xb[i_j] = xb[i_j] + y[i_i] * sb
+            yb[i_i] = yb[i_i] + x[i_j] * sb
+        end
+    end
+    sb = 0.0
+    return nothing
+end
+
+function red_escape(x, y, i_n, i_m, out, acc)
+    s = 0.0
+    for i_i = 1:i_n
+        for i_j = 1:i_m
+            s = s + x[i_j] * y[i_i]
+        end
+        out[i_i] = out[i_i] + s * s
+    end
+    s = x[1] * y[1]
+    acc[1] = acc[1] + s * s
+end

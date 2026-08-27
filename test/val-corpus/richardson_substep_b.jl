@@ -1,12 +1,12 @@
 function initstacks_richardson_substep_b(dt_stage, num_stages, y_init)
     nsub = 1
-    prefix_h_stack_1 = Vector{Int}(undef, div(num_stages - 1, 1) + 1)
+    prefix_h_stack_1 = Vector{Int}(undef, max(0, div(num_stages - 1, 1) + 1))
     __tot_h_stack_1 = 0
-    prefix_tripcount_stack_1 = Vector{Int}(undef, div(num_stages - 1, 1) + 1)
+    prefix_tripcount_stack_1 = Vector{Int}(undef, max(0, div(num_stages - 1, 1) + 1))
     __tot_tripcount_stack_1 = 0
-    prefix_y_stack_1 = Vector{Int}(undef, div(num_stages - 1, 1) + 1)
+    prefix_y_stack_1 = Vector{Int}(undef, max(0, div(num_stages - 1, 1) + 1))
     __tot_y_stack_1 = 0
-    val_nsub_1 = Vector{Int64}(undef, div(num_stages - 1, 1) + 1)
+    val_nsub_1 = Vector{Int64}(undef, max(0, div(num_stages - 1, 1) + 1))
     for i_stage = 1:num_stages
         prefix_h_stack_1[(i_stage - 1) + 1] = __tot_h_stack_1
         prefix_tripcount_stack_1[(i_stage - 1) + 1] = __tot_tripcount_stack_1
@@ -16,12 +16,12 @@ function initstacks_richardson_substep_b(dt_stage, num_stages, y_init)
         val_nsub_1[(i_stage - 1) + 1] = nsub
         __tot_h_stack_1 = __tot_h_stack_1 + 1
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + 1
-        __tot_y_stack_1 = __tot_y_stack_1 + ((div(nsub - 1, 1) + 1) + 1)
+        __tot_y_stack_1 = __tot_y_stack_1 + (max(0, div(nsub - 1, 1) + 1) + 1)
         nsub = nsub * 2
     end
     h_stack = Vector{Float64}(undef, __tot_h_stack_1 + 1)
     tripcount_stack = Vector{Int64}(undef, __tot_tripcount_stack_1)
-    y_stack = Vector{Float64}(undef, __tot_y_stack_1 + 1)
+    y_stack = Vector{Float64}(undef, __tot_y_stack_1)
     return (h_stack, tripcount_stack, y_stack, prefix_h_stack_1, prefix_tripcount_stack_1, prefix_y_stack_1, __tot_h_stack_1, __tot_tripcount_stack_1, __tot_y_stack_1, val_nsub_1)
 end
 
@@ -45,15 +45,13 @@ function richardson_substep_b(y_init, y_initb, out, outb, a_coef, a_coefb, dt_st
         end
         out[i_stage] = y
         nsub = nsub * 2
-        __idx_y_stack_1_9 = (prefix_y_stack_1[(i_stage - 1) + 1] + (div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1)) + 1
+        __idx_y_stack_1_9 = (prefix_y_stack_1[(i_stage - 1) + 1] + max(0, div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1)) + 1
         y_stack[__idx_y_stack_1_9] = y
     end
     h_stack[__tot_h_stack_1 + 1] = h
-    y_stack[__tot_y_stack_1 + 1] = y
     h = h_stack[__tot_h_stack_1 + 1]
-    y = y_stack[__tot_y_stack_1 + 1]
     for i_stage = num_stages:-1:1
-        __idx_y_stack_1_0 = (prefix_y_stack_1[(i_stage - 1) + 1] + (div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1)) + 1
+        __idx_y_stack_1_0 = (prefix_y_stack_1[(i_stage - 1) + 1] + max(0, div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1)) + 1
         y = y_stack[__idx_y_stack_1_0]
         yb = yb + outb[i_stage]
         outb[i_stage] = 0.0

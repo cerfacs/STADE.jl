@@ -1,15 +1,15 @@
 function initstacks_coarsen_retire_b(levels, n)
     cur = n
-    prefix_t_stack_1 = Vector{Int}(undef, div(levels - 1, 1) + 1)
+    prefix_t_stack_1 = Vector{Int}(undef, max(0, div(levels - 1, 1) + 1))
     __tot_t_stack_1 = 0
-    prefix_tripcount_stack_1 = Vector{Int}(undef, div(levels - 1, 1) + 1)
+    prefix_tripcount_stack_1 = Vector{Int}(undef, max(0, div(levels - 1, 1) + 1))
     __tot_tripcount_stack_1 = 0
-    val_cur_1 = Vector{Int64}(undef, div(levels - 1, 1) + 1)
+    val_cur_1 = Vector{Int64}(undef, max(0, div(levels - 1, 1) + 1))
     for i_l = 1:levels
         prefix_t_stack_1[(i_l - 1) + 1] = __tot_t_stack_1
         prefix_tripcount_stack_1[(i_l - 1) + 1] = __tot_tripcount_stack_1
         val_cur_1[(i_l - 1) + 1] = cur
-        __tot_t_stack_1 = __tot_t_stack_1 + ((div(cur - 1, 1) + 1) + 1)
+        __tot_t_stack_1 = __tot_t_stack_1 + (max(0, div(cur - 1, 1) + 1) + 1)
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + 1
         cur = div(cur + 1, 2)
     end
@@ -38,7 +38,7 @@ function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd,
             y[i] = y[i] + t * t
         end
         cur = div(cur + 1, 2)
-        __idx_t_stack_1_4 = (prefix_t_stack_1[(i_l - 1) + 1] + (div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1)) + 1
+        __idx_t_stack_1_4 = (prefix_t_stack_1[(i_l - 1) + 1] + max(0, div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1)) + 1
         t_stack_d[__idx_t_stack_1_4] = td
         t_stack[__idx_t_stack_1_4] = t
     end
@@ -53,7 +53,7 @@ function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd,
     outbd[1] = 0.0
     outb[1] = 0.0
     for i_l = levels:-1:1
-        __idx_t_stack_1_0 = (prefix_t_stack_1[(i_l - 1) + 1] + (div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1)) + 1
+        __idx_t_stack_1_0 = (prefix_t_stack_1[(i_l - 1) + 1] + max(0, div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1)) + 1
         td = t_stack_d[__idx_t_stack_1_0]
         t = t_stack[__idx_t_stack_1_0]
         __idx_tripcount_stack_1_2 = prefix_tripcount_stack_1[(i_l - 1) + 1] + 1

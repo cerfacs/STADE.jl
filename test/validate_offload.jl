@@ -27,18 +27,29 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # max host-side loops allowed per kernel. `:refused` = cgen_ingest cannot take
     # this adjoint at all, which is correct when a stack stays growable.
     EXPECTED = Dict{String,Any}(
+    # bnd_carried, ii_readnested and ttgc sit above what they used to reach, deliberately.
+    # cgen_liveout_is_zeroed refuses to split a loop whose local scalars a later HOST
+    # statement reads -- those reads saw a stale value, since the split moved the
+    # assignment onto the device. Their gradients were correct anyway, but only because
+    # every stale value happened to land in a snapshot slot whose restore was dead, which
+    # nothing enforced. These three are the residue after agen_boundary_push_redundant
+    # cleared the rest; each one's scalar is genuinely read after the loop, so the split
+    # cannot be made safe by removing a redundant push. Six host loops corpus-wide is the
+    # measured price of the guard.
         "advection" => 3, "advection_multi" => 3, "affine_loss" => 0,
-        "bilinear" => 0, "bnd_branch" => 3, "bnd_carried" => 0,
+        "bilinear" => 0, "bnd_branch" => 3, "bnd_carried" => 1,
         "bnd_nested_only" => 5, "bnd_readfirst" => 6,
         "branchsel" => 0, "cascadic_mg_prolong" => 22,
         "cellscatter" => 3,
         "clamped_sumsq" => 0, "coarsen_retire" => 4, "cond_field_choice" => 0,
         "cond_loop_choice" => 0, "dotprod" => 0, "geomrecur" => 3,
+        "fixed_sweeps" => 3, "ii_readbefore" => 4, "ii_readnested" => 2,
         "matvec_loss" => 0, "mg_vcycle" => 28, "mg_vcycle_multi" => 28,
         "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
-        "quadloss" => 0, "raggedii" => 1, "raggedind" => 1,
+        "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
+        "retire_empty" => 4,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,
-        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 8,
+        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 11,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,
         "windowed_relax_retire" => 7,
     )

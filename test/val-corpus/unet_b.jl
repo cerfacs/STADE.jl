@@ -18,16 +18,16 @@ function initstacks_unet_b(c1, c2, c3, h, w)
     n_e1_out = c1 * hw
     n_e2_mid = c2 * hw2
     n_e2_out = c2 * hw2
-    t_e1_stack = Vector{Float64}(undef, div(n_e1_mid - 1, 1) + 1)
-    skip1_stack = Vector{Float64}(undef, div(n_e1_out - 1, 1) + 1)
-    t_e2_stack = Vector{Float64}(undef, div(n_e2_mid - 1, 1) + 1)
-    skip2_stack = Vector{Float64}(undef, div(n_e2_out - 1, 1) + 1)
-    t_b_stack = Vector{Float64}(undef, div(n_b_mid - 1, 1) + 1)
-    bott_stack = Vector{Float64}(undef, div(n_b_out - 1, 1) + 1)
-    t_d2_stack = Vector{Float64}(undef, div(n_d2_mid - 1, 1) + 1)
-    dec2out_stack = Vector{Float64}(undef, div(n_d2_out - 1, 1) + 1)
-    t_d1_stack = Vector{Float64}(undef, div(n_d1_mid - 1, 1) + 1)
-    dec1out_stack = Vector{Float64}(undef, div(n_d1_out - 1, 1) + 1)
+    t_e1_stack = Vector{Float64}(undef, max(0, div(n_e1_mid - 1, 1) + 1))
+    skip1_stack = Vector{Float64}(undef, max(0, div(n_e1_out - 1, 1) + 1))
+    t_e2_stack = Vector{Float64}(undef, max(0, div(n_e2_mid - 1, 1) + 1))
+    skip2_stack = Vector{Float64}(undef, max(0, div(n_e2_out - 1, 1) + 1))
+    t_b_stack = Vector{Float64}(undef, max(0, div(n_b_mid - 1, 1) + 1))
+    bott_stack = Vector{Float64}(undef, max(0, div(n_b_out - 1, 1) + 1))
+    t_d2_stack = Vector{Float64}(undef, max(0, div(n_d2_mid - 1, 1) + 1))
+    dec2out_stack = Vector{Float64}(undef, max(0, div(n_d2_out - 1, 1) + 1))
+    t_d1_stack = Vector{Float64}(undef, max(0, div(n_d1_mid - 1, 1) + 1))
+    dec1out_stack = Vector{Float64}(undef, max(0, div(n_d1_out - 1, 1) + 1))
     return (t_e1_stack, skip1_stack, t_e2_stack, skip2_stack, t_b_stack, bott_stack, t_d2_stack, dec2out_stack, t_d1_stack, dec1out_stack)
 end
 

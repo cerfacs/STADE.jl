@@ -1,5 +1,5 @@
 function initstacks_bnd_carried_b(i_n)
-    t_stack = Vector{Float64}(undef, (div(i_n - 1, 1) + 1) + 1)
+    t_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + 1)
     return t_stack
 end
 
@@ -27,10 +27,10 @@ function bnd_carried_hv(x, xb, y, yb, i_n, out, outb, xd, xbd, yd, ybd, outd, ou
         tbd = 0.0
         tb = 0.0
     end
-    t_stack_d[(div(i_n - 1, 1) + 1) + 1] = td
-    t_stack[(div(i_n - 1, 1) + 1) + 1] = t
-    td = t_stack_d[(div(i_n - 1, 1) + 1) + 1]
-    t = t_stack[(div(i_n - 1, 1) + 1) + 1]
+    t_stack_d[max(0, div(i_n - 1, 1) + 1) + 1] = td
+    t_stack[max(0, div(i_n - 1, 1) + 1) + 1] = t
+    td = t_stack_d[max(0, div(i_n - 1, 1) + 1) + 1]
+    t = t_stack[max(0, div(i_n - 1, 1) + 1) + 1]
     tbd = 0.0
     tb = 0.0
     return nothing

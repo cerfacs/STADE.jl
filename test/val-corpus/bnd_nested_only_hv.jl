@@ -1,6 +1,6 @@
 function initstacks_bnd_nested_only_b(i_m, i_n)
-    v_stack = Vector{Float64}(undef, (((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1) + 1)
-    out_stack = Vector{Float64}(undef, (div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1))
+    v_stack = Vector{Float64}(undef, ((max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1) + 1)
+    out_stack = Vector{Float64}(undef, max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1))
     return (v_stack, out_stack)
 end
 
@@ -24,29 +24,29 @@ function bnd_nested_only_hv(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, xd, xb
             outd[i_i] = outd[i_i] + (v * vd + v * vd)
             out[i_i] = out[i_i] + v * v
         end
-        out_stack_d[(div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)] = outd[i_i]
-        out_stack[(div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)] = out[i_i]
+        out_stack_d[max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)] = outd[i_i]
+        out_stack[max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)] = out[i_i]
         outd[i_i] = outd[i_i] + (y[i_i] * outd[i_i - 1] + out[i_i - 1] * yd[i_i])
         out[i_i] = out[i_i] + out[i_i - 1] * y[i_i]
-        v_stack_d[(div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)] = vd
-        v_stack[(div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)] = v
+        v_stack_d[max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)] = vd
+        v_stack[max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)] = v
     end
-    v_stack_d[((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1] = vd
-    v_stack[((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1] = v
+    v_stack_d[(max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1] = vd
+    v_stack[(max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1] = v
     vd = y[1] * xd[1] + x[1] * yd[1]
     v = x[1] * y[1]
     accd[1] = accd[1] + (v * vd + v * vd)
     acc[1] = acc[1] + v * v
-    v_stack_d[(((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1) + 1] = vd
-    v_stack[(((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1) + 1] = v
-    vd = v_stack_d[(((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1) + 1]
-    v = v_stack[(((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1) + 1]
+    v_stack_d[((max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1) + 1] = vd
+    v_stack[((max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1) + 1] = v
+    vd = v_stack_d[((max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1) + 1]
+    v = v_stack[((max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1) + 1]
     vbd = vbd + (accb[1] * vd + v * accbd[1])
     vb = vb + v * accb[1]
     vbd = vbd + (accb[1] * vd + v * accbd[1])
     vb = vb + v * accb[1]
-    vd = v_stack_d[((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1]
-    v = v_stack[((div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + (div(i_n - 2, 1) + 1)) + 1]
+    vd = v_stack_d[(max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1]
+    v = v_stack[(max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + max(0, div(i_n - 2, 1) + 1)) + 1]
     xbd[1] = xbd[1] + (vb * yd[1] + y[1] * vbd)
     xb[1] = xb[1] + y[1] * vb
     ybd[1] = ybd[1] + (vb * xd[1] + x[1] * vbd)
@@ -54,10 +54,10 @@ function bnd_nested_only_hv(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, xd, xb
     vbd = 0.0
     vb = 0.0
     for i_i = i_n:-1:2
-        vd = v_stack_d[(div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)]
-        v = v_stack[(div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)]
-        outd[i_i] = out_stack_d[(div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)]
-        out[i_i] = out_stack[(div(i_n - 2, 1) + 1) * (div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)]
+        vd = v_stack_d[max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)]
+        v = v_stack[max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)]
+        outd[i_i] = out_stack_d[max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)]
+        out[i_i] = out_stack[max(0, div(i_n - 2, 1) + 1) * max(0, div(i_m - 1, 1) + 1) + ((i_i - 2) + 1)]
         outbd[i_i - 1] = outbd[i_i - 1] + (outb[i_i] * yd[i_i] + y[i_i] * outbd[i_i])
         outb[i_i - 1] = outb[i_i - 1] + y[i_i] * outb[i_i]
         ybd[i_i] = ybd[i_i] + (outb[i_i] * outd[i_i - 1] + out[i_i - 1] * outbd[i_i])

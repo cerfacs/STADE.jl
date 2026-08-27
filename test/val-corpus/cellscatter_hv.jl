@@ -1,6 +1,6 @@
 function initstacks_cellscatter_b(i_ncell, i_njac, i_nnode)
-    up_stack = Vector{Float64}(undef, (div(i_njac - 1, 1) + 1) * (div(i_nnode - 1, 1) + 1))
-    auxu_stack = Vector{Float64}(undef, ((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + 1)
+    up_stack = Vector{Float64}(undef, max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1))
+    auxu_stack = Vector{Float64}(undef, max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_ncell - 1, 1) + 1))
     return (up_stack, auxu_stack)
 end
 
@@ -34,16 +34,8 @@ function cellscatter_hv(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i
             upd[i_node] = upd[i_node] + -(mupd[i_node])
             up[i_node] = up[i_node] - mup[i_node]
         end
-        auxu_stack_d[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_ - 1) + 1)] = auxud
-        auxu_stack[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_ - 1) + 1)] = auxu
     end
-    auxu_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + 1] = auxud
-    auxu_stack[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + 1] = auxu
-    auxud = auxu_stack_d[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + 1]
-    auxu = auxu_stack[((div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + (div(i_njac - 1, 1) + 1)) + 1]
     for i_ = i_njac:-1:1
-        auxud = auxu_stack_d[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_ - 1) + 1)]
-        auxu = auxu_stack[(div(i_njac - 1, 1) + 1) * (div(i_ncell - 1, 1) + 1) + ((i_ - 1) + 1)]
         for i_node = i_nnode:-1:1
             upd[i_node] = up_stack_d[((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1]
             up[i_node] = up_stack[((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1]

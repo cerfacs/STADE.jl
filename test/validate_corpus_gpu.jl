@@ -161,6 +161,15 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
     end
     Core.eval(Main, plan_adj.host)
 
+    # The CPU reference pair has to be DEFINED here too, not just named. Evaluating
+    # `adjoint_out.adjoint.args[1].args[1]` alone resolves the function's name and nothing
+    # else, so without these two lines every kernel fails with `UndefVarError: <name>_b not
+    # defined in Main` -- the device side was being compared against a function that was never
+    # brought into scope. Confirmed on a live GPU: this is what made the whole script report
+    # gen_error for all 41 corpus kernels.
+    Core.eval(Main, adjoint_out.initstacks)
+    Core.eval(Main, adjoint_out.adjoint)
+
     cpu_init_fn = Core.eval(Main, adjoint_out.initstacks.args[1].args[1])
     cpu_adj_fn  = Core.eval(Main, adjoint_out.adjoint.args[1].args[1])
     dev_init_fn = Core.eval(Main, plan_init.host.args[1].args[1])

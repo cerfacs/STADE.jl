@@ -1,5 +1,5 @@
 function initstacks_clamped_sumsq_b(i_n)
-    branch_stack = Vector{Int64}(undef, div(i_n - 1, 1) + 1)
+    branch_stack = Vector{Int64}(undef, max(0, div(i_n - 1, 1) + 1))
     return branch_stack
 end
 
