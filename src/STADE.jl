@@ -1622,12 +1622,11 @@ function snap_plan(kernel, active_map; site_needed = nothing)
     counter = Ref(0)
     snap_walk!(kernel.body, active_map, kernel.sig.kinds, reassigned, value_needed, sites, counter,
                false, assign_counts, kernel.body, site_needed)
-    # A block-boundary push owns its stack outright instead of borrowing one an :assign site
-    # happened to create. The boundary kill in snap_fwd_walk! retires exactly those sites, and
-    # agen_block_boundary_vars SKIPS a var with no (:value, var) stack -- so without this the
-    # push and its matching pop would both vanish silently rather than raise. A stack with no
-    # remaining reference is pruned later by agen_finalize_stacks, so registering one that
-    # ii_plan or `exempt` turns out to retire costs nothing.
+# A block-boundary push owns its stack outright instead of borrowing one an :assign site happened to
+# create. The boundary kill in snap_fwd_walk! retires exactly those sites, and
+# agen_block_boundary_vars skips a var with no (:value, var) stack -- so without this the push and its
+# matching pop would vanish silently rather than raise. A stack with no remaining reference is pruned
+# later by agen_finalize_stacks.
     for var in sort(collect(snap_boundary_snapshot_vars(kernel)); by = string)
         any(s -> s.kind == :value && s.array == var, sites) && continue
         counter[] = counter[] + 1
@@ -2019,15 +2018,11 @@ function snap_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}()
             seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
         end
     end
-    # This body's block-boundary push re-establishes each of these vars at the head of its own
-    # reverse body, so every read INSIDE `body` is served by that pop plus this body's own
-    # sites, never by a site outside it. Dropping them here is what stops the loop back edge
-    # (snap_fwd_walk_loop!) demanding a redundant push at the first write of a body that
-    # already has a boundary snapshot -- the cell-loop `aux = 0.0` shape, whose push is what
-    # makes the whole loop look loop-carried to cgen_. A read placed BEFORE that write, in this
-    # same body, re-adds the var during the walk, so the within-iteration need is untouched;
-    # so is a read in an enclosing body, which arrives via in_seen and is restored by this
-    # body's own first site.
+    # This body's block-boundary push re-establishes each of these vars at the head of its own reverse body, so every
+    # read inside `body` is served by that pop, never a site outside it. Dropping them here stops the loop back edge
+    # (snap_fwd_walk_loop!) demanding a redundant push at the first write of a body that already has a boundary snapshot
+    # -- the cell-loop `aux = 0.0` shape, whose push makes the loop look loop-carried to cgen_. A read before that write,
+    # in the same body, re-adds the var; so does a read in an enclosing body, restored by this body's own first site.
     kill = snap_boundary_kill_vars(body, bvars)
     isempty(kill) && return seen
     return setdiff(seen, kill)
@@ -2647,30 +2642,11 @@ function agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_
                           !agen_boundary_push_redundant(body, v, kinds, value_needed, exempt)); by = string)
 end
 
-# This body's own boundary push is redundant when the body does not write `var` at its own top
-# level AND some body nested inside it is GUARANTEED to push `var`. The outer PUSH is the thing
-# worth removing: it reads `var` after a loop cgen_ may have split onto the device, so it stores
-# whatever stale value the host copy still holds. Confirmed on a live GPU -- cellscatter's
-# gradients were correct while its stacks differed by a full relative 1.0, entirely through this
-# push, and 2.2e-16 once it was gone.
-#
-# Note what the GUARANTEED condition is and is NOT for. It is NOT what makes dropping safe: the
-# site pushes inside `body` already form a complete chain, since the first one restores the
-# body's entering value, which is the previous iteration's final value, which is what the
-# previous reverse iteration needs at its start. Kernels where the outer push is kept and no
-# descendant qualifies drop it with bit-identical gradients. What the condition bounds is how
-# AGGRESSIVE the collapse gets. Drop more than this and the value need moves into per-iteration
-# site pushes inside the loop, cgen_contains_stackop then refuses to split it, and offload
-# coverage falls -- measured at ttgc 8 -> 14 host loops, coarsen_retire 4 -> 6, red_escape
-# 5 -> 6. So a mutation of this predicate fails validate_offload, NOT validate_corpus. Testing it
-# against the oracles alone reports it as dead weight, which is how it was nearly deleted.
-#
-# Keyed on the GUARANTEED condition (agen_boundary_kill_vars': a nested write plus a top-level
-# write, which no ii_plan can retire) rather than on agen_block_boundary_vars itself. The layout
-# walks call this without an ii_plan and the emit walks call it with one; a predicate that varied
-# between them would reserve a slot the emitter never writes, or drop one it does. Being keyed on
-# the same condition as the fwd-walk kill also means the two cannot disagree: the kill only ever
-# fires at a body with a top-level write, which is precisely a body that keeps its push.
+# This body's own boundary push is redundant when the body doesn't write `var` at its own top level AND some nested body is guaranteed to push it
+# -- the outer push reads `var` after a loop cgen_ may have split onto the device, storing a stale host value (confirmed live). The GUARANTEED
+# condition doesn't make dropping safe, since the inner pushes already form a complete chain; it bounds how aggressive the collapse gets, as
+# dropping more moves the value need into per-iteration pushes that cgen_contains_stackop then refuses to split, lowering offload coverage. Keyed
+# on agen_boundary_kill_vars' condition so the layout/emit walks and the fwd-walk kill can never disagree.
 function agen_boundary_push_redundant(body, var, kinds, value_needed, exempt)
     agen_has_top_level_write(body, var) && return false
     return agen_boundary_guaranteed_below(body, var, kinds, value_needed, exempt)
@@ -3036,17 +3012,11 @@ function agen_stride(loop_ctx, i)
     return agen_prod_exprs(terms)
 end
 
-# A loop whose bound has fallen below its start runs zero times, but div(hi - lo, step) + 1 goes
-# NEGATIVE as soon as hi <= lo - 2. Inside a size SUM a negative term shrinks the allocation
-# rather than contributing nothing, so the stack comes out short and the reverse sweep runs off
-# the end of it. mg_vcycle at num_levels >= 4 reaches `for j = 1:nc` with nc = -1 and was
-# undersized by exactly that; retire_empty is the deterministic witness. Clamped here, at the one
-# place trip counts are summed into a size.
-#
-# agen_stride and cgen_kernel_def's bounds check deliberately keep the raw form. A stride is only
-# ever evaluated for a site that actually ran, so every factor in it is a loop that executed and
-# is therefore >= 1; and a negative bounds check already makes every thread return, which is the
-# correct behaviour for a loop with no iterations.
+# A loop whose bound has fallen below its start runs zero times, but div(hi-lo,step)+1 goes negative as soon as
+# hi<=lo-2. Inside a size SUM a negative term shrinks the allocation rather than contributing nothing, undersizing
+# the stack -- mg_vcycle at num_levels>=4 hit exactly this (nc=-1). Clamped here, the one place trip counts are
+# summed into a size. agen_stride/cgen_kernel_def's bounds check keep the raw form: a stride only evaluates for a
+# site that ran (every factor >=1), and a negative bounds check already makes every thread return.
 agen_size_trip_count(lo, step, hi) = Expr(:call, :max, 0, cgen_trip_count(lo, step, hi))
 
 # product of trip counts of every frame in loop_ctx -- one
@@ -3065,12 +3035,10 @@ function agen_local_position(loop_ctx)
 end
 
 # ---- Tier B detection ------------------------------------------------
-# A loop's bound-determining symbol is ever an assignment target inside ANY ancestor loop
-# (a multigrid solver's ragged level-size halving sequence is the confirmed real instance).
-# The ancestor does not have to carry a value between its own iterations: `w = m0 + i` in an
-# iteration-independent outer loop varies the inner trip count just as much, and gating this
-# walk on that made STADE size such a stack from a body-local variable. Returns the offending
-# bound var, or `nothing` if the kernel is fully Tier A.
+# A loop's bound-determining symbol is ever an assignment target inside any ancestor loop (a multigrid solver's
+# ragged level-size halving sequence is the confirmed instance). The ancestor need not carry a value between
+# iterations: `w = m0 + i` in an iteration-independent outer loop varies the inner trip count too, and gating on that
+# made STADE size a stack from a body-local variable. Returns the offending bound var, or `nothing` if fully Tier A.
 function agen_tier_b_offender(kernel)
     return agen_tier_b_walk(kernel.body, Set{Symbol}())
 end
@@ -3189,11 +3157,10 @@ function agen_layout_record!(occ_mult, key_order, tainted_stacks, stack_name, lo
 end
 
 # ---- Tier B ragged-block layout (closed-form, GPU-eligible) ----
-# A 'ragged block' = an ancestor loop AL whose body contains a ragged descendant it alone governs. Returns
-# `nothing` if `stmt` isn't a genuine AL -- raggedness of the descendant is the whole test, so AL needs no
-# property of its own. AL's body is laid out via agen_indexed_layout reused as the AL-scoped sub-
-# engine, seeded with the incoming reassignments (not AL's own top-level ones), so only genuine AL-within-AL
-# raggedness taints. Returns `(header, local_offsets, local_sizes, ineligible_stacks)`, scoped to AL's own frame.
+# A 'ragged block' = an ancestor loop AL whose body contains a ragged descendant it alone governs. Returns `nothing` if `stmt` isn't a
+# genuine AL -- raggedness of the descendant is the whole test. AL's body is laid out via agen_indexed_layout reused as the AL-scoped
+# sub-engine, seeded with the incoming reassignments (not AL's own top-level ones), so only genuine AL-within-AL raggedness taints.
+# Returns `(header, local_offsets, local_sizes, ineligible_stacks)`, scoped to AL's own frame.
 function agen_ragged_block(stmt, kinds, active_map, value_needed, reassigned, exempt, stacks, seq_reassigned; push_pop = nothing)
     own_reassigned = agen_collect_reassigned(stmt.body, true)
     agen_tier_b_walk(stmt.body, own_reassigned) === nothing && return nothing
@@ -3625,11 +3592,10 @@ function agen_emit_pop(stack_name::Symbol, ectx, key, exprs)
 end
 
 # ---- Phase 3 cleanup: drop stack args left unused by fusion ----
-# A var covered by an ii_plan site does not always mean its stack becomes fully unused -- agen_block_boundary_vars
-# can still need it. A blanket drop would be a real bug, so the safe approach generates the adjoint body first, then
+# A var covered by an ii_plan site doesn't always mean its stack becomes fully unused -- agen_block_boundary_vars can
+# still need it. A blanket drop would be a real bug, so the safe approach generates the adjoint body first, then
 # drops only what provably has zero remaining stack references in the actual output. Covers both storage modes:
-# keep_push_pop=true reads/writes a stack through push!/pop!; keep_push_pop=false reads/writes it through an
-# indexed ref, nm[idx], on either side of an assignment.
+# keep_push_pop=true via push!/pop!, keep_push_pop=false via an indexed ref, nm[idx].
 function agen_collect_used_stacks!(expr, used)
     if expr isa Expr
         if expr.head == :call && length(expr.args) >= 2 && expr.args[1] in (:push!, :pop!) && expr.args[2] isa Symbol
@@ -3683,13 +3649,11 @@ function agen_drop_unused_stack_allocs(initstacks_expr, unused)
     return Expr(:function, initstacks_expr.args[1], Expr(:block, new_stmts...))
 end
 
-# Shared by agen_emit and stade_hvp: both need the identical post-fusion cleanup --
-# scan the generated function for real stack use (agen_used_stack_names, which covers
-# both push!/pop! and indexed-ref access), then drop whatever agen_stack_names(sites)
-# lists but the scan never found. `is_hvp` additionally drops hvp_emit's own orphaned
-# `<stack>_d` shadow allocs (see hvp_drop_unused_shadow_stack_allocs), since hvp_emit
-# builds one for every site regardless of fusion. A single shared function keeps the two
-# call sites from drifting the way two independently hand-edited copies eventually would.
+# Shared by agen_emit and stade_hvp: both need identical post-fusion cleanup -- scan the generated
+# function for real stack use (agen_used_stack_names, covering both push!/pop! and indexed-ref
+# access), then drop whatever agen_stack_names(sites) lists but the scan never found. `is_hvp`
+# additionally drops hvp_emit's own orphaned `<stack>_d` shadow allocs, since hvp_emit builds one for
+# every site regardless of fusion. A single shared function keeps the two call sites from drifting.
 function agen_finalize_stacks(fn_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp::Bool = false)
     ii_plan === nothing && return (fn_expr, initstacks_expr)
     used = agen_used_stack_names(fn_expr)
@@ -3915,11 +3879,10 @@ function agen_if_branch_scalar_vars(stmt, kinds, value_needed)
     return vars
 end
 
-# Did agen_forward_body actually push this branch's write to `var` onto its value stack? The
-# forward gate is reproduced here in full, INCLUDING the site-level TBR decision -- lin_plan
-# activity alone is not it. Keyed on the primal branch body, the same object agen_forward_body
-# recursed into, so agen_site_key matches. Getting this wrong desyncs push!/pop!'s single
-# shared stack pointer under keep_push_pop=true: the discard-pop below would consume an entry
+# Did agen_forward_body actually push this branch's write to `var` onto its value stack? The forward gate is
+# reproduced here in full, including the site-level TBR decision -- lin_plan activity alone is not it. Keyed on the
+# primal branch body, the same object agen_forward_body recursed into, so agen_site_key matches. Getting this wrong
+# desyncs push!/pop!'s shared stack pointer under keep_push_pop=true: the discard-pop below would consume an entry
 # nothing ever pushed.
 function agen_branch_pushed(primal_branch, var, kinds, active_map, exempt, site_source)
     for i in eachindex(primal_branch)
@@ -4065,10 +4028,9 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                 pop!(ectx.loop_ctx)
                 # Every backward loop reverses. A loop that carries a value from one iteration to
                 # the next must reverse to be correct, and STADE cannot see that coupling when it
-                # runs through an array with no snapshot (a purely additive prefix scan). An
-                # independent loop computes the same adjoint in either direction, so reversing it
-                # costs nothing. Over-reversal is always right, under-reversal is a silent wrong
-                # gradient, so the decision is not worth an analysis.
+                # runs through an array with no snapshot. An independent loop computes the same
+                # adjoint either direction, so reversing it costs nothing. Over-reversal is always
+                # right, under-reversal a silent wrong gradient -- not worth an analysis.
                 loop_expr = emit_forloop(stmt.var, stmt.hi, stmt.lo, agen_negate_step(stmt.step), inner)
                 for bv in agen_tripcount_bound_vars(stmt, reassigned)
                     push!(exprs, Expr(:(=), bv, agen_emit_pop(stacks[(:tripcount, bv)], ectx, agen_site_key(primal_body, idx, bv), exprs)))
@@ -4413,12 +4375,10 @@ end
 
 
 # ==================== cgen_* =====================================
-# CUDA codegen: turns a validated kernel, or a STADE-generated function, into a host launcher plus one `@cuda` device kernel per data-parallel
-# loop -- a loop-nest transform, independent of act_/snap_/lin_. Parallelism is proved from the loop's own structure via
-# cgen_reduction_only_loop, never declared by the source.
-# Ingests via cgen_from_kernel (plain skill-stade) or
-# cgen_parse_generated (STADE's own vocabulary). Stack safety: a loop with push!/pop! anywhere is never split, since LIFO order can't survive
-# concurrent threads. Race safety: a split write is atomic-free only if the thread var occurs in its index, else CUDA.@atomic.
+# CUDA codegen: turns a validated kernel, or a STADE-generated function, into a host launcher plus one `@cuda` device kernel per data-parallel loop
+# -- proved from the loop's own structure via cgen_reduction_only_loop, never declared by the source. Ingests via cgen_from_kernel (plain skill-
+# stade) or cgen_parse_generated (STADE's own vocabulary). Stack safety: a loop with push!/pop! anywhere is never split, since LIFO order can't
+# survive concurrent threads. Race safety: a split write is atomic-free only if the thread var occurs in its index, else CUDA.@atomic.
 
 function cgen_from_kernel(kernel)
     return (name = kernel.sig.name, args = kernel.sig.args, body = kernel.body, ret = Symbol[])
@@ -4683,23 +4643,16 @@ function cgen_collect_all_assigned!(body::Vector{NamedTuple}, names::Set{Symbol}
     end
 end
 
-# ---- array-privacy proof: is a written array confined to a private, non-overlapping
-#      slice per outer iteration, regardless of how many sub-loops touch it? ----
-# The pairwise write/read-index check below (cgen_reduction_only_loop's own tail) treats every
-# access to an array as one undifferentiated set, so it cannot tell "three sub-loops each write
-# their own disjoint slice of a per-edge scratch buffer, a fourth reads the assembled whole" apart
-# from a genuine value recurrence -- both look like "a write index that doesn't match some read
-# index of the same array". This section adds a narrower, additive proof for exactly the safe
-# shape, scoped per sub-loop rather than globally: an array is accepted here only when every
-# access decomposes cleanly into (an outer-loop-invariant base, an inner loop's own additive index),
-# and the group structure matches one of two provably-safe patterns (see cgen_array_private_to_loop).
-# Anything that doesn't decompose this way falls straight back to the pairwise check, unchanged.
+# ---- array-privacy proof: is a written array confined to a private slice? ----
+# The pairwise write/read-index check below treats every access to an array as one undifferentiated set, so it can't tell disjoint per-
+# sub-loop slices assembled into a whole apart from a genuine value recurrence. This adds a narrower, additive proof for exactly that
+# safe shape, scoped per sub-loop: an array is accepted only when every access decomposes into an outer-invariant base plus an inner
+# loop's additive index, matching one of two provably-safe patterns. Anything else falls back to the pairwise check, unchanged.
 
-# canonicalizes an additive/subtractive expression into a sign-tagged multiset of leaf terms --
-# `+`/`-` flatten at any depth, and a literal-integer multiplier expands into repeated leaves
-# (`2*n` becomes two copies of `n`), so `n_in_msg` and `n_node_feat+n_node_feat+n_edge_feat` can be
-# compared on equal footing once `n_in_msg`'s own definition is substituted in (see
-# cgen_expand_additive_terms). Bounded to a sane literal range so a stray large constant can't blow
+# Canonicalizes an additive/subtractive expression into a sign-tagged multiset of leaf terms --
+# `+`/`-` flatten at any depth, and a literal-integer multiplier expands into repeated leaves (`2*n`
+# becomes two copies of `n`), so two differently-shaped sums can be compared on equal footing once
+# definitions are substituted in. Bounded to a sane literal range so a stray large constant can't blow
 # this up.
 function cgen_flatten_additive_terms(expr, sign::Int = 1, out::Vector{Tuple{Int,Any}} = Tuple{Int,Any}[])
     if expr isa Expr && expr.head == :call && expr.args[1] == :+
@@ -4785,15 +4738,11 @@ function cgen_strip_local_additive_term(expr, localvar::Symbol, other_chain_vars
     end
 end
 
-# collects every occurrence of `arr` within one top-level statement of the candidate loop, at any
-# nesting depth, tagged with the full chain of enclosing loop vars paired with their own `.hi`
-# (never just the variable name -- sibling sub-loops routinely reuse the same loop-variable name
-# with different trip counts, e.g. three separate `for k = 1:...` loops in the same kernel, so a
-# name-keyed trip-count table would silently collide). Bails (returns `nothing`) the moment `arr`
-# is touched inside an `:if` -- reasoning through a conditional's effect on which slice gets
-# written is out of scope here, so that case is left to the pairwise fallback -- or a for-loop
-# whose bounds aren't a literal `1:hi` step-1 range, since the additive stripping below assumes
-# that shape.
+# Collects every occurrence of `arr` within one top-level statement of the candidate loop, at any nesting depth, tagged
+# with the full chain of enclosing loop vars paired with their own `.hi` (never just the name -- sibling sub-loops
+# routinely reuse the same loop-variable name with different trip counts, so a name-keyed table would silently collide).
+# Bails (`nothing`) the moment `arr` is touched inside an `:if`, or a for-loop whose bounds aren't a literal `1:hi` step-1
+# range, since the additive stripping below assumes that shape.
 function cgen_deep_array_occurrences!(stmts, arr::Symbol, chain::Vector{Tuple{Symbol,Any}}, out)
     for stmt in stmts
         if stmt.kind == :assign
@@ -4839,42 +4788,11 @@ function cgen_classify_array_occurrence(idx_expr, chain::Vector{Tuple{Symbol,Any
     return (base, trip)
 end
 
-# The proof itself. Groups every occurrence of `arr` within the candidate loop's body by which
-# top-level statement it came from (a plain assignment, or an immediately- or more-deeply-nested
-# sub-loop), requires each group to be internally self-consistent (its own write and read indices,
-# after stripping any local sub-loop variable, all agree -- the same requirement the pairwise check
-# already makes, just scoped per group instead of globally), then accepts the whole array under
-# either of two provably-safe patterns:
-#
-#   1. No group is a pure reader (every group either only writes, or reads back exactly what it
-#      itself just wrote). Cross-group relationships never matter for thread safety in this case --
-#      each group is independently either a self-contained accumulation or a write nothing else in
-#      this loop depends on -- so whether different groups' bases could coincide across different
-#      outer iterations is cgen_device_assign's job (atomic vs plain), never this proof's.
-#   2. Every group shares the exact same (base, trip) -- repeatedly touching one already-established
-#      sub-region (write, then read-modify-write, then plain read, all at the same offset).
-#   3. A cumulative-assembly pattern: one reading group (optionally also writing, already
-#      self-consistent) consumes a base plus some trip-sized range; zero or more write-only groups,
-#      all on the same side of the reader in program order, each add their own trip to a running
-#      total starting from that same base; the reader's own range must equal that running total exactly. This is the shape
-#      that lets `msg_input[in_off+k]`, `msg_input[in_off+n_node_feat+k]`, and
-#      `msg_input[in_off+2n_node_feat+k]` (three private sub-ranges) be proven to add up to exactly
-#      what `msg_input[in_off+i]` (for i = 1:n_in_msg) reads back, once n_in_msg's own
-#      definition is expanded and matches term-for-term.
-#
-# Anything not covered -- multiple pure-reader groups, a reader before some of its writers, a
-# group whose own accesses don't line up, a multi-dimensional ref, arr touched inside an `:if` --
-# returns `nothing`, meaning "not proven either way", and the caller falls back to the pairwise
-# check for that array exactly as before this proof existed.
-# ---- save-then-overwrite elision -------------------------------------
-# An adjoint's destructive write to an active array is preceded by a save of the value it
-# overwrites: `stack[...] = arr[i]` immediately before `arr[i] = ...`. That read touches exactly
-# the element the write on the next line already accounts for, so it adds no region of its own.
-# Left in place it turns a pure-writer group into a mixed one, and the cumulative-assembly
-# pattern below (which allows exactly one reader group) then refuses every assemble-then-consume
-# loop an adjoint produces. The rewrite below drops only that read, and is narrow on purpose:
-# same body, immediately adjacent statement, structurally identical index, and the saved value
-# goes straight into a different array. A read anywhere else, or at any other index, stays.
+# The proof itself. Groups every occurrence of `arr` by which top-level statement it came from, requiring each group's write/read indices
+# to agree internally (after stripping any local sub-loop variable). Accepts the array when no group is a pure reader (each a self-
+# contained accumulation, so cross-group base coincidence is cgen_device_assign's job), or when every group shares the same (base,trip),
+# or a cumulative-assembly pattern where one reading group's range provably matches a running sum of write-only groups' trips from the
+# same base. Anything uncovered returns `nothing`, falling back to the pairwise check.
 function cgen_elide_snapshot_saves(stmt, arr::Symbol)
     if stmt.kind == :for
         return (kind = :for, var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step,
@@ -4980,11 +4898,10 @@ end
 # fields gets no proof at all and falls straight to the pairwise check.
 
 # Every access to this array pins one fixed dimension to the candidate loop's own variable, so
-# iteration i touches only slice [.., i, ..] and two iterations never overlap. This is the
-# multi-dimensional counterpart of an index that reduces to `base + i`: `skx[i_loc, i_cell]`
-# inside `for i_cell` is private for exactly the same reason as `x[off + k]` is. Sound because a
-# split loop runs its whole body in one thread, so ordering within an iteration is preserved and
-# only cross-iteration overlap has to be ruled out.
+# iteration i touches only slice [.., i, ..] and two iterations never overlap. This is the multi-
+# dimensional counterpart of an index that reduces to `base + i`: `skx[i_loc, i_cell]` inside `for
+# i_cell` is private for the same reason as `x[off + k]`. Sound because a split loop runs its whole
+# body in one thread, so only cross-iteration overlap has to be ruled out.
 function cgen_array_sliced_by_loopvar(widxs, ridxs, loopvar::Symbol)
     idxs = vcat(collect(widxs), collect(ridxs))
     isempty(idxs) && return false
@@ -5019,15 +4936,11 @@ function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, kno
     writes = Dict{Any,Vector{Any}}()
     reads = Dict{Any,Vector{Any}}()
     cgen_collect_array_accesses!(body, writes, reads)
-# Deliberately not scoped to index expressions mentioning the loop's own variable: a sweep-style
-# recurrence can carry its cross-iteration coupling through an inner loop's index, with no mention of
-# the outer loop's variable at all. The loop var doesn't have to appear in an index for reading and
-# writing the same array at two indices to be a genuine recurrence -- any structural mismatch between
-# a write and read index of the same array disqualifies the loop, unconditionally -- UNLESS
-# cgen_array_private_to_loop can prove that array's whole access pattern is confined to a private,
-# non-overlapping per-outer-iteration region despite the mismatch (see that function's own comment).
-# Only tried for a written array; a purely-read array never reaches this loop at all, and never needed
-# proving in the first place, since concurrent reads of shared memory are always safe on their own.
+# Deliberately not scoped to index expressions mentioning the loop's own variable: a sweep-style recurrence can carry its cross-iteration
+# coupling through an inner loop's index, with no mention of the outer variable at all. A structural mismatch between a write and read index
+# of the same array disqualifies the loop -- UNLESS cgen_array_private_to_loop can prove that array's whole access pattern is confined to a
+# private, non-overlapping per-outer-iteration region. Only tried for a written array; a purely-read array never needs proving, since
+# concurrent reads are always safe.
     array_defs = merge(outer_defs, cgen_scalar_def_map(body))
     for (arr, widxs) in writes
         cgen_array_private_to_loop(body, arr, array_defs) === true && continue
@@ -5059,13 +4972,11 @@ function cgen_var_assigned_anywhere(body::Vector{NamedTuple}, var::Symbol)
     return false
 end
 
-# The value `var` provably holds at the end of one traversal of body, if it's the same
-# literal on every control-flow path, else `nothing`. Walks in program order threading a
-# running state: :unchanged (not touched yet), :unknown (touched but not provably a single
-# literal), or a Number (every touch since the last branch point agrees on this exact
-# literal).
-# `entry` is the value `var` is known to hold coming INTO this body, or nothing if unknown. It
-# matters only for a nested loop that might not run: see cgen_terminal_value_walk.
+# The value `var` provably holds at the end of one traversal of body, if it's the same literal on
+# every control-flow path, else `nothing`. Walks in program order threading a running state:
+# :unchanged (not touched), :unknown (touched but not provably a single literal), or a Number
+# (every touch since the last branch point agrees). `entry` is the value `var` is known to hold
+# coming into this body, mattering only for a nested loop that might not run.
 function cgen_loop_convergent_constant(body::Vector{NamedTuple}, var::Symbol, entry = nothing)
     state = cgen_terminal_value_walk(body, var, :unchanged, entry)
     state === :unchanged && return entry
@@ -5088,19 +4999,11 @@ function cgen_terminal_value_walk(body::Vector{NamedTuple}, var::Symbol, state, 
             end
         elseif stmt.kind == :for
             if cgen_var_assigned_anywhere(stmt.body, var)
-                # A var touched inside a nested loop isn't automatically :unknown -- if that nested loop's
-                # own body provably converges `var` to the same literal on every one of its control-flow
-                # paths too (recursing exactly as the top-level caller does), that literal is what `var`
-                # holds after the nested loop finishes. Needed once this proof runs on loops whose reset
-                # lives one level deeper than the reduction itself.
-                #
-                # But only when the nested loop is GUARANTEED to run. With a runtime bound there are two
-                # outcomes -- the loop's constant, or the value already held -- and the claim survives
-                # only if they agree. mpnn's reverse node loop agrees (`sb` enters at 0.0, the feature
-                # loop converges it back to 0.0, so an empty feature loop leaves 0.0 either way);
-                # entry_empty does not (`sb` has already been accumulated into before the loop that would
-                # reset it, so an empty one leaves a live value). Taking `inner` unconditionally is what
-                # made entry_empty's GPU adjoint wrong by 1.43 while its CPU adjoint was correct.
+                # A var touched inside a nested loop isn't automatically :unknown -- if that nested loop's own body provably converges `var` to
+                # the same literal on every path too, that literal is what `var` holds after it finishes. Needed once this proof runs on loops
+                # whose reset lives one level deeper than the reduction. But only when the nested loop is GUARANTEED to run: with a runtime
+                # bound there are two outcomes, and the claim survives only if they agree -- taking `inner` unconditionally made entry_empty's
+                # GPU adjoint wrong by 1.43 while its CPU adjoint was correct.
                 held = state === :unchanged ? entry : state
                 inner = cgen_loop_convergent_constant(stmt.body, var, held)
                 state = if cgen_loop_runs_once(stmt)
@@ -5449,21 +5352,11 @@ function cgen_expr_has_ref(e)
     return any(cgen_expr_has_ref, e.args)
 end
 
-# Would splitting this loop actually produce a valid device kernel? cgen_reduction_only_loop's
-# array test is coarse by design: it admits a write and a read at the SAME index, which is right
-# for a commutative accumulation (cgen_device_assign rewrites it as an atomic add) and wrong for a
-# non-additive read-modify-write like `y[i] = 0.5 * y[i] + x[i]` that a repeating outer loop
-# re-applies -- threads running that concurrently race, and no atomic wrapper fixes it.
-# cgen_device_assign already refuses exactly this, but refusing THERE fails the whole conversion.
-# Asking here instead lets the loop stay on the host so its body can be split at a level that is
-# safe. `build` is the caller's own trial cgen_kernel_def/jgen_kernel_def call, so each backend
-# asks about its own codegen rather than a shared approximation of it.
-#
-# This replaced cgen_prefer_inner_split, which deferred into a lone inner child whenever BOTH
-# loops were eligible. That is a preference, not a fallback: it stranded every eligible outer loop
-# that happened to have one child on the host, including the Tier B sizing skeleton's
-# `for i_k = 1:nu; for i_j = 1:nc`, where splitting the outer is strictly better than nu host-side
-# launches of the inner. A fallback fires only when it is needed, so it witnesses itself.
+# Would splitting this loop actually produce a valid device kernel? cgen_reduction_only_loop's array test is coarse: it admits a write/read at the SAME
+# index, right for a commutative accumulation but wrong for a non-additive read-modify-write like `y[i] = 0.5*y[i]+x[i]` that a repeating outer loop re-
+# applies -- concurrent threads race, no atomic fixes it. cgen_device_assign already refuses this, but refusing THERE fails the whole conversion; asking
+# here lets the loop stay on the host instead. This replaced cgen_prefer_inner_split, a preference that stranded every eligible outer loop with one
+# child on the host.
 function cgen_kernel_def_ok(build)
     try
         build()
@@ -5474,57 +5367,36 @@ function cgen_kernel_def_ok(build)
 end
 
 # ---- host-side body walk: splits device kernels off ----
-# Host-side body walk: splits off one device kernel per eligible iteration-independent loop; anything left over runs as ordinary host-side Julia. A
-# left-over statement touching a device array is what CUDA.allowscalar(false) rejects -- confirmed as a live-GPU crash. Fix: each run of consecutive
-# :assign statements is wrapped in one allowscalar_macro block if any touches an array, else emitted unwrapped. keep_all_atomic=false additionally
-# offers a splittable loop to cgen_idiomatic_scalar_reduction, replacing it with one dot/sum/mapreduce call when it matches that narrow shape.
-# outer_defs: scalar definitions from the whole kernel's own top-level body (see
-# cgen_scalar_def_map), built once by cgen_emit and threaded through unchanged at every
-# recursion level -- cgen_reduction_only_loop's array-privacy proof needs it to see through a
-# kernel-level size relationship like `n_in_msg = 2 * n_node_feat + n_edge_feat`, defined well
-# outside any candidate loop's own body.
+# Host-side body walk: splits off one device kernel per eligible iteration-independent loop; anything left over runs as ordinary host-side
+# Julia, wrapped in one allowscalar_macro block if a touched statement reads a device array (confirmed live-GPU crash otherwise).
+# keep_all_atomic=false additionally offers a splittable loop to cgen_idiomatic_scalar_reduction. outer_defs: scalar definitions from the
+# kernel's top-level body, threaded through so the array-privacy proof can see a size relationship defined outside any candidate loop.
 
-# Splitting a loop moves its assignments onto the DEVICE, leaving the host's copy of every local
-# scalar behind. Any later HOST read of one of them then sees a stale value -- cgen_use_before_def
-# only checks reads that happen WITHIN the loop. This is the gate for reads that happen after it.
-#
-# An adjoint shadow is exempt, and provably so rather than by luck: agen_backward_assign ends
-# every consumed shadow with `vb = 0.0`, so the device leaves 0.0 behind and the host copy is
-# already 0.0. That exemption is what keeps the gate affordable -- 28 of the corpus's 41 live-out
-# sites are shadows. The rest are gathered accumulators, stencil taps and retired window bounds,
-# where the two values genuinely differ and the host stores the wrong number.
-#
-# Depends on the block-boundary collapse (agen_boundary_push_redundant) having already removed
-# the redundant outer pushes: those were the reads, and without the collapse this gate refuses
-# nine corpus kernels instead of three.
+# Splitting a loop moves its assignments onto the DEVICE, leaving the host's copy of every local scalar behind. Any later HOST read of one
+# then sees a stale value -- cgen_use_before_def only checks reads WITHIN the loop; this is the gate for reads after it. An adjoint shadow is
+# exempt, provably: agen_backward_assign ends every consumed shadow with `vb = 0.0`, so device and host copies already agree (28 of 41 live-
+# out sites). The rest are accumulators, stencil taps, and window bounds, where the values genuinely differ. Depends on the block-boundary
+# collapse having already removed redundant outer pushes.
 function cgen_liveout_is_zeroed(stmt, root_body, loop_vars, synth = Dict{Symbol,Any}())
     locals = setdiff(cgen_locally_assigned_scalars(stmt.body), loop_vars)
     isempty(locals) && return true
     for v in ii_escapes_nested(root_body, stmt.body, locals)
-        # A var in `synth` is not a hazard however the escape looks. synth[v] = c means the value
-        # coming INTO the loop is already c and every path through the body converges back to c,
-        # so after the split the host copy still holds c -- which is exactly what the sequential
-        # loop leaves, on any iteration count including zero. mpnn's reverse node loop is this
-        # case: `sb` enters at 0.0 and the body's last write to it is 0.0, but that write sits
-        # inside a runtime-bounded feature loop, so cgen_last_assign_is_zero cannot prove it and
-        # the whole n_nodes loop was stranded on the host.
+        # A var in `synth` is not a hazard however the escape looks. synth[v] = c means the value coming into
+        # the loop is already c and every path converges back to c, so the host copy still holds c after the
+        # split -- exactly what the sequential loop leaves. mpnn's reverse node loop is this case: `sb` enters
+        # at 0.0 and its last write is 0.0, but that write sits inside a runtime-bounded feature loop, so
+        # cgen_last_assign_is_zero cannot prove it.
         haskey(synth, v) && continue
         cgen_last_assign_is_zero(stmt.body, v) || return false
     end
     return true
 end
 
-# Is the LAST assignment to `v` on every path through `body` the literal 0.0? A write only counts
-# when it is GUARANTEED to run: at this body's own top level, in both arms of an `:if`, or inside
-# a loop whose literal bounds prove at least one iteration. A write that might not happen cannot
-# establish the zero, and -- worse -- a write that might happen destroys a zero established
-# earlier, so an unprovable nested write clears the flag rather than being ignored.
-#
-# entry_empty is why: its adjoint zeroes the shadow inside `for i_j = w:-1:1`, which runs zero
-# times once the window retires, leaving `sb` holding a live accumulation. Accepting that as
-# "zeroed at exit" exempted the loop from the live-out gate, the pass loop was split, and the
-# host then read a stale `sb`. Caught on a live GPU at 1.43 relative error while the CPU adjoint
-# was correct -- the sequential path never exposes it.
+# Is the LAST assignment to `v` on every path through `body` the literal 0.0? A write only counts when GUARANTEED to run: at this body's own
+# top level, in both arms of an `:if`, or inside a loop whose literal bounds prove at least one iteration. An unprovable nested write clears
+# the flag rather than being ignored, since it might destroy a zero already established. entry_empty is why: its adjoint zeroes the shadow
+# inside `for i_j = w:-1:1`, which runs zero times once the window retires, leaving `sb` holding a live accumulation -- caught on a live GPU
+# at 1.43 relative error while the CPU adjoint was correct.
 function cgen_last_assign_is_zero(body, v)
     found = false
     for st in body
@@ -5578,15 +5450,11 @@ end
 
 function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
     exprs = Any[]
-    # Seeded from the enclosing body's own known_consts at the point this body was reached (never
-    # written back) -- a scalar reset at the *tail* of a non-split ancestor loop's body converges
-    # by induction to the same literal on every one of that loop's own iterations, so a literal
-    # known several nesting levels up remains valid here even though nothing in *this* body's own
-    # statement list re-establishes it. Without this, cgen_reduction_only_loop only ever sees a
-    # known_consts entry when the resetting literal sits immediately before the loop in the same
-    # statement list -- which fails for any reduction scalar whose reset lives one nesting level
-    # below its true initializer, e.g. an adjoint accumulator zeroed at the end of an inner loop's
-    # body but declared outside an outer sequential loop entirely.
+    # Seeded from the enclosing body's own known_consts at the point this body was reached (never written back) -- a scalar
+    # reset at the tail of a non-split ancestor loop's body converges by induction to the same literal on every iteration, so
+    # a literal known several nesting levels up remains valid here even though nothing in this body's own statement list re-
+    # establishes it. Without this, cgen_reduction_only_loop misses a reduction scalar whose reset lives one level below its
+    # true initializer.
     known_consts = copy(outer_known_consts)
     pending = Any[]
     pending_has_array = false
@@ -5668,24 +5536,18 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
             end
             delete!(known_consts, stmt.var)
-            # Blind invalidation here would throw away entries that remain true: if this loop's own
-            # body provably converges an assigned scalar to a literal by the walk cgen_reduction_only_loop
-            # already trusts (cgen_loop_convergent_constant), that literal holds after the loop regardless
-            # of whether the loop itself split -- update rather than erase, so a later sibling statement
-            # (or a further sibling loop, per mpnn's `sb` scratch reused across two separate loop nests)
-            # can still see it. Only truly unprovable scalars get deleted.
+            # Blind invalidation here would throw away entries that remain true: if this loop's own body
+            # provably converges an assigned scalar to a literal by the walk cgen_reduction_only_loop
+            # already trusts, that literal holds after the loop regardless of whether it split -- update
+            # rather than erase, so a later sibling statement can still see it. Only truly unprovable
+            # scalars get deleted.
             for v in cgen_all_assigned_scalars(stmt.body)
                 c = cgen_loop_convergent_constant(stmt.body, v, get(known_consts, v, nothing))
-                # The convergent constant only describes the value AFTER the loop if the loop
-                # actually ran. A runtime bound may give zero iterations, in which case `v` still
-                # holds whatever it held coming in -- unless that was already the same constant,
-                # which makes the claim true either way. Recording it unconditionally lets
-                # cgen_reduction_only_loop synthesise `v = c` as a split kernel's first statement
-                # for a LATER loop, and every thread then starts from c instead of the value the
-                # sequential code carried in. ii_kill is the witness: its reverse shadow enters
-                # the pass loop holding 2*v*outb[1], the zeroing i_j loop above it is empty once
-                # the width retires, and the GPU adjoint came out wrong by 0.98 while the CPU one
-                # was correct.
+                # The convergent constant only describes the value after the loop if the loop actually ran. A runtime bound
+                # may give zero iterations, in which case `v` still holds what it held coming in -- unless that was already
+                # the same constant. Recording it unconditionally lets cgen_reduction_only_loop synthesise `v = c` for a
+                # LATER loop; every thread starts from c instead of the sequential value. ii_kill is the witness: the GPU
+                # adjoint came out wrong by 0.98 while the CPU one was correct.
                 if c === nothing || !(cgen_loop_runs_once(stmt) || get(known_consts, v, nothing) == c)
                     delete!(known_consts, v)
                 else
@@ -5736,11 +5598,10 @@ end
 
 function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
-    # A zero-trip loop is a legal no-op on the CPU (`for i = 1:0` just does not run), but
-    # `cld(0, nthread) == 0` and a launch with zero blocks is a hard CUDA error, so the same
-    # kernel and inputs would run on the host and crash on the device. A multigrid solver
-    # coarsened until a level has no points reaches exactly this. One block is launched
-    # instead: every thread in it fails the `__tid > trip_count` guard the device kernel
+    # A zero-trip loop is a legal no-op on the CPU, but `cld(0, nthread) == 0` and a launch with zero
+    # blocks is a hard CUDA error, so the same kernel and inputs would crash on the device. A
+    # multigrid solver coarsened until a level has no points reaches exactly this. One block is
+    # launched instead: every thread in it fails the `__tid > trip_count` guard the device kernel
     # already opens with, and returns immediately.
     nblocks = Expr(:call, :max, 1, Expr(:call, :cld, n_iter, :nthread_per_block))
     call = Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...)
@@ -5955,12 +5816,11 @@ function jgen_stack_device_expr(rhs::Expr)
     return Expr(:call, Expr(:., :JACC, QuoteNode(:zeros)), T, size_expr)
 end
 
-# keep_all_atomic: same meaning as cgen_body's -- a matched loop is replaced by one `JACC.@parallel_reduce` call instead of a synthesized per-
-# element atomic kernel. CORRECTED: a live GPU run proved allowscalar-style handling IS needed here too: `JACC.@parallel_reduce` returns a
-# plain host scalar, but writing it back into `target` (a device-array-backed ref at runtime) via a bare host assignment is a host setindex!
-# against a device array. Unlike CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch, raising 'Scalar indexing is disallowed'. Fix:
+# keep_all_atomic: same meaning as cgen_body's -- a matched loop is replaced by one `JACC.@parallel_reduce` call
+# instead of a synthesized per-element atomic kernel. Writing its plain host-scalar result back into `target` (a
+# device-array-backed ref) via a bare host assignment is a host setindex! against a device array; unlike
+# CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch (confirmed live: 'Scalar indexing is disallowed'). Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
-# outer_defs: see cgen_body's identical parameter -- kept in sync for the JACC target.
 function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
@@ -6056,16 +5916,11 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # own tail stays known for statements (or further sibling loops) that follow.
             for v in cgen_all_assigned_scalars(stmt.body)
                 c = cgen_loop_convergent_constant(stmt.body, v, get(known_consts, v, nothing))
-                # The convergent constant only describes the value AFTER the loop if the loop
-                # actually ran. A runtime bound may give zero iterations, in which case `v` still
-                # holds whatever it held coming in -- unless that was already the same constant,
-                # which makes the claim true either way. Recording it unconditionally lets
-                # cgen_reduction_only_loop synthesise `v = c` as a split kernel's first statement
-                # for a LATER loop, and every thread then starts from c instead of the value the
-                # sequential code carried in. ii_kill is the witness: its reverse shadow enters
-                # the pass loop holding 2*v*outb[1], the zeroing i_j loop above it is empty once
-                # the width retires, and the GPU adjoint came out wrong by 0.98 while the CPU one
-                # was correct.
+                # The convergent constant only describes the value after the loop if the loop actually ran. A runtime bound
+                # may give zero iterations, in which case `v` still holds what it held coming in -- unless that was already
+                # the same constant. Recording it unconditionally lets cgen_reduction_only_loop synthesise `v = c` for a
+                # LATER loop; every thread starts from c instead of the sequential value. ii_kill is the witness: the GPU
+                # adjoint came out wrong by 0.98 while the CPU one was correct.
                 if c === nothing || !(cgen_loop_runs_once(stmt) || get(known_consts, v, nothing) == c)
                     delete!(known_consts, v)
                 else
@@ -6578,16 +6433,11 @@ function val_generate_baseline(kernel, primal_expr::Expr;
         end
     end
     last_err = nothing
-# A scalar_int arg is very often an iteration count -- more iterations means more chances for per-step amplification to
-# compound into a blow-up under otherwise reasonable random data. Narrowing the upper end of the range after a divergence --
-# rather than redrawing at the same range -- targets that directly, without assuming what any particular arg means. Allowed to
-# fall below the caller's own int_lo down to 1: a smaller working baseline beats none. Reset for a non-divergence failure.
-# The floor stays at 1 only because THIS path is a divergence remedy, not a coverage mechanism -- an int_lo of 0 passed in by
-# the caller is honoured, and is how a zero-trip loop gets drawn deliberately (see validate_zerotrip.jl). It used to say a
-# zero-iteration loop "would trivially pass"; that turned out to be exactly backwards. Six separate analyses treated a loop
-# that may not run as having run, every one of them producing silently wrong gradients, and none was reachable at all until a
-# kernel was hand-written to retire a bound past zero. What IS true is that a draw carrying no signal passes trivially, and
-# that is now a rejection criterion below rather than an assumption here.
+# A scalar_int arg is often an iteration count -- more iterations means more chances for per-step amplification to blow up. Narrowing the
+# range's upper end after a divergence, rather than redrawing, targets that directly. Allowed to fall to 1 (int_lo=0 from the caller is still
+# honored, deliberately drawing zero-trip loops -- see validate_zerotrip.jl). Six separate analyses used to treat a loop that may not run as
+# having run, producing silently wrong gradients, until a kernel was hand-written to retire a bound past zero; a draw carrying no signal
+# passing trivially is now a rejection criterion below, not an assumption here.
     cur_hi = int_hi
     for attempt in 1:attempts
         int_args = val_random_int_args(kernel.sig; lo = min(int_lo, cur_hi), hi = cur_hi, divisible_by = divisible_by)
@@ -7212,13 +7062,11 @@ function stade_tangent(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     return tgen_emit(kernel, lin_plan)
 end
 
-# Computes the site-level TBR decision from both independently duplicated implementations (snap_* and
-# agen_*) and asserts they agree exactly before returning either -- the permanent guard, so a future
-# silent divergence fails loudly here instead of corrupting a gradient. Also asserts every site-level
-# "needed" site is backed by the coarser whole-variable value_needed set that fuse_ii_loops still
-# relies on -- site-level must only ever refine that set, never diverge from it. Returns (snap_sites,
-# agen_sites): snap_plan consumes its own, agen_emit/hvp_emit consume theirs. Always run -- site-level
-# TBR is no longer opt-in, it's how every snapshot decision is made.
+# Computes the site-level TBR decision from both independently duplicated implementations (snap_* and agen_*) and
+# asserts they agree exactly before returning either -- the permanent guard, so a future silent divergence fails
+# loudly here. Also asserts every site-level 'needed' site is backed by the coarser whole-variable value_needed set
+# fuse_ii_loops relies on -- site-level must only refine it, never diverge. Returns (snap_sites, agen_sites), each
+# stage's own duplicate as its sole input. Always run -- no longer opt-in.
 function stade_site_level_tbr_check(kernel)
     snap_sites = snap_value_needed_sites(kernel)
     agen_sites = agen_value_needed_sites(kernel)
@@ -7234,19 +7082,11 @@ function stade_site_level_tbr_check(kernel)
 end
 
 
-# ---- dead loop-entry scalars ----------------------------------------------------------------
-# A scalar assigned only INSIDE a nested block of `body`, and written there before anything reads
-# it, carries a value in from the previous iteration that nothing ever uses. The primal does not
-# say so, and the adjoint's pre-write snapshot then READS that carried value -- which makes the
-# enclosing loop look loop-carried to cgen_use_before_def and blocks the split, however dead the
-# value actually is. ttgc's second cell nest is the case in point: `vere` is assigned in every
-# i_loc iteration before use, but without a reset the cell loop stays on the host, at a cost of
-# i_ncell scalar round-trips per Jacobi sweep.
-#
-# Writing `var = 0.0` at the top of `body` states the kill the primal already implies. It is
-# numerically inert exactly when norm_first_touch says :write. Note that suppressing the snapshot
-# instead does NOT work, measured: cgen_use_before_def refuses on the structure of the body, so a
-# read that precedes the definition still blocks the split even when guarded away.
+# ---- dead loop-entry scalars ----
+# A scalar assigned only inside a nested block of `body`, written there before anything reads it, carries a value from the previous iteration that nothing uses --
+# the adjoint's pre-write snapshot then reads that value, making the loop look loop-carried to cgen_use_before_def and blocking the split. ttgc's second cell nest
+# is the case in point: `vere` is assigned every i_loc iteration before use, but without a reset the cell loop stays on the host. Writing `var = 0.0` at the top
+# of `body` states that kill. Suppressing the snapshot instead does NOT work: cgen_use_before_def refuses regardless.
 function norm_dead_entry_vars(body, kinds, value_needed)
     locals = agen_collect_reassigned(body, true)
     return sort(collect(v for v in intersect(locals, value_needed)
@@ -7357,13 +7197,10 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     tier_b_extra_args = vcat(table_names, tot_names, val_names)
     hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites,
                          tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan)
-    # Mirrors agen_emit's own post-hoc cleanup, sharing agen_finalize_stacks so the two passes
-    # cannot drift out of sync. Required for consistency: stade_adjoint's own initstacks_* already
-    # drops a stack once fusion leaves it unused, and validation code sharing initstacks_* across
-    # both adjoint and hvp calls needs hvp_expr's signature to match. hvp_expr's fwd/bwd use the
-    # same agen_forward_body/agen_backward_body calls as the adjoint path, so scanning it
-    # independently lands on the same unused set. is_hvp=true additionally drops hvp_shadow_stack_inits'
-    # orphaned `<stack>_d` shadow alloc for each dropped stack (see hvp_drop_unused_shadow_stack_allocs).
+# Mirrors agen_emit's own post-hoc cleanup, sharing agen_finalize_stacks so the two passes can't drift out of sync. Required for consistency:
+# stade_adjoint's own initstacks_* already drops a stack once fusion leaves it unused, and validation code sharing initstacks_* across both
+# adjoint and hvp calls needs hvp_expr's signature to match. hvp_expr's fwd/bwd reuse the same agen_forward_body/agen_backward_body calls as
+# the adjoint path, landing on the same unused set. is_hvp=true additionally drops each dropped stack's orphaned `<stack>_d` shadow alloc.
     (hvp_expr, initstacks_expr) = agen_finalize_stacks(hvp_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp = true)
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
@@ -7737,15 +7574,11 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
     push!(lines, "function _val_init_stacks_local(fn, extra_args)\n    r = fn(extra_args...)\n    r === nothing && return ()\n    r isa Tuple && return r\n    return (r,)\nend\n")
     push!(lines, "_relerr_scalar(a, b) = abs(a - b) / max(abs(a), abs(b), 1.0)\n" *
                  "_relerr_arr(a, b) = maximum(abs.(a .- b) ./ max.(abs.(a), abs.(b), 1.0))\n")
-    # Compares the SNAPSHOT STACKS, not just the arguments. A stack slot written from a stale
-    # host scalar -- one a split loop assigned on the device, leaving the host copy behind --
-    # shows up here and nowhere else, because the gradients stay correct whenever that slot's
-    # restore happens to be dead. That is a real condition on the corpus, confirmed on a live
-    # GPU for cellscatter (gradients to 5.5e-14, stacks off by a full relative 1.0) and for
-    # raggedii. It is reported rather than folded into `ok` for exactly that reason: a nonzero
-    # value means the kernel passes for a reason nothing in the codebase enforces, which is a
-    # finding, not a failure. Non-array tuple entries are skipped -- a Tier B initstacks_*
-    # returns prefix tables and scalar totals alongside the stacks themselves.
+# Compares the SNAPSHOT STACKS, not just the arguments. A stack slot written from a stale host scalar (a split loop assigned it on the device,
+# leaving the host copy behind) shows up here and nowhere else, since gradients stay correct whenever that slot's restore happens to be dead
+# -- confirmed live for cellscatter (gradients to 5.5e-14, stacks off by 1.0) and raggedii. Reported rather than folded into `ok`: a nonzero
+# value means the kernel passes for a reason nothing enforces, a finding not a failure. Non-array tuple entries are skipped, since a Tier B
+# initstacks_* returns prefix tables and totals alongside the stacks.
     push!(lines, "function _val_stack_relerr(cpu_stacks, gpu_stacks)\n" *
                  "    worst = 0.0\n    n = 0\n" *
                  "    for (c, g) in zip(cpu_stacks, gpu_stacks)\n" *
@@ -8029,14 +7862,11 @@ function ii_kill_and_collect!(body, alive, escaped, value_only = false)
             alive_els  = ii_kill_and_collect!(stmt.els,  copy(alive), escaped, value_only)
             alive = intersect(alive_then, alive_els)
         elseif stmt.kind == :for
-            # A kill inside a loop only counts when the loop is GUARANTEED to run -- a loop with
-            # a runtime bound may execute zero times, leaving the incoming value in place for a
-            # later read to observe. Reads are collected either way (they are the escapes we are
-            # looking for); only the kill is conditional. The `:if` arm above is the same rule
-            # expressed as an intersection: kill only when both branches kill.
-            #
-            # Getting this wrong under-reports escapes, so a loop gets fused whose scalar is
-            # still live, and the gradient is silently wrong -- ii_kill is the witness, at 0.39.
+            # A kill inside a loop only counts when the loop is GUARANTEED to run -- a runtime bound may execute zero
+            # times, leaving the incoming value for a later read. Reads are collected either way; only the kill is
+            # conditional. The `:if` arm above is the same rule as an intersection: kill only when both branches kill.
+            # Getting this wrong under-reports escapes, fusing a loop whose scalar is still live -- ii_kill is the
+            # witness, at 0.39.
             inner = ii_kill_and_collect!(stmt.body, copy(alive), escaped, value_only)
             cgen_loop_runs_once(stmt) && (alive = inner)
         end
@@ -8099,16 +7929,11 @@ function ii_escapes_nested(kernel_body, target, vars, value_only = false)
 end
 
 
-# Value-needed reads of `vars` that are a genuine hazard for a kind whose adjoint stays at the
-# backward position. Same walk as ii_escapes_nested, value-needed only (see ii_value_reads),
-# EXCEPT at the innermost enclosing body: a var that body is guaranteed to block-boundary
-# snapshot is restored at the head of every one of its reverse iterations, before any of its
-# statements run, so a read there is already served. That is exactly what makes a cell-scatter
-# gather loop safe -- `auxu = 0.0` at the top of the cell body, gathered by one sub-loop and
-# consumed nonlinearly by the next -- and it is why snap_boundary_kill_vars' top-level-write
-# condition is load-bearing here: without it the guarantee does not hold and nothing restores
-# the accumulator. Outer levels get no such exemption; the boundary pop there restores a
-# per-iteration value, not the post-loop one an outer read needs.
+# Value-needed reads of `vars` that are a genuine hazard for a kind whose adjoint stays at the backward position.
+# Same walk as ii_escapes_nested, value-needed only, EXCEPT at the innermost enclosing body: a var that body is
+# guaranteed to block-boundary snapshot is restored at the head of every reverse iteration before any statements run,
+# so a read there is already served -- exactly what makes a cell-scatter gather loop safe (`auxu = 0.0` at the top,
+# gathered by one sub-loop, consumed by the next). Outer levels get no such exemption.
 function ii_red_escapes(kernel_body, target, vars, bvars)
     path = ii_find_ancestor_path(kernel_body, target, false)
     path === nothing && return copy(vars)
@@ -8369,12 +8194,11 @@ end
 function ii_fused_var_in_nested_for(body, vars, plan = nothing)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :for
-            # A nested loop that is ITSELF classified re-establishes its own scalars per inner
-            # iteration -- but only for a read INSIDE that loop. A read at THIS level that
-            # precedes the loop is reversed in the fused body's `bwd` half, which runs after the
-            # whole forward nest, so it sees the scalar's last inner-iteration value instead of
-            # the one it read going forward. A read that FOLLOWS the loop is safe for the same
-            # reason it is a hazard here: going forward it already read that last inner value.
+            # A nested loop that is ITSELF classified re-establishes its own scalars per inner iteration -- but only
+            # for a read INSIDE that loop. A read at THIS level that precedes the loop is reversed in the fused body's
+            # `bwd` half, running after the whole forward nest, so it sees the scalar's last inner-iteration value
+            # instead of what it read going forward. A read that FOLLOWS the loop is safe for the same reason: going
+            # forward it already read that last inner value.
             covered = plan !== nothing && haskey(plan, agen_site_key(body, idx))
             (!covered && ii_assigns_any(stmt.body, vars)) && return true
         elseif stmt.kind == :if
@@ -8386,13 +8210,10 @@ function ii_fused_var_in_nested_for(body, vars, plan = nothing)
 end
 
 # ---- reverse-direction escape: a read the loop is reversed BEFORE -------------------
-# ii_escapes_nested asks whether the loop's own output reaches a later read. This asks the
-# mirror question: does a read positioned BEFORE the loop still need the value the loop
-# overwrites? Such a read's adjoint runs AFTER the fused loop's backward code, and every fusing
-# kind elides its fused scalars' snapshots, so nothing re-establishes the value in between.
-# Walks each ancestor level's preceding siblings forward, accumulating vars that have been read,
-# and dropping one again on a fresh assignment -- that assignment's own snapshot site sits
-# outside the loop and is not elided, so it restores the read's value itself.
+# ii_escapes_nested asks whether the loop's own output reaches a later read. This asks the mirror question: does a read BEFORE the loop still need
+# the value the loop overwrites? Such a read's adjoint runs AFTER the fused loop's backward code, and every fusing kind elides its fused scalars'
+# snapshots, so nothing re-establishes the value in between. Walks each ancestor level's preceding siblings forward, accumulating vars read,
+# dropping one on a fresh assignment (whose own snapshot site, outside the loop, isn't elided and restores the value itself).
 function ii_pending_reads!(body, vars, pending, plan = nothing, limit = nothing)
     for (idx, stmt) in enumerate(body)
         # `limit` bounds this level to the statements BEFORE the candidate loop. Passed as an
@@ -8567,11 +8388,10 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
         inside_nonlinear = Set{Symbol}()
         snap_collect_value_needed!(stmt.body, inside_nonlinear)
         isempty(intersect(vn_red, inside_nonlinear)) || return :none
-        # Same question OUTSIDE the body. vn_red is excluded from push, and every kind carrying a
-        # vn_red defers its adjoint to the backward position -- so a read of the accumulator that
-        # sits AFTER this loop is reversed BEFORE the loop's backward code, with nothing having
-        # restored the accumulator's primal for it. Only a value-needed read matters here: the
-        # canonical `out[i] = s` write-back is linear and safe, which is why this uses
+        # Same question OUTSIDE the body. vn_red is excluded from push, and every kind carrying it defers its
+        # adjoint to the backward position -- so a read of the accumulator after this loop is reversed BEFORE
+        # the loop's backward code, with nothing having restored the accumulator's primal. Only a value-needed
+        # read matters: the canonical `out[i] = s` write-back is linear and safe, which is why this uses
         # ii_value_reads rather than the flat read test vn_ind gets below.
         isempty(ii_red_escapes(kernel.body, stmt.body, vn_red, snap_boundary_stack_vars(kernel))) || return :none
     end
@@ -8644,11 +8464,10 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
         inside_nonlinear = Set{Symbol}()
         agen_collect_value_needed!(stmt.body, inside_nonlinear)
         isempty(intersect(vn_red, inside_nonlinear)) || return :none
-        # Same question OUTSIDE the body. vn_red is excluded from push, and every kind carrying a
-        # vn_red defers its adjoint to the backward position -- so a read of the accumulator that
-        # sits AFTER this loop is reversed BEFORE the loop's backward code, with nothing having
-        # restored the accumulator's primal for it. Only a value-needed read matters here: the
-        # canonical `out[i] = s` write-back is linear and safe, which is why this uses
+        # Same question OUTSIDE the body. vn_red is excluded from push, and every kind carrying it defers its
+        # adjoint to the backward position -- so a read of the accumulator after this loop is reversed BEFORE
+        # the loop's backward code, with nothing having restored the accumulator's primal. Only a value-needed
+        # read matters: the canonical `out[i] = s` write-back is linear and safe, which is why this uses
         # ii_value_reads rather than the flat read test vn_ind gets below.
         isempty(ii_red_escapes(kernel.body, stmt.body, vn_red, agen_boundary_stack_vars(kernel))) || return :none
     end
