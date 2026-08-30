@@ -62,6 +62,13 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # the CPU one was correct. mpnn is the conservative residue of the same rule.
         "entry_branch" => 3, "entry_dead" => 2, "entry_empty" => 7,
         "geomrecur" => 3,
+    # Negative control, and the one entry here that is a REFUSAL rather than a
+    # budget. The outer loop carries a read-after-write -- each cell's dense
+    # layer consumes the previous cell's slice -- so all three outer loops in
+    # the bundle (forward sweep, reverse sweep, and the re-emitted primal) must
+    # stay on the host. A drop below 3 is not an improvement here; it means an
+    # unsafe loop reached the device. Do NOT lower this baseline.
+    "halo_assembly" => 3,
         "fixed_sweeps" => 3, "ii_kill" => 6, "ii_readbefore" => 4, "ii_readnested" => 2,
         "matvec_loss" => 0, "mg_vcycle" => 28, "mg_vcycle_multi" => 28,
         "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
