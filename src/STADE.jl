@@ -5975,11 +5975,20 @@ end
 # style argument, not a plain function call (that was the pre-1.0/v0.0.x API). The
 # underlying kernel function's own signature is unchanged (index still its first parameter,
 # supplied internally by the macro); only the launch call's shape moved.
+# A zero-trip loop is a legal no-op on the CPU, and `JACC.@parallel_for range=0`
+# raises DivideError on the CUDA backend (probed live on an RTX PRO 6000: range=0
+# throws, range=4 runs). cgen_launch_expr survives the same case by launching one
+# block whose threads all fail the device kernel's own `__tid > trip_count` guard,
+# but JACC's programming model has no such per-thread guard to fall back on --
+# the callee is a plain indexed function -- so the launch itself has to be skipped.
+# A multigrid solver coarsened until a level has no points reaches exactly this,
+# as does any kernel whose extent is an integer argument drawn as zero.
 function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
-    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_for"))), nothing,
-                Expr(:(=), :range, n_iter),
-                Expr(:call, jgen_kernel_fname(owner, idx), fargs...))
+    launch = Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_for"))), nothing,
+                  Expr(:(=), :range, n_iter),
+                  Expr(:call, jgen_kernel_fname(owner, idx), fargs...))
+    return Expr(:if, Expr(:call, :>, n_iter, 0), Expr(:block, launch))
 end
 
 function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol}, thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
@@ -6965,6 +6974,14 @@ end
 
 io_default_yaml_path(in_path::String) = splitext(in_path)[1] * ".yaml"
 
+# GPU parity gets its own baseline file rather than sharing the CPU oracles'.
+# `.yaml` is gitignored, so whichever script ran last owns the shared name --
+# and validate_zerotrip.jl deliberately draws integers from [0, 2], leaving
+# every extent at or near zero. A GPU run inheriting that draw executes no
+# device code and reports a pass. Separating the namespaces makes a GPU result
+# independent of test ordering.
+io_gpu_yaml_path(in_path::String) = splitext(in_path)[1] * ".gpu.yaml"
+
 # a minimal, hand-written YAML subset -- no external dependency. Two
 # top-level mappings: `int_args:` (bare integers) and `values:` (a
 # scalar is a bare float, a 1-D array is a flow list `[a, b, c]`, a
@@ -7520,7 +7537,10 @@ end
 # (value, shadow) pair -- mirrors val_adjoint_call_args's own ordering
 # rule exactly (array_int gets no shadow; scalar_int is a bare name,
 # shared verbatim between cpu/gpu since it's never wrapped).
-function val_gpu_call_args(sig, device::Symbol)
+# `mode = :hvp` appends one tangent pair per float arg after the whole
+# adjoint list, mirroring val_hvp_call_args's second pass -- the layout is
+# hvp_-specific and cannot be derived from sig.kinds alone.
+function val_gpu_call_args(sig, device::Symbol; mode::Symbol = :adjoint)
     parts = String[]
     for a in sig.args
         k = sig.kinds[a]
@@ -7530,6 +7550,12 @@ function val_gpu_call_args(sig, device::Symbol)
             push!(parts, "$(a)_val_$(device)", "$(a)_sh_$(device)")
         else
             push!(parts, "$(a)_val_$(device)")
+        end
+    end
+    if mode == :hvp
+        for a in sig.args
+            sig.kinds[a] in (:scalar_float, :array_float) || continue
+            push!(parts, "$(a)_tan_$(device)", "$(a)_shtan_$(device)")
         end
     end
     return parts
@@ -7566,34 +7592,46 @@ end
 # `values` itself (the primal baseline) is shared across trials but
 # freshly deepcopy'd every trial on both devices, since the call under
 # test mutates its float arrays in place.
+# `mode = :hvp` swaps the generated function under test for the HVP and
+# consumes two further per-trial seed Vectors: `tan_seeds` (the direction
+# the Hessian multiplies) and `shtan_seeds` (the tangent of the reverse
+# seed). Both are ignored for `:adjoint`.
 function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vector,
-                                adjoint_out, gpu_init, gpu_adj, stack_arg_names::Vector{Symbol},
-                                backend; rtol::Float64 = 2.5e-14)
+                                gen_out, gpu_init, gpu_gen, stack_arg_names::Vector{Symbol},
+                                backend; rtol::Float64 = 2.5e-14, mode::Symbol = :adjoint,
+                                tan_seeds::Vector = Any[], shtan_seeds::Vector = Any[])
+    mode in (:adjoint, :hvp) || error("val_gpu_parity_script: mode must be :adjoint or :hvp, got $(mode)")
     sig = kernel.sig
-    cpu_init_name = val_def_fn_name(adjoint_out.initstacks)
-    cpu_adj_name  = val_def_fn_name(adjoint_out.adjoint)
+    cpu_gen_expr = mode == :hvp ? gen_out.hvp : gen_out.adjoint
+    cpu_init_name = val_def_fn_name(gen_out.initstacks)
+    cpu_gen_name  = val_def_fn_name(cpu_gen_expr)
     gpu_init_name = val_def_fn_name(gpu_init.host)
-    gpu_adj_name  = val_def_fn_name(gpu_adj.host)
+    gpu_gen_name  = val_def_fn_name(gpu_gen.host)
     arrtype = backend.arrtype
 
     lines = String[]
     isempty(backend.preamble) || push!(lines, backend.preamble)
     push!(lines, "using JSON3", "")
 
-    push!(lines, io_expr_to_source(adjoint_out.initstacks))
-    push!(lines, io_expr_to_source(adjoint_out.adjoint))
+    push!(lines, io_expr_to_source(gen_out.initstacks))
+    push!(lines, io_expr_to_source(cpu_gen_expr))
     push!(lines, io_expr_to_source(gpu_init.host))
     for k in gpu_init.kernels
         push!(lines, io_expr_to_source(k))
     end
-    push!(lines, io_expr_to_source(gpu_adj.host))
-    for k in gpu_adj.kernels
+    push!(lines, io_expr_to_source(gpu_gen.host))
+    for k in gpu_gen.kernels
         push!(lines, io_expr_to_source(k))
     end
 
     push!(lines, "function _val_init_stacks_local(fn, extra_args)\n    r = fn(extra_args...)\n    r === nothing && return ()\n    r isa Tuple && return r\n    return (r,)\nend\n")
     push!(lines, "_relerr_scalar(a, b) = abs(a - b) / max(abs(a), abs(b), 1.0)\n" *
-                 "_relerr_arr(a, b) = maximum(abs.(a .- b) ./ max.(abs.(a), abs.(b), 1.0))\n")
+# `init = 0.0` is load-bearing, not defensive: the baseline generator gates a draw
+# only on initstacks_* running, so an all-zero integer draw (every extent 0) is
+# dimensionally coherent and gets accepted, producing zero-length stacks and
+# zero-length float arrays. `maximum` over those throws rather than comparing
+# nothing, which is what an empty comparison should do.
+                 "_relerr_arr(a, b) = maximum(abs.(a .- b) ./ max.(abs.(a), abs.(b), 1.0); init = 0.0)\n")
 # Compares the SNAPSHOT STACKS, not just the arguments. A stack slot written from a stale host scalar (a split loop assigned it on the device,
 # leaving the host copy behind) shows up here and nowhere else, since gradients stay correct whenever that slot's restore happens to be dead
 # -- confirmed live for cellscatter (gradients to 5.5e-14, stacks off by 1.0) and raggedii. Reported rather than folded into `ok`: a nonzero
@@ -7618,6 +7656,7 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
     scalar_args = [a for a in sig.args if sig.kinds[a] == :scalar_float]
     array_float_args = [a for a in sig.args if sig.kinds[a] == :array_float]
     array_int_args = [a for a in sig.args if sig.kinds[a] == :array_int]
+    float_args = [a for a in sig.args if sig.kinds[a] in (:scalar_float, :array_float)]
 
     for a in float_or_intarr_args
         push!(lines, "__base_$(a) = $(val_julia_literal(values[a]))")
@@ -7630,15 +7669,34 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
         seed_list = join([val_julia_literal(sd[a]) for sd in seeds], ", ")
         push!(lines, "__seed_$(a) = [$(seed_list)]")
     end
+    if mode == :hvp
+        for a in float_args
+            tan_list = join([val_julia_literal(sd[a]) for sd in tan_seeds], ", ")
+            sht_list = join([val_julia_literal(sd[a]) for sd in shtan_seeds], ", ")
+            push!(lines, "__tan_$(a) = [$(tan_list)]")
+            push!(lines, "__shtan_$(a) = [$(sht_list)]")
+        end
+    end
 
     stack_extra_cpu = join([val_gpu_stack_extra_ref(n, int_args, :cpu) for n in stack_arg_names], ", ")
     stack_extra_gpu = join([val_gpu_stack_extra_ref(n, int_args, :gpu) for n in stack_arg_names], ", ")
-    cpu_call = "$(cpu_adj_name)($(join(val_gpu_call_args(sig, :cpu), ", ")), stacks_cpu...)"
-    gpu_call = "$(gpu_adj_name)($(join(val_gpu_call_args(sig, :gpu), ", ")), stacks_gpu...)"
-    ret_cpu_tuple = isempty(scalar_args) ? "()" : (length(scalar_args) == 1 ? "(ret_cpu,)" : "ret_cpu")
-    ret_gpu_tuple = isempty(scalar_args) ? "()" : (length(scalar_args) == 1 ? "(ret_gpu,)" : "ret_gpu")
+    cpu_call = "$(cpu_gen_name)($(join(val_gpu_call_args(sig, :cpu; mode), ", ")), stacks_cpu...)"
+    gpu_call = "$(gpu_gen_name)($(join(val_gpu_call_args(sig, :gpu; mode), ", ")), stacks_gpu...)"
+# Each scalar_float arg returns ONE value from an adjoint and TWO from an HVP
+# (ab, abd), so emit_return_scalars' bare-value-vs-tuple rule only ever yields a
+# bare value in the adjoint's single-scalar case -- an HVP with one scalar arg
+# still returns a genuine 2-tuple. Same rule val_call_hv relies on.
+    n_ret = mode == :hvp ? 2 * length(scalar_args) : length(scalar_args)
+    ret_tuple(v) = isempty(scalar_args) ? "()" : (n_ret == 1 ? "($(v),)" : v)
 
-    push!(lines, "max_rel_err = 0.0", "stack_max_rel_err = 0.0", "stacks_compared = 0")
+# A run in which the kernel wrote nothing is not a pass. Array LENGTH is the wrong
+# thing to check: an all-zero integer draw leaves every array at its baseline
+# length while every loop bound collapses to zero trips, so the arrays are
+# compared, they match, and `ok` is reported for a run that executed no device
+# code at all -- measured live at elements_compared=416, max_rel_err=0.0. What
+# has to be counted is elements the CPU reference actually CHANGED.
+    push!(lines, "max_rel_err = 0.0", "stack_max_rel_err = 0.0", "stacks_compared = 0",
+                 "elements_compared = 0", "elements_changed = 0")
     push!(lines, "for __trial in 1:$(length(seeds))")
     for a in array_float_args
         push!(lines, "  $(a)_val_cpu = deepcopy(__base_$(a)); $(a)_sh_cpu = deepcopy(__seed_$(a)[__trial])")
@@ -7652,21 +7710,44 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
         push!(lines, "  $(a)_val_cpu = __base_$(a); $(a)_sh_cpu = __seed_$(a)[__trial]")
         push!(lines, "  $(a)_val_gpu = __base_$(a); $(a)_sh_gpu = __seed_$(a)[__trial]")
     end
+    if mode == :hvp
+        for a in array_float_args
+            push!(lines, "  $(a)_tan_cpu = deepcopy(__tan_$(a)[__trial]); $(a)_shtan_cpu = deepcopy(__shtan_$(a)[__trial])")
+            push!(lines, "  $(a)_tan_gpu = $(arrtype)(deepcopy(__tan_$(a)[__trial])); $(a)_shtan_gpu = $(arrtype)(deepcopy(__shtan_$(a)[__trial]))")
+        end
+        for a in scalar_args
+            push!(lines, "  $(a)_tan_cpu = __tan_$(a)[__trial]; $(a)_shtan_cpu = __shtan_$(a)[__trial]")
+            push!(lines, "  $(a)_tan_gpu = __tan_$(a)[__trial]; $(a)_shtan_gpu = __shtan_$(a)[__trial]")
+        end
+    end
     push!(lines, "  stacks_cpu = _val_init_stacks_local($(cpu_init_name), Any[$(stack_extra_cpu)])")
     push!(lines, "  stacks_gpu = _val_init_stacks_local($(gpu_init_name), Any[$(stack_extra_gpu)])")
+    for a in array_float_args
+        push!(lines, "  __pre_$(a)_val = deepcopy($(a)_val_cpu); __pre_$(a)_sh = deepcopy($(a)_sh_cpu)")
+        mode == :hvp && push!(lines, "  __pre_$(a)_tan = deepcopy($(a)_tan_cpu); __pre_$(a)_shtan = deepcopy($(a)_shtan_cpu)")
+    end
     push!(lines, "  ret_cpu = $(cpu_call)")
     push!(lines, "  ret_gpu = $(gpu_call)")
-    push!(lines, "  ret_cpu_t = $(ret_cpu_tuple)")
-    push!(lines, "  ret_gpu_t = $(ret_gpu_tuple)")
+    push!(lines, "  ret_cpu_t = $(ret_tuple("ret_cpu"))")
+    push!(lines, "  ret_gpu_t = $(ret_tuple("ret_gpu"))")
     push!(lines, "  local_max = 0.0")
     for a in array_float_args
+        push!(lines, "  global elements_compared += length($(a)_val_cpu) + length($(a)_sh_cpu)")
+        push!(lines, "  global elements_changed += count(!=(0.0), $(a)_val_cpu .- __pre_$(a)_val) + count(!=(0.0), $(a)_sh_cpu .- __pre_$(a)_sh)")
         push!(lines, "  local_max = max(local_max, _relerr_arr($(a)_sh_cpu, Array($(a)_sh_gpu)))")
         push!(lines, "  local_max = max(local_max, _relerr_arr($(a)_val_cpu, Array($(a)_val_gpu)))")
+        if mode == :hvp
+            push!(lines, "  global elements_compared += length($(a)_tan_cpu) + length($(a)_shtan_cpu)")
+            push!(lines, "  global elements_changed += count(!=(0.0), $(a)_tan_cpu .- __pre_$(a)_tan) + count(!=(0.0), $(a)_shtan_cpu .- __pre_$(a)_shtan)")
+            push!(lines, "  local_max = max(local_max, _relerr_arr($(a)_tan_cpu, Array($(a)_tan_gpu)))")
+            push!(lines, "  local_max = max(local_max, _relerr_arr($(a)_shtan_cpu, Array($(a)_shtan_gpu)))")
+        end
     end
     for a in array_int_args
         push!(lines, "  local_max = max(local_max, _relerr_arr(Float64.($(a)_val_cpu), Float64.(Array($(a)_val_gpu))))")
     end
-    for (i, _) in enumerate(scalar_args)
+    for i in 1:n_ret
+        push!(lines, "  global elements_compared += 1")
         push!(lines, "  local_max = max(local_max, _relerr_scalar(ret_cpu_t[$(i)], ret_gpu_t[$(i)]))")
     end
     push!(lines, "  (__sworst, __sn) = _val_stack_relerr(stacks_cpu, stacks_gpu)")
@@ -7674,7 +7755,7 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
     push!(lines, "  global stacks_compared += __sn")
     push!(lines, "  global max_rel_err = max(max_rel_err, local_max)")
     push!(lines, "end")
-    push!(lines, "println(JSON3.write(Dict(\"ok\" => max_rel_err <= $(rtol), \"max_rel_err\" => max_rel_err, \"stack_max_rel_err\" => stack_max_rel_err, \"stacks_compared\" => stacks_compared, \"device\" => $(val_gpu_device_name_expr(backend)))))")
+    push!(lines, "println(JSON3.write(Dict(\"ok\" => (max_rel_err <= $(rtol)) && elements_changed > 0, \"mode\" => \"$(mode)\", \"max_rel_err\" => max_rel_err, \"stack_max_rel_err\" => stack_max_rel_err, \"stacks_compared\" => stacks_compared, \"elements_compared\" => elements_compared, \"elements_changed\" => elements_changed, \"vacuous\" => elements_changed == 0, \"device\" => $(val_gpu_device_name_expr(backend)))))")
 
     return join(lines, "\n") * "\n"
 end
@@ -7696,21 +7777,29 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                   trials::Int = 3, rtol::Union{Float64,Nothing} = nothing,
                                   self_check::Bool = true,
-                                  keep_push_pop::Bool = false, fuse_ii_loops::Bool = false)
+                                  keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
+                                  mode::Symbol = :adjoint)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
-    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    mode in (:adjoint, :hvp) ||
+        error("stade_validate_gpu_file: mode must be :adjoint or :hvp, got $(mode)")
+    yp = yaml_path === nothing ? io_gpu_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     primal_expr = io_read_corpus_entry(in_path)
     kernel = parse_kernel(primal_expr)
     baseline = io_read_baseline_yaml(yp)
     val_coerce_int_arrays!(kernel, baseline.values)
 
-    adjoint_out = stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(adjoint_out.initstacks, backend)
-    gpu_adj  = stade_gpu(adjoint_out.adjoint, backend)
-    stack_arg_names = Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
+    gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
+                             stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
+    gpu_init = stade_gpu(gen_out.initstacks, backend)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend)
+    stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
+    # the HVP's two extra per-trial directions -- drawn the same way as the
+    # reverse seed, independently of it and of each other
+    tan_seeds   = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
+    shtan_seeds = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
 
 # IEEE float addition isn't associative, so an atomic accumulation sums its contributing threads in whatever order the
 # scheduler runs them -- different from the CPU adjoint's sequential summation, though both compute the identical sum. A kernel
@@ -7719,12 +7808,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 # atomic-site count is a conservative proxy, verified against unet's case. An explicit rtol always overrides this.
     resolved_rtol = rtol
     if resolved_rtol === nothing
-        atomic_sites = sum(val_count_atomic_sites(k, backend.atomic_macro) for k in gpu_adj.kernels; init = 0)
+        atomic_sites = sum(val_count_atomic_sites(k, backend.atomic_macro) for k in gpu_gen.kernels; init = 0)
         resolved_rtol = 2.5e-14 * max(1, atomic_sites)
     end
 
     script = val_gpu_parity_script(kernel, baseline.int_args, baseline.values, seeds,
-                                    adjoint_out, gpu_init, gpu_adj, stack_arg_names, backend; rtol = resolved_rtol)
+                                    gen_out, gpu_init, gpu_gen, stack_arg_names, backend;
+                                    rtol = resolved_rtol, mode, tan_seeds, shtan_seeds)
     open(out_path, "w") do f
         write(f, script)
     end
@@ -7757,22 +7847,28 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
                                    scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
                                    trials::Int = 3, rtol::Union{Float64,Nothing} = nothing,
                                    self_check::Bool = true,
-                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false)
+                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
+                                   mode::Symbol = :adjoint)
     keep_push_pop &&
         error("stade_validate_jacc_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
-    yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
+    mode in (:adjoint, :hvp) ||
+        error("stade_validate_jacc_file: mode must be :adjoint or :hvp, got $(mode)")
+    yp = yaml_path === nothing ? io_gpu_yaml_path(in_path) : yaml_path
     io_path_exists(yp) || stade_generate_baseline_file(in_path; yaml_path = yp, scale = scale, int_lo = int_lo, int_hi = int_hi, self_check = self_check)
     primal_expr = io_read_corpus_entry(in_path)
     kernel = parse_kernel(primal_expr)
     baseline = io_read_baseline_yaml(yp)
     val_coerce_int_arrays!(kernel, baseline.values)
 
-    adjoint_out = stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
+    gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
+                             stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
     backend = val_jacc_backend()
-    jacc_init = stade_jacc(adjoint_out.initstacks)
-    jacc_adj  = stade_jacc(adjoint_out.adjoint)
-    stack_arg_names = Symbol[a for a in adjoint_out.initstacks.args[1].args[2:end]]
+    jacc_init = stade_jacc(gen_out.initstacks)
+    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint)
+    stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
+    tan_seeds   = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
+    shtan_seeds = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
 
     # same reasoning as stade_validate_gpu_file's own resolved_rtol --
     # Atomix.@atomic's cross-thread reordering is the same non-
@@ -7780,12 +7876,13 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
     # emits the atomic.
     resolved_rtol = rtol
     if resolved_rtol === nothing
-        atomic_sites = sum(val_count_atomic_sites(k, backend.atomic_macro) for k in jacc_adj.kernels; init = 0)
+        atomic_sites = sum(val_count_atomic_sites(k, backend.atomic_macro) for k in jacc_gen.kernels; init = 0)
         resolved_rtol = 2.5e-14 * max(1, atomic_sites)
     end
 
     script = val_gpu_parity_script(kernel, baseline.int_args, baseline.values, seeds,
-                                    adjoint_out, jacc_init, jacc_adj, stack_arg_names, backend; rtol = resolved_rtol)
+                                    gen_out, jacc_init, jacc_gen, stack_arg_names, backend;
+                                    rtol = resolved_rtol, mode, tan_seeds, shtan_seeds)
     open(out_path, "w") do f
         write(f, script)
     end
