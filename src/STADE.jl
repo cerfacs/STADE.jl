@@ -5976,11 +5976,15 @@ end
 # underlying kernel function's own signature is unchanged (index still its first parameter,
 # supplied internally by the macro); only the launch call's shape moved.
 # A zero-trip loop is a legal no-op on the CPU, and `JACC.@parallel_for range=0`
-# raises DivideError on the CUDA backend (probed live on an RTX PRO 6000: range=0
-# throws, range=4 runs). cgen_launch_expr survives the same case by launching one
-# block whose threads all fail the device kernel's own `__tid > trip_count` guard,
-# but JACC's programming model has no such per-thread guard to fall back on --
-# the callee is a plain indexed function -- so the launch itself has to be skipped.
+# raises DivideError on the CUDA backend: JACC computes its block count with
+# `cld`, which divides by the range (JACC/ext/CUDAExt/CUDAExt.jl:67). Confirmed
+# twice on an RTX PRO 6000 -- once on a synthetic `range=0` against a `range=4`
+# control, and once on this kernel's own unguarded output, which fails in `cld`
+# at that exact frame.
+# cgen_launch_expr survives the same case by launching one block whose threads
+# all fail the device kernel's own `__tid > trip_count` guard, but JACC's
+# programming model has no such per-thread guard to fall back on -- the callee
+# is a plain indexed function -- so the launch itself has to be skipped.
 # A multigrid solver coarsened until a level has no points reaches exactly this,
 # as does any kernel whose extent is an integer argument drawn as zero.
 function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
