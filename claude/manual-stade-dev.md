@@ -1328,6 +1328,27 @@ silently loses a fraction of the accumulation on real hardware.
    a write index and a read index disqualifies the loop, unless one of
    three relaxations applies.
 
+### Snapshot elision gates all three relaxations
+
+`cgen_array_private_to_loop` sees a snapshot save's read of an array as an
+ordinary consumer unless `cgen_snapshot_save_dead` proves the element is dead
+on arrival: overwritten later in the same statement list with nothing touching
+the array in between. Getting this wrong does not produce wrong numbers. It
+produces correct numbers computed on the host, which no oracle notices.
+
+The scan cannot be an adjacency test. An adjoint puts the overwrite immediately
+after its own save, but `hvp_double_stmt` interleaves every statement's shadow
+twin with its primal, so in an HVP the overwrite sits two statements later.
+mpnn is the witness: its adjoint offloaded every loop while its HVP left the
+loops over graph edges and over graph nodes on the host, launching one kernel
+per edge and per node.
+
+That gives a load-bearing invariant, and `validate_offload.jl` now asserts it:
+**an HVP must offload exactly as well as its adjoint**, because it is the
+adjoint with every statement doubled -- same loops, same bounds, same snapshot
+sites. Measuring only the adjoint hid this defect for as long as that file
+existed.
+
 ### The three aliasing relaxations
 
 **Array privacy** (`cgen_array_private_to_loop`). The pairwise check
@@ -1403,6 +1424,24 @@ see.
 The fourth oracle does **not** validate the tangent. A bug shared by both
 generated codes cancels in the identity. It complements the other three
 and replaces none of them.
+
+### What a GPU parity pass has to mean
+
+`stade_validate_gpu_file` and `stade_validate_jacc_file` take
+`mode = :adjoint | :hvp`. The HVP argument layout -- the whole adjoint list,
+then one `(tangent, tangent-of-shadow)` pair per float argument -- cannot be
+derived from `sig.kinds`, so `val_gpu_call_args` and `validate_corpus_gpu.jl`'s
+`gval_build_call` both reimplement it. Two arrays of equal length swapped
+between those slots raises nothing anywhere; `validate_gpu_arglayout.jl` pins
+the two against the generated signature, position for position, with no GPU.
+
+A parity run also has to have done something. Counting elements *compared* is
+not enough: an all-zero integer draw leaves every array at its baseline length
+while collapsing every loop bound to zero trips, so the arrays are compared,
+they match, and a run that executed no device code reports a pass -- measured
+live at 416 elements compared and `max_rel_err = 0.0`. What is counted instead
+is elements the CPU reference actually **wrote**, and a run that wrote none is
+reported `vacuous` rather than `ok`.
 
 ### Baselines
 
@@ -1964,7 +2003,15 @@ julia validate_corpus_flags.jl           # all four flag combinations
 julia validate_ii_coverage.jl            # fusion coverage floor
 julia validate_offload.jl                # GPU coverage ceiling, no GPU needed
 julia validate_zerotrip.jl               # integer draws that include zero
+julia validate_gpu_arglayout.jl          # adjoint/HVP call layout, no GPU needed
+julia validate_elision_coverage.jl       # snapshot-elision branches, no GPU needed
+julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```
+
+`validate_zerotrip.jl` deletes the `.yaml` baselines it wrote. It draws every
+integer from `[0, 2]`, and `.yaml` is gitignored, so leaving them behind would
+hand the next script a corpus in which nearly every loop is empty. GPU parity
+keeps its own `.gpu.yaml` namespace for the same reason.
 
 Run the corpus in halves. `validate_corpus.jl` accepts kernel names as
 arguments. Backgrounded runs get reaped in this environment.
