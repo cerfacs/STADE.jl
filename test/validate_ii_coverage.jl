@@ -35,6 +35,7 @@ function validate_ii_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
         "cascadic_mg_prolong" => 0, "cellscatter" => 1, "clamped_sumsq" => 0,
         "coarsen_retire" => 0, "cond_field_choice" => 0, "cond_loop_choice" => 0,
         "dotprod" => 0, "fixed_sweeps" => 0, "geomrecur" => 0,
+        "halo_assembly" => 0,
         "entry_branch" => 0, "entry_dead" => 2, "entry_empty" => 0,
         "ii_kill" => 0, "ii_readbefore" => 1, "ii_readnested" => 0,
         "matvec_loss" => 0, "mg_vcycle" => 0,
