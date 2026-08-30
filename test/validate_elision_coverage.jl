@@ -32,6 +32,13 @@ Rule 10 in skill-stade-dev asks that every shape an analysis can encounter be
 represented in the corpus. This measures that directly instead of assuming it,
 and fails if a future change makes a branch dead.
 
+Reachability is all this asserts, and that limit is deliberate. Making the
+guard unconditionally permissive (`return true`) changes no offload decision
+anywhere in the corpus, so no coverage test can distinguish a correct guard
+from a reckless one here -- the index arithmetic in
+`cgen_array_private_to_loop` is what actually refuses unsafe loops. Keep this
+script for branch reachability and reason about correctness separately.
+
 Needs no GPU.
 """
 function validate_elision_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
