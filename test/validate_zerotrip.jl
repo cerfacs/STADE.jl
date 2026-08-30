@@ -55,6 +55,14 @@ function validate_zerotrip(dir::String = joinpath(@__DIR__, "val-corpus");
 
     bad = count(r -> r.status != :ok, results)
     println("\n", length(zero_drawn), " kernels drew a zero-trip bound: ", join(zero_drawn, ", "))
+    # These baselines hold integers from [0, 2] and `.yaml` is gitignored, so leaving
+    # them behind hands the next script a corpus where nearly every loop is empty.
+    # A GPU parity run inheriting one executes no device code and still reports a
+    # pass. Deleting them keeps this script's deliberately degenerate draw local to
+    # this script.
+    for f in filter(f -> endswith(f, ".yaml"), readdir(dir))
+        rm(joinpath(dir, f))
+    end
     println(length(results) - bad, "/", length(results), " checks passed",
             bad == 0 ? "" : "   *** $bad NOT OK ***")
     return bad
