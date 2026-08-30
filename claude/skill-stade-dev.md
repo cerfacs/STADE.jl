@@ -210,6 +210,32 @@ from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
 Measure **loops offloaded**, never device-kernel count — adjacent
 splittable loops merge, so fewer kernels can mean more offloaded.
 
+**An HVP must offload exactly as well as its adjoint.** It is the adjoint
+with every statement doubled by `hvp_double_stmt` — same loops, same
+bounds, same snapshot sites. Any gap is a defect, not a property of the
+mode. `validate_offload.jl` measures both against one ceiling.
+
+Nothing downstream of `cgen_snapshot_save_dead` may assume a snapshot
+save and its covering overwrite are **adjacent**. That holds for an
+adjoint and is two statements early for an HVP, whose interleaved shadow
+twin sits between them. mpnn is the witness: adjoint fully offloaded,
+HVP launching one kernel per graph edge and per graph node. `cgen_`/
+`jgen_` are the only stages that ingest already-doubled code, so they are
+the only place this class can appear.
+
+`jgen_` gets no free zero-trip guard. `cgen_launch_expr` survives a
+zero-trip loop by launching one block whose threads all fail the device
+kernel's own `__tid > trip_count` check; JACC's callee is a plain indexed
+function with no such guard, and `range = 0` raises `DivideError` on a
+live device. `jgen_launch_expr` must skip the launch instead.
+
+A GPU parity pass means nothing unless the kernel **wrote** something.
+Elements *compared* is the wrong count: an all-zero integer draw leaves
+arrays at full length while every loop bound collapses to zero trips.
+Count elements changed. GPU baselines live in their own `.gpu.yaml`
+namespace, because `.yaml` is gitignored and `validate_zerotrip.jl`
+deliberately draws integers from `[0, 2]`.
+
 ## Self-check before returning STADE code
 
 - [ ] No `module`, `struct`, `@enum`, top-level `const`, or shared state
@@ -227,6 +253,8 @@ splittable loops merge, so fewer kernels can mean more offloaded.
 - [ ] `initstacks_*` has no free variable outside its parameter list
 - [ ] A `keep_push_pop=false` claim went through `stade_validate_*_file`
       with the flag explicitly passed
+- [ ] A GPU claim was measured for **both** `:adjoint` and `:hvp`, and the
+      run changed a nonzero number of elements
 
 ## Discipline
 
