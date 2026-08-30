@@ -1343,6 +1343,18 @@ mpnn is the witness: its adjoint offloaded every loop while its HVP left the
 loops over graph edges and over graph nodes on the host, launching one kernel
 per edge and per node.
 
+One measured caveat, so nobody over-trusts this guard. Replacing
+`cgen_snapshot_save_dead` with an unconditional `return true` -- eliding every
+snapshot save, however live -- changes **nothing** across the corpus: all 47
+kernels in both modes offload exactly as before, `halo_assembly` still refuses,
+and every oracle stays green. Dropping only the intervening-touch check is
+likewise inert. So elision *precision* is not what keeps an unsafe loop off the
+device; `cgen_array_private_to_loop`'s index arithmetic is, and elision only
+moves the reader COUNT that pattern 3 keys on. The conservatism in
+`cgen_stmt_touches_array` is belt-and-braces against shapes the corpus does not
+yet contain, not a load-bearing safety check -- treat a change there as a
+correctness question to reason about, not one the test suite will catch for you.
+
 That gives a load-bearing invariant, and `validate_offload.jl` now asserts it:
 **an HVP must offload exactly as well as its adjoint**, because it is the
 adjoint with every statement doubled -- same loops, same bounds, same snapshot
