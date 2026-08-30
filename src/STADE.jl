@@ -4808,14 +4808,34 @@ end
 function cgen_elide_snapshot_saves_body(body::Vector{NamedTuple}, arr::Symbol)
     out = NamedTuple[]
     for (i, st) in enumerate(body)
-        if i < length(body) && cgen_is_snapshot_save(st, arr) &&
-           cgen_overwrites_same_element(body[i + 1], arr, st.rhs.args[2])
+        if cgen_is_snapshot_save(st, arr) && cgen_snapshot_save_dead(body, i, arr, st.rhs.args[2])
             push!(out, (kind = :assign, lhs = st.lhs, rhs = 0.0))
         else
             push!(out, cgen_elide_snapshot_saves(st, arr))
         end
     end
     return out
+end
+
+# The save's read contributes nothing to `arr`'s access region when the same element is
+# overwritten later in this same statement list with nothing in between touching `arr` at all:
+# the element is dead on arrival, and the covering write is already an occurrence of its own.
+# An adjacency test instead of this scan is correct for an adjoint and wrong for an HVP, where
+# hvp_double_stmt interleaves each statement's shadow copy with its primal, putting the
+# overwrite two statements after its own save. mpnn is the witness -- its adjoint offloads
+# every loop, its HVP left the loops over edges and over nodes on the host.
+function cgen_snapshot_save_dead(body::Vector{NamedTuple}, i::Int, arr::Symbol, idx)
+    for j in (i + 1):length(body)
+        cgen_overwrites_same_element(body[j], arr, idx) && return true
+        cgen_stmt_touches_array(body[j], arr) && return false
+    end
+    return false
+end
+
+cgen_stmt_touches_array(st, arr::Symbol) = begin
+    writes = Dict{Any,Vector{Any}}(); reads = Dict{Any,Vector{Any}}()
+    cgen_collect_array_accesses!(NamedTuple[st], writes, reads)
+    haskey(writes, arr) || haskey(reads, arr)
 end
 
 cgen_is_snapshot_save(st, arr::Symbol) =
