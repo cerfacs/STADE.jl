@@ -3514,6 +3514,23 @@ function agen_substitute_vars(expr, subst::Dict{Symbol,Any})
     return expr
 end
 
+# Reads a computed stack index into its own scalar, on its own line, and returns that scalar.
+# Every :indexed site goes through here. A Tier B index embeds a prefix/val table lookup, which
+# inline would be the a[b[i]] indirect indexing parse_check_no_indirect_indexing forbids -- STADE's
+# own front end rejecting its own output. A Tier A index carries no lookup but is still a
+# multi-term position formula, and the same one-name-per-site form is what a hand-written
+# skill-stade kernel would use for either. `__idx_<stack>[_<block>]_<position in exprs>` is unique
+# within one statement list; a sibling list reusing the name is an ordinary reassignment, always
+# read by the very next statement. An already-atomic index (a bare symbol, or a non-loop site's
+# literal 1) is returned as is -- naming it would add a line that says nothing.
+function agen_hoist_index!(exprs, stack, block_id, index)
+    (index isa Symbol || index isa Number) && return index
+    tmp = block_id === nothing ? Symbol("__idx_", string(stack), "_", length(exprs)) :
+                                 Symbol("__idx_", string(stack), "_", block_id, "_", length(exprs))
+    push!(exprs, Expr(:(=), tmp, index))
+    return tmp
+end
+
 function agen_site_index(exprs, ectx, key)
     entry = ectx.layout.offsets[key]
     if entry[1] === :ragged
@@ -3546,18 +3563,10 @@ function agen_site_index(exprs, ectx, key)
         # overlap earlier ones' index range. `base` is always a plain symbol/kernel-arg
         # expression, never a block-local scalar, so it needs no substitution.
         full_index = agen_add_exprs(agen_add_exprs(agen_add_exprs(get(blk.base, stack, 0), Expr(:ref, table_name, table_idx)), local_offset), local_position)
-        # `full_index` embeds a table lookup as a sub-expression of an outer `stack[...]` ref's
-        # index -- exactly the a[b[i]]-style indirect indexing parse_check_no_indirect_indexing
-        # forbids (STADE's front end rejecting its own generated code). Reading it into a
-        # scalar on its own line first, right here, satisfies that rule the way a hand-written
-        # kernel would.
-        parse_contains_ref(full_index) || return full_index
-        tmp = Symbol("__idx_", string(stack), "_", block_id, "_", length(exprs))
-        push!(exprs, Expr(:(=), tmp, full_index))
-        return tmp
+        return agen_hoist_index!(exprs, stack, block_id, full_index)
     end
-    (_, offset) = entry
-    return agen_add_exprs(offset, agen_local_position(ectx.loop_ctx))
+    (stack, offset) = entry
+    return agen_hoist_index!(exprs, stack, nothing, agen_add_exprs(offset, agen_local_position(ectx.loop_ctx)))
 end
 
 # True whenever `stack_name` should use plain push!/pop! rather than an :indexed write/read: either
@@ -3583,9 +3592,8 @@ end
 
 # Returns the RHS expr only -- caller wraps `lhs = <this>`, matching how a plain
 # `pop!(stack)` was always just an rhs expr too. `exprs` is the caller's in-construction
-# statement list: agen_site_index may push a hoisted index assignment onto it before
-# returning, landing ahead of whatever statement the caller builds from this call's return
-# value.
+# statement list: agen_site_index pushes the hoisted index assignment onto it before returning,
+# landing ahead of whatever statement the caller builds from this call's return value.
 function agen_emit_pop(stack_name::Symbol, ectx, key, exprs)
     agen_use_stack_push(ectx, stack_name) && return Expr(:call, :pop!, stack_name)
     return Expr(:ref, stack_name, agen_site_index(exprs, ectx, key))
