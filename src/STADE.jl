@@ -5623,7 +5623,15 @@ function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, 
     # multigrid solver coarsened until a level has no points reaches exactly this. One block is
     # launched instead: every thread in it fails the `__tid > trip_count` guard the device kernel
     # already opens with, and returns immediately.
-    nblocks = Expr(:call, :max, 1, Expr(:call, :cld, n_iter, :nthread_per_block))
+    # `Base.cld`, not bare `cld`. A shadow name is its primal name plus b/d/bd, so a
+    # primal scalar called `cl` becomes `cld` and shadows Base.cld in the very scope this
+    # launch calls it from. mg_vcycle does exactly that: its HVP died on a live GPU with
+    # "objects of type Float64 are not callable" while its adjoint (suffix `b`, no
+    # collision) and its JACC build (whose launch uses div, not cld) both passed.
+    # Only the launch expression can be qualified -- cgen_trip_count's output is
+    # re-ingested by cgen_parse_generated, and parse_check_expr allows plain function
+    # names only. `mo` -> `mod` and `fl` -> `fld` remain live traps inside kernel bodies.
+    nblocks = Expr(:call, :max, 1, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), n_iter, :nthread_per_block))
     call = Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...)
     return Expr(:macrocall, backend.launch_macro, nothing,
                 Expr(:(=), backend.threads_kw, :nthread_per_block),
@@ -5841,7 +5849,7 @@ end
 # device-array-backed ref) via a bare host assignment is a host setindex! against a device array; unlike
 # CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch (confirmed live: 'Scalar indexing is disallowed'). Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}())
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = true, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
     # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
@@ -5877,7 +5885,15 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             end
         elseif stmt.kind == :if
             flush_pending!()
-            push!(exprs, emit_if(stmt.cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
+            # A host-side branch condition that reads a device array element needs the
+            # same @allowscalar wrapping cgen_body gives it. jgen_body wrapped `pending`
+            # assignment runs but not the condition itself, so an entry branch keyed on
+            # an array element -- entry_branch, cond_field_choice -- died with "Scalar
+            # indexing is disallowed" on JACC while the CUDA path, which wraps the
+            # condition, ran fine. Found by the first full-corpus live GPU run.
+            cond = cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ?
+                   Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond
+            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -5890,6 +5906,25 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
             # codegen rather than a structural approximation of it
             eligible = eligible && cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth))
+            # JACC's parallel_for SPLATS its varargs into the kernel. Past Julia's
+            # inference splat limit the compiler stops unrolling and emits a dynamic
+            # jl_f__apply_iterate, which has no GPU lowering, so the kernel fails to
+            # compile at all: ttgc's HVP generated a 42-argument kernel and died with
+            # InvalidIRError on a live GPU. cgen_ has no such ceiling -- a @cuda launch
+            # passes arguments positionally -- so this is a genuine capability gap, and
+            # the right response is to keep the loop on the host rather than emit code
+            # that cannot run. Slower, correct, and it still executes. The bound was
+            # bracketed on hardware (25 args compile, 42 do not); 32 is Julia's
+            # MAX_TUPLE_SPLAT and the most likely exact threshold.
+            eligible = eligible && length(cgen_free_vars(stmt, stmt.var)) <= JGEN_MAX_SPLAT_ARGS
+            # Same live-out refusal cgen_body applies -- jgen_body had no equivalent, and
+            # no root_body to apply it against. A split loop's scalars live on the device;
+            # a later host statement reading one gets the host's stale copy instead. ii_kill
+            # is the witness: `v` is written by a loop and read after it, cgen keeps that
+            # loop on the host, jgen offloaded it and the host's v stayed 0.0. Silent wrong
+            # gradients, not a crash -- measured at max_rel_err 0.85 (adjoint) and 1.23
+            # (HVP) on a live GPU while the CUDA path was exact.
+            eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth)
             if eligible
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
@@ -5928,7 +5963,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
             end
             delete!(known_consts, stmt.var)
             # See cgen_body's matching comment: update via cgen_loop_convergent_constant rather
@@ -5957,6 +5992,9 @@ end
 # thread-index intrinsic to bind, unlike cgen_kernel_def, since JACC.@parallel_for range=N
 # already guarantees the index range. cgen_loopvar_from_tid still does the affine lo/step
 # remapping, same as for cgen_.
+# Julia's MAX_TUPLE_SPLAT. See the ceiling's use in jgen_body for why it exists.
+const JGEN_MAX_SPLAT_ARGS = 32
+
 function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, reduce_vars::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}())
     jidx = :__jacc_i
     body = Any[Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, jidx))]
