@@ -90,6 +90,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
              (:hvp,     STADE.stade_hvp_file,     "_hv.jl"))
 
     bad = 0
+    checks_extra = Ref(0)
     improved = String[]
     for f in kernels
         name = splitext(f)[1]
@@ -126,7 +127,49 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         end
     end
 
-    checks = length(kernels) * length(MODES)
+    # Backend agreement used to be checked here too. It now lives in
+    # validate_backend_agreement.jl, which compares loop shapes and kernel arities
+    # rather than bare counts and knows that JACC's splat ceiling makes one pair
+    # legitimately diverge. Two implementations of one rule drift apart; this one
+    # was the weaker, so it is gone rather than duplicated.
+    # No generated host function may CALL a plain name it also ASSIGNS as a scalar.
+    # A shadow name is its primal name plus b/d/bd, so a primal scalar `cl` becomes
+    # `cld` and shadows Base.cld -- which cgen_launch_expr calls in that same scope.
+    # mg_vcycle's HVP died on a live GPU with "objects of type Float64 are not
+    # callable" while its adjoint (suffix `b`) and its JACC build (launch uses div)
+    # both passed. Checking the property beats blacklisting names: it catches
+    # `mo` -> `mod` and `fl` -> `fld` too, and anything future codegen starts calling.
+    for f in kernels
+        name = splitext(f)[1]
+        primal = STADE.io_read_corpus_entry(joinpath(dir, f))
+        for (mode, _, _) in MODES
+            gen = mode == :hvp ? STADE.stade_hvp(primal; keep_push_pop = false, fuse_ii_loops = true) :
+                                 STADE.stade_adjoint(primal; keep_push_pop = false, fuse_ii_loops = true)
+            expr = mode == :hvp ? gen.hvp : gen.adjoint
+            for (label, host) in (("cuda", STADE.stade_gpu(expr, STADE.cgen_backend_cuda()).host),
+                                  ("jacc", STADE.stade_jacc(expr).host))
+                assigned = Set{Symbol}()
+                collect_assigned(e) = e isa Expr &&
+                    (e.head === :(=) && e.args[1] isa Symbol && push!(assigned, e.args[1]);
+                     foreach(collect_assigned, e.args))
+                collect_assigned(host)
+                shadowed = Symbol[]
+                scan(e) = e isa Expr &&
+                    (e.head === :call && e.args[1] isa Symbol && e.args[1] in assigned &&
+                        push!(shadowed, e.args[1]);
+                     foreach(scan, e.args))
+                scan(host)
+                checks_extra[] += 1
+                if !isempty(shadowed)
+                    println(rpad("$(name) [$(mode)/$(label)]", 34),
+                            " FAIL  calls a shadowed name: ", join(sort(unique(shadowed)), ", "))
+                    bad += 1
+                end
+            end
+        end
+    end
+
+    checks = length(kernels) * length(MODES) + checks_extra[]
     isempty(improved) || println("\nimproved (lower the baseline): ", join(improved, ", "))
     println("\n", checks - bad, "/", checks, " checks within budget",
             bad == 0 ? "" : "   *** $bad NOT OK ***")
