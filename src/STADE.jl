@@ -4817,13 +4817,11 @@ function cgen_elide_snapshot_saves_body(body::Vector{NamedTuple}, arr::Symbol)
     return out
 end
 
-# The save's read contributes nothing to `arr`'s access region when the same element is
-# overwritten later in this same statement list with nothing in between touching `arr` at all:
-# the element is dead on arrival, and the covering write is already an occurrence of its own.
-# An adjacency test instead of this scan is correct for an adjoint and wrong for an HVP, where
-# hvp_double_stmt interleaves each statement's shadow copy with its primal, putting the
-# overwrite two statements after its own save. mpnn is the witness -- its adjoint offloads
-# every loop, its HVP left the loops over edges and over nodes on the host.
+# The save's read contributes nothing to `arr`'s access region when the same element is overwritten later in this
+# statement list with nothing in between touching `arr`: it's dead on arrival, and the covering write is already an
+# occurrence of its own. An adjacency test instead of this scan is correct for an adjoint and wrong for an HVP, where
+# hvp_double_stmt interleaves each statement's shadow with its primal, putting the overwrite two statements after its
+# own save -- mpnn is the witness: its adjoint offloads every loop, its HVP left two on the host.
 function cgen_snapshot_save_dead(body::Vector{NamedTuple}, i::Int, arr::Symbol, idx)
     for j in (i + 1):length(body)
         cgen_overwrites_same_element(body[j], arr, idx) && return true
@@ -5618,19 +5616,11 @@ end
 
 function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
-    # A zero-trip loop is a legal no-op on the CPU, but `cld(0, nthread) == 0` and a launch with zero
-    # blocks is a hard CUDA error, so the same kernel and inputs would crash on the device. A
-    # multigrid solver coarsened until a level has no points reaches exactly this. One block is
-    # launched instead: every thread in it fails the `__tid > trip_count` guard the device kernel
-    # already opens with, and returns immediately.
-    # `Base.cld`, not bare `cld`. A shadow name is its primal name plus b/d/bd, so a
-    # primal scalar called `cl` becomes `cld` and shadows Base.cld in the very scope this
-    # launch calls it from. mg_vcycle does exactly that: its HVP died on a live GPU with
-    # "objects of type Float64 are not callable" while its adjoint (suffix `b`, no
-    # collision) and its JACC build (whose launch uses div, not cld) both passed.
-    # Only the launch expression can be qualified -- cgen_trip_count's output is
-    # re-ingested by cgen_parse_generated, and parse_check_expr allows plain function
-    # names only. `mo` -> `mod` and `fl` -> `fld` remain live traps inside kernel bodies.
+# A zero-trip loop is a legal no-op on the CPU, but a launch with zero blocks is a hard CUDA error, so the kernel would crash on the device -- a
+# multigrid solver coarsened to zero points reaches exactly this. One block is launched instead, its threads failing the `__tid > trip_count` guard
+# and returning. `Base.cld`, not bare `cld`: a shadow name is its primal name plus b/d/bd, so a primal scalar `cl` becomes `cld`, colliding here
+# (mg_vcycle's HVP died live with 'objects of type Float64 are not callable'). Only the launch expression can be qualified, since re-ingestion
+# allows plain names only; `mo`->`mod` and `fl`->`fld` remain live traps in kernel bodies.
     nblocks = Expr(:call, :max, 1, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), n_iter, :nthread_per_block))
     call = Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...)
     return Expr(:macrocall, backend.launch_macro, nothing,
@@ -5885,12 +5875,11 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             end
         elseif stmt.kind == :if
             flush_pending!()
-            # A host-side branch condition that reads a device array element needs the
-            # same @allowscalar wrapping cgen_body gives it. jgen_body wrapped `pending`
-            # assignment runs but not the condition itself, so an entry branch keyed on
-            # an array element -- entry_branch, cond_field_choice -- died with "Scalar
-            # indexing is disallowed" on JACC while the CUDA path, which wraps the
-            # condition, ran fine. Found by the first full-corpus live GPU run.
+            # A host-side branch condition that reads a device array element needs the same @allowscalar
+            # wrapping cgen_body gives it. jgen_body wrapped the `pending` assignments but not the
+            # condition itself, so an entry branch keyed on an array element died with 'Scalar indexing
+            # is disallowed' on JACC while the CUDA path, which wraps the condition, ran fine. Found by
+            # the first full-corpus live GPU run.
             cond = cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ?
                    Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond
             push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
@@ -5906,24 +5895,17 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
             # codegen rather than a structural approximation of it
             eligible = eligible && cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth))
-            # JACC's parallel_for SPLATS its varargs into the kernel. Past Julia's
-            # inference splat limit the compiler stops unrolling and emits a dynamic
-            # jl_f__apply_iterate, which has no GPU lowering, so the kernel fails to
-            # compile at all: ttgc's HVP generated a 42-argument kernel and died with
-            # InvalidIRError on a live GPU. cgen_ has no such ceiling -- a @cuda launch
-            # passes arguments positionally -- so this is a genuine capability gap, and
-            # the right response is to keep the loop on the host rather than emit code
-            # that cannot run. Slower, correct, and it still executes. The bound was
-            # bracketed on hardware (25 args compile, 42 do not); 32 is Julia's
-            # MAX_TUPLE_SPLAT and the most likely exact threshold.
+            # JACC's parallel_for SPLATS its varargs into the kernel. Past Julia's inference splat limit the compiler stops unrolling and
+            # emits a dynamic jl_f__apply_iterate with no GPU lowering: ttgc's HVP generated a 42-argument kernel and died with
+            # InvalidIRError live. cgen_ has no such ceiling (a @cuda launch passes arguments positionally), so keeping the loop on the
+            # host is slower but correct. Bracketed on hardware (25 args compile, 42 don't); 32 is Julia's MAX_TUPLE_SPLAT and the likely
+            # exact threshold.
             eligible = eligible && length(cgen_free_vars(stmt, stmt.var)) <= JGEN_MAX_SPLAT_ARGS
-            # Same live-out refusal cgen_body applies -- jgen_body had no equivalent, and
-            # no root_body to apply it against. A split loop's scalars live on the device;
-            # a later host statement reading one gets the host's stale copy instead. ii_kill
-            # is the witness: `v` is written by a loop and read after it, cgen keeps that
-            # loop on the host, jgen offloaded it and the host's v stayed 0.0. Silent wrong
-            # gradients, not a crash -- measured at max_rel_err 0.85 (adjoint) and 1.23
-            # (HVP) on a live GPU while the CUDA path was exact.
+            # Same live-out refusal cgen_body applies -- jgen_body had no equivalent, and no root_body
+            # to apply it against. A split loop's scalars live on the device; a later host statement
+            # reading one gets the stale host copy instead. ii_kill is the witness: cgen keeps that loop
+            # on the host, jgen offloaded it and the host's v stayed 0.0 -- silent wrong gradients,
+            # measured at max_rel_err 0.85 (adjoint) and 1.23 (HVP) live while the CUDA path was exact.
             eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth)
             if eligible
                 red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
@@ -6009,22 +5991,11 @@ function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, r
     return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
 end
 
-# JACC.jl v1.x: JACC.@parallel_for range=N f(args...) -- a macro with a `range=` keyword-
-# style argument, not a plain function call (that was the pre-1.0/v0.0.x API). The
-# underlying kernel function's own signature is unchanged (index still its first parameter,
-# supplied internally by the macro); only the launch call's shape moved.
-# A zero-trip loop is a legal no-op on the CPU, and `JACC.@parallel_for range=0`
-# raises DivideError on the CUDA backend: JACC computes its block count with
-# `cld`, which divides by the range (JACC/ext/CUDAExt/CUDAExt.jl:67). Confirmed
-# twice on an RTX PRO 6000 -- once on a synthetic `range=0` against a `range=4`
-# control, and once on this kernel's own unguarded output, which fails in `cld`
-# at that exact frame.
-# cgen_launch_expr survives the same case by launching one block whose threads
-# all fail the device kernel's own `__tid > trip_count` guard, but JACC's
-# programming model has no such per-thread guard to fall back on -- the callee
-# is a plain indexed function -- so the launch itself has to be skipped.
-# A multigrid solver coarsened until a level has no points reaches exactly this,
-# as does any kernel whose extent is an integer argument drawn as zero.
+# JACC.jl v1.x: JACC.@parallel_for range=N f(args...) -- a macro with a `range=` keyword, not a plain call; the kernel
+# function's own signature is unchanged, only the launch call's shape moved. A zero-trip loop is a legal CPU no-op, but
+# `JACC.@parallel_for range=0` raises DivideError on the CUDA backend, since JACC computes its block count with `cld` against
+# the range -- confirmed twice on real hardware. cgen_launch_expr survives the same case with one block whose threads fail the
+# device kernel's own guard, but JACC's plain-indexed-function model has no such guard, so the launch itself must be skipped.
 function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
     launch = Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_for"))), nothing,
@@ -7016,12 +6987,11 @@ end
 
 io_default_yaml_path(in_path::String) = splitext(in_path)[1] * ".yaml"
 
-# GPU parity gets its own baseline file rather than sharing the CPU oracles'.
-# `.yaml` is gitignored, so whichever script ran last owns the shared name --
-# and validate_zerotrip.jl deliberately draws integers from [0, 2], leaving
-# every extent at or near zero. A GPU run inheriting that draw executes no
-# device code and reports a pass. Separating the namespaces makes a GPU result
-# independent of test ordering.
+# GPU parity gets its own baseline file rather than sharing the CPU oracles'. `.yaml` is
+# gitignored, so whichever script ran last owns the shared name -- and validate_zerotrip.jl
+# deliberately draws integers from [0, 2], leaving every extent at or near zero. A GPU run
+# inheriting that draw executes no device code and reports a pass. Separating the namespaces
+# keeps a GPU result independent of test ordering.
 io_gpu_yaml_path(in_path::String) = splitext(in_path)[1] * ".gpu.yaml"
 
 # a minimal, hand-written YAML subset -- no external dependency. Two
@@ -7574,14 +7544,11 @@ function val_julia_literal(v::AbstractMatrix{<:Real})
     return "$(T)[" * join(rows, "; ") * "]"
 end
 
-# positional call-argument NAMES (not values) for one device's copies,
-# in kernel.sig.args order with each float-kind arg expanded to its
-# (value, shadow) pair -- mirrors val_adjoint_call_args's own ordering
-# rule exactly (array_int gets no shadow; scalar_int is a bare name,
-# shared verbatim between cpu/gpu since it's never wrapped).
-# `mode = :hvp` appends one tangent pair per float arg after the whole
-# adjoint list, mirroring val_hvp_call_args's second pass -- the layout is
-# hvp_-specific and cannot be derived from sig.kinds alone.
+# Positional call-argument NAMES (not values) for one device's copies, in kernel.sig.args order with each float-kind
+# arg expanded to its (value, shadow) pair -- mirrors val_adjoint_call_args's ordering exactly (array_int gets no
+# shadow; scalar_int is a bare name, shared verbatim between cpu/gpu). `mode = :hvp` appends one tangent pair per
+# float arg after the whole adjoint list, mirroring val_hvp_call_args's second pass -- the layout is hvp_-specific
+# and can't be derived from sig.kinds alone.
 function val_gpu_call_args(sig, device::Symbol; mode::Symbol = :adjoint)
     parts = String[]
     for a in sig.args
@@ -7629,15 +7596,11 @@ function val_gpu_device_name_expr(backend)
     return "\"unknown-backend-$(backend.kernel_tag)\""
 end
 
-# Assembles the full script described above. `seeds` is a Vector of
-# per-trial seed Dicts (same shape as `values`, one per trial) --
-# `values` itself (the primal baseline) is shared across trials but
-# freshly deepcopy'd every trial on both devices, since the call under
-# test mutates its float arrays in place.
-# `mode = :hvp` swaps the generated function under test for the HVP and
-# consumes two further per-trial seed Vectors: `tan_seeds` (the direction
-# the Hessian multiplies) and `shtan_seeds` (the tangent of the reverse
-# seed). Both are ignored for `:adjoint`.
+# Assembles the full script described above. `seeds` is a Vector of per-trial seed Dicts (same shape as `values`) -- `values`
+# itself (the primal baseline) is shared across trials but freshly deepcopy'd every trial on both devices, since the call under
+# test mutates its float arrays in place. `mode = :hvp` swaps the function under test for the HVP and consumes two further per-
+# trial seed Vectors: `tan_seeds` (the Hessian's direction) and `shtan_seeds` (the reverse seed's tangent), both ignored for
+# `:adjoint`.
 function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vector,
                                 gen_out, gpu_init, gpu_gen, stack_arg_names::Vector{Symbol},
                                 backend; rtol::Float64 = 2.5e-14, mode::Symbol = :adjoint,
@@ -7731,12 +7694,11 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
     n_ret = mode == :hvp ? 2 * length(scalar_args) : length(scalar_args)
     ret_tuple(v) = isempty(scalar_args) ? "()" : (n_ret == 1 ? "($(v),)" : v)
 
-# A run in which the kernel wrote nothing is not a pass. Array LENGTH is the wrong
-# thing to check: an all-zero integer draw leaves every array at its baseline
-# length while every loop bound collapses to zero trips, so the arrays are
-# compared, they match, and `ok` is reported for a run that executed no device
-# code at all -- measured live at elements_compared=416, max_rel_err=0.0. What
-# has to be counted is elements the CPU reference actually CHANGED.
+# A run in which the kernel wrote nothing is not a pass. Array LENGTH is the wrong thing to
+# check: an all-zero integer draw leaves every array at its baseline length while every loop
+# bound collapses to zero trips, so the arrays compare equal and `ok` is reported for a run that
+# executed no device code -- measured live at elements_compared=416, max_rel_err=0.0. What has to
+# be counted is elements the CPU reference actually CHANGED.
     push!(lines, "max_rel_err = 0.0", "stack_max_rel_err = 0.0", "stacks_compared = 0",
                  "elements_compared = 0", "elements_changed = 0")
     push!(lines, "for __trial in 1:$(length(seeds))")
