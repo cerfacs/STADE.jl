@@ -65,7 +65,7 @@ end
 
 ## Wishlist 💡
 
-- [ ] Wrap common subexpressions into auxiliary variables
+- [x] ✅ [v0.2.2] Wrap common subexpressions into auxiliary variables
 - [ ] Add `bgen_` stage for mini-batch execution code via GPU-aware MPI
 - [ ] Replace reduction-related atomic writes with more performant alternatives
 - [ ] Add support to `:while` statement
