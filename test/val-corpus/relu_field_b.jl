@@ -6,10 +6,12 @@ end
 function relu_field_b(loss, lossb, u, ub, v, vb, i_n, branch_stack)
     for i_x = 1:i_n
         if u[i_x] > 0.0
-            branch_stack[(i_x - 1) + 1] = 1
+            __idx_branch_stack_0 = (i_x - 1) + 1
+            branch_stack[__idx_branch_stack_0] = 1
             v[i_x] = u[i_x] ^ 2
         else
-            branch_stack[(i_x - 1) + 1] = 0
+            __idx_branch_stack_0 = (i_x - 1) + 1
+            branch_stack[__idx_branch_stack_0] = 0
             v[i_x] = 0.0
         end
     end
@@ -20,7 +22,8 @@ function relu_field_b(loss, lossb, u, ub, v, vb, i_n, branch_stack)
         vb[i_x2] = vb[i_x2] + lossb[1]
     end
     for i_x = i_n:-1:1
-        __branch = branch_stack[(i_x - 1) + 1]
+        __idx_branch_stack_0 = (i_x - 1) + 1
+        __branch = branch_stack[__idx_branch_stack_0]
         if __branch == 1
             ub[i_x] = ub[i_x] + (2 * u[i_x]) * vb[i_x]
             vb[i_x] = 0.0

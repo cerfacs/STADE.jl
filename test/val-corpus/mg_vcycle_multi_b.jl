@@ -236,9 +236,11 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
         hl_stack[__idx_hl_stack_1_17] = hl
         hl = hl * 2.0
     end
-    hl2_stack[__tot_hl2_stack_1 + 1] = hl2
+    __idx_hl2_stack_4 = __tot_hl2_stack_1 + 1
+    hl2_stack[__idx_hl2_stack_4] = hl2
     hl2 = hl * hl
-    u_stack[__tot_u_stack_1 + 1] = u[1, num_levels]
+    __idx_u_stack_7 = __tot_u_stack_1 + 1
+    u_stack[__idx_u_stack_7] = u[1, num_levels]
     u[1, num_levels] = 0.5 * hl2 * f[1, num_levels]
     for i_level = num_levels - 1:-1:1
         nl = nl * 2
@@ -321,10 +323,14 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
             end
         end
     end
-    hl_stack[(__tot_hl_stack_1 + __tot_hl_stack_2) + 1] = hl
-    hl2_stack[((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1] = hl2
-    hl = hl_stack[(__tot_hl_stack_1 + __tot_hl_stack_2) + 1]
-    hl2 = hl2_stack[((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1]
+    __idx_hl_stack_11 = (__tot_hl_stack_1 + __tot_hl_stack_2) + 1
+    hl_stack[__idx_hl_stack_11] = hl
+    __idx_hl2_stack_13 = ((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1
+    hl2_stack[__idx_hl2_stack_13] = hl2
+    __idx_hl_stack_0 = (__tot_hl_stack_1 + __tot_hl_stack_2) + 1
+    hl = hl_stack[__idx_hl_stack_0]
+    __idx_hl2_stack_2 = ((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1
+    hl2 = hl2_stack[__idx_hl2_stack_2]
     for i_level = 1:num_levels - 1
         for i_k_mg_relax_c2 = nu2:-1:1
             __idx_tripcount_stack_2_0 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (1 + 1)) + ((i_k_mg_relax_c2 - 1) + 1)
@@ -425,11 +431,13 @@ function mg_vcycle_multi_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1,
         hl = hl_stack[__idx_hl_stack_2_0]
         hlb = 0.5hlb
     end
-    u[1, num_levels] = u_stack[__tot_u_stack_1 + 1]
+    __idx_u_stack_0 = __tot_u_stack_1 + 1
+    u[1, num_levels] = u_stack[__idx_u_stack_0]
     hl2b = hl2b + (0.5 * f[1, num_levels]) * ub[1, num_levels]
     fb[1, num_levels] = fb[1, num_levels] + (0.5hl2) * ub[1, num_levels]
     ub[1, num_levels] = 0.0
-    hl2 = hl2_stack[__tot_hl2_stack_1 + 1]
+    __idx_hl2_stack_0 = __tot_hl2_stack_1 + 1
+    hl2 = hl2_stack[__idx_hl2_stack_0]
     hlb = hlb + hl * hl2b
     hlb = hlb + hl * hl2b
     hl2b = 0.0

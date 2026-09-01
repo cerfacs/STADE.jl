@@ -6,8 +6,9 @@ end
 function geomrecur_hv(loss, lossb, u, ub, c, cb, i_n, lossd, lossbd, ud, ubd, cd, cbd, u_stack)
     u_stack_d = Vector{Float64}(undef, length(u_stack))
     for i_x = 2:i_n
-        u_stack_d[(i_x - 2) + 1] = ud[i_x]
-        u_stack[(i_x - 2) + 1] = u[i_x]
+        __idx_u_stack_0 = (i_x - 2) + 1
+        u_stack_d[__idx_u_stack_0] = ud[i_x]
+        u_stack[__idx_u_stack_0] = u[i_x]
         ud[i_x] = u[i_x - 1] * cd + c * ud[i_x - 1]
         u[i_x] = c * u[i_x - 1]
     end
@@ -20,8 +21,9 @@ function geomrecur_hv(loss, lossb, u, ub, c, cb, i_n, lossd, lossbd, ud, ubd, cd
         ub[i_x] = ub[i_x] + (2 * u[i_x]) * lossb[1]
     end
     for i_x = i_n:-1:2
-        ud[i_x] = u_stack_d[(i_x - 2) + 1]
-        u[i_x] = u_stack[(i_x - 2) + 1]
+        __idx_u_stack_0 = (i_x - 2) + 1
+        ud[i_x] = u_stack_d[__idx_u_stack_0]
+        u[i_x] = u_stack[__idx_u_stack_0]
         cbd = cbd + (ub[i_x] * ud[i_x - 1] + u[i_x - 1] * ubd[i_x])
         cb = cb + u[i_x - 1] * ub[i_x]
         ubd[i_x - 1] = ubd[i_x - 1] + (ub[i_x] * cd + c * ubd[i_x])

@@ -48,8 +48,10 @@ function richardson_substep_b(y_init, y_initb, out, outb, a_coef, a_coefb, dt_st
         __idx_y_stack_1_9 = (prefix_y_stack_1[(i_stage - 1) + 1] + max(0, div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1)) + 1
         y_stack[__idx_y_stack_1_9] = y
     end
-    h_stack[__tot_h_stack_1 + 1] = h
-    h = h_stack[__tot_h_stack_1 + 1]
+    __idx_h_stack_2 = __tot_h_stack_1 + 1
+    h_stack[__idx_h_stack_2] = h
+    __idx_h_stack_0 = __tot_h_stack_1 + 1
+    h = h_stack[__idx_h_stack_0]
     for i_stage = num_stages:-1:1
         __idx_y_stack_1_0 = (prefix_y_stack_1[(i_stage - 1) + 1] + max(0, div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1)) + 1
         y = y_stack[__idx_y_stack_1_0]

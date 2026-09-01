@@ -6,11 +6,13 @@ end
 function relu_field_hv(loss, lossb, u, ub, v, vb, i_n, lossd, lossbd, ud, ubd, vd, vbd, branch_stack)
     for i_x = 1:i_n
         if u[i_x] > 0.0
-            branch_stack[(i_x - 1) + 1] = 1
+            __idx_branch_stack_0 = (i_x - 1) + 1
+            branch_stack[__idx_branch_stack_0] = 1
             vd[i_x] = (2 * u[i_x]) * ud[i_x]
             v[i_x] = u[i_x] ^ 2
         else
-            branch_stack[(i_x - 1) + 1] = 0
+            __idx_branch_stack_0 = (i_x - 1) + 1
+            branch_stack[__idx_branch_stack_0] = 0
             vd[i_x] = 0.0
             v[i_x] = 0.0
         end
@@ -24,7 +26,8 @@ function relu_field_hv(loss, lossb, u, ub, v, vb, i_n, lossd, lossbd, ud, ubd, v
         vb[i_x2] = vb[i_x2] + lossb[1]
     end
     for i_x = i_n:-1:1
-        __branch = branch_stack[(i_x - 1) + 1]
+        __idx_branch_stack_0 = (i_x - 1) + 1
+        __branch = branch_stack[__idx_branch_stack_0]
         if __branch == 1
             ubd[i_x] = ubd[i_x] + (vb[i_x] * (2 * ud[i_x]) + (2 * u[i_x]) * vbd[i_x])
             ub[i_x] = ub[i_x] + (2 * u[i_x]) * vb[i_x]

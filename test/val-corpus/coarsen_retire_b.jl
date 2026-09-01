@@ -36,8 +36,10 @@ function coarsen_retire_b(x, xb, y, yb, n, levels, out, outb, tripcount_stack, t
         t_stack[__idx_t_stack_1_4] = t
     end
     out[1] = y[1]
-    t_stack[__tot_t_stack_1 + 1] = t
-    t = t_stack[__tot_t_stack_1 + 1]
+    __idx_t_stack_3 = __tot_t_stack_1 + 1
+    t_stack[__idx_t_stack_3] = t
+    __idx_t_stack_0 = __tot_t_stack_1 + 1
+    t = t_stack[__idx_t_stack_0]
     yb[1] = yb[1] + outb[1]
     outb[1] = 0.0
     for i_l = levels:-1:1

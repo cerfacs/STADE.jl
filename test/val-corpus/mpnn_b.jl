@@ -24,15 +24,18 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
         in_off = (e - 1) * n_in_msg
         msg_off = (e - 1) * n_msg_feat
         for k = 1:n_node_feat
-            msg_input_stack[((e - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1] = msg_input[in_off + k]
+            __idx_msg_input_stack_0 = ((e - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1
+            msg_input_stack[__idx_msg_input_stack_0] = msg_input[in_off + k]
             msg_input[in_off + k] = node_feat[src_off + k]
         end
         for k = 1:n_node_feat
-            msg_input_stack[max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((e - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)] = msg_input[in_off + n_node_feat + k]
+            __idx_msg_input_stack_0 = max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((e - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)
+            msg_input_stack[__idx_msg_input_stack_0] = msg_input[in_off + n_node_feat + k]
             msg_input[in_off + n_node_feat + k] = node_feat[dst_off + k]
         end
         for k = 1:n_edge_feat
-            msg_input_stack[(max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1)) + (((e - 1) * (div(n_edge_feat - 1, 1) + 1) + (k - 1)) + 1)] = msg_input[in_off + 2n_node_feat + k]
+            __idx_msg_input_stack_0 = (max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1)) + (((e - 1) * (div(n_edge_feat - 1, 1) + 1) + (k - 1)) + 1)
+            msg_input_stack[__idx_msg_input_stack_0] = msg_input[in_off + 2n_node_feat + k]
             msg_input[in_off + 2n_node_feat + k] = edge_feat[edge_off + k]
         end
         for o = 1:n_msg_feat
@@ -41,11 +44,13 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
                 widx = (o - 1) * n_in_msg + i_i
                 s = s + w_msg[widx] * msg_input[in_off + i_i]
             end
-            msg_scratch_stack[((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (o - 1)) + 1] = msg_scratch[msg_off + o]
+            __idx_msg_scratch_stack_2 = ((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (o - 1)) + 1
+            msg_scratch_stack[__idx_msg_scratch_stack_2] = msg_scratch[msg_off + o]
             msg_scratch[msg_off + o] = s
         end
         for k = 1:n_msg_feat
-            msg_scratch_stack[max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_msg_feat - 1, 1) + 1) + (((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)] = msg_scratch[msg_off + k]
+            __idx_msg_scratch_stack_0 = max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_msg_feat - 1, 1) + 1) + (((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)
+            msg_scratch_stack[__idx_msg_scratch_stack_0] = msg_scratch[msg_off + k]
             msg_scratch[msg_off + k] = max(msg_scratch[msg_off + k], 0.0)
         end
         for k = 1:n_msg_feat
@@ -65,11 +70,13 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
         agg_off = (v - 1) * n_msg_feat
         uin_off = (v - 1) * n_in_upd
         for k = 1:n_node_feat
-            upd_input_stack[((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1] = upd_input[uin_off + k]
+            __idx_upd_input_stack_0 = ((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1
+            upd_input_stack[__idx_upd_input_stack_0] = upd_input[uin_off + k]
             upd_input[uin_off + k] = node_feat[node_off + k]
         end
         for k = 1:n_msg_feat
-            upd_input_stack[max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)] = upd_input[uin_off + n_node_feat + k]
+            __idx_upd_input_stack_0 = max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)
+            upd_input_stack[__idx_upd_input_stack_0] = upd_input[uin_off + n_node_feat + k]
             upd_input[uin_off + n_node_feat + k] = agg[agg_off + k]
         end
         for o = 1:n_node_feat
@@ -78,11 +85,13 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
                 widx = (o - 1) * n_in_upd + i_i
                 s = s + w_upd[widx] * upd_input[uin_off + i_i]
             end
-            upd_scratch_stack[((v - 1) * (div(n_node_feat - 1, 1) + 1) + (o - 1)) + 1] = upd_scratch[node_off + o]
+            __idx_upd_scratch_stack_2 = ((v - 1) * (div(n_node_feat - 1, 1) + 1) + (o - 1)) + 1
+            upd_scratch_stack[__idx_upd_scratch_stack_2] = upd_scratch[node_off + o]
             upd_scratch[node_off + o] = s
         end
         for k = 1:n_node_feat
-            upd_scratch_stack[max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)] = upd_scratch[node_off + k]
+            __idx_upd_scratch_stack_0 = max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)
+            upd_scratch_stack[__idx_upd_scratch_stack_0] = upd_scratch[node_off + k]
             upd_scratch[node_off + k] = max(upd_scratch[node_off + k], 0.0)
         end
         for k = 1:n_node_feat
@@ -101,11 +110,13 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
             node_feat_outb[node_off + k] = 0.0
         end
         for k = n_node_feat:-1:1
-            upd_scratch[node_off + k] = upd_scratch_stack[max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)]
+            __idx_upd_scratch_stack_0 = max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)
+            upd_scratch[node_off + k] = upd_scratch_stack[__idx_upd_scratch_stack_0]
             upd_scratchb[node_off + k] = (0.5 * (1.0 + sign(upd_scratch[node_off + k]))) * upd_scratchb[node_off + k]
         end
         for o = n_node_feat:-1:1
-            upd_scratch[node_off + o] = upd_scratch_stack[((v - 1) * (div(n_node_feat - 1, 1) + 1) + (o - 1)) + 1]
+            __idx_upd_scratch_stack_0 = ((v - 1) * (div(n_node_feat - 1, 1) + 1) + (o - 1)) + 1
+            upd_scratch[node_off + o] = upd_scratch_stack[__idx_upd_scratch_stack_0]
             sb = sb + upd_scratchb[node_off + o]
             upd_scratchb[node_off + o] = 0.0
             for i_i = n_in_upd:-1:1
@@ -117,12 +128,14 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
             sb = 0.0
         end
         for k = n_msg_feat:-1:1
-            upd_input[uin_off + n_node_feat + k] = upd_input_stack[max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)]
+            __idx_upd_input_stack_0 = max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)
+            upd_input[uin_off + n_node_feat + k] = upd_input_stack[__idx_upd_input_stack_0]
             aggb[agg_off + k] = aggb[agg_off + k] + upd_inputb[uin_off + n_node_feat + k]
             upd_inputb[uin_off + n_node_feat + k] = 0.0
         end
         for k = n_node_feat:-1:1
-            upd_input[uin_off + k] = upd_input_stack[((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1]
+            __idx_upd_input_stack_0 = ((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1
+            upd_input[uin_off + k] = upd_input_stack[__idx_upd_input_stack_0]
             node_featb[node_off + k] = node_featb[node_off + k] + upd_inputb[uin_off + k]
             upd_inputb[uin_off + k] = 0.0
         end
@@ -148,11 +161,13 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
             messagesb[msg_off + k] = 0.0
         end
         for k = n_msg_feat:-1:1
-            msg_scratch[msg_off + k] = msg_scratch_stack[max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_msg_feat - 1, 1) + 1) + (((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)]
+            __idx_msg_scratch_stack_0 = max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_msg_feat - 1, 1) + 1) + (((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)
+            msg_scratch[msg_off + k] = msg_scratch_stack[__idx_msg_scratch_stack_0]
             msg_scratchb[msg_off + k] = (0.5 * (1.0 + sign(msg_scratch[msg_off + k]))) * msg_scratchb[msg_off + k]
         end
         for o = n_msg_feat:-1:1
-            msg_scratch[msg_off + o] = msg_scratch_stack[((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (o - 1)) + 1]
+            __idx_msg_scratch_stack_0 = ((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (o - 1)) + 1
+            msg_scratch[msg_off + o] = msg_scratch_stack[__idx_msg_scratch_stack_0]
             sb = sb + msg_scratchb[msg_off + o]
             msg_scratchb[msg_off + o] = 0.0
             for i_i = n_in_msg:-1:1
@@ -164,17 +179,20 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
             sb = 0.0
         end
         for k = n_edge_feat:-1:1
-            msg_input[in_off + 2n_node_feat + k] = msg_input_stack[(max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1)) + (((e - 1) * (div(n_edge_feat - 1, 1) + 1) + (k - 1)) + 1)]
+            __idx_msg_input_stack_0 = (max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1)) + (((e - 1) * (div(n_edge_feat - 1, 1) + 1) + (k - 1)) + 1)
+            msg_input[in_off + 2n_node_feat + k] = msg_input_stack[__idx_msg_input_stack_0]
             edge_featb[edge_off + k] = edge_featb[edge_off + k] + msg_inputb[in_off + 2n_node_feat + k]
             msg_inputb[in_off + 2n_node_feat + k] = 0.0
         end
         for k = n_node_feat:-1:1
-            msg_input[in_off + n_node_feat + k] = msg_input_stack[max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((e - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)]
+            __idx_msg_input_stack_0 = max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((e - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)
+            msg_input[in_off + n_node_feat + k] = msg_input_stack[__idx_msg_input_stack_0]
             node_featb[dst_off + k] = node_featb[dst_off + k] + msg_inputb[in_off + n_node_feat + k]
             msg_inputb[in_off + n_node_feat + k] = 0.0
         end
         for k = n_node_feat:-1:1
-            msg_input[in_off + k] = msg_input_stack[((e - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1]
+            __idx_msg_input_stack_0 = ((e - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1
+            msg_input[in_off + k] = msg_input_stack[__idx_msg_input_stack_0]
             node_featb[src_off + k] = node_featb[src_off + k] + msg_inputb[in_off + k]
             msg_inputb[in_off + k] = 0.0
         end

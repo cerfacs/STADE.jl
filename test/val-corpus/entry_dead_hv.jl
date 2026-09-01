@@ -29,10 +29,12 @@ function entry_dead_hv(x, xb, y, yb, i_cell_to_node, i_ncell, i_nnode, res, resb
         outd[i_x] = outd[i_x] + (res[i_x] * resd[i_x] + res[i_x] * resd[i_x])
         out[i_x] = out[i_x] + res[i_x] * res[i_x]
     end
-    v_stack_d[(max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1] = vd
-    v_stack[(max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1] = v
-    vd = v_stack_d[(max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1]
-    v = v_stack[(max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1]
+    __idx_v_stack_3 = (max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1
+    v_stack_d[__idx_v_stack_3] = vd
+    v_stack[__idx_v_stack_3] = v
+    __idx_v_stack_0 = (max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1
+    vd = v_stack_d[__idx_v_stack_0]
+    v = v_stack[__idx_v_stack_0]
     for i_x = i_nnode:-1:1
         resbd[i_x] = resbd[i_x] + (outb[i_x] * resd[i_x] + res[i_x] * outbd[i_x])
         resb[i_x] = resb[i_x] + res[i_x] * outb[i_x]

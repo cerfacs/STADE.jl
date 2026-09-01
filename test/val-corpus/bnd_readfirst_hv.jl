@@ -14,24 +14,29 @@ function bnd_readfirst_hv(x, xb, i_n, i_m, out, outb, xd, xbd, outd, outbd, s_st
     for i_i = 1:i_n
         outd[i_i] = outd[i_i] + (s * sd + s * sd)
         out[i_i] = out[i_i] + s * s
-        s_stack_d[(i_i - 1) + 1] = sd
-        s_stack[(i_i - 1) + 1] = s
+        __idx_s_stack_1 = (i_i - 1) + 1
+        s_stack_d[__idx_s_stack_1] = sd
+        s_stack[__idx_s_stack_1] = s
         sd = 0.0
         s = 0.0
         for i_j = 1:i_m
             sd = sd + (x[i_j] * xd[i_i] + x[i_i] * xd[i_j])
             s = s + x[i_i] * x[i_j]
         end
-        s_stack_d[(max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)] = sd
-        s_stack[(max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)] = s
+        __idx_s_stack_5 = (max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)
+        s_stack_d[__idx_s_stack_5] = sd
+        s_stack[__idx_s_stack_5] = s
     end
-    s_stack_d[((max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + max(0, div(i_n - 1, 1) + 1)) + 1] = sd
-    s_stack[((max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + max(0, div(i_n - 1, 1) + 1)) + 1] = s
-    sd = s_stack_d[((max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + max(0, div(i_n - 1, 1) + 1)) + 1]
-    s = s_stack[((max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + max(0, div(i_n - 1, 1) + 1)) + 1]
+    __idx_s_stack_2 = ((max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + max(0, div(i_n - 1, 1) + 1)) + 1
+    s_stack_d[__idx_s_stack_2] = sd
+    s_stack[__idx_s_stack_2] = s
+    __idx_s_stack_0 = ((max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + max(0, div(i_n - 1, 1) + 1)) + 1
+    sd = s_stack_d[__idx_s_stack_0]
+    s = s_stack[__idx_s_stack_0]
     for i_i = i_n:-1:1
-        sd = s_stack_d[(max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)]
-        s = s_stack[(max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)]
+        __idx_s_stack_0 = (max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)
+        sd = s_stack_d[__idx_s_stack_0]
+        s = s_stack[__idx_s_stack_0]
         for i_j = 1:i_m
             sd = sd + (x[i_j] * xd[i_i] + x[i_i] * xd[i_j])
             s = s + x[i_i] * x[i_j]
@@ -40,8 +45,9 @@ function bnd_readfirst_hv(x, xb, i_n, i_m, out, outb, xd, xbd, outd, outbd, s_st
             xbd[i_j] = xbd[i_j] + (sb * xd[i_i] + x[i_i] * sbd)
             xb[i_j] = xb[i_j] + x[i_i] * sb
         end
-        sd = s_stack_d[(i_i - 1) + 1]
-        s = s_stack[(i_i - 1) + 1]
+        __idx_s_stack_0 = (i_i - 1) + 1
+        sd = s_stack_d[__idx_s_stack_0]
+        s = s_stack[__idx_s_stack_0]
         sbd = 0.0
         sb = 0.0
         sbd = sbd + (outb[i_i] * sd + s * outbd[i_i])

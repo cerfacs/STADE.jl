@@ -36,8 +36,10 @@ function entry_empty_b(x, xb, u, ub, i_npass, i_w0, out, outb, tripcount_stack, 
         __idx_s_stack_1_5 = (prefix_s_stack_1[(i_p - 1) + 1] + max(0, div(val_w_1[(i_p - 1) + 1] - 1, 1) + 1)) + 1
         s_stack[__idx_s_stack_1_5] = s
     end
-    s_stack[__tot_s_stack_1 + 1] = s
-    s = s_stack[__tot_s_stack_1 + 1]
+    __idx_s_stack_3 = __tot_s_stack_1 + 1
+    s_stack[__idx_s_stack_3] = s
+    __idx_s_stack_0 = __tot_s_stack_1 + 1
+    s = s_stack[__idx_s_stack_0]
     for i_p = i_npass:-1:1
         __idx_s_stack_1_0 = (prefix_s_stack_1[(i_p - 1) + 1] + max(0, div(val_w_1[(i_p - 1) + 1] - 1, 1) + 1)) + 1
         s = s_stack[__idx_s_stack_1_0]

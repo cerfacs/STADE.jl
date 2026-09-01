@@ -21,8 +21,10 @@ function entry_dead_b(x, xb, y, yb, i_cell_to_node, i_ncell, i_nnode, res, resb,
     for i_x = 1:i_nnode
         out[i_x] = out[i_x] + res[i_x] * res[i_x]
     end
-    v_stack[(max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1] = v
-    v = v_stack[(max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1]
+    __idx_v_stack_3 = (max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1
+    v_stack[__idx_v_stack_3] = v
+    __idx_v_stack_0 = (max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1
+    v = v_stack[__idx_v_stack_0]
     for i_x = i_nnode:-1:1
         resb[i_x] = resb[i_x] + res[i_x] * outb[i_x]
         resb[i_x] = resb[i_x] + res[i_x] * outb[i_x]

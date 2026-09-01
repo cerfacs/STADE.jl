@@ -44,10 +44,12 @@ function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd,
     end
     outd[1] = yd[1]
     out[1] = y[1]
-    t_stack_d[__tot_t_stack_1 + 1] = td
-    t_stack[__tot_t_stack_1 + 1] = t
-    td = t_stack_d[__tot_t_stack_1 + 1]
-    t = t_stack[__tot_t_stack_1 + 1]
+    __idx_t_stack_3 = __tot_t_stack_1 + 1
+    t_stack_d[__idx_t_stack_3] = td
+    t_stack[__idx_t_stack_3] = t
+    __idx_t_stack_0 = __tot_t_stack_1 + 1
+    td = t_stack_d[__idx_t_stack_0]
+    t = t_stack[__idx_t_stack_0]
     ybd[1] = ybd[1] + outbd[1]
     yb[1] = yb[1] + outb[1]
     outbd[1] = 0.0

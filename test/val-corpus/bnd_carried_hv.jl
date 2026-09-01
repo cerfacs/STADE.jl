@@ -27,10 +27,12 @@ function bnd_carried_hv(x, xb, y, yb, i_n, out, outb, xd, xbd, yd, ybd, outd, ou
         tbd = 0.0
         tb = 0.0
     end
-    t_stack_d[max(0, div(i_n - 1, 1) + 1) + 1] = td
-    t_stack[max(0, div(i_n - 1, 1) + 1) + 1] = t
-    td = t_stack_d[max(0, div(i_n - 1, 1) + 1) + 1]
-    t = t_stack[max(0, div(i_n - 1, 1) + 1) + 1]
+    __idx_t_stack_2 = max(0, div(i_n - 1, 1) + 1) + 1
+    t_stack_d[__idx_t_stack_2] = td
+    t_stack[__idx_t_stack_2] = t
+    __idx_t_stack_0 = max(0, div(i_n - 1, 1) + 1) + 1
+    td = t_stack_d[__idx_t_stack_0]
+    t = t_stack[__idx_t_stack_0]
     tbd = 0.0
     tb = 0.0
     return nothing

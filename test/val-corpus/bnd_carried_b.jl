@@ -16,8 +16,10 @@ function bnd_carried_b(x, xb, y, yb, i_n, out, outb, t_stack)
         yb[i_i] = yb[i_i] + x[i_i] * tb
         tb = 0.0
     end
-    t_stack[max(0, div(i_n - 1, 1) + 1) + 1] = t
-    t = t_stack[max(0, div(i_n - 1, 1) + 1) + 1]
+    __idx_t_stack_2 = max(0, div(i_n - 1, 1) + 1) + 1
+    t_stack[__idx_t_stack_2] = t
+    __idx_t_stack_0 = max(0, div(i_n - 1, 1) + 1) + 1
+    t = t_stack[__idx_t_stack_0]
     tb = 0.0
     return nothing
 end
