@@ -35,8 +35,9 @@ function raggedind_b(out, outb, u, ub, x, xb, n, m0, tripcount_stack, s_stack, p
         __idx_s_stack_1_0 = prefix_s_stack_1[(i_x - 1) + 1] + 1
         s = s_stack[__idx_s_stack_1_0]
         w = m0 + i_x
-        sb = sb + s * outb[i_x]
-        sb = sb + s * outb[i_x]
+        __cse_0 = s * outb[i_x]
+        sb = sb + __cse_0
+        sb = sb + __cse_0
         outb[i_x] = 0.0
         __idx_tripcount_stack_1_6 = prefix_tripcount_stack_1[(i_x - 1) + 1] + 1
         w = tripcount_stack[__idx_tripcount_stack_1_6]

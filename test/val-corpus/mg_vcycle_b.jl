@@ -238,8 +238,9 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         for j = 1:nc
             jf = j * 2
             __idx_u_stack_2_1 = ((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
-            u_stack[__idx_u_stack_2_1] = u[jf, i_level]
-            u[jf, i_level] = u[jf, i_level] + u[j, i_level + 1]
+            __cse_0 = u[jf, i_level]
+            u_stack[__idx_u_stack_2_1] = __cse_0
+            u[jf, i_level] = __cse_0 + u[j, i_level + 1]
         end
         __idx_tripcount_stack_2_13 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + 1) + 1
         tripcount_stack[__idx_tripcount_stack_2_13] = nc
@@ -264,8 +265,9 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 branch_stack[__idx_branch_stack_2_0] = 0
             end
             __idx_u_stack_2_5 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
-            u_stack[__idx_u_stack_2_5] = u[jf, i_level]
-            u[jf, i_level] = u[jf, i_level] + 0.5 * (cl + cr)
+            __cse_1 = u[jf, i_level]
+            u_stack[__idx_u_stack_2_5] = __cse_1
+            u[jf, i_level] = __cse_1 + 0.5 * (cl + cr)
             __idx_cl_stack_2_8 = prefix_cl_stack_2[div(i_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
             cl_stack[__idx_cl_stack_2_8] = cl
             __idx_cr_stack_2_10 = prefix_cr_stack_2[div(i_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
@@ -338,10 +340,11 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 end
                 __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                 u[i_j, i_level] = u_stack[__idx_u_stack_2_0]
-                hl2b = hl2b + f[i_j, i_level] * (0.5 * ub[i_j, i_level])
-                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * (0.5 * ub[i_j, i_level])
-                leftb = leftb + 0.5 * ub[i_j, i_level]
-                rightb = rightb + 0.5 * ub[i_j, i_level]
+                __cse_2 = 0.5 * ub[i_j, i_level]
+                hl2b = hl2b + f[i_j, i_level] * __cse_2
+                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_2
+                leftb = leftb + __cse_2
+                rightb = rightb + __cse_2
                 ub[i_j, i_level] = 0.0
                 if __branch_pre_4 == 1
                     ub[i_j + 1, i_level] = ub[i_j + 1, i_level] + rightb
@@ -381,8 +384,9 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             end
             __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
             u[jf, i_level] = u_stack[__idx_u_stack_2_0]
-            clb = clb + 0.5 * ub[jf, i_level]
-            crb = crb + 0.5 * ub[jf, i_level]
+            __cse_3 = 0.5 * ub[jf, i_level]
+            clb = clb + __cse_3
+            crb = crb + __cse_3
             if __branch_pre_5 == 1
                 ub[j, i_level + 1] = ub[j, i_level + 1] + crb
                 crb = 0.0
@@ -404,8 +408,9 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         end
         __idx_hl2_stack_2_0 = ((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + 1
         hl2 = hl2_stack[__idx_hl2_stack_2_0]
-        hlb = hlb + hl * hl2b
-        hlb = hlb + hl * hl2b
+        __cse_4 = hl * hl2b
+        hlb = hlb + __cse_4
+        hlb = hlb + __cse_4
         hl2b = 0.0
         __idx_hl_stack_2_0 = (__tot_hl_stack_1 + prefix_hl_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + 1
         hl = hl_stack[__idx_hl_stack_2_0]
@@ -413,13 +418,15 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
     end
     __idx_u_stack_0 = __tot_u_stack_1 + 1
     u[1, num_levels] = u_stack[__idx_u_stack_0]
-    hl2b = hl2b + (0.5 * f[1, num_levels]) * ub[1, num_levels]
-    fb[1, num_levels] = fb[1, num_levels] + (0.5hl2) * ub[1, num_levels]
+    __cse_5 = ub[1, num_levels]
+    hl2b = hl2b + (0.5 * f[1, num_levels]) * __cse_5
+    fb[1, num_levels] = fb[1, num_levels] + (0.5hl2) * __cse_5
     ub[1, num_levels] = 0.0
     __idx_hl2_stack_0 = __tot_hl2_stack_1 + 1
     hl2 = hl2_stack[__idx_hl2_stack_0]
-    hlb = hlb + hl * hl2b
-    hlb = hlb + hl * hl2b
+    __cse_6 = hl * hl2b
+    hlb = hlb + __cse_6
+    hlb = hlb + __cse_6
     hl2b = 0.0
     for i_level = num_levels - 1:-1:1
         __idx_hl_stack_1_0 = prefix_hl_stack_1[(i_level - 1) + 1] + 1
@@ -438,9 +445,11 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             jf = j * 2
             __idx_f_stack_1_0 = prefix_f_stack_1[(i_level - 1) + 1] + ((j - 1) + 1)
             f[j, i_level + 1] = f_stack[__idx_f_stack_1_0]
-            rb[jf - 1, i_level] = rb[jf - 1, i_level] + 0.25 * fb[j, i_level + 1]
-            rb[jf, i_level] = rb[jf, i_level] + 0.5 * fb[j, i_level + 1]
-            rb[jf + 1, i_level] = rb[jf + 1, i_level] + 0.25 * fb[j, i_level + 1]
+            __cse_7 = fb[j, i_level + 1]
+            __cse_8 = 0.25__cse_7
+            rb[jf - 1, i_level] = rb[jf - 1, i_level] + __cse_8
+            rb[jf, i_level] = rb[jf, i_level] + 0.5__cse_7
+            rb[jf + 1, i_level] = rb[jf + 1, i_level] + __cse_8
             fb[j, i_level + 1] = 0.0
         end
         __idx_tripcount_stack_1_9 = (prefix_tripcount_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1)) + 1
@@ -468,11 +477,15 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             end
             __idx_r_stack_1_0 = prefix_r_stack_1[(i_level - 1) + 1] + ((j - 1) + 1)
             r[j, i_level] = r_stack[__idx_r_stack_1_0]
-            fb[j, i_level] = fb[j, i_level] + rb[j, i_level]
-            ub[j, i_level] = ub[j, i_level] + 2.0 * ((1.0 / hl2) * -(rb[j, i_level]))
-            leftb = leftb + -((1.0 / hl2) * -(rb[j, i_level]))
-            rightb = rightb + -((1.0 / hl2) * -(rb[j, i_level]))
-            hl2b = hl2b + -(((2.0 * u[j, i_level] - left) - right) / hl2 ^ 2) * -(rb[j, i_level])
+            __cse_9 = rb[j, i_level]
+            fb[j, i_level] = fb[j, i_level] + __cse_9
+            __cse_10 = -__cse_9
+            __cse_11 = (1.0 / hl2) * __cse_10
+            ub[j, i_level] = ub[j, i_level] + 2.0__cse_11
+            __cse_12 = -__cse_11
+            leftb = leftb + __cse_12
+            rightb = rightb + __cse_12
+            hl2b = hl2b + -(((2.0 * u[j, i_level] - left) - right) / hl2 ^ 2) * __cse_10
             rb[j, i_level] = 0.0
             if __branch_pre_4 == 1
                 ub[j + 1, i_level] = ub[j + 1, i_level] + rightb
@@ -511,10 +524,11 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 end
                 __idx_u_stack_1_0 = prefix_u_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                 u[i_j, i_level] = u_stack[__idx_u_stack_1_0]
-                hl2b = hl2b + f[i_j, i_level] * (0.5 * ub[i_j, i_level])
-                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * (0.5 * ub[i_j, i_level])
-                leftb = leftb + 0.5 * ub[i_j, i_level]
-                rightb = rightb + 0.5 * ub[i_j, i_level]
+                __cse_13 = 0.5 * ub[i_j, i_level]
+                hl2b = hl2b + f[i_j, i_level] * __cse_13
+                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_13
+                leftb = leftb + __cse_13
+                rightb = rightb + __cse_13
                 ub[i_j, i_level] = 0.0
                 if __branch_pre_4 == 1
                     ub[i_j + 1, i_level] = ub[i_j + 1, i_level] + rightb
@@ -530,8 +544,9 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         end
         __idx_hl2_stack_1_0 = prefix_hl2_stack_1[(i_level - 1) + 1] + 1
         hl2 = hl2_stack[__idx_hl2_stack_1_0]
-        hlb = hlb + hl * hl2b
-        hlb = hlb + hl * hl2b
+        __cse_14 = hl * hl2b
+        hlb = hlb + __cse_14
+        hlb = hlb + __cse_14
         hl2b = 0.0
     end
     h1b = h1b + hlb

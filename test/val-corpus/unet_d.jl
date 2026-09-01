@@ -143,15 +143,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp1 * wp1 + (row - 1) * wp1 + col
             wid = 0.0
             wi = (((co - 1) * c_in + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_e1a[wi] * xpad0d[xi] + xpad0[xi] * w_e1ad[wi])
-            s = s + xpad0[xi] * w_e1a[wi]
+            __cse_0 = w_e1a[wi]
+            __cse_1 = xpad0[xi]
+            sd = sd + (__cse_0 * xpad0d[xi] + __cse_1 * w_e1ad[wi])
+            s = s + __cse_1 * __cse_0
         end
         t_e1d[idx] = sd + b_e1ad[co]
         t_e1[idx] = s + b_e1a[co]
     end
     for i = 1:n_e1_mid
-        t_e1d[i] = (0.5 * (1.0 + sign(t_e1[i] - zero_val))) * t_e1d[i]
-        t_e1[i] = max(t_e1[i], zero_val)
+        __cse_2 = t_e1[i]
+        t_e1d[i] = (0.5 * (1.0 + sign(__cse_2 - zero_val))) * t_e1d[i]
+        t_e1[i] = max(__cse_2, zero_val)
     end
     for i = 1:n_e1_midpad
         t_e1padd[i] = 0.0
@@ -205,15 +208,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp1 * wp1 + (row - 1) * wp1 + col
             wid = 0.0
             wi = (((co - 1) * c1 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_e1b[wi] * t_e1padd[xi] + t_e1pad[xi] * w_e1bd[wi])
-            s = s + t_e1pad[xi] * w_e1b[wi]
+            __cse_3 = w_e1b[wi]
+            __cse_4 = t_e1pad[xi]
+            sd = sd + (__cse_3 * t_e1padd[xi] + __cse_4 * w_e1bd[wi])
+            s = s + __cse_4 * __cse_3
         end
         skip1d[idx] = sd + b_e1bd[co]
         skip1[idx] = s + b_e1b[co]
     end
     for i = 1:n_e1_out
-        skip1d[i] = (0.5 * (1.0 + sign(skip1[i] - zero_val))) * skip1d[i]
-        skip1[i] = max(skip1[i], zero_val)
+        __cse_5 = skip1[i]
+        skip1d[i] = (0.5 * (1.0 + sign(__cse_5 - zero_val))) * skip1d[i]
+        skip1[i] = max(__cse_5, zero_val)
     end
     for idx = 1:c1 * hw2
         idxm1d = 0.0
@@ -297,15 +303,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp2 * wp2 + (row - 1) * wp2 + col
             wid = 0.0
             wi = (((co - 1) * c1 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_e2a[wi] * p1padd[xi] + p1pad[xi] * w_e2ad[wi])
-            s = s + p1pad[xi] * w_e2a[wi]
+            __cse_6 = w_e2a[wi]
+            __cse_7 = p1pad[xi]
+            sd = sd + (__cse_6 * p1padd[xi] + __cse_7 * w_e2ad[wi])
+            s = s + __cse_7 * __cse_6
         end
         t_e2d[idx] = sd + b_e2ad[co]
         t_e2[idx] = s + b_e2a[co]
     end
     for i = 1:n_e2_mid
-        t_e2d[i] = (0.5 * (1.0 + sign(t_e2[i] - zero_val))) * t_e2d[i]
-        t_e2[i] = max(t_e2[i], zero_val)
+        __cse_8 = t_e2[i]
+        t_e2d[i] = (0.5 * (1.0 + sign(__cse_8 - zero_val))) * t_e2d[i]
+        t_e2[i] = max(__cse_8, zero_val)
     end
     for i = 1:n_e2_midpad
         t_e2padd[i] = 0.0
@@ -359,15 +368,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp2 * wp2 + (row - 1) * wp2 + col
             wid = 0.0
             wi = (((co - 1) * c2 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_e2b[wi] * t_e2padd[xi] + t_e2pad[xi] * w_e2bd[wi])
-            s = s + t_e2pad[xi] * w_e2b[wi]
+            __cse_9 = w_e2b[wi]
+            __cse_10 = t_e2pad[xi]
+            sd = sd + (__cse_9 * t_e2padd[xi] + __cse_10 * w_e2bd[wi])
+            s = s + __cse_10 * __cse_9
         end
         skip2d[idx] = sd + b_e2bd[co]
         skip2[idx] = s + b_e2b[co]
     end
     for i = 1:n_e2_out
-        skip2d[i] = (0.5 * (1.0 + sign(skip2[i] - zero_val))) * skip2d[i]
-        skip2[i] = max(skip2[i], zero_val)
+        __cse_11 = skip2[i]
+        skip2d[i] = (0.5 * (1.0 + sign(__cse_11 - zero_val))) * skip2d[i]
+        skip2[i] = max(__cse_11, zero_val)
     end
     for idx = 1:c2 * hw4
         idxm1d = 0.0
@@ -451,15 +463,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp4 * wp4 + (row - 1) * wp4 + col
             wid = 0.0
             wi = (((co - 1) * c2 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_ba[wi] * p2padd[xi] + p2pad[xi] * w_bad[wi])
-            s = s + p2pad[xi] * w_ba[wi]
+            __cse_12 = w_ba[wi]
+            __cse_13 = p2pad[xi]
+            sd = sd + (__cse_12 * p2padd[xi] + __cse_13 * w_bad[wi])
+            s = s + __cse_13 * __cse_12
         end
         t_bd[idx] = sd + b_bad[co]
         t_b[idx] = s + b_ba[co]
     end
     for i = 1:n_b_mid
-        t_bd[i] = (0.5 * (1.0 + sign(t_b[i] - zero_val))) * t_bd[i]
-        t_b[i] = max(t_b[i], zero_val)
+        __cse_14 = t_b[i]
+        t_bd[i] = (0.5 * (1.0 + sign(__cse_14 - zero_val))) * t_bd[i]
+        t_b[i] = max(__cse_14, zero_val)
     end
     for i = 1:n_b_midpad
         t_bpadd[i] = 0.0
@@ -513,15 +528,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp4 * wp4 + (row - 1) * wp4 + col
             wid = 0.0
             wi = (((co - 1) * c3 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_bb[wi] * t_bpadd[xi] + t_bpad[xi] * w_bbd[wi])
-            s = s + t_bpad[xi] * w_bb[wi]
+            __cse_15 = w_bb[wi]
+            __cse_16 = t_bpad[xi]
+            sd = sd + (__cse_15 * t_bpadd[xi] + __cse_16 * w_bbd[wi])
+            s = s + __cse_16 * __cse_15
         end
         bottd[idx] = sd + b_bbd[co]
         bott[idx] = s + b_bb[co]
     end
     for i = 1:n_b_out
-        bottd[i] = (0.5 * (1.0 + sign(bott[i] - zero_val))) * bottd[i]
-        bott[i] = max(bott[i], zero_val)
+        __cse_17 = bott[i]
+        bottd[i] = (0.5 * (1.0 + sign(__cse_17 - zero_val))) * bottd[i]
+        bott[i] = max(__cse_17, zero_val)
     end
     for idx = 1:c3 * hw2
         idxm1d = 0.0
@@ -607,15 +625,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp2 * wp2 + (row - 1) * wp2 + col
             wid = 0.0
             wi = (((co - 1) * c32 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_d2a[wi] * cat2padd[xi] + cat2pad[xi] * w_d2ad[wi])
-            s = s + cat2pad[xi] * w_d2a[wi]
+            __cse_18 = w_d2a[wi]
+            __cse_19 = cat2pad[xi]
+            sd = sd + (__cse_18 * cat2padd[xi] + __cse_19 * w_d2ad[wi])
+            s = s + __cse_19 * __cse_18
         end
         t_d2d[idx] = sd + b_d2ad[co]
         t_d2[idx] = s + b_d2a[co]
     end
     for i = 1:n_d2_mid
-        t_d2d[i] = (0.5 * (1.0 + sign(t_d2[i] - zero_val))) * t_d2d[i]
-        t_d2[i] = max(t_d2[i], zero_val)
+        __cse_20 = t_d2[i]
+        t_d2d[i] = (0.5 * (1.0 + sign(__cse_20 - zero_val))) * t_d2d[i]
+        t_d2[i] = max(__cse_20, zero_val)
     end
     for i = 1:n_d2_midpad
         t_d2padd[i] = 0.0
@@ -669,15 +690,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp2 * wp2 + (row - 1) * wp2 + col
             wid = 0.0
             wi = (((co - 1) * c2 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_d2b[wi] * t_d2padd[xi] + t_d2pad[xi] * w_d2bd[wi])
-            s = s + t_d2pad[xi] * w_d2b[wi]
+            __cse_21 = w_d2b[wi]
+            __cse_22 = t_d2pad[xi]
+            sd = sd + (__cse_21 * t_d2padd[xi] + __cse_22 * w_d2bd[wi])
+            s = s + __cse_22 * __cse_21
         end
         dec2outd[idx] = sd + b_d2bd[co]
         dec2out[idx] = s + b_d2b[co]
     end
     for i = 1:n_d2_out
-        dec2outd[i] = (0.5 * (1.0 + sign(dec2out[i] - zero_val))) * dec2outd[i]
-        dec2out[i] = max(dec2out[i], zero_val)
+        __cse_23 = dec2out[i]
+        dec2outd[i] = (0.5 * (1.0 + sign(__cse_23 - zero_val))) * dec2outd[i]
+        dec2out[i] = max(__cse_23, zero_val)
     end
     for idx = 1:c2 * hw
         idxm1d = 0.0
@@ -763,15 +787,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp1 * wp1 + (row - 1) * wp1 + col
             wid = 0.0
             wi = (((co - 1) * c21 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_d1a[wi] * cat1padd[xi] + cat1pad[xi] * w_d1ad[wi])
-            s = s + cat1pad[xi] * w_d1a[wi]
+            __cse_24 = w_d1a[wi]
+            __cse_25 = cat1pad[xi]
+            sd = sd + (__cse_24 * cat1padd[xi] + __cse_25 * w_d1ad[wi])
+            s = s + __cse_25 * __cse_24
         end
         t_d1d[idx] = sd + b_d1ad[co]
         t_d1[idx] = s + b_d1a[co]
     end
     for i = 1:n_d1_mid
-        t_d1d[i] = (0.5 * (1.0 + sign(t_d1[i] - zero_val))) * t_d1d[i]
-        t_d1[i] = max(t_d1[i], zero_val)
+        __cse_26 = t_d1[i]
+        t_d1d[i] = (0.5 * (1.0 + sign(__cse_26 - zero_val))) * t_d1d[i]
+        t_d1[i] = max(__cse_26, zero_val)
     end
     for i = 1:n_d1_midpad
         t_d1padd[i] = 0.0
@@ -825,15 +852,18 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hp1 * wp1 + (row - 1) * wp1 + col
             wid = 0.0
             wi = (((co - 1) * c1 + (ci - 1)) * kh + (ki - 1)) * kw + kj
-            sd = sd + (w_d1b[wi] * t_d1padd[xi] + t_d1pad[xi] * w_d1bd[wi])
-            s = s + t_d1pad[xi] * w_d1b[wi]
+            __cse_27 = w_d1b[wi]
+            __cse_28 = t_d1pad[xi]
+            sd = sd + (__cse_27 * t_d1padd[xi] + __cse_28 * w_d1bd[wi])
+            s = s + __cse_28 * __cse_27
         end
         dec1outd[idx] = sd + b_d1bd[co]
         dec1out[idx] = s + b_d1b[co]
     end
     for i = 1:n_d1_out
-        dec1outd[i] = (0.5 * (1.0 + sign(dec1out[i] - zero_val))) * dec1outd[i]
-        dec1out[i] = max(dec1out[i], zero_val)
+        __cse_29 = dec1out[i]
+        dec1outd[i] = (0.5 * (1.0 + sign(__cse_29 - zero_val))) * dec1outd[i]
+        dec1out[i] = max(__cse_29, zero_val)
     end
     for idx = 1:c_out * hw
         idxm1d = 0.0
@@ -867,8 +897,10 @@ function unet_d(x, xd, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ad, b_e1a, b_e1
             xi = (ci - 1) * hw + (row - 1) * w + col
             wid = 0.0
             wi = (((co - 1) * c1 + (ci - 1)) * kh_out + (ki - 1)) * kw_out + kj
-            sd = sd + (w_out[wi] * dec1outd[xi] + dec1out[xi] * w_outd[wi])
-            s = s + dec1out[xi] * w_out[wi]
+            __cse_30 = w_out[wi]
+            __cse_31 = dec1out[xi]
+            sd = sd + (__cse_30 * dec1outd[xi] + __cse_31 * w_outd[wi])
+            s = s + __cse_31 * __cse_30
         end
         yd[idx] = sd + b_outd[co]
         y[idx] = s + b_out[co]

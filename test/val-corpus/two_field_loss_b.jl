@@ -13,8 +13,9 @@ function two_field_loss_b(loss, lossb, u, ub, v, vb, p, pb, q, qb, i_n)
         loss[1] = loss[1] + p[i_x2] + q[i_x2]
     end
     for i_x2 = i_n:-1:1
-        pb[i_x2] = pb[i_x2] + lossb[1]
-        qb[i_x2] = qb[i_x2] + lossb[1]
+        __cse_0 = lossb[1]
+        pb[i_x2] = pb[i_x2] + __cse_0
+        qb[i_x2] = qb[i_x2] + __cse_0
     end
     for i_x = i_n:-1:1
         vb[i_x] = vb[i_x] + (3 * v[i_x] ^ 2) * qb[i_x]

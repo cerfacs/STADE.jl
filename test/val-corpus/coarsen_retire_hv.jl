@@ -32,9 +32,12 @@ function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd,
             __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + ((i - 1) + 1)
             t_stack_d[__idx_t_stack_1_0] = td
             t_stack[__idx_t_stack_1_0] = t
-            td = x[i] * xd[i] + x[i] * xd[i]
-            t = x[i] * x[i]
-            yd[i] = yd[i] + (t * td + t * td)
+            __cse_0 = x[i]
+            __cse_3 = __cse_0 * xd[i]
+            td = __cse_3 + __cse_3
+            t = __cse_0 * __cse_0
+            __cse_4 = t * td
+            yd[i] = yd[i] + (__cse_4 + __cse_4)
             y[i] = y[i] + t * t
         end
         cur = div(cur + 1, 2)
@@ -61,17 +64,23 @@ function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd,
         __idx_tripcount_stack_1_2 = prefix_tripcount_stack_1[(i_l - 1) + 1] + 1
         cur = tripcount_stack[__idx_tripcount_stack_1_2]
         for i = cur:-1:1
-            tbd = tbd + (yb[i] * td + t * ybd[i])
-            tb = tb + t * yb[i]
-            tbd = tbd + (yb[i] * td + t * ybd[i])
-            tb = tb + t * yb[i]
+            __cse_5 = yb[i]
+            __cse_1d = __cse_5 * td + t * ybd[i]
+            __cse_1 = t * __cse_5
+            tbd = tbd + __cse_1d
+            tb = tb + __cse_1
+            tbd = tbd + __cse_1d
+            tb = tb + __cse_1
             __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + ((i - 1) + 1)
             td = t_stack_d[__idx_t_stack_1_0]
             t = t_stack[__idx_t_stack_1_0]
-            xbd[i] = xbd[i] + (tb * xd[i] + x[i] * tbd)
-            xb[i] = xb[i] + x[i] * tb
-            xbd[i] = xbd[i] + (tb * xd[i] + x[i] * tbd)
-            xb[i] = xb[i] + x[i] * tb
+            __cse_6 = x[i]
+            __cse_2d = tb * xd[i] + __cse_6 * tbd
+            __cse_2 = __cse_6 * tb
+            xbd[i] = xbd[i] + __cse_2d
+            xb[i] = xb[i] + __cse_2
+            xbd[i] = xbd[i] + __cse_2d
+            xb[i] = xb[i] + __cse_2
             tbd = 0.0
             tb = 0.0
         end

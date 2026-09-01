@@ -37,8 +37,9 @@ function raggedii_b(out, outb, u, ub, x, xb, n, m0, tripcount_stack, s_stack, pr
     for i_x = n:-1:1
         __idx_s_stack_1_0 = (prefix_s_stack_1[(i_x - 1) + 1] + max(0, div(2 - 1, 1) + 1)) + 1
         s = s_stack[__idx_s_stack_1_0]
-        sb = sb + s * outb[i_x]
-        sb = sb + s * outb[i_x]
+        __cse_0 = s * outb[i_x]
+        sb = sb + __cse_0
+        sb = sb + __cse_0
         outb[i_x] = 0.0
         for i_y = 2:-1:1
             __idx_s_stack_1_0 = prefix_s_stack_1[(i_x - 1) + 1] + ((i_y - 1) + 1)

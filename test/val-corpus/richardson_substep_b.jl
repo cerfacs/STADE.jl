@@ -62,9 +62,10 @@ function richardson_substep_b(y_init, y_initb, out, outb, a_coef, a_coefb, dt_st
         for i_sub = nsub:-1:1
             __idx_y_stack_1_0 = prefix_y_stack_1[(i_stage - 1) + 1] + ((i_sub - 1) + 1)
             y = y_stack[__idx_y_stack_1_0]
-            hb = hb + (a_coef * y) * -yb
-            a_coefb = a_coefb + (h * y) * -yb
-            yb = yb + (h * a_coef) * -yb
+            __cse_0 = -yb
+            hb = hb + (a_coef * y) * __cse_0
+            a_coefb = a_coefb + (h * y) * __cse_0
+            yb = yb + (h * a_coef) * __cse_0
         end
         y_initb = y_initb + yb
         yb = 0.0

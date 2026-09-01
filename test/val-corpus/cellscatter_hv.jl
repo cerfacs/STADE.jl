@@ -22,8 +22,10 @@ function cellscatter_hv(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i
             end
             for i_loc = 1:4
                 i_lnode = i_cell_to_node[i_loc, i_cell]
-                mupd[i_lnode] = mupd[i_lnode] + (cell_vol[i_cell] * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * cell_vold[i_cell])
-                mup[i_lnode] = mup[i_lnode] + (auxu + up[i_lnode]) * cell_vol[i_cell]
+                __cse_3 = cell_vol[i_cell]
+                __cse_4 = auxu + up[i_lnode]
+                mupd[i_lnode] = mupd[i_lnode] + (__cse_3 * (auxud + upd[i_lnode]) + __cse_4 * cell_vold[i_cell])
+                mup[i_lnode] = mup[i_lnode] + __cse_4 * __cse_3
             end
             __idx_auxu_stack_3 = ((i_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1
             auxu_stack_d[__idx_auxu_stack_3] = auxud
@@ -31,10 +33,12 @@ function cellscatter_hv(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i
         end
         for i_node = 1:i_nnode
             __idx_up_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
-            up_stack_d[__idx_up_stack_0] = upd[i_node]
-            up_stack[__idx_up_stack_0] = up[i_node]
-            upd[i_node] = upd[i_node] + -(mupd[i_node])
-            up[i_node] = up[i_node] - mup[i_node]
+            __cse_0d = upd[i_node]
+            __cse_0 = up[i_node]
+            up_stack_d[__idx_up_stack_0] = __cse_0d
+            up_stack[__idx_up_stack_0] = __cse_0
+            upd[i_node] = __cse_0d + -(mupd[i_node])
+            up[i_node] = __cse_0 - mup[i_node]
         end
     end
     for i_ = i_njac:-1:1
@@ -51,12 +55,18 @@ function cellscatter_hv(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i
             auxu = auxu_stack[__idx_auxu_stack_0]
             for i_loc = 4:-1:1
                 i_lnode = i_cell_to_node[i_loc, i_cell]
-                auxubd = auxubd + (mupb[i_lnode] * cell_vold[i_cell] + cell_vol[i_cell] * mupbd[i_lnode])
-                auxub = auxub + cell_vol[i_cell] * mupb[i_lnode]
-                upbd[i_lnode] = upbd[i_lnode] + (mupb[i_lnode] * cell_vold[i_cell] + cell_vol[i_cell] * mupbd[i_lnode])
-                upb[i_lnode] = upb[i_lnode] + cell_vol[i_cell] * mupb[i_lnode]
-                cell_volbd[i_cell] = cell_volbd[i_cell] + (mupb[i_lnode] * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * mupbd[i_lnode])
-                cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_lnode]) * mupb[i_lnode]
+                __cse_1d = mupbd[i_lnode]
+                __cse_1 = mupb[i_lnode]
+                __cse_5 = cell_vol[i_cell]
+                __cse_2d = __cse_1 * cell_vold[i_cell] + __cse_5 * __cse_1d
+                __cse_2 = __cse_5 * __cse_1
+                auxubd = auxubd + __cse_2d
+                auxub = auxub + __cse_2
+                upbd[i_lnode] = upbd[i_lnode] + __cse_2d
+                upb[i_lnode] = upb[i_lnode] + __cse_2
+                __cse_6 = auxu + up[i_lnode]
+                cell_volbd[i_cell] = cell_volbd[i_cell] + (__cse_1 * (auxud + upd[i_lnode]) + __cse_6 * __cse_1d)
+                cell_volb[i_cell] = cell_volb[i_cell] + __cse_6 * __cse_1
             end
             for i_loc = 1:4
                 i_lnode = i_cell_to_node[i_loc, i_cell]

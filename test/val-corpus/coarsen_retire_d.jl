@@ -3,9 +3,12 @@ function coarsen_retire_d(x, xd, y, yd, n, levels, out, outd)
     cur = n
     for i_l = 1:levels
         for i = 1:cur
-            td = x[i] * xd[i] + x[i] * xd[i]
-            t = x[i] * x[i]
-            yd[i] = yd[i] + (t * td + t * td)
+            __cse_0 = x[i]
+            __cse_1 = __cse_0 * xd[i]
+            td = __cse_1 + __cse_1
+            t = __cse_0 * __cse_0
+            __cse_2 = t * td
+            yd[i] = yd[i] + (__cse_2 + __cse_2)
             y[i] = y[i] + t * t
         end
         curd = 0.0

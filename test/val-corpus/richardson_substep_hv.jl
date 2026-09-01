@@ -81,12 +81,17 @@ function richardson_substep_hv(y_init, y_initb, out, outb, a_coef, a_coefb, dt_s
             __idx_y_stack_1_0 = prefix_y_stack_1[(i_stage - 1) + 1] + ((i_sub - 1) + 1)
             yd = y_stack_d[__idx_y_stack_1_0]
             y = y_stack[__idx_y_stack_1_0]
-            hbd = hbd + (-yb * (y * a_coefd + a_coef * yd) + (a_coef * y) * -ybd)
-            hb = hb + (a_coef * y) * -yb
-            a_coefbd = a_coefbd + (-yb * (y * hd + h * yd) + (h * y) * -ybd)
-            a_coefb = a_coefb + (h * y) * -yb
-            ybd = ybd + (-yb * (a_coef * hd + h * a_coefd) + (h * a_coef) * -ybd)
-            yb = yb + (h * a_coef) * -yb
+            __cse_0d = -ybd
+            __cse_0 = -yb
+            __cse_1 = a_coef * y
+            hbd = hbd + (__cse_0 * (y * a_coefd + a_coef * yd) + __cse_1 * __cse_0d)
+            hb = hb + __cse_1 * __cse_0
+            __cse_2 = h * y
+            a_coefbd = a_coefbd + (__cse_0 * (y * hd + h * yd) + __cse_2 * __cse_0d)
+            a_coefb = a_coefb + __cse_2 * __cse_0
+            __cse_3 = h * a_coef
+            ybd = ybd + (__cse_0 * (a_coef * hd + h * a_coefd) + __cse_3 * __cse_0d)
+            yb = yb + __cse_3 * __cse_0
         end
         y_initbd = y_initbd + ybd
         y_initb = y_initb + yb

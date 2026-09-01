@@ -8,12 +8,15 @@ function bnd_carried_b(x, xb, y, yb, i_n, out, outb, t_stack)
     tb = 0.0
     t = 1.0
     for i_i = 1:i_n
-        t = x[i_i] * y[i_i]
+        __cse_0 = x[i_i]
+        __cse_1 = y[i_i]
+        t = __cse_0 * __cse_1
         out[i_i] = out[i_i] + t * t
-        tb = tb + t * outb[i_i]
-        tb = tb + t * outb[i_i]
-        xb[i_i] = xb[i_i] + y[i_i] * tb
-        yb[i_i] = yb[i_i] + x[i_i] * tb
+        __cse_2 = t * outb[i_i]
+        tb = tb + __cse_2
+        tb = tb + __cse_2
+        xb[i_i] = xb[i_i] + __cse_1 * tb
+        yb[i_i] = yb[i_i] + __cse_0 * tb
         tb = 0.0
     end
     __idx_t_stack_2 = max(0, div(i_n - 1, 1) + 1) + 1

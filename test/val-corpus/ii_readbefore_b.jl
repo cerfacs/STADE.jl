@@ -6,7 +6,8 @@ end
 function ii_readbefore_b(x, xb, i_n, i_m, out, outb, s_stack)
     s = 0.0
     sb = 0.0
-    s = x[1] * x[1]
+    __cse_0 = x[1]
+    s = __cse_0 * __cse_0
     out[1] = out[1] + s * s
     for i_i = 1:i_n
         __idx_s_stack_0 = (i_i - 1) + 1
@@ -26,21 +27,26 @@ function ii_readbefore_b(x, xb, i_n, i_m, out, outb, s_stack)
     for i_i = i_n:-1:1
         __idx_s_stack_0 = (max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)
         s = s_stack[__idx_s_stack_0]
-        sb = sb + s * outb[i_i]
-        sb = sb + s * outb[i_i]
+        __cse_1 = s * outb[i_i]
+        sb = sb + __cse_1
+        sb = sb + __cse_1
         for i_j = 1:i_m
-            s = s + x[i_j] * x[i_i]
-            xb[i_j] = xb[i_j] + x[i_i] * sb
-            xb[i_i] = xb[i_i] + x[i_j] * sb
+            __cse_2 = x[i_j]
+            __cse_3 = x[i_i]
+            s = s + __cse_2 * __cse_3
+            xb[i_j] = xb[i_j] + __cse_3 * sb
+            xb[i_i] = xb[i_i] + __cse_2 * sb
         end
         __idx_s_stack_0 = (i_i - 1) + 1
         s = s_stack[__idx_s_stack_0]
         sb = 0.0
     end
-    sb = sb + s * outb[1]
-    sb = sb + s * outb[1]
-    xb[1] = xb[1] + x[1] * sb
-    xb[1] = xb[1] + x[1] * sb
+    __cse_4 = s * outb[1]
+    sb = sb + __cse_4
+    sb = sb + __cse_4
+    __cse_5 = x[1] * sb
+    xb[1] = xb[1] + __cse_5
+    xb[1] = xb[1] + __cse_5
     sb = 0.0
     return nothing
 end

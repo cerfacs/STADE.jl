@@ -26,15 +26,18 @@ function bnd_readfirst_b(x, xb, i_n, i_m, out, outb, s_stack)
         __idx_s_stack_0 = (max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)
         s = s_stack[__idx_s_stack_0]
         for i_j = 1:i_m
-            s = s + x[i_i] * x[i_j]
-            xb[i_i] = xb[i_i] + x[i_j] * sb
-            xb[i_j] = xb[i_j] + x[i_i] * sb
+            __cse_0 = x[i_i]
+            __cse_1 = x[i_j]
+            s = s + __cse_0 * __cse_1
+            xb[i_i] = xb[i_i] + __cse_1 * sb
+            xb[i_j] = xb[i_j] + __cse_0 * sb
         end
         __idx_s_stack_0 = (i_i - 1) + 1
         s = s_stack[__idx_s_stack_0]
         sb = 0.0
-        sb = sb + s * outb[i_i]
-        sb = sb + s * outb[i_i]
+        __cse_2 = s * outb[i_i]
+        sb = sb + __cse_2
+        sb = sb + __cse_2
     end
     sb = 0.0
     return nothing

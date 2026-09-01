@@ -1509,6 +1509,273 @@ function emit_return_nothing()
     return :(return nothing)
 end
 
+# ---- local common-subexpression elimination -------------------------
+# A shared post-pass over an already-generated body, run by tgen_/agen_/hvp_ alike. The
+# duplication it removes is structural, not accidental: der_adjoint_generic copies the incoming
+# seed into every one of a node's contributions, so a node with k active children replicates its
+# whole seed k times and each level multiplies against the one above. `advection_b`'s
+# `(1.0 / dx) * -(ub[i_x])` appearing three times, with `-(ub[i_x])` a shared factor in a fourth
+# place, is one `/` node and one `*` node's seeds.
+#
+# Scope is one straight-line run of statements inside a single block. A `:for` or `:if` ends the
+# run, and its bodies are processed on their own -- nothing is ever hoisted across a loop header
+# or into a branch, so a temporary can never outlive the control flow that computed it.
+
+# Candidates are exactly the ops carrying a derivative rule (which is exactly what skill-stade
+# lets a kernel call) plus array reads. Everything else -- push!, pop!, sizehint!, Vector{...} --
+# falls outside, which is what keeps a stack pop, whose two evaluations return DIFFERENT values,
+# from ever being treated as a repeated expression.
+emit_cse_candidate(e, ctx) = e isa Expr &&
+    ((e.head == :call && !isempty(e.args) && e.args[1] isa Symbol && e.args[1] in ctx.pure) ||
+     (e.head == :ref && !isempty(e.args) && e.args[1] isa Symbol)) &&
+    emit_cse_touches_float(e, ctx)
+
+# An integer-valued expression is deliberately never a candidate, even when it repeats. An index
+# formula like `i_x - 1` is where cgen_/jgen_ read the thread variable to decide which loops can be
+# offloaded and whether a split write needs an atomic; naming it hides the variable from that
+# analysis, and doing so pushed four mpnn loops back onto the host for the sake of one integer
+# subtraction. Every temporary this pass creates is float-valued, so a `__cse_*` read counts as
+# touching a float -- an hvp body goes through the pass twice and the second pass has to recognize
+# the first pass's names.
+function emit_cse_touches_float(e, ctx)
+    for v in emit_cse_reads!(e, Set{Symbol}())
+        (v in ctx.floats || startswith(string(v), "__cse_")) && return true
+    end
+    return false
+end
+
+# Every variable an expression reads: bare symbols, and the NAME of any array it indexes.
+function emit_cse_reads!(e, acc)
+    e isa Symbol && (push!(acc, e); return acc)
+    e isa Expr || return acc
+    e.head == :ref && e.args[1] isa Symbol && push!(acc, e.args[1])
+    start = (e.head == :call || e.head == :ref) ? 2 : 1
+    for a in e.args[start:end]
+        emit_cse_reads!(a, acc)
+    end
+    return acc
+end
+
+# An occurrence's identity. Two textually identical occurrences share a key only when every
+# variable they read still carries the same generation and no barrier has intervened, so a write
+# between them (or a push!/pop! anywhere) forces a fresh key rather than a wrong reuse.
+function emit_cse_key(e, gen, barrier)
+    vs = sort(collect(emit_cse_reads!(e, Set{Symbol}())); by = string)
+    return (e, barrier[], Tuple((v, get(gen, v, 0)) for v in vs))
+end
+
+emit_cse_bump!(gen, v::Symbol) = (gen[v] = get(gen, v, 0) + 1; nothing)
+
+# Applies one statement's writes. An assignment invalidates its target; a push!/pop! anywhere in
+# the statement invalidates that stack; anything that is not an assignment at all is a full
+# barrier, since this pass does not model what it might touch.
+function emit_cse_apply_writes!(s, gen, barrier)
+    emit_cse_bump_stack_ops!(s, gen)
+    if s isa Expr && s.head == :(=)
+        lhs = s.args[1]
+        lhs isa Symbol && return emit_cse_bump!(gen, lhs)
+        lhs isa Expr && lhs.head == :ref && lhs.args[1] isa Symbol && return emit_cse_bump!(gen, lhs.args[1])
+    end
+    barrier[] += 1
+    return nothing
+end
+
+function emit_cse_bump_stack_ops!(e, gen)
+    if e isa Expr
+        e.head == :call && length(e.args) >= 2 && e.args[1] in (:push!, :pop!) &&
+            e.args[2] isa Symbol && emit_cse_bump!(gen, e.args[2])
+        for a in e.args
+            emit_cse_bump_stack_ops!(a, gen)
+        end
+    end
+    return nothing
+end
+
+# Pass 1: count every candidate occurrence, keyed as above. Walks rvalue positions only -- an
+# assignment's target is a store, though the index expressions inside it are ordinary reads.
+function emit_cse_count!(e, gen, barrier, counts, ctx)
+    if emit_cse_candidate(e, ctx)
+        key = emit_cse_key(e, gen, barrier)
+        counts[key] = get(counts, key, 0) + 1
+    end
+    if e isa Expr
+        start = (e.head == :call || e.head == :ref) ? 2 : 1
+        for a in e.args[start:end]
+            emit_cse_count!(a, gen, barrier, counts, ctx)
+        end
+    end
+    return nothing
+end
+
+function emit_cse_count_stmt!(s, gen, barrier, counts, ctx)
+    if s isa Expr && s.head == :(=)
+        emit_cse_count!(s.args[2], gen, barrier, counts, ctx)
+        lhs = s.args[1]
+        if lhs isa Expr && lhs.head == :ref
+            for a in lhs.args[2:end]
+                emit_cse_count!(a, gen, barrier, counts, ctx)
+            end
+        end
+    else
+        emit_cse_count!(s, gen, barrier, counts, ctx)
+    end
+    return nothing
+end
+
+# Pass 2: rewrite, replaying pass 1's generation bookkeeping exactly so the keys line up. Children
+# are rewritten before their parent, but the parent's KEY is taken from the original expression --
+# otherwise a parent whose child got named would key differently in the two passes and never match.
+# Naming children first is also what puts `__cse_0 = -(ub[i_x])` ahead of the `__cse_1` that uses it.
+function emit_cse_rewrite(e, gen, barrier, counts, names, pending, counter, ctx)
+    emit_cse_candidate(e, ctx) || return emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx)
+    key = emit_cse_key(e, gen, barrier)
+    haskey(names, key) && return names[key]
+    rebuilt = emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx)
+    get(counts, key, 0) > 1 || return rebuilt
+    tmp = Symbol("__cse_t", counter[])
+    counter[] += 1
+    push!(pending, Expr(:(=), tmp, rebuilt))
+    names[key] = tmp
+    return tmp
+end
+
+function emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx)
+    e isa Expr || return e
+    start = (e.head == :call || e.head == :ref) ? 2 : 1
+    args = Any[e.args[1:(start - 1)]...]
+    for a in e.args[start:end]
+        push!(args, emit_cse_rewrite(a, gen, barrier, counts, names, pending, counter, ctx))
+    end
+    return Expr(e.head, args...)
+end
+
+function emit_cse_rewrite_stmt(s, gen, barrier, counts, names, pending, counter, ctx)
+    if s isa Expr && s.head == :(=)
+        rhs = emit_cse_rewrite(s.args[2], gen, barrier, counts, names, pending, counter, ctx)
+        lhs = s.args[1]
+        if lhs isa Expr && lhs.head == :ref
+            lhs = emit_cse_rewrite_args(lhs, gen, barrier, counts, names, pending, counter, ctx)
+        end
+        return Expr(:(=), lhs, rhs)
+    end
+    return emit_cse_rewrite(s, gen, barrier, counts, names, pending, counter, ctx)
+end
+
+# Counts references to each `__cse_*` name, reading positions only.
+function emit_cse_tally!(e, counts)
+    if e isa Symbol
+        startswith(string(e), "__cse_") && (counts[e] = get(counts, e, 0) + 1)
+    elseif e isa Expr
+        if e.head == :(=)
+            emit_cse_tally!(e.args[2], counts)
+            e.args[1] isa Expr && for a in e.args[1].args[2:end]; emit_cse_tally!(a, counts); end
+        else
+            start = (e.head == :call || e.head == :ref) ? 2 : 1
+            for a in e.args[start:end]; emit_cse_tally!(a, counts); end
+        end
+    end
+    return nothing
+end
+
+# A temporary loses uses to a LARGER one bound around it: `1.0 / dx` is named because it occurs
+# three times, then all three occurrences vanish into the single `(1.0 / dx) * -(ub[i_x])` that
+# replaces them. What is left with one use, or none, is folded back into that use and dropped, to a
+# fixpoint. Without this the pass would trade an operation for an assignment and emit a chain of
+# one-use names -- more lines than it started with, and no faster.
+function emit_cse_prune(stmts)
+    while true
+        counts = Dict{Symbol,Int}()
+        for s in stmts
+            emit_cse_tally!(s, counts)
+        end
+        out = Any[]
+        subst = Dict{Symbol,Any}()
+        removed = false
+        for s in stmts
+            s2 = isempty(subst) ? s : agen_substitute_vars(s, subst)
+            if s2 isa Expr && s2.head == :(=) && s2.args[1] isa Symbol &&
+               startswith(string(s2.args[1]), "__cse_") && get(counts, s2.args[1], 0) <= 1
+                subst[s2.args[1]] = s2.args[2]
+                removed = true
+                continue
+            end
+            push!(out, s2)
+        end
+        stmts = out
+        removed || return stmts
+    end
+end
+
+function emit_cse_run(run, counter, ctx)
+    isempty(run) && return Any[]
+    provisional = Ref(0)
+    counts = Dict{Any,Int}()
+    gen = Dict{Symbol,Int}()
+    barrier = Ref(0)
+    for s in run
+        emit_cse_count_stmt!(s, gen, barrier, counts, ctx)
+        emit_cse_apply_writes!(s, gen, barrier)
+    end
+    out = Any[]
+    names = Dict{Any,Symbol}()
+    gen = Dict{Symbol,Int}()
+    barrier = Ref(0)
+    for s in run
+        pending = Any[]
+        rewritten = emit_cse_rewrite_stmt(s, gen, barrier, counts, names, pending, provisional, ctx)
+        append!(out, pending)
+        push!(out, rewritten)
+        emit_cse_apply_writes!(s, gen, barrier)
+    end
+    return emit_cse_renumber(emit_cse_prune(out), counter)
+end
+
+# Pruning leaves holes in the numbering, since a name that was bound and then folded back still
+# consumed one. Survivors are renumbered in definition order after the fixpoint, so what reaches the
+# file runs 0, 1, 2, ... -- this output is meant to be read.
+function emit_cse_renumber(stmts, counter)
+    subst = Dict{Symbol,Any}()
+    for s in stmts
+        if s isa Expr && s.head == :(=) && s.args[1] isa Symbol && startswith(string(s.args[1]), "__cse_t")
+            subst[s.args[1]] = Symbol("__cse_", counter[])
+            counter[] += 1
+        end
+    end
+    isempty(subst) && return stmts
+    return Any[agen_substitute_vars(s, subst) for s in stmts]
+end
+
+# `counter` is threaded so every temporary in one generated function has a distinct name, which is
+# what lets a body be run through this pass more than once (hvp_ does, before and after doubling).
+function emit_cse_block(stmts, counter, ctx)
+    out = Any[]
+    run = Any[]
+    for s in stmts
+        s isa LineNumberNode && continue
+        if s isa Expr && s.head == :for
+            append!(out, emit_cse_run(run, counter, ctx)); empty!(run)
+            push!(out, Expr(:for, s.args[1], Expr(:block, emit_cse_block(s.args[2].args, counter, ctx)...)))
+        elseif s isa Expr && s.head == :if
+            append!(out, emit_cse_run(run, counter, ctx)); empty!(run)
+            args = Any[s.args[1]]
+            for a in s.args[2:end]
+                push!(args, a isa Expr && a.head == :block ? Expr(:block, emit_cse_block(a.args, counter, ctx)...) :
+                            first(emit_cse_block(Any[a], counter, ctx)))
+            end
+            push!(out, Expr(:if, args...))
+        else
+            push!(run, s)
+        end
+    end
+    append!(out, emit_cse_run(run, counter, ctx))
+    return out
+end
+
+emit_cse_stmts(stmts, counter, floats) = emit_cse_block(stmts, counter, (pure = Set(keys(der_table())), floats = floats))
+
+# Rewrites a whole `function f(args...) ... end` Expr in place of its body.
+
+
 # `return nothing` when there is nothing to hand back; `return v` for one var,
 # `return v1,v2,...` for several -- the only way a scalar argument's new value
 # escapes the call (arrays mutate in place, no return needed). Shared by
@@ -2153,7 +2420,19 @@ function tgen_emit(kernel, lin_plan)
     body_exprs = tgen_body(lin_plan)
     reassigned = tgen_reassigned_scalar_args(kernel)
     push!(body_exprs, emit_return_scalars([tgen_shadow(v) for v in reassigned]))
-    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body_exprs...))
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, emit_cse_stmts(body_exprs, Ref(0), tgen_cse_float_names(kernel.sig))...))
+end
+
+# Every float-valued name a tangent body can mention: each float variable and its shadow. Anything
+# absent is Int64, which emit_cse_stmts refuses to name.
+function tgen_cse_float_names(sig)
+    names = Set{Symbol}()
+    for (v, k) in sig.kinds
+        k in (:scalar_float, :array_float) || continue
+        push!(names, v)
+        push!(names, tgen_shadow(v))
+    end
+    return names
 end
 
 tgen_fname(name::Symbol) = Symbol(string(name) * "_d")
@@ -2274,6 +2553,27 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     return (adjoint = adjoint_expr, initstacks = initstacks_expr)
 end
 
+# Every float-valued name an adjoint or hvp body can mention: each float variable, its adjoint, both
+# of their second-order shadows, and the stacks that hold floats. A :branch or :tripcount stack holds
+# Int64 and is deliberately left out, so `n = tripcount_stack[i]` is never named.
+function agen_cse_float_names(sig, sites)
+    names = Set{Symbol}()
+    for (v, k) in sig.kinds
+        k in (:scalar_float, :array_float) || continue
+        for nm in (v, agen_shadow(v))
+            push!(names, nm)
+            push!(names, tgen_shadow(nm))
+        end
+    end
+    for s in sites
+        s.kind in (:array, :value) || continue
+        nm = agen_site_stack_name(s)
+        push!(names, nm)
+        push!(names, hvp_stack_shadow(nm))
+    end
+    return names
+end
+
 agen_fname(name::Symbol) = Symbol(string(name) * "_b")
 agen_init_fname(name::Symbol) = Symbol("initstacks_" * string(name) * "_b")
 
@@ -2324,7 +2624,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
     push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
 
-    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, emit_cse_stmts(body, Ref(0), agen_cse_float_names(kernel.sig, sites))...))
 end
 
 # Int64 variables reassigned at more than one :assign site are evolving state depending on the full
@@ -4183,10 +4483,14 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
 
     ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan)
 
-    fwd = agen_forward_body(kernel.body, sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, lin_body = lin_plan, unsafe = unsafe)
-    bwd = agen_backward_body(lin_plan, kernel.body, sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
+    cse_counter = Ref(0)
+    cse_floats = agen_cse_float_names(sig, sites)
+    fwd = emit_cse_stmts(agen_forward_body(kernel.body, sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, lin_body = lin_plan, unsafe = unsafe), cse_counter, cse_floats)
+    bwd = emit_cse_stmts(agen_backward_body(lin_plan, kernel.body, sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx), cse_counter, cse_floats)
 
     shadow_of = hvp_shadow_map(kernel, sites)
+    hvp_register_cse_shadows!(shadow_of, fwd)
+    hvp_register_cse_shadows!(shadow_of, bwd)
 
     fname = hvp_fname(sig.name)
     seed_args = Symbol[]
@@ -4220,7 +4524,26 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     end
     push!(body, emit_return_scalars(ret))
 
-    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...))
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, emit_cse_stmts(body, cse_counter, cse_floats)...))
+end
+
+# emit_cse_stmts' temporaries are locals invented after shape inference, so kernel.sig.kinds has
+# never heard of them and hvp_shadow_map cannot see them. Left unregistered, hvp_tangent_expr
+# resolves each one to the literal 0.0 and hvp_double_stmt emits no shadow line, silently dropping
+# every second-order term that flows through a bound subexpression -- the corpus catches this on
+# some kernels but not all. Registered in program order, so a temporary defined from an earlier one
+# sees it. A temporary whose own tangent is 0.0 (a pure index computation) needs no shadow, and
+# giving it one would only emit a dead `__cse_Nd = 0.0`.
+function hvp_register_cse_shadows!(shadow_of, stmts)
+    for e in stmts
+        if e isa Expr && e.head == :(=) && e.args[1] isa Symbol && startswith(string(e.args[1]), "__cse_")
+            hvp_tangent_expr(e.args[2], shadow_of) == 0.0 && continue
+            shadow_of[e.args[1]] = tgen_shadow(e.args[1])
+        elseif e isa Expr
+            hvp_register_cse_shadows!(shadow_of, e.args)
+        end
+    end
+    return nothing
 end
 
 hvp_fname(name::Symbol) = Symbol(string(name) * "_hv")

@@ -4,24 +4,33 @@ end
 
 function affine_loss_hv(loss, lossb, u, ub, a, ab, b, bb, v, vb, i_n, lossd, lossbd, ud, ubd, ad, abd, bd, bbd, vd, vbd)
     for i_x = 1:i_n
-        vd[i_x] = (u[i_x] * ad[i_x] + a[i_x] * ud[i_x]) + bd[i_x]
-        v[i_x] = a[i_x] * u[i_x] + b[i_x]
+        __cse_1 = u[i_x]
+        __cse_2 = a[i_x]
+        vd[i_x] = (__cse_1 * ad[i_x] + __cse_2 * ud[i_x]) + bd[i_x]
+        v[i_x] = __cse_2 * __cse_1 + b[i_x]
     end
     for i_x2 = 1:i_n
-        lossd[1] = lossd[1] + (2 * v[i_x2]) * vd[i_x2]
-        loss[1] = loss[1] + v[i_x2] ^ 2
+        __cse_3 = v[i_x2]
+        lossd[1] = lossd[1] + (2__cse_3) * vd[i_x2]
+        loss[1] = loss[1] + __cse_3 ^ 2
     end
     for i_x2 = i_n:-1:1
-        vbd[i_x2] = vbd[i_x2] + (lossb[1] * (2 * vd[i_x2]) + (2 * v[i_x2]) * lossbd[1])
-        vb[i_x2] = vb[i_x2] + (2 * v[i_x2]) * lossb[1]
+        __cse_4 = lossb[1]
+        __cse_5 = 2 * v[i_x2]
+        vbd[i_x2] = vbd[i_x2] + (__cse_4 * (2 * vd[i_x2]) + __cse_5 * lossbd[1])
+        vb[i_x2] = vb[i_x2] + __cse_5 * __cse_4
     end
     for i_x = i_n:-1:1
-        abd[i_x] = abd[i_x] + (vb[i_x] * ud[i_x] + u[i_x] * vbd[i_x])
-        ab[i_x] = ab[i_x] + u[i_x] * vb[i_x]
-        ubd[i_x] = ubd[i_x] + (vb[i_x] * ad[i_x] + a[i_x] * vbd[i_x])
-        ub[i_x] = ub[i_x] + a[i_x] * vb[i_x]
-        bbd[i_x] = bbd[i_x] + vbd[i_x]
-        bb[i_x] = bb[i_x] + vb[i_x]
+        __cse_0d = vbd[i_x]
+        __cse_0 = vb[i_x]
+        __cse_6 = u[i_x]
+        abd[i_x] = abd[i_x] + (__cse_0 * ud[i_x] + __cse_6 * __cse_0d)
+        ab[i_x] = ab[i_x] + __cse_6 * __cse_0
+        __cse_7 = a[i_x]
+        ubd[i_x] = ubd[i_x] + (__cse_0 * ad[i_x] + __cse_7 * __cse_0d)
+        ub[i_x] = ub[i_x] + __cse_7 * __cse_0
+        bbd[i_x] = bbd[i_x] + __cse_0d
+        bb[i_x] = bb[i_x] + __cse_0
         vbd[i_x] = 0.0
         vb[i_x] = 0.0
     end

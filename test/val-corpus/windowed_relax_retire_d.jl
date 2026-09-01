@@ -1,7 +1,8 @@
 function windowed_relax_retire_d(u, ud, f, fd, w0, num_passes, dx, dxd, n, nd)
     wd = 0.0
     w = w0
-    dx2d = dx * dxd + dx * dxd
+    __cse_0 = dx * dxd
+    dx2d = __cse_0 + __cse_0
     dx2 = dx * dx
     for i_pass = 1:num_passes
         if mod(i_pass, 2) == 0
@@ -21,8 +22,9 @@ function windowed_relax_retire_d(u, ud, f, fd, w0, num_passes, dx, dxd, n, nd)
                 rightd = ud[i_j + 1]
                 right = u[i_j + 1]
             end
-            ud[i_j] = 0.5 * (((f[i_j] * dx2d + dx2 * fd[i_j]) + leftd) + rightd)
-            u[i_j] = 0.5 * (dx2 * f[i_j] + left + right)
+            __cse_1 = f[i_j]
+            ud[i_j] = 0.5 * (((__cse_1 * dx2d + dx2 * fd[i_j]) + leftd) + rightd)
+            u[i_j] = 0.5 * (dx2 * __cse_1 + left + right)
         end
     end
     return nothing

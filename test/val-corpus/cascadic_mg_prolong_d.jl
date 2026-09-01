@@ -5,7 +5,8 @@ function cascadic_mg_prolong_d(u, ud, rhs, rhsd, h_coarse, h_coarsed, nu, num_le
     hl = h_coarse
     ncd = 0.0
     nc = nl - 1
-    hl2d = hl * hld + hl * hld
+    __cse_0 = hl * hld
+    hl2d = __cse_0 + __cse_0
     hl2 = hl * hl
     for i_k = 1:nu
         for i_j = 1:nc
@@ -21,8 +22,9 @@ function cascadic_mg_prolong_d(u, ud, rhs, rhsd, h_coarse, h_coarsed, nu, num_le
                 rightd = ud[i_j + 1, 1]
                 right = u[i_j + 1, 1]
             end
-            ud[i_j, 1] = 0.5 * (((rhs[i_j, 1] * hl2d + hl2 * rhsd[i_j, 1]) + leftd) + rightd)
-            u[i_j, 1] = 0.5 * (hl2 * rhs[i_j, 1] + left + right)
+            __cse_1 = rhs[i_j, 1]
+            ud[i_j, 1] = 0.5 * (((__cse_1 * hl2d + hl2 * rhsd[i_j, 1]) + leftd) + rightd)
+            u[i_j, 1] = 0.5 * (hl2 * __cse_1 + left + right)
         end
     end
     for i_level = 2:num_levels
@@ -32,7 +34,8 @@ function cascadic_mg_prolong_d(u, ud, rhs, rhsd, h_coarse, h_coarsed, nu, num_le
         hl = hl / 2.0
         ncd = 0.0
         nc = nl - 1
-        hl2d = hl * hld + hl * hld
+        __cse_2 = hl * hld
+        hl2d = __cse_2 + __cse_2
         hl2 = hl * hl
         ncoarsed = 0.0
         ncoarse = div(nl, 2) - 1
@@ -74,8 +77,9 @@ function cascadic_mg_prolong_d(u, ud, rhs, rhsd, h_coarse, h_coarsed, nu, num_le
                     rightd = ud[i_j + 1, i_level]
                     right = u[i_j + 1, i_level]
                 end
-                ud[i_j, i_level] = 0.5 * (((rhs[i_j, i_level] * hl2d + hl2 * rhsd[i_j, i_level]) + leftd) + rightd)
-                u[i_j, i_level] = 0.5 * (hl2 * rhs[i_j, i_level] + left + right)
+                __cse_3 = rhs[i_j, i_level]
+                ud[i_j, i_level] = 0.5 * (((__cse_3 * hl2d + hl2 * rhsd[i_j, i_level]) + leftd) + rightd)
+                u[i_j, i_level] = 0.5 * (hl2 * __cse_3 + left + right)
             end
         end
     end

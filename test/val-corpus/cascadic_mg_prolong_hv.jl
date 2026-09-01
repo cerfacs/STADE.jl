@@ -102,7 +102,8 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
     hld = h_coarsed
     hl = h_coarse
     nc = nl - 1
-    hl2d = hl * hld + hl * hld
+    __cse_5 = hl * hld
+    hl2d = __cse_5 + __cse_5
     hl2 = hl * hl
     for i_k = 1:nu
         __idx_tripcount_stack_0 = (i_k - 1) + 1
@@ -130,8 +131,9 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 __idx_branch_stack_0 = max(0, div(nu - 1, 1) + 1) * max(0, div(nc - 1, 1) + 1) + (((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1)
                 branch_stack[__idx_branch_stack_0] = 0
             end
-            ud[i_j, 1] = 0.5 * (((rhs[i_j, 1] * hl2d + hl2 * rhsd[i_j, 1]) + leftd) + rightd)
-            u[i_j, 1] = 0.5 * (hl2 * rhs[i_j, 1] + left + right)
+            __cse_6 = rhs[i_j, 1]
+            ud[i_j, 1] = 0.5 * (((__cse_6 * hl2d + hl2 * rhsd[i_j, 1]) + leftd) + rightd)
+            u[i_j, 1] = 0.5 * (hl2 * __cse_6 + left + right)
             __idx_left_stack_5 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
             left_stack_d[__idx_left_stack_5] = leftd
             left_stack[__idx_left_stack_5] = left
@@ -151,7 +153,8 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
         __idx_hl2_stack_1_5 = prefix_hl2_stack_1[(i_level - 2) + 1] + 1
         hl2_stack_d[__idx_hl2_stack_1_5] = hl2d
         hl2_stack[__idx_hl2_stack_1_5] = hl2
-        hl2d = hl * hld + hl * hld
+        __cse_7 = hl * hld
+        hl2d = __cse_7 + __cse_7
         hl2 = hl * hl
         ncoarse = div(nl, 2) - 1
         __idx_tripcount_stack_1_9 = (max(0, div(nu - 1, 1) + 1) + prefix_tripcount_stack_1[(i_level - 2) + 1]) + 1
@@ -222,8 +225,9 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                     __idx_branch_stack_1_0 = (((max(0, div(nu - 1, 1) + 1) * max(0, div(nc - 1, 1) + 1) + max(0, div(nu - 1, 1) + 1) * max(0, div(nc - 1, 1) + 1)) + prefix_branch_stack_1[(i_level - 2) + 1]) + ((max(0, div((val_ncoarse_1[(i_level - 2) + 1] + 1) - 1, 1) + 1) + max(0, div((val_ncoarse_1[(i_level - 2) + 1] + 1) - 1, 1) + 1)) + max(0, div(nu - 1, 1) + 1) * max(0, div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1))) + (((i_k - 1) * (div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                     branch_stack[__idx_branch_stack_1_0] = 0
                 end
-                ud[i_j, i_level] = 0.5 * (((rhs[i_j, i_level] * hl2d + hl2 * rhsd[i_j, i_level]) + leftd) + rightd)
-                u[i_j, i_level] = 0.5 * (hl2 * rhs[i_j, i_level] + left + right)
+                __cse_8 = rhs[i_j, i_level]
+                ud[i_j, i_level] = 0.5 * (((__cse_8 * hl2d + hl2 * rhsd[i_j, i_level]) + leftd) + rightd)
+                u[i_j, i_level] = 0.5 * (hl2 * __cse_8 + left + right)
                 __idx_left_stack_1_5 = (max(0, div(nu - 1, 1) + 1) * max(0, div(nc - 1, 1) + 1) + prefix_left_stack_1[(i_level - 2) + 1]) + (((i_k - 1) * (div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                 left_stack_d[__idx_left_stack_1_5] = leftd
                 left_stack[__idx_left_stack_1_5] = left
@@ -278,14 +282,17 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                     leftd = 0.0
                     left = 0.0
                 end
-                hl2bd = hl2bd + ((0.5 * ub[i_j, i_level]) * rhsd[i_j, i_level] + rhs[i_j, i_level] * (0.5 * ubd[i_j, i_level]))
-                hl2b = hl2b + rhs[i_j, i_level] * (0.5 * ub[i_j, i_level])
-                rhsbd[i_j, i_level] = rhsbd[i_j, i_level] + ((0.5 * ub[i_j, i_level]) * hl2d + hl2 * (0.5 * ubd[i_j, i_level]))
-                rhsb[i_j, i_level] = rhsb[i_j, i_level] + hl2 * (0.5 * ub[i_j, i_level])
-                leftbd = leftbd + 0.5 * ubd[i_j, i_level]
-                leftb = leftb + 0.5 * ub[i_j, i_level]
-                rightbd = rightbd + 0.5 * ubd[i_j, i_level]
-                rightb = rightb + 0.5 * ub[i_j, i_level]
+                __cse_0d = 0.5 * ubd[i_j, i_level]
+                __cse_0 = 0.5 * ub[i_j, i_level]
+                __cse_9 = rhs[i_j, i_level]
+                hl2bd = hl2bd + (__cse_0 * rhsd[i_j, i_level] + __cse_9 * __cse_0d)
+                hl2b = hl2b + __cse_9 * __cse_0
+                rhsbd[i_j, i_level] = rhsbd[i_j, i_level] + (__cse_0 * hl2d + hl2 * __cse_0d)
+                rhsb[i_j, i_level] = rhsb[i_j, i_level] + hl2 * __cse_0
+                leftbd = leftbd + __cse_0d
+                leftb = leftb + __cse_0
+                rightbd = rightbd + __cse_0d
+                rightb = rightb + __cse_0
                 ubd[i_j, i_level] = 0.0
                 ub[i_j, i_level] = 0.0
                 if __branch_pre_4 == 1
@@ -338,10 +345,12 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 cld = 0.0
                 cl = 0.0
             end
-            clbd = clbd + 0.5 * ubd[jf, i_level]
-            clb = clb + 0.5 * ub[jf, i_level]
-            crbd = crbd + 0.5 * ubd[jf, i_level]
-            crb = crb + 0.5 * ub[jf, i_level]
+            __cse_1d = 0.5 * ubd[jf, i_level]
+            __cse_1 = 0.5 * ub[jf, i_level]
+            clbd = clbd + __cse_1d
+            clb = clb + __cse_1
+            crbd = crbd + __cse_1d
+            crb = crb + __cse_1
             ubd[jf, i_level] = 0.0
             ub[jf, i_level] = 0.0
             if __branch_pre_5 == 1
@@ -373,10 +382,12 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
         __idx_hl2_stack_1_0 = prefix_hl2_stack_1[(i_level - 2) + 1] + 1
         hl2d = hl2_stack_d[__idx_hl2_stack_1_0]
         hl2 = hl2_stack[__idx_hl2_stack_1_0]
-        hlbd = hlbd + (hl2b * hld + hl * hl2bd)
-        hlb = hlb + hl * hl2b
-        hlbd = hlbd + (hl2b * hld + hl * hl2bd)
-        hlb = hlb + hl * hl2b
+        __cse_2d = hl2b * hld + hl * hl2bd
+        __cse_2 = hl * hl2b
+        hlbd = hlbd + __cse_2d
+        hlb = hlb + __cse_2
+        hlbd = hlbd + __cse_2d
+        hlb = hlb + __cse_2
         hl2bd = 0.0
         hl2b = 0.0
         __idx_hl_stack_1_0 = prefix_hl_stack_1[(i_level - 2) + 1] + 1
@@ -417,14 +428,17 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 leftd = 0.0
                 left = 0.0
             end
-            hl2bd = hl2bd + ((0.5 * ub[i_j, 1]) * rhsd[i_j, 1] + rhs[i_j, 1] * (0.5 * ubd[i_j, 1]))
-            hl2b = hl2b + rhs[i_j, 1] * (0.5 * ub[i_j, 1])
-            rhsbd[i_j, 1] = rhsbd[i_j, 1] + ((0.5 * ub[i_j, 1]) * hl2d + hl2 * (0.5 * ubd[i_j, 1]))
-            rhsb[i_j, 1] = rhsb[i_j, 1] + hl2 * (0.5 * ub[i_j, 1])
-            leftbd = leftbd + 0.5 * ubd[i_j, 1]
-            leftb = leftb + 0.5 * ub[i_j, 1]
-            rightbd = rightbd + 0.5 * ubd[i_j, 1]
-            rightb = rightb + 0.5 * ub[i_j, 1]
+            __cse_3d = 0.5 * ubd[i_j, 1]
+            __cse_3 = 0.5 * ub[i_j, 1]
+            __cse_10 = rhs[i_j, 1]
+            hl2bd = hl2bd + (__cse_3 * rhsd[i_j, 1] + __cse_10 * __cse_3d)
+            hl2b = hl2b + __cse_10 * __cse_3
+            rhsbd[i_j, 1] = rhsbd[i_j, 1] + (__cse_3 * hl2d + hl2 * __cse_3d)
+            rhsb[i_j, 1] = rhsb[i_j, 1] + hl2 * __cse_3
+            leftbd = leftbd + __cse_3d
+            leftb = leftb + __cse_3
+            rightbd = rightbd + __cse_3d
+            rightb = rightb + __cse_3
             ubd[i_j, 1] = 0.0
             ub[i_j, 1] = 0.0
             if __branch_pre_4 == 1
@@ -445,10 +459,12 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
             leftb = 0.0
         end
     end
-    hlbd = hlbd + (hl2b * hld + hl * hl2bd)
-    hlb = hlb + hl * hl2b
-    hlbd = hlbd + (hl2b * hld + hl * hl2bd)
-    hlb = hlb + hl * hl2b
+    __cse_4d = hl2b * hld + hl * hl2bd
+    __cse_4 = hl * hl2b
+    hlbd = hlbd + __cse_4d
+    hlb = hlb + __cse_4
+    hlbd = hlbd + __cse_4d
+    hlb = hlb + __cse_4
     hl2bd = 0.0
     hl2b = 0.0
     h_coarsebd = h_coarsebd + hlbd

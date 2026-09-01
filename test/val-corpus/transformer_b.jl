@@ -128,8 +128,9 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 for j = 1:n
                     kk = score_off + (i - 1) * n + j
                     __idx_probs_stack_1 = max(0, div(n_layers - 1, 1) + 1) * max(0, div(h - 1, 1) + 1) * max(0, div(n - 1, 1) + 1) * max(0, div(n - 1, 1) + 1) + (((i_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1)
-                    probs_stack[__idx_probs_stack_1] = probs[kk]
-                    probs[kk] = probs[kk] / row_sum
+                    __cse_0 = probs[kk]
+                    probs_stack[__idx_probs_stack_1] = __cse_0
+                    probs[kk] = __cse_0 / row_sum
                 end
                 __idx_row_max_stack_6 = max(0, div(n_layers - 1, 1) + 1) * max(0, div(h - 1, 1) + 1) * max(0, div(n - 1, 1) + 1) * max(0, div(n - 2, 1) + 1) + (((i_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1)
                 row_max_stack[__idx_row_max_stack_6] = row_max
@@ -308,17 +309,22 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             s2 = s2_stack[__idx_s2_stack_2]
             for j = d:-1:1
                 kk = (i - 1) * d + j
-                resid2b[kk] = resid2b[kk] + (1.0 / denom) * (ln2_gain[ln2_offset + j] * x_nextb[kk])
-                row_meanb = row_meanb + -((1.0 / denom) * (ln2_gain[ln2_offset + j] * x_nextb[kk]))
-                denomb = denomb + -((resid2[kk] - row_mean) / denom ^ 2) * (ln2_gain[ln2_offset + j] * x_nextb[kk])
-                ln2_gainb[ln2_offset + j] = ln2_gainb[ln2_offset + j] + ((resid2[kk] - row_mean) / denom) * x_nextb[kk]
-                ln2_biasb[ln2_offset + j] = ln2_biasb[ln2_offset + j] + x_nextb[kk]
+                __cse_1 = x_nextb[kk]
+                __cse_2 = ln2_gain[ln2_offset + j] * __cse_1
+                __cse_3 = (1.0 / denom) * __cse_2
+                resid2b[kk] = resid2b[kk] + __cse_3
+                row_meanb = row_meanb + -__cse_3
+                __cse_4 = resid2[kk] - row_mean
+                denomb = denomb + -(__cse_4 / denom ^ 2) * __cse_2
+                ln2_gainb[ln2_offset + j] = ln2_gainb[ln2_offset + j] + (__cse_4 / denom) * __cse_1
+                ln2_biasb[ln2_offset + j] = ln2_biasb[ln2_offset + j] + __cse_1
                 x_nextb[kk] = 0.0
             end
             __idx_denom_stack_0 = max(0, div(n_layers - 1, 1) + 1) * max(0, div(n - 1, 1) + 1) + (((i_l - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1)
             denom = denom_stack[__idx_denom_stack_0]
-            row_varb = row_varb + (1.0 / (2.0 * sqrt(row_var + eps))) * denomb
-            epsb = epsb + (1.0 / (2.0 * sqrt(row_var + eps))) * denomb
+            __cse_5 = (1.0 / (2.0 * sqrt(row_var + eps))) * denomb
+            row_varb = row_varb + __cse_5
+            epsb = epsb + __cse_5
             denomb = 0.0
             __idx_row_var_stack_0 = max(0, div(n_layers - 1, 1) + 1) * max(0, div(n - 1, 1) + 1) + (((i_l - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1)
             row_var = row_var_stack[__idx_row_var_stack_0]
@@ -327,8 +333,9 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             for i_j = 1:d
                 diff = resid2[(i - 1) * d + i_j] - row_mean
                 s2 = s2 + diff * diff
-                diffb = diffb + diff * s2b
-                diffb = diffb + diff * s2b
+                __cse_6 = diff * s2b
+                diffb = diffb + __cse_6
+                diffb = diffb + __cse_6
                 resid2b[(i - 1) * d + i_j] = resid2b[(i - 1) * d + i_j] + diffb
                 row_meanb = row_meanb + -diffb
                 diffb = 0.0
@@ -347,8 +354,9 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
         for idx = n_d:-1:1
             __idx_resid2_stack_0 = ((i_l - 1) * (div(n_d - 1, 1) + 1) + (idx - 1)) + 1
             resid2[idx] = resid2_stack[__idx_resid2_stack_0]
-            normed1b[idx] = normed1b[idx] + resid2b[idx]
-            ff_outb[idx] = ff_outb[idx] + resid2b[idx]
+            __cse_7 = resid2b[idx]
+            normed1b[idx] = normed1b[idx] + __cse_7
+            ff_outb[idx] = ff_outb[idx] + __cse_7
             resid2b[idx] = 0.0
         end
         for idx = n_d:-1:1
@@ -356,13 +364,16 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             s = s_stack[__idx_s_stack_0]
             i = div(idx - 1, d) + 1
             j = mod(idx - 1, d) + 1
-            sb = sb + ff_outb[(i - 1) * d + j]
-            b2b[b2_offset + j] = b2b[b2_offset + j] + ff_outb[(i - 1) * d + j]
+            __cse_8 = ff_outb[(i - 1) * d + j]
+            sb = sb + __cse_8
+            b2b[b2_offset + j] = b2b[b2_offset + j] + __cse_8
             ff_outb[(i - 1) * d + j] = 0.0
             for i_p = 1:dff
-                s = s + ff_hidden[(i - 1) * dff + i_p] * w2[w2_offset + (i_p - 1) * d + j]
-                ff_hiddenb[(i - 1) * dff + i_p] = ff_hiddenb[(i - 1) * dff + i_p] + w2[w2_offset + (i_p - 1) * d + j] * sb
-                w2b[w2_offset + (i_p - 1) * d + j] = w2b[w2_offset + (i_p - 1) * d + j] + ff_hidden[(i - 1) * dff + i_p] * sb
+                __cse_9 = ff_hidden[(i - 1) * dff + i_p]
+                __cse_10 = w2[w2_offset + (i_p - 1) * d + j]
+                s = s + __cse_9 * __cse_10
+                ff_hiddenb[(i - 1) * dff + i_p] = ff_hiddenb[(i - 1) * dff + i_p] + __cse_10 * sb
+                w2b[w2_offset + (i_p - 1) * d + j] = w2b[w2_offset + (i_p - 1) * d + j] + __cse_9 * sb
             end
             sb = 0.0
         end
@@ -373,13 +384,16 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             j = mod(idx - 1, dff) + 1
             __idx_ff_hidden_stack_0 = ((i_l - 1) * (div(n_dff - 1, 1) + 1) + (idx - 1)) + 1
             ff_hidden[(i - 1) * dff + j] = ff_hidden_stack[__idx_ff_hidden_stack_0]
-            sb = sb + (0.5 * (1.0 + sign(s + b1[b1_offset + j]))) * ff_hiddenb[(i - 1) * dff + j]
-            b1b[b1_offset + j] = b1b[b1_offset + j] + (0.5 * (1.0 + sign(s + b1[b1_offset + j]))) * ff_hiddenb[(i - 1) * dff + j]
+            __cse_11 = (0.5 * (1.0 + sign(s + b1[b1_offset + j]))) * ff_hiddenb[(i - 1) * dff + j]
+            sb = sb + __cse_11
+            b1b[b1_offset + j] = b1b[b1_offset + j] + __cse_11
             ff_hiddenb[(i - 1) * dff + j] = 0.0
             for i_p = 1:d
-                s = s + normed1[(i - 1) * d + i_p] * w1[w1_offset + (i_p - 1) * dff + j]
-                normed1b[(i - 1) * d + i_p] = normed1b[(i - 1) * d + i_p] + w1[w1_offset + (i_p - 1) * dff + j] * sb
-                w1b[w1_offset + (i_p - 1) * dff + j] = w1b[w1_offset + (i_p - 1) * dff + j] + normed1[(i - 1) * d + i_p] * sb
+                __cse_12 = normed1[(i - 1) * d + i_p]
+                __cse_13 = w1[w1_offset + (i_p - 1) * dff + j]
+                s = s + __cse_12 * __cse_13
+                normed1b[(i - 1) * d + i_p] = normed1b[(i - 1) * d + i_p] + __cse_13 * sb
+                w1b[w1_offset + (i_p - 1) * dff + j] = w1b[w1_offset + (i_p - 1) * dff + j] + __cse_12 * sb
             end
             sb = 0.0
         end
@@ -392,17 +406,22 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 kk = (i - 1) * d + j
                 __idx_normed1_stack_0 = ((i_l - 1) * ((div(n - 1, 1) + 1) * (div(d - 1, 1) + 1)) + (i - 1) * (div(d - 1, 1) + 1) + (j - 1)) + 1
                 normed1[kk] = normed1_stack[__idx_normed1_stack_0]
-                resid1b[kk] = resid1b[kk] + (1.0 / denom) * (ln1_gain[ln_offset + j] * normed1b[kk])
-                row_meanb = row_meanb + -((1.0 / denom) * (ln1_gain[ln_offset + j] * normed1b[kk]))
-                denomb = denomb + -((resid1[kk] - row_mean) / denom ^ 2) * (ln1_gain[ln_offset + j] * normed1b[kk])
-                ln1_gainb[ln_offset + j] = ln1_gainb[ln_offset + j] + ((resid1[kk] - row_mean) / denom) * normed1b[kk]
-                ln1_biasb[ln_offset + j] = ln1_biasb[ln_offset + j] + normed1b[kk]
+                __cse_14 = normed1b[kk]
+                __cse_15 = ln1_gain[ln_offset + j] * __cse_14
+                __cse_16 = (1.0 / denom) * __cse_15
+                resid1b[kk] = resid1b[kk] + __cse_16
+                row_meanb = row_meanb + -__cse_16
+                __cse_17 = resid1[kk] - row_mean
+                denomb = denomb + -(__cse_17 / denom ^ 2) * __cse_15
+                ln1_gainb[ln_offset + j] = ln1_gainb[ln_offset + j] + (__cse_17 / denom) * __cse_14
+                ln1_biasb[ln_offset + j] = ln1_biasb[ln_offset + j] + __cse_14
                 normed1b[kk] = 0.0
             end
             __idx_denom_stack_0 = ((i_l - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1
             denom = denom_stack[__idx_denom_stack_0]
-            row_varb = row_varb + (1.0 / (2.0 * sqrt(row_var + eps))) * denomb
-            epsb = epsb + (1.0 / (2.0 * sqrt(row_var + eps))) * denomb
+            __cse_18 = (1.0 / (2.0 * sqrt(row_var + eps))) * denomb
+            row_varb = row_varb + __cse_18
+            epsb = epsb + __cse_18
             denomb = 0.0
             __idx_row_var_stack_0 = ((i_l - 1) * (div(n - 1, 1) + 1) + (i - 1)) + 1
             row_var = row_var_stack[__idx_row_var_stack_0]
@@ -411,8 +430,9 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             for i_j = 1:d
                 diff = resid1[(i - 1) * d + i_j] - row_mean
                 s2 = s2 + diff * diff
-                diffb = diffb + diff * s2b
-                diffb = diffb + diff * s2b
+                __cse_19 = diff * s2b
+                diffb = diffb + __cse_19
+                diffb = diffb + __cse_19
                 resid1b[(i - 1) * d + i_j] = resid1b[(i - 1) * d + i_j] + diffb
                 row_meanb = row_meanb + -diffb
                 diffb = 0.0
@@ -431,8 +451,9 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
         for idx = n_d:-1:1
             __idx_resid1_stack_0 = ((i_l - 1) * (div(n_d - 1, 1) + 1) + (idx - 1)) + 1
             resid1[idx] = resid1_stack[__idx_resid1_stack_0]
-            xb[idx] = xb[idx] + resid1b[idx]
-            attn_outb[idx] = attn_outb[idx] + resid1b[idx]
+            __cse_20 = resid1b[idx]
+            xb[idx] = xb[idx] + __cse_20
+            attn_outb[idx] = attn_outb[idx] + __cse_20
             resid1b[idx] = 0.0
         end
         for idx = n_d:-1:1
@@ -440,13 +461,16 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             s = s_stack[__idx_s_stack_0]
             i = div(idx - 1, d) + 1
             j = mod(idx - 1, d) + 1
-            sb = sb + attn_outb[(i - 1) * d + j]
-            bob[b_offset + j] = bob[b_offset + j] + attn_outb[(i - 1) * d + j]
+            __cse_21 = attn_outb[(i - 1) * d + j]
+            sb = sb + __cse_21
+            bob[b_offset + j] = bob[b_offset + j] + __cse_21
             attn_outb[(i - 1) * d + j] = 0.0
             for i_p = 1:d
-                s = s + ctx[(i - 1) * d + i_p] * wo[w_offset + (i_p - 1) * d + j]
-                ctxb[(i - 1) * d + i_p] = ctxb[(i - 1) * d + i_p] + wo[w_offset + (i_p - 1) * d + j] * sb
-                wob[w_offset + (i_p - 1) * d + j] = wob[w_offset + (i_p - 1) * d + j] + ctx[(i - 1) * d + i_p] * sb
+                __cse_22 = ctx[(i - 1) * d + i_p]
+                __cse_23 = wo[w_offset + (i_p - 1) * d + j]
+                s = s + __cse_22 * __cse_23
+                ctxb[(i - 1) * d + i_p] = ctxb[(i - 1) * d + i_p] + __cse_23 * sb
+                wob[w_offset + (i_p - 1) * d + j] = wob[w_offset + (i_p - 1) * d + j] + __cse_22 * sb
             end
             sb = 0.0
         end
@@ -463,9 +487,11 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 sb = sb + ctxb[(i - 1) * d + head_offset + p]
                 ctxb[(i - 1) * d + head_offset + p] = 0.0
                 for i_j = 1:n
-                    s = s + probs[score_off + (i - 1) * n + i_j] * v[(i_j - 1) * d + head_offset + p]
-                    probsb[score_off + (i - 1) * n + i_j] = probsb[score_off + (i - 1) * n + i_j] + v[(i_j - 1) * d + head_offset + p] * sb
-                    vb[(i_j - 1) * d + head_offset + p] = vb[(i_j - 1) * d + head_offset + p] + probs[score_off + (i - 1) * n + i_j] * sb
+                    __cse_24 = probs[score_off + (i - 1) * n + i_j]
+                    __cse_25 = v[(i_j - 1) * d + head_offset + p]
+                    s = s + __cse_24 * __cse_25
+                    probsb[score_off + (i - 1) * n + i_j] = probsb[score_off + (i - 1) * n + i_j] + __cse_25 * sb
+                    vb[(i_j - 1) * d + head_offset + p] = vb[(i_j - 1) * d + head_offset + p] + __cse_24 * sb
                 end
                 sb = 0.0
             end
@@ -478,8 +504,9 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                     kk = score_off + (i - 1) * n + j
                     __idx_probs_stack_0 = max(0, div(n_layers - 1, 1) + 1) * max(0, div(h - 1, 1) + 1) * max(0, div(n - 1, 1) + 1) * max(0, div(n - 1, 1) + 1) + (((i_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1)
                     probs[kk] = probs_stack[__idx_probs_stack_0]
-                    row_sumb = row_sumb + -(probs[kk] / row_sum ^ 2) * probsb[kk]
-                    probsb[kk] = (1.0 / row_sum) * probsb[kk]
+                    __cse_26 = probsb[kk]
+                    row_sumb = row_sumb + -(probs[kk] / row_sum ^ 2) * __cse_26
+                    probsb[kk] = (1.0 / row_sum) * __cse_26
                 end
                 for i_j = 1:n
                     row_sum = row_sum + probs[score_off + (i - 1) * n + i_j]
@@ -490,15 +517,17 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                     kk = score_off + (i - 1) * n + j
                     __idx_probs_stack_0 = ((i_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 1, 1) + 1)) + (i - 1) * (div(n - 1, 1) + 1) + (j - 1)) + 1
                     probs[kk] = probs_stack[__idx_probs_stack_0]
-                    scoresb[kk] = scoresb[kk] + exp(scores[kk] - row_max) * probsb[kk]
-                    row_maxb = row_maxb + -(exp(scores[kk] - row_max) * probsb[kk])
+                    __cse_27 = exp(scores[kk] - row_max) * probsb[kk]
+                    scoresb[kk] = scoresb[kk] + __cse_27
+                    row_maxb = row_maxb + -__cse_27
                     probsb[kk] = 0.0
                 end
                 for i_j = n:-1:2
                     __idx_row_max_stack_0 = ((i_l - 1) * ((div(h - 1, 1) + 1) * (div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (hh - 1) * ((div(n - 1, 1) + 1) * (div(n - 2, 1) + 1)) + (i - 1) * (div(n - 2, 1) + 1) + (i_j - 2)) + 1
                     row_max = row_max_stack[__idx_row_max_stack_0]
-                    scoresb[score_off + (i - 1) * n + i_j] = scoresb[score_off + (i - 1) * n + i_j] + (0.5 * (1.0 + sign(scores[score_off + (i - 1) * n + i_j] - row_max))) * row_maxb
-                    row_maxb = (0.5 * (1.0 + sign(row_max - scores[score_off + (i - 1) * n + i_j]))) * row_maxb
+                    __cse_28 = scores[score_off + (i - 1) * n + i_j]
+                    scoresb[score_off + (i - 1) * n + i_j] = scoresb[score_off + (i - 1) * n + i_j] + (0.5 * (1.0 + sign(__cse_28 - row_max))) * row_maxb
+                    row_maxb = (0.5 * (1.0 + sign(row_max - __cse_28))) * row_maxb
                 end
                 scoresb[score_off + (i - 1) * n + 1] = scoresb[score_off + (i - 1) * n + 1] + row_maxb
                 row_maxb = 0.0
@@ -513,9 +542,11 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
                 sb = sb + inv_sqrt_dk * scoresb[score_off + (i - 1) * n + j]
                 scoresb[score_off + (i - 1) * n + j] = 0.0
                 for i_p = 1:dk
-                    s = s + q[(i - 1) * d + head_offset + i_p] * k[(j - 1) * d + head_offset + i_p]
-                    qb[(i - 1) * d + head_offset + i_p] = qb[(i - 1) * d + head_offset + i_p] + k[(j - 1) * d + head_offset + i_p] * sb
-                    kb[(j - 1) * d + head_offset + i_p] = kb[(j - 1) * d + head_offset + i_p] + q[(i - 1) * d + head_offset + i_p] * sb
+                    __cse_29 = q[(i - 1) * d + head_offset + i_p]
+                    __cse_30 = k[(j - 1) * d + head_offset + i_p]
+                    s = s + __cse_29 * __cse_30
+                    qb[(i - 1) * d + head_offset + i_p] = qb[(i - 1) * d + head_offset + i_p] + __cse_30 * sb
+                    kb[(j - 1) * d + head_offset + i_p] = kb[(j - 1) * d + head_offset + i_p] + __cse_29 * sb
                 end
                 sb = 0.0
             end
@@ -527,13 +558,16 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             j = mod(idx - 1, d) + 1
             __idx_v_stack_0 = ((i_l - 1) * (div(n_d - 1, 1) + 1) + (idx - 1)) + 1
             v[(i - 1) * d + j] = v_stack[__idx_v_stack_0]
-            sb = sb + vb[(i - 1) * d + j]
-            bvb[b_offset + j] = bvb[b_offset + j] + vb[(i - 1) * d + j]
+            __cse_31 = vb[(i - 1) * d + j]
+            sb = sb + __cse_31
+            bvb[b_offset + j] = bvb[b_offset + j] + __cse_31
             vb[(i - 1) * d + j] = 0.0
             for i_p = 1:d
-                s = s + x[(i - 1) * d + i_p] * wv[w_offset + (i_p - 1) * d + j]
-                xb[(i - 1) * d + i_p] = xb[(i - 1) * d + i_p] + wv[w_offset + (i_p - 1) * d + j] * sb
-                wvb[w_offset + (i_p - 1) * d + j] = wvb[w_offset + (i_p - 1) * d + j] + x[(i - 1) * d + i_p] * sb
+                __cse_32 = x[(i - 1) * d + i_p]
+                __cse_33 = wv[w_offset + (i_p - 1) * d + j]
+                s = s + __cse_32 * __cse_33
+                xb[(i - 1) * d + i_p] = xb[(i - 1) * d + i_p] + __cse_33 * sb
+                wvb[w_offset + (i_p - 1) * d + j] = wvb[w_offset + (i_p - 1) * d + j] + __cse_32 * sb
             end
             sb = 0.0
         end
@@ -544,13 +578,16 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             j = mod(idx - 1, d) + 1
             __idx_k_stack_0 = ((i_l - 1) * (div(n_d - 1, 1) + 1) + (idx - 1)) + 1
             k[(i - 1) * d + j] = k_stack[__idx_k_stack_0]
-            sb = sb + kb[(i - 1) * d + j]
-            bkb[b_offset + j] = bkb[b_offset + j] + kb[(i - 1) * d + j]
+            __cse_34 = kb[(i - 1) * d + j]
+            sb = sb + __cse_34
+            bkb[b_offset + j] = bkb[b_offset + j] + __cse_34
             kb[(i - 1) * d + j] = 0.0
             for i_p = 1:d
-                s = s + x[(i - 1) * d + i_p] * wk[w_offset + (i_p - 1) * d + j]
-                xb[(i - 1) * d + i_p] = xb[(i - 1) * d + i_p] + wk[w_offset + (i_p - 1) * d + j] * sb
-                wkb[w_offset + (i_p - 1) * d + j] = wkb[w_offset + (i_p - 1) * d + j] + x[(i - 1) * d + i_p] * sb
+                __cse_35 = x[(i - 1) * d + i_p]
+                __cse_36 = wk[w_offset + (i_p - 1) * d + j]
+                s = s + __cse_35 * __cse_36
+                xb[(i - 1) * d + i_p] = xb[(i - 1) * d + i_p] + __cse_36 * sb
+                wkb[w_offset + (i_p - 1) * d + j] = wkb[w_offset + (i_p - 1) * d + j] + __cse_35 * sb
             end
             sb = 0.0
         end
@@ -561,13 +598,16 @@ function transformer_b(x, xb, wq, wqb, bq, bqb, wk, wkb, bk, bkb, wv, wvb, bv, b
             j = mod(idx - 1, d) + 1
             __idx_q_stack_0 = ((i_l - 1) * (div(n_d - 1, 1) + 1) + (idx - 1)) + 1
             q[(i - 1) * d + j] = q_stack[__idx_q_stack_0]
-            sb = sb + qb[(i - 1) * d + j]
-            bqb[b_offset + j] = bqb[b_offset + j] + qb[(i - 1) * d + j]
+            __cse_37 = qb[(i - 1) * d + j]
+            sb = sb + __cse_37
+            bqb[b_offset + j] = bqb[b_offset + j] + __cse_37
             qb[(i - 1) * d + j] = 0.0
             for i_p = 1:d
-                s = s + x[(i - 1) * d + i_p] * wq[w_offset + (i_p - 1) * d + j]
-                xb[(i - 1) * d + i_p] = xb[(i - 1) * d + i_p] + wq[w_offset + (i_p - 1) * d + j] * sb
-                wqb[w_offset + (i_p - 1) * d + j] = wqb[w_offset + (i_p - 1) * d + j] + x[(i - 1) * d + i_p] * sb
+                __cse_38 = x[(i - 1) * d + i_p]
+                __cse_39 = wq[w_offset + (i_p - 1) * d + j]
+                s = s + __cse_38 * __cse_39
+                xb[(i - 1) * d + i_p] = xb[(i - 1) * d + i_p] + __cse_39 * sb
+                wqb[w_offset + (i_p - 1) * d + j] = wqb[w_offset + (i_p - 1) * d + j] + __cse_38 * sb
             end
             sb = 0.0
         end

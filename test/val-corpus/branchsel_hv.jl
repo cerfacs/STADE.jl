@@ -15,17 +15,23 @@ function branchsel_hv(loss, lossb, x, xb, y, yb, lossd, lossbd, xd, xbd, yd, ybd
     end
     __branch = branch_stack[1]
     if __branch == 1
-        xbd = xbd + (lossb[1] * (2xd) + (2x) * lossbd[1])
-        xb = xb + (2x) * lossb[1]
-        ybd = ybd + -(lossbd[1])
-        yb = yb + -(lossb[1])
+        __cse_0d = lossbd[1]
+        __cse_0 = lossb[1]
+        __cse_2 = 2x
+        xbd = xbd + (__cse_0 * (2xd) + __cse_2 * __cse_0d)
+        xb = xb + __cse_2 * __cse_0
+        ybd = ybd + -__cse_0d
+        yb = yb + -__cse_0
         lossbd[1] = 0.0
         lossb[1] = 0.0
     else
-        ybd = ybd + (lossb[1] * (2yd) + (2y) * lossbd[1])
-        yb = yb + (2y) * lossb[1]
-        xbd = xbd + -(lossbd[1])
-        xb = xb + -(lossb[1])
+        __cse_1d = lossbd[1]
+        __cse_1 = lossb[1]
+        __cse_3 = 2y
+        ybd = ybd + (__cse_1 * (2yd) + __cse_3 * __cse_1d)
+        yb = yb + __cse_3 * __cse_1
+        xbd = xbd + -__cse_1d
+        xb = xb + -__cse_1
         lossbd[1] = 0.0
         lossb[1] = 0.0
     end

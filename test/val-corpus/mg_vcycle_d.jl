@@ -8,7 +8,8 @@ function mg_vcycle_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, 
     for i_level = 1:num_levels - 1
         nd = 0.0
         n = nl - 1
-        hl2d = hl * hld + hl * hld
+        __cse_0 = hl * hld
+        hl2d = __cse_0 + __cse_0
         hl2 = hl * hl
         for i_k = 1:nu1
             for i_j = 1:n
@@ -24,8 +25,9 @@ function mg_vcycle_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, 
                     rightd = ud[i_j + 1, i_level]
                     right = u[i_j + 1, i_level]
                 end
-                ud[i_j, i_level] = 0.5 * (((f[i_j, i_level] * hl2d + hl2 * fd[i_j, i_level]) + leftd) + rightd)
-                u[i_j, i_level] = 0.5 * (hl2 * f[i_j, i_level] + left + right)
+                __cse_1 = f[i_j, i_level]
+                ud[i_j, i_level] = 0.5 * (((__cse_1 * hl2d + hl2 * fd[i_j, i_level]) + leftd) + rightd)
+                u[i_j, i_level] = 0.5 * (hl2 * __cse_1 + left + right)
             end
         end
         for j = 1:n
@@ -41,8 +43,9 @@ function mg_vcycle_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, 
                 rightd = ud[j + 1, i_level]
                 right = u[j + 1, i_level]
             end
-            rd[j, i_level] = fd[j, i_level] + -(((1.0 / hl2) * ((2.0 * ud[j, i_level] + -leftd) + -rightd) + -(((2.0 * u[j, i_level] - left) - right) / hl2 ^ 2) * hl2d))
-            r[j, i_level] = f[j, i_level] - ((2.0 * u[j, i_level] - left) - right) / hl2
+            __cse_2 = (2.0 * u[j, i_level] - left) - right
+            rd[j, i_level] = fd[j, i_level] + -(((1.0 / hl2) * ((2.0 * ud[j, i_level] + -leftd) + -rightd) + -(__cse_2 / hl2 ^ 2) * hl2d))
+            r[j, i_level] = f[j, i_level] - __cse_2 / hl2
         end
         ncgd = 0.0
         ncg = div(nl, 2)
@@ -63,10 +66,12 @@ function mg_vcycle_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, 
         hld = 2.0hld
         hl = hl * 2.0
     end
-    hl2d = hl * hld + hl * hld
+    __cse_3 = hl * hld
+    hl2d = __cse_3 + __cse_3
     hl2 = hl * hl
-    ud[1, num_levels] = (0.5 * f[1, num_levels]) * hl2d + (0.5hl2) * fd[1, num_levels]
-    u[1, num_levels] = 0.5 * hl2 * f[1, num_levels]
+    __cse_4 = f[1, num_levels]
+    ud[1, num_levels] = (0.5__cse_4) * hl2d + (0.5hl2) * fd[1, num_levels]
+    u[1, num_levels] = 0.5 * hl2 * __cse_4
     for i_level = num_levels - 1:-1:1
         nld = 0.0
         nl = nl * 2
@@ -78,7 +83,8 @@ function mg_vcycle_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, 
         ncg = div(nl, 2)
         ncd = 0.0
         nc = ncg - 1
-        hl2d = hl * hld + hl * hld
+        __cse_5 = hl * hld
+        hl2d = __cse_5 + __cse_5
         hl2 = hl * hl
         for j = 1:nc
             jfd = 0.0
@@ -118,8 +124,9 @@ function mg_vcycle_d(u, ud, f, fd, r, rd, nfine, num_levels, h1, h1d, nu1, nu2, 
                     rightd = ud[i_j + 1, i_level]
                     right = u[i_j + 1, i_level]
                 end
-                ud[i_j, i_level] = 0.5 * (((f[i_j, i_level] * hl2d + hl2 * fd[i_j, i_level]) + leftd) + rightd)
-                u[i_j, i_level] = 0.5 * (hl2 * f[i_j, i_level] + left + right)
+                __cse_6 = f[i_j, i_level]
+                ud[i_j, i_level] = 0.5 * (((__cse_6 * hl2d + hl2 * fd[i_j, i_level]) + leftd) + rightd)
+                u[i_j, i_level] = 0.5 * (hl2 * __cse_6 + left + right)
             end
         end
     end

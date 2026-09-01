@@ -21,7 +21,8 @@ end
 function entry_empty_b(x, xb, u, ub, i_npass, i_w0, out, outb, tripcount_stack, s_stack, prefix_s_stack_1, prefix_tripcount_stack_1, __tot_s_stack_1, __tot_tripcount_stack_1, val_w_1)
     s = 0.0
     sb = 0.0
-    s = x[1] * x[1]
+    __cse_0 = x[1]
+    s = __cse_0 * __cse_0
     w = i_w0
     for i_p = 1:i_npass
         __idx_tripcount_stack_1_0 = prefix_tripcount_stack_1[(i_p - 1) + 1] + 1
@@ -43,8 +44,9 @@ function entry_empty_b(x, xb, u, ub, i_npass, i_w0, out, outb, tripcount_stack, 
     for i_p = i_npass:-1:1
         __idx_s_stack_1_0 = (prefix_s_stack_1[(i_p - 1) + 1] + max(0, div(val_w_1[(i_p - 1) + 1] - 1, 1) + 1)) + 1
         s = s_stack[__idx_s_stack_1_0]
-        sb = sb + s * outb[i_p]
-        sb = sb + s * outb[i_p]
+        __cse_1 = s * outb[i_p]
+        sb = sb + __cse_1
+        sb = sb + __cse_1
         __idx_tripcount_stack_1_4 = prefix_tripcount_stack_1[(i_p - 1) + 1] + 1
         w = tripcount_stack[__idx_tripcount_stack_1_4]
         for i_j = w:-1:1
@@ -55,8 +57,9 @@ function entry_empty_b(x, xb, u, ub, i_npass, i_w0, out, outb, tripcount_stack, 
             sb = 0.0
         end
     end
-    xb[1] = xb[1] + x[1] * sb
-    xb[1] = xb[1] + x[1] * sb
+    __cse_2 = x[1] * sb
+    xb[1] = xb[1] + __cse_2
+    xb[1] = xb[1] + __cse_2
     sb = 0.0
     return nothing
 end

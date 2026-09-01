@@ -42,15 +42,18 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
             for i_i = 1:n_in_msg
                 widxd = 0.0
                 widx = (o - 1) * n_in_msg + i_i
-                sd = sd + (msg_input[in_off + i_i] * w_msgd[widx] + w_msg[widx] * msg_inputd[in_off + i_i])
-                s = s + w_msg[widx] * msg_input[in_off + i_i]
+                __cse_0 = msg_input[in_off + i_i]
+                __cse_1 = w_msg[widx]
+                sd = sd + (__cse_0 * w_msgd[widx] + __cse_1 * msg_inputd[in_off + i_i])
+                s = s + __cse_1 * __cse_0
             end
             msg_scratchd[msg_off + o] = sd
             msg_scratch[msg_off + o] = s
         end
         for k = 1:n_msg_feat
-            msg_scratchd[msg_off + k] = (0.5 * (1.0 + sign(msg_scratch[msg_off + k]))) * msg_scratchd[msg_off + k]
-            msg_scratch[msg_off + k] = max(msg_scratch[msg_off + k], 0.0)
+            __cse_2 = msg_scratch[msg_off + k]
+            msg_scratchd[msg_off + k] = (0.5 * (1.0 + sign(__cse_2))) * msg_scratchd[msg_off + k]
+            msg_scratch[msg_off + k] = max(__cse_2, 0.0)
         end
         for k = 1:n_msg_feat
             messagesd[msg_off + k] = msg_scratchd[msg_off + k]
@@ -90,15 +93,18 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
             for i_i = 1:n_in_upd
                 widxd = 0.0
                 widx = (o - 1) * n_in_upd + i_i
-                sd = sd + (upd_input[uin_off + i_i] * w_updd[widx] + w_upd[widx] * upd_inputd[uin_off + i_i])
-                s = s + w_upd[widx] * upd_input[uin_off + i_i]
+                __cse_3 = upd_input[uin_off + i_i]
+                __cse_4 = w_upd[widx]
+                sd = sd + (__cse_3 * w_updd[widx] + __cse_4 * upd_inputd[uin_off + i_i])
+                s = s + __cse_4 * __cse_3
             end
             upd_scratchd[node_off + o] = sd
             upd_scratch[node_off + o] = s
         end
         for k = 1:n_node_feat
-            upd_scratchd[node_off + k] = (0.5 * (1.0 + sign(upd_scratch[node_off + k]))) * upd_scratchd[node_off + k]
-            upd_scratch[node_off + k] = max(upd_scratch[node_off + k], 0.0)
+            __cse_5 = upd_scratch[node_off + k]
+            upd_scratchd[node_off + k] = (0.5 * (1.0 + sign(__cse_5))) * upd_scratchd[node_off + k]
+            upd_scratch[node_off + k] = max(__cse_5, 0.0)
         end
         for k = 1:n_node_feat
             node_feat_outd[node_off + k] = upd_scratchd[node_off + k]

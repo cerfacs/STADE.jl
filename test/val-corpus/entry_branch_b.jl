@@ -30,8 +30,9 @@ function entry_branch_b(x, xb, y, yb, flag, flagb, i_n, out, outb, branch_stack,
     for i_i = i_n:-1:1
         __idx_s_stack_0 = max(0, div(i_n - 1, 1) + 1) + ((i_i - 1) + 1)
         s = s_stack[__idx_s_stack_0]
-        sb = sb + s * outb[i_i]
-        sb = sb + s * outb[i_i]
+        __cse_0 = s * outb[i_i]
+        sb = sb + __cse_0
+        sb = sb + __cse_0
         __idx_branch_stack_4 = (i_i - 1) + 1
         __branch = branch_stack[__idx_branch_stack_4]
         if __branch == 1

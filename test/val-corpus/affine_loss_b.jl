@@ -13,9 +13,10 @@ function affine_loss_b(loss, lossb, u, ub, a, ab, b, bb, v, vb, i_n)
         vb[i_x2] = vb[i_x2] + (2 * v[i_x2]) * lossb[1]
     end
     for i_x = i_n:-1:1
-        ab[i_x] = ab[i_x] + u[i_x] * vb[i_x]
-        ub[i_x] = ub[i_x] + a[i_x] * vb[i_x]
-        bb[i_x] = bb[i_x] + vb[i_x]
+        __cse_0 = vb[i_x]
+        ab[i_x] = ab[i_x] + u[i_x] * __cse_0
+        ub[i_x] = ub[i_x] + a[i_x] * __cse_0
+        bb[i_x] = bb[i_x] + __cse_0
         vb[i_x] = 0.0
     end
     return nothing

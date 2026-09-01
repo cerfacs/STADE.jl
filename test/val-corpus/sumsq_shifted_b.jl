@@ -7,9 +7,11 @@ function sumsq_shifted_b(loss, lossb, u, ub, alpha, alphab, beta, betab, i_n)
         loss[1] = loss[1] + (alpha * u[i_x] + beta) ^ 2
     end
     for i_x = i_n:-1:1
-        alphab = alphab + u[i_x] * ((2 * (alpha * u[i_x] + beta)) * lossb[1])
-        ub[i_x] = ub[i_x] + alpha * ((2 * (alpha * u[i_x] + beta)) * lossb[1])
-        betab = betab + (2 * (alpha * u[i_x] + beta)) * lossb[1]
+        __cse_0 = u[i_x]
+        __cse_1 = (2 * (alpha * __cse_0 + beta)) * lossb[1]
+        alphab = alphab + __cse_0 * __cse_1
+        ub[i_x] = ub[i_x] + alpha * __cse_1
+        betab = betab + __cse_1
     end
     return (alphab, betab)
 end

@@ -56,8 +56,10 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             s = b_msg[o]
             for i_i = 1:n_in_msg
                 widx = (o - 1) * n_in_msg + i_i
-                sd = sd + (msg_input[in_off + i_i] * w_msgd[widx] + w_msg[widx] * msg_inputd[in_off + i_i])
-                s = s + w_msg[widx] * msg_input[in_off + i_i]
+                __cse_2 = msg_input[in_off + i_i]
+                __cse_3 = w_msg[widx]
+                sd = sd + (__cse_2 * w_msgd[widx] + __cse_3 * msg_inputd[in_off + i_i])
+                s = s + __cse_3 * __cse_2
             end
             __idx_msg_scratch_stack_2 = ((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (o - 1)) + 1
             msg_scratch_stack_d[__idx_msg_scratch_stack_2] = msg_scratchd[msg_off + o]
@@ -67,10 +69,12 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
         end
         for k = 1:n_msg_feat
             __idx_msg_scratch_stack_0 = max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_msg_feat - 1, 1) + 1) + (((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)
-            msg_scratch_stack_d[__idx_msg_scratch_stack_0] = msg_scratchd[msg_off + k]
-            msg_scratch_stack[__idx_msg_scratch_stack_0] = msg_scratch[msg_off + k]
-            msg_scratchd[msg_off + k] = (0.5 * (1.0 + sign(msg_scratch[msg_off + k]))) * msg_scratchd[msg_off + k]
-            msg_scratch[msg_off + k] = max(msg_scratch[msg_off + k], 0.0)
+            __cse_0d = msg_scratchd[msg_off + k]
+            __cse_0 = msg_scratch[msg_off + k]
+            msg_scratch_stack_d[__idx_msg_scratch_stack_0] = __cse_0d
+            msg_scratch_stack[__idx_msg_scratch_stack_0] = __cse_0
+            msg_scratchd[msg_off + k] = (0.5 * (1.0 + sign(__cse_0))) * __cse_0d
+            msg_scratch[msg_off + k] = max(__cse_0, 0.0)
         end
         for k = 1:n_msg_feat
             messagesd[msg_off + k] = msg_scratchd[msg_off + k]
@@ -109,8 +113,10 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             s = b_upd[o]
             for i_i = 1:n_in_upd
                 widx = (o - 1) * n_in_upd + i_i
-                sd = sd + (upd_input[uin_off + i_i] * w_updd[widx] + w_upd[widx] * upd_inputd[uin_off + i_i])
-                s = s + w_upd[widx] * upd_input[uin_off + i_i]
+                __cse_4 = upd_input[uin_off + i_i]
+                __cse_5 = w_upd[widx]
+                sd = sd + (__cse_4 * w_updd[widx] + __cse_5 * upd_inputd[uin_off + i_i])
+                s = s + __cse_5 * __cse_4
             end
             __idx_upd_scratch_stack_2 = ((v - 1) * (div(n_node_feat - 1, 1) + 1) + (o - 1)) + 1
             upd_scratch_stack_d[__idx_upd_scratch_stack_2] = upd_scratchd[node_off + o]
@@ -120,10 +126,12 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
         end
         for k = 1:n_node_feat
             __idx_upd_scratch_stack_0 = max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)
-            upd_scratch_stack_d[__idx_upd_scratch_stack_0] = upd_scratchd[node_off + k]
-            upd_scratch_stack[__idx_upd_scratch_stack_0] = upd_scratch[node_off + k]
-            upd_scratchd[node_off + k] = (0.5 * (1.0 + sign(upd_scratch[node_off + k]))) * upd_scratchd[node_off + k]
-            upd_scratch[node_off + k] = max(upd_scratch[node_off + k], 0.0)
+            __cse_1d = upd_scratchd[node_off + k]
+            __cse_1 = upd_scratch[node_off + k]
+            upd_scratch_stack_d[__idx_upd_scratch_stack_0] = __cse_1d
+            upd_scratch_stack[__idx_upd_scratch_stack_0] = __cse_1
+            upd_scratchd[node_off + k] = (0.5 * (1.0 + sign(__cse_1))) * __cse_1d
+            upd_scratch[node_off + k] = max(__cse_1, 0.0)
         end
         for k = 1:n_node_feat
             node_feat_outd[node_off + k] = upd_scratchd[node_off + k]
@@ -147,8 +155,9 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             __idx_upd_scratch_stack_0 = max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)
             upd_scratchd[node_off + k] = upd_scratch_stack_d[__idx_upd_scratch_stack_0]
             upd_scratch[node_off + k] = upd_scratch_stack[__idx_upd_scratch_stack_0]
-            upd_scratchbd[node_off + k] = (0.5 * (1.0 + sign(upd_scratch[node_off + k]))) * upd_scratchbd[node_off + k]
-            upd_scratchb[node_off + k] = (0.5 * (1.0 + sign(upd_scratch[node_off + k]))) * upd_scratchb[node_off + k]
+            __cse_6 = 0.5 * (1.0 + sign(upd_scratch[node_off + k]))
+            upd_scratchbd[node_off + k] = __cse_6 * upd_scratchbd[node_off + k]
+            upd_scratchb[node_off + k] = __cse_6 * upd_scratchb[node_off + k]
         end
         for o = n_node_feat:-1:1
             __idx_upd_scratch_stack_0 = ((v - 1) * (div(n_node_feat - 1, 1) + 1) + (o - 1)) + 1
@@ -160,10 +169,12 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             upd_scratchb[node_off + o] = 0.0
             for i_i = n_in_upd:-1:1
                 widx = (o - 1) * n_in_upd + i_i
-                w_updbd[widx] = w_updbd[widx] + (sb * upd_inputd[uin_off + i_i] + upd_input[uin_off + i_i] * sbd)
-                w_updb[widx] = w_updb[widx] + upd_input[uin_off + i_i] * sb
-                upd_inputbd[uin_off + i_i] = upd_inputbd[uin_off + i_i] + (sb * w_updd[widx] + w_upd[widx] * sbd)
-                upd_inputb[uin_off + i_i] = upd_inputb[uin_off + i_i] + w_upd[widx] * sb
+                __cse_7 = upd_input[uin_off + i_i]
+                w_updbd[widx] = w_updbd[widx] + (sb * upd_inputd[uin_off + i_i] + __cse_7 * sbd)
+                w_updb[widx] = w_updb[widx] + __cse_7 * sb
+                __cse_8 = w_upd[widx]
+                upd_inputbd[uin_off + i_i] = upd_inputbd[uin_off + i_i] + (sb * w_updd[widx] + __cse_8 * sbd)
+                upd_inputb[uin_off + i_i] = upd_inputb[uin_off + i_i] + __cse_8 * sb
             end
             b_updbd[o] = b_updbd[o] + sbd
             b_updb[o] = b_updb[o] + sb
@@ -216,8 +227,9 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             __idx_msg_scratch_stack_0 = max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_msg_feat - 1, 1) + 1) + (((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)
             msg_scratchd[msg_off + k] = msg_scratch_stack_d[__idx_msg_scratch_stack_0]
             msg_scratch[msg_off + k] = msg_scratch_stack[__idx_msg_scratch_stack_0]
-            msg_scratchbd[msg_off + k] = (0.5 * (1.0 + sign(msg_scratch[msg_off + k]))) * msg_scratchbd[msg_off + k]
-            msg_scratchb[msg_off + k] = (0.5 * (1.0 + sign(msg_scratch[msg_off + k]))) * msg_scratchb[msg_off + k]
+            __cse_9 = 0.5 * (1.0 + sign(msg_scratch[msg_off + k]))
+            msg_scratchbd[msg_off + k] = __cse_9 * msg_scratchbd[msg_off + k]
+            msg_scratchb[msg_off + k] = __cse_9 * msg_scratchb[msg_off + k]
         end
         for o = n_msg_feat:-1:1
             __idx_msg_scratch_stack_0 = ((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (o - 1)) + 1
@@ -229,10 +241,12 @@ function mpnn_hv(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, 
             msg_scratchb[msg_off + o] = 0.0
             for i_i = n_in_msg:-1:1
                 widx = (o - 1) * n_in_msg + i_i
-                w_msgbd[widx] = w_msgbd[widx] + (sb * msg_inputd[in_off + i_i] + msg_input[in_off + i_i] * sbd)
-                w_msgb[widx] = w_msgb[widx] + msg_input[in_off + i_i] * sb
-                msg_inputbd[in_off + i_i] = msg_inputbd[in_off + i_i] + (sb * w_msgd[widx] + w_msg[widx] * sbd)
-                msg_inputb[in_off + i_i] = msg_inputb[in_off + i_i] + w_msg[widx] * sb
+                __cse_10 = msg_input[in_off + i_i]
+                w_msgbd[widx] = w_msgbd[widx] + (sb * msg_inputd[in_off + i_i] + __cse_10 * sbd)
+                w_msgb[widx] = w_msgb[widx] + __cse_10 * sb
+                __cse_11 = w_msg[widx]
+                msg_inputbd[in_off + i_i] = msg_inputbd[in_off + i_i] + (sb * w_msgd[widx] + __cse_11 * sbd)
+                msg_inputb[in_off + i_i] = msg_inputb[in_off + i_i] + __cse_11 * sb
             end
             b_msgbd[o] = b_msgbd[o] + sbd
             b_msgb[o] = b_msgb[o] + sb

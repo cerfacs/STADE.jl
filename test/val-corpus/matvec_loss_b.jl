@@ -17,8 +17,9 @@ function matvec_loss_b(loss, lossb, a, ab, u, ub, v, vb, i_m, i_n)
     for idx = i_m * i_n:-1:1
         i_i = div(idx - 1, i_n) + 1
         i_j = mod(idx - 1, i_n) + 1
-        ab[i_i, i_j] = ab[i_i, i_j] + u[i_j] * vb[i_i]
-        ub[i_j] = ub[i_j] + a[i_i, i_j] * vb[i_i]
+        __cse_0 = vb[i_i]
+        ab[i_i, i_j] = ab[i_i, i_j] + u[i_j] * __cse_0
+        ub[i_j] = ub[i_j] + a[i_i, i_j] * __cse_0
     end
     return nothing
 end

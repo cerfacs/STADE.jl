@@ -16,16 +16,20 @@ function advection_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode, 
     end
     for i_ = i_nstep:-1:1
         for i_x = i_nnode:-1:2
-            cb = cb + (dt * du[i_x]) * ((1.0 / dx) * -(ub[i_x]))
-            dtb = dtb + (c * du[i_x]) * ((1.0 / dx) * -(ub[i_x]))
-            dub[i_x] = dub[i_x] + (c * dt) * ((1.0 / dx) * -(ub[i_x]))
-            dxb = dxb + -((c * dt * du[i_x]) / dx ^ 2) * -(ub[i_x])
+            __cse_0 = du[i_x]
+            __cse_1 = -(ub[i_x])
+            __cse_2 = (1.0 / dx) * __cse_1
+            cb = cb + (dt * __cse_0) * __cse_2
+            dtb = dtb + (c * __cse_0) * __cse_2
+            dub[i_x] = dub[i_x] + (c * dt) * __cse_2
+            dxb = dxb + -((c * dt * __cse_0) / dx ^ 2) * __cse_1
         end
         for i_x = i_nnode:-1:2
             __idx_du_stack_0 = ((i_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x - 2)) + 1
             du[i_x] = du_stack[__idx_du_stack_0]
-            ub[i_x] = ub[i_x] + dub[i_x]
-            ub[i_x - 1] = ub[i_x - 1] + -(dub[i_x])
+            __cse_3 = dub[i_x]
+            ub[i_x] = ub[i_x] + __cse_3
+            ub[i_x - 1] = ub[i_x - 1] + -__cse_3
             dub[i_x] = 0.0
         end
     end

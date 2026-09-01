@@ -26,10 +26,13 @@ function retire_empty_hv(u, ub, x, xb, i_npass, i_w0, ud, ubd, xd, xbd, tripcoun
         tripcount_stack[__idx_tripcount_stack_1_0] = w
         for i_j = 1:w
             __idx_u_stack_1_0 = prefix_u_stack_1[(i_p - 1) + 1] + ((i_j - 1) + 1)
-            u_stack_d[__idx_u_stack_1_0] = ud[i_j]
-            u_stack[__idx_u_stack_1_0] = u[i_j]
-            ud[i_j] = ud[i_j] + (u[i_j] * xd[i_j] + x[i_j] * ud[i_j])
-            u[i_j] = u[i_j] + x[i_j] * u[i_j]
+            __cse_0d = ud[i_j]
+            __cse_0 = u[i_j]
+            u_stack_d[__idx_u_stack_1_0] = __cse_0d
+            u_stack[__idx_u_stack_1_0] = __cse_0
+            __cse_2 = x[i_j]
+            ud[i_j] = __cse_0d + (__cse_0 * xd[i_j] + __cse_2 * __cse_0d)
+            u[i_j] = __cse_0 + __cse_2 * __cse_0
         end
         w = w - 3
     end
@@ -40,10 +43,14 @@ function retire_empty_hv(u, ub, x, xb, i_npass, i_w0, ud, ubd, xd, xbd, tripcoun
             __idx_u_stack_1_0 = prefix_u_stack_1[(i_p - 1) + 1] + ((i_j - 1) + 1)
             ud[i_j] = u_stack_d[__idx_u_stack_1_0]
             u[i_j] = u_stack[__idx_u_stack_1_0]
-            xbd[i_j] = xbd[i_j] + (ub[i_j] * ud[i_j] + u[i_j] * ubd[i_j])
-            xb[i_j] = xb[i_j] + u[i_j] * ub[i_j]
-            ubd[i_j] = ubd[i_j] + (ub[i_j] * xd[i_j] + x[i_j] * ubd[i_j])
-            ub[i_j] = ub[i_j] + x[i_j] * ub[i_j]
+            __cse_1d = ubd[i_j]
+            __cse_1 = ub[i_j]
+            __cse_3 = u[i_j]
+            xbd[i_j] = xbd[i_j] + (__cse_1 * ud[i_j] + __cse_3 * __cse_1d)
+            xb[i_j] = xb[i_j] + __cse_3 * __cse_1
+            __cse_4 = x[i_j]
+            ubd[i_j] = __cse_1d + (__cse_1 * xd[i_j] + __cse_4 * __cse_1d)
+            ub[i_j] = __cse_1 + __cse_4 * __cse_1
         end
     end
     return nothing

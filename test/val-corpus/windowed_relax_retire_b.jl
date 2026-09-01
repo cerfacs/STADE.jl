@@ -101,10 +101,11 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
             else
                 left = 0.0
             end
-            dx2b = dx2b + f[i_j] * (0.5 * ub[i_j])
-            fb[i_j] = fb[i_j] + dx2 * (0.5 * ub[i_j])
-            leftb = leftb + 0.5 * ub[i_j]
-            rightb = rightb + 0.5 * ub[i_j]
+            __cse_0 = 0.5 * ub[i_j]
+            dx2b = dx2b + f[i_j] * __cse_0
+            fb[i_j] = fb[i_j] + dx2 * __cse_0
+            leftb = leftb + __cse_0
+            rightb = rightb + __cse_0
             ub[i_j] = 0.0
             if __branch_pre_4 == 1
                 ub[i_j + 1] = ub[i_j + 1] + rightb
@@ -122,8 +123,9 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
         if __branch == 1
         end
     end
-    dxb = dxb + dx * dx2b
-    dxb = dxb + dx * dx2b
+    __cse_1 = dx * dx2b
+    dxb = dxb + __cse_1
+    dxb = dxb + __cse_1
     dx2b = 0.0
     return (dxb, nb)
 end

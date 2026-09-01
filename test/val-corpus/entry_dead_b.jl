@@ -19,15 +19,17 @@ function entry_dead_b(x, xb, y, yb, i_cell_to_node, i_ncell, i_nnode, res, resb,
         end
     end
     for i_x = 1:i_nnode
-        out[i_x] = out[i_x] + res[i_x] * res[i_x]
+        __cse_0 = res[i_x]
+        out[i_x] = out[i_x] + __cse_0 * __cse_0
     end
     __idx_v_stack_3 = (max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1
     v_stack[__idx_v_stack_3] = v
     __idx_v_stack_0 = (max(0, div(i_ncell - 1, 1) + 1) * max(0, div(4 - 1, 1) + 1) + max(0, div(i_ncell - 1, 1) + 1)) + 1
     v = v_stack[__idx_v_stack_0]
     for i_x = i_nnode:-1:1
-        resb[i_x] = resb[i_x] + res[i_x] * outb[i_x]
-        resb[i_x] = resb[i_x] + res[i_x] * outb[i_x]
+        __cse_1 = res[i_x] * outb[i_x]
+        resb[i_x] = resb[i_x] + __cse_1
+        resb[i_x] = resb[i_x] + __cse_1
     end
     for i_cell = 1:i_ncell
         v = 0.0
@@ -47,8 +49,9 @@ function entry_dead_b(x, xb, y, yb, i_cell_to_node, i_ncell, i_nnode, res, resb,
             i_node = i_cell_to_node[i_loc, i_cell]
             for i_k = 4:-1:1
                 i_k_node = i_cell_to_node[i_k, i_cell]
-                vb = vb + v * resb[i_k_node]
-                vb = vb + v * resb[i_k_node]
+                __cse_2 = v * resb[i_k_node]
+                vb = vb + __cse_2
+                vb = vb + __cse_2
             end
             xb[i_node] = xb[i_node] + y[i_cell] * vb
             yb[i_cell] = yb[i_cell] + x[i_node] * vb

@@ -12,8 +12,10 @@ function cellscatter_d(i_cell_to_node, cell_vol, cell_vold, i_ncell, i_nnode, i_
             for i_loc = 1:4
                 i_lnoded = 0.0
                 i_lnode = i_cell_to_node[i_loc, i_cell]
-                mupd[i_lnode] = mupd[i_lnode] + (cell_vol[i_cell] * (auxud + upd[i_lnode]) + (auxu + up[i_lnode]) * cell_vold[i_cell])
-                mup[i_lnode] = mup[i_lnode] + (auxu + up[i_lnode]) * cell_vol[i_cell]
+                __cse_0 = cell_vol[i_cell]
+                __cse_1 = auxu + up[i_lnode]
+                mupd[i_lnode] = mupd[i_lnode] + (__cse_0 * (auxud + upd[i_lnode]) + __cse_1 * cell_vold[i_cell])
+                mup[i_lnode] = mup[i_lnode] + __cse_1 * __cse_0
             end
         end
         for i_node = 1:i_nnode

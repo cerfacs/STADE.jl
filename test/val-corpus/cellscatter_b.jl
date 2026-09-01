@@ -23,8 +23,9 @@ function cellscatter_b(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i_
         end
         for i_node = 1:i_nnode
             __idx_up_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
-            up_stack[__idx_up_stack_0] = up[i_node]
-            up[i_node] = up[i_node] - mup[i_node]
+            __cse_0 = up[i_node]
+            up_stack[__idx_up_stack_0] = __cse_0
+            up[i_node] = __cse_0 - mup[i_node]
         end
     end
     for i_ = i_njac:-1:1
@@ -38,9 +39,11 @@ function cellscatter_b(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i_
             auxu = auxu_stack[__idx_auxu_stack_0]
             for i_loc = 4:-1:1
                 i_lnode = i_cell_to_node[i_loc, i_cell]
-                auxub = auxub + cell_vol[i_cell] * mupb[i_lnode]
-                upb[i_lnode] = upb[i_lnode] + cell_vol[i_cell] * mupb[i_lnode]
-                cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_lnode]) * mupb[i_lnode]
+                __cse_1 = mupb[i_lnode]
+                __cse_2 = cell_vol[i_cell] * __cse_1
+                auxub = auxub + __cse_2
+                upb[i_lnode] = upb[i_lnode] + __cse_2
+                cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_lnode]) * __cse_1
             end
             for i_loc = 1:4
                 i_lnode = i_cell_to_node[i_loc, i_cell]

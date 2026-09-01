@@ -10,8 +10,10 @@ function entry_branch_hv(x, xb, y, yb, flag, flagb, i_n, out, outb, xd, xbd, yd,
     sb = 0.0
     sd = 0.0
     sbd = 0.0
-    sd = y[1] * xd[1] + x[1] * yd[1]
-    s = x[1] * y[1]
+    __cse_1 = y[1]
+    __cse_2 = x[1]
+    sd = __cse_1 * xd[1] + __cse_2 * yd[1]
+    s = __cse_2 * __cse_1
     for i_i = 1:i_n
         if flag[i_i] > 0.0
             __idx_branch_stack_0 = (i_i - 1) + 1
@@ -19,13 +21,16 @@ function entry_branch_hv(x, xb, y, yb, flag, flagb, i_n, out, outb, xd, xbd, yd,
             __idx_s_stack_0 = (i_i - 1) + 1
             s_stack_d[__idx_s_stack_0] = sd
             s_stack[__idx_s_stack_0] = s
-            sd = y[i_i] * xd[i_i] + x[i_i] * yd[i_i]
-            s = x[i_i] * y[i_i]
+            __cse_3 = y[i_i]
+            __cse_4 = x[i_i]
+            sd = __cse_3 * xd[i_i] + __cse_4 * yd[i_i]
+            s = __cse_4 * __cse_3
         else
             __idx_branch_stack_0 = (i_i - 1) + 1
             branch_stack[__idx_branch_stack_0] = 0
         end
-        outd[i_i] = outd[i_i] + (s * sd + s * sd)
+        __cse_5 = s * sd
+        outd[i_i] = outd[i_i] + (__cse_5 + __cse_5)
         out[i_i] = out[i_i] + s * s
         __idx_s_stack_2 = max(0, div(i_n - 1, 1) + 1) + ((i_i - 1) + 1)
         s_stack_d[__idx_s_stack_2] = sd
@@ -41,28 +46,35 @@ function entry_branch_hv(x, xb, y, yb, flag, flagb, i_n, out, outb, xd, xbd, yd,
         __idx_s_stack_0 = max(0, div(i_n - 1, 1) + 1) + ((i_i - 1) + 1)
         sd = s_stack_d[__idx_s_stack_0]
         s = s_stack[__idx_s_stack_0]
-        sbd = sbd + (outb[i_i] * sd + s * outbd[i_i])
-        sb = sb + s * outb[i_i]
-        sbd = sbd + (outb[i_i] * sd + s * outbd[i_i])
-        sb = sb + s * outb[i_i]
+        __cse_6 = outb[i_i]
+        __cse_0d = __cse_6 * sd + s * outbd[i_i]
+        __cse_0 = s * __cse_6
+        sbd = sbd + __cse_0d
+        sb = sb + __cse_0
+        sbd = sbd + __cse_0d
+        sb = sb + __cse_0
         __idx_branch_stack_4 = (i_i - 1) + 1
         __branch = branch_stack[__idx_branch_stack_4]
         if __branch == 1
             __idx_s_stack_0 = (i_i - 1) + 1
             sd = s_stack_d[__idx_s_stack_0]
             s = s_stack[__idx_s_stack_0]
-            xbd[i_i] = xbd[i_i] + (sb * yd[i_i] + y[i_i] * sbd)
-            xb[i_i] = xb[i_i] + y[i_i] * sb
-            ybd[i_i] = ybd[i_i] + (sb * xd[i_i] + x[i_i] * sbd)
-            yb[i_i] = yb[i_i] + x[i_i] * sb
+            __cse_7 = y[i_i]
+            xbd[i_i] = xbd[i_i] + (sb * yd[i_i] + __cse_7 * sbd)
+            xb[i_i] = xb[i_i] + __cse_7 * sb
+            __cse_8 = x[i_i]
+            ybd[i_i] = ybd[i_i] + (sb * xd[i_i] + __cse_8 * sbd)
+            yb[i_i] = yb[i_i] + __cse_8 * sb
             sbd = 0.0
             sb = 0.0
         end
     end
-    xbd[1] = xbd[1] + (sb * yd[1] + y[1] * sbd)
-    xb[1] = xb[1] + y[1] * sb
-    ybd[1] = ybd[1] + (sb * xd[1] + x[1] * sbd)
-    yb[1] = yb[1] + x[1] * sb
+    __cse_9 = y[1]
+    xbd[1] = xbd[1] + (sb * yd[1] + __cse_9 * sbd)
+    xb[1] = xb[1] + __cse_9 * sb
+    __cse_10 = x[1]
+    ybd[1] = ybd[1] + (sb * xd[1] + __cse_10 * sbd)
+    yb[1] = yb[1] + __cse_10 * sb
     sbd = 0.0
     sb = 0.0
     return nothing

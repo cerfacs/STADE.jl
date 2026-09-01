@@ -21,12 +21,15 @@ function bnd_branch_b(x, xb, flag, flagb, i_n, i_m, out, outb, branch_stack, s_s
         end
         __branch = branch_stack[1]
         if __branch == 1
-            sb = sb + s * outb[i_i]
-            sb = sb + s * outb[i_i]
+            __cse_0 = s * outb[i_i]
+            sb = sb + __cse_0
+            sb = sb + __cse_0
             for i_j = 1:i_m
-                s = s + x[i_j] * x[i_i]
-                xb[i_j] = xb[i_j] + x[i_i] * sb
-                xb[i_i] = xb[i_i] + x[i_j] * sb
+                __cse_1 = x[i_j]
+                __cse_2 = x[i_i]
+                s = s + __cse_1 * __cse_2
+                xb[i_j] = xb[i_j] + __cse_2 * sb
+                xb[i_i] = xb[i_i] + __cse_1 * sb
             end
             sb = 0.0
         end

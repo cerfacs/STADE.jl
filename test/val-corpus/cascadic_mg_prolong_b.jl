@@ -220,10 +220,11 @@ function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_le
                 else
                     left = 0.0
                 end
-                hl2b = hl2b + rhs[i_j, i_level] * (0.5 * ub[i_j, i_level])
-                rhsb[i_j, i_level] = rhsb[i_j, i_level] + hl2 * (0.5 * ub[i_j, i_level])
-                leftb = leftb + 0.5 * ub[i_j, i_level]
-                rightb = rightb + 0.5 * ub[i_j, i_level]
+                __cse_0 = 0.5 * ub[i_j, i_level]
+                hl2b = hl2b + rhs[i_j, i_level] * __cse_0
+                rhsb[i_j, i_level] = rhsb[i_j, i_level] + hl2 * __cse_0
+                leftb = leftb + __cse_0
+                rightb = rightb + __cse_0
                 ub[i_j, i_level] = 0.0
                 if __branch_pre_4 == 1
                     ub[i_j + 1, i_level] = ub[i_j + 1, i_level] + rightb
@@ -261,8 +262,9 @@ function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_le
             else
                 cl = 0.0
             end
-            clb = clb + 0.5 * ub[jf, i_level]
-            crb = crb + 0.5 * ub[jf, i_level]
+            __cse_1 = 0.5 * ub[jf, i_level]
+            clb = clb + __cse_1
+            crb = crb + __cse_1
             ub[jf, i_level] = 0.0
             if __branch_pre_5 == 1
                 ub[j, i_level - 1] = ub[j, i_level - 1] + crb
@@ -284,8 +286,9 @@ function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_le
         end
         __idx_hl2_stack_1_0 = prefix_hl2_stack_1[(i_level - 2) + 1] + 1
         hl2 = hl2_stack[__idx_hl2_stack_1_0]
-        hlb = hlb + hl * hl2b
-        hlb = hlb + hl * hl2b
+        __cse_2 = hl * hl2b
+        hlb = hlb + __cse_2
+        hlb = hlb + __cse_2
         hl2b = 0.0
         __idx_hl_stack_1_0 = prefix_hl_stack_1[(i_level - 2) + 1] + 1
         hl = hl_stack[__idx_hl_stack_1_0]
@@ -315,10 +318,11 @@ function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_le
             else
                 left = 0.0
             end
-            hl2b = hl2b + rhs[i_j, 1] * (0.5 * ub[i_j, 1])
-            rhsb[i_j, 1] = rhsb[i_j, 1] + hl2 * (0.5 * ub[i_j, 1])
-            leftb = leftb + 0.5 * ub[i_j, 1]
-            rightb = rightb + 0.5 * ub[i_j, 1]
+            __cse_3 = 0.5 * ub[i_j, 1]
+            hl2b = hl2b + rhs[i_j, 1] * __cse_3
+            rhsb[i_j, 1] = rhsb[i_j, 1] + hl2 * __cse_3
+            leftb = leftb + __cse_3
+            rightb = rightb + __cse_3
             ub[i_j, 1] = 0.0
             if __branch_pre_4 == 1
                 ub[i_j + 1, 1] = ub[i_j + 1, 1] + rightb
@@ -332,8 +336,9 @@ function cascadic_mg_prolong_b(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_le
             leftb = 0.0
         end
     end
-    hlb = hlb + hl * hl2b
-    hlb = hlb + hl * hl2b
+    __cse_4 = hl * hl2b
+    hlb = hlb + __cse_4
+    hlb = hlb + __cse_4
     hl2b = 0.0
     h_coarseb = h_coarseb + hlb
     hlb = 0.0

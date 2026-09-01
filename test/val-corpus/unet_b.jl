@@ -127,8 +127,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_e1_mid
         __idx_t_e1_stack_0 = (i - 1) + 1
-        t_e1_stack[__idx_t_e1_stack_0] = t_e1[i]
-        t_e1[i] = max(t_e1[i], zero_val)
+        __cse_0 = t_e1[i]
+        t_e1_stack[__idx_t_e1_stack_0] = __cse_0
+        t_e1[i] = max(__cse_0, zero_val)
     end
     for i = 1:n_e1_midpad
         t_e1pad[i] = zero_val
@@ -165,8 +166,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_e1_out
         __idx_skip1_stack_0 = (i - 1) + 1
-        skip1_stack[__idx_skip1_stack_0] = skip1[i]
-        skip1[i] = max(skip1[i], zero_val)
+        __cse_1 = skip1[i]
+        skip1_stack[__idx_skip1_stack_0] = __cse_1
+        skip1[i] = max(__cse_1, zero_val)
     end
     for idx = 1:c1 * hw2
         idxm1 = idx - 1
@@ -219,8 +221,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_e2_mid
         __idx_t_e2_stack_0 = (i - 1) + 1
-        t_e2_stack[__idx_t_e2_stack_0] = t_e2[i]
-        t_e2[i] = max(t_e2[i], zero_val)
+        __cse_2 = t_e2[i]
+        t_e2_stack[__idx_t_e2_stack_0] = __cse_2
+        t_e2[i] = max(__cse_2, zero_val)
     end
     for i = 1:n_e2_midpad
         t_e2pad[i] = zero_val
@@ -257,8 +260,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_e2_out
         __idx_skip2_stack_0 = (i - 1) + 1
-        skip2_stack[__idx_skip2_stack_0] = skip2[i]
-        skip2[i] = max(skip2[i], zero_val)
+        __cse_3 = skip2[i]
+        skip2_stack[__idx_skip2_stack_0] = __cse_3
+        skip2[i] = max(__cse_3, zero_val)
     end
     for idx = 1:c2 * hw4
         idxm1 = idx - 1
@@ -311,8 +315,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_b_mid
         __idx_t_b_stack_0 = (i - 1) + 1
-        t_b_stack[__idx_t_b_stack_0] = t_b[i]
-        t_b[i] = max(t_b[i], zero_val)
+        __cse_4 = t_b[i]
+        t_b_stack[__idx_t_b_stack_0] = __cse_4
+        t_b[i] = max(__cse_4, zero_val)
     end
     for i = 1:n_b_midpad
         t_bpad[i] = zero_val
@@ -349,8 +354,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_b_out
         __idx_bott_stack_0 = (i - 1) + 1
-        bott_stack[__idx_bott_stack_0] = bott[i]
-        bott[i] = max(bott[i], zero_val)
+        __cse_5 = bott[i]
+        bott_stack[__idx_bott_stack_0] = __cse_5
+        bott[i] = max(__cse_5, zero_val)
     end
     for idx = 1:c3 * hw2
         idxm1 = idx - 1
@@ -406,8 +412,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_d2_mid
         __idx_t_d2_stack_0 = (i - 1) + 1
-        t_d2_stack[__idx_t_d2_stack_0] = t_d2[i]
-        t_d2[i] = max(t_d2[i], zero_val)
+        __cse_6 = t_d2[i]
+        t_d2_stack[__idx_t_d2_stack_0] = __cse_6
+        t_d2[i] = max(__cse_6, zero_val)
     end
     for i = 1:n_d2_midpad
         t_d2pad[i] = zero_val
@@ -444,8 +451,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_d2_out
         __idx_dec2out_stack_0 = (i - 1) + 1
-        dec2out_stack[__idx_dec2out_stack_0] = dec2out[i]
-        dec2out[i] = max(dec2out[i], zero_val)
+        __cse_7 = dec2out[i]
+        dec2out_stack[__idx_dec2out_stack_0] = __cse_7
+        dec2out[i] = max(__cse_7, zero_val)
     end
     for idx = 1:c2 * hw
         idxm1 = idx - 1
@@ -501,8 +509,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_d1_mid
         __idx_t_d1_stack_0 = (i - 1) + 1
-        t_d1_stack[__idx_t_d1_stack_0] = t_d1[i]
-        t_d1[i] = max(t_d1[i], zero_val)
+        __cse_8 = t_d1[i]
+        t_d1_stack[__idx_t_d1_stack_0] = __cse_8
+        t_d1[i] = max(__cse_8, zero_val)
     end
     for i = 1:n_d1_midpad
         t_d1pad[i] = zero_val
@@ -539,8 +548,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
     end
     for i = 1:n_d1_out
         __idx_dec1out_stack_0 = (i - 1) + 1
-        dec1out_stack[__idx_dec1out_stack_0] = dec1out[i]
-        dec1out[i] = max(dec1out[i], zero_val)
+        __cse_9 = dec1out[i]
+        dec1out_stack[__idx_dec1out_stack_0] = __cse_9
+        dec1out[i] = max(__cse_9, zero_val)
     end
     for idx = 1:c_out * hw
         idxm1 = idx - 1
@@ -614,8 +624,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw)
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
-        sb = sb + yb[idx]
-        b_outb[co] = b_outb[co] + yb[idx]
+        __cse_10 = yb[idx]
+        sb = sb + __cse_10
+        b_outb[co] = b_outb[co] + __cse_10
         yb[idx] = 0.0
         for i_k = c1 * khkw_out:-1:1
             kseqm1 = i_k - 1
@@ -643,8 +654,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw)
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
-        sb = sb + dec1outb[idx]
-        b_d1bb[co] = b_d1bb[co] + dec1outb[idx]
+        __cse_11 = dec1outb[idx]
+        sb = sb + __cse_11
+        b_d1bb[co] = b_d1bb[co] + __cse_11
         dec1outb[idx] = 0.0
         for i_k = c1 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -685,8 +697,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw)
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
-        sb = sb + t_d1b[idx]
-        b_d1ab[co] = b_d1ab[co] + t_d1b[idx]
+        __cse_12 = t_d1b[idx]
+        sb = sb + __cse_12
+        b_d1ab[co] = b_d1ab[co] + __cse_12
         t_d1b[idx] = 0.0
         for i_k = c21 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -749,8 +762,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw2)
         i = div(rem, w2) + 1
         j = mod(rem, w2) + 1
-        sb = sb + dec2outb[idx]
-        b_d2bb[co] = b_d2bb[co] + dec2outb[idx]
+        __cse_13 = dec2outb[idx]
+        sb = sb + __cse_13
+        b_d2bb[co] = b_d2bb[co] + __cse_13
         dec2outb[idx] = 0.0
         for i_k = c2 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -791,8 +805,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw2)
         i = div(rem, w2) + 1
         j = mod(rem, w2) + 1
-        sb = sb + t_d2b[idx]
-        b_d2ab[co] = b_d2ab[co] + t_d2b[idx]
+        __cse_14 = t_d2b[idx]
+        sb = sb + __cse_14
+        b_d2ab[co] = b_d2ab[co] + __cse_14
         t_d2b[idx] = 0.0
         for i_k = c32 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -855,8 +870,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw4)
         i = div(rem, w4) + 1
         j = mod(rem, w4) + 1
-        sb = sb + bottb[idx]
-        b_bbb[co] = b_bbb[co] + bottb[idx]
+        __cse_15 = bottb[idx]
+        sb = sb + __cse_15
+        b_bbb[co] = b_bbb[co] + __cse_15
         bottb[idx] = 0.0
         for i_k = c3 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -897,8 +913,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw4)
         i = div(rem, w4) + 1
         j = mod(rem, w4) + 1
-        sb = sb + t_bb[idx]
-        b_bab[co] = b_bab[co] + t_bb[idx]
+        __cse_16 = t_bb[idx]
+        sb = sb + __cse_16
+        b_bab[co] = b_bab[co] + __cse_16
         t_bb[idx] = 0.0
         for i_k = c2 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -949,8 +966,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         oj = mod(rem, w4) + 1
         i0 = 2oi - 1
         j0 = 2oj - 1
-        m1b = m1b + (0.5 * (1.0 + sign(m1 - m2))) * p2b[idx]
-        m2b = m2b + (0.5 * (1.0 + sign(m2 - m1))) * p2b[idx]
+        __cse_17 = p2b[idx]
+        m1b = m1b + (0.5 * (1.0 + sign(m1 - m2))) * __cse_17
+        m2b = m2b + (0.5 * (1.0 + sign(m2 - m1))) * __cse_17
         p2b[idx] = 0.0
         a21b = a21b + (0.5 * (1.0 + sign(a21 - a22))) * m2b
         a22b = a22b + (0.5 * (1.0 + sign(a22 - a21))) * m2b
@@ -978,8 +996,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw2)
         i = div(rem, w2) + 1
         j = mod(rem, w2) + 1
-        sb = sb + skip2b[idx]
-        b_e2bb[co] = b_e2bb[co] + skip2b[idx]
+        __cse_18 = skip2b[idx]
+        sb = sb + __cse_18
+        b_e2bb[co] = b_e2bb[co] + __cse_18
         skip2b[idx] = 0.0
         for i_k = c2 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -1020,8 +1039,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw2)
         i = div(rem, w2) + 1
         j = mod(rem, w2) + 1
-        sb = sb + t_e2b[idx]
-        b_e2ab[co] = b_e2ab[co] + t_e2b[idx]
+        __cse_19 = t_e2b[idx]
+        sb = sb + __cse_19
+        b_e2ab[co] = b_e2ab[co] + __cse_19
         t_e2b[idx] = 0.0
         for i_k = c1 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -1072,8 +1092,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         oj = mod(rem, w2) + 1
         i0 = 2oi - 1
         j0 = 2oj - 1
-        m1b = m1b + (0.5 * (1.0 + sign(m1 - m2))) * p1b[idx]
-        m2b = m2b + (0.5 * (1.0 + sign(m2 - m1))) * p1b[idx]
+        __cse_20 = p1b[idx]
+        m1b = m1b + (0.5 * (1.0 + sign(m1 - m2))) * __cse_20
+        m2b = m2b + (0.5 * (1.0 + sign(m2 - m1))) * __cse_20
         p1b[idx] = 0.0
         a21b = a21b + (0.5 * (1.0 + sign(a21 - a22))) * m2b
         a22b = a22b + (0.5 * (1.0 + sign(a22 - a21))) * m2b
@@ -1101,8 +1122,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw)
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
-        sb = sb + skip1b[idx]
-        b_e1bb[co] = b_e1bb[co] + skip1b[idx]
+        __cse_21 = skip1b[idx]
+        sb = sb + __cse_21
+        b_e1bb[co] = b_e1bb[co] + __cse_21
         skip1b[idx] = 0.0
         for i_k = c1 * khkw:-1:1
             kseqm1 = i_k - 1
@@ -1143,8 +1165,9 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         rem = mod(idxm1, hw)
         i = div(rem, w) + 1
         j = mod(rem, w) + 1
-        sb = sb + t_e1b[idx]
-        b_e1ab[co] = b_e1ab[co] + t_e1b[idx]
+        __cse_22 = t_e1b[idx]
+        sb = sb + __cse_22
+        b_e1ab[co] = b_e1ab[co] + __cse_22
         t_e1b[idx] = 0.0
         for i_k = c_in * khkw:-1:1
             kseqm1 = i_k - 1

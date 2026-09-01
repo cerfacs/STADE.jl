@@ -32,8 +32,10 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
             sd = 0.0
             s = 0.0
             for i_p = 1:d
-                sd = sd + (wq[w_offset + (i_p - 1) * d + j] * xd[(i - 1) * d + i_p] + x[(i - 1) * d + i_p] * wqd[w_offset + (i_p - 1) * d + j])
-                s = s + x[(i - 1) * d + i_p] * wq[w_offset + (i_p - 1) * d + j]
+                __cse_0 = wq[w_offset + (i_p - 1) * d + j]
+                __cse_1 = x[(i - 1) * d + i_p]
+                sd = sd + (__cse_0 * xd[(i - 1) * d + i_p] + __cse_1 * wqd[w_offset + (i_p - 1) * d + j])
+                s = s + __cse_1 * __cse_0
             end
             qd[(i - 1) * d + j] = sd + bqd[b_offset + j]
             q[(i - 1) * d + j] = s + bq[b_offset + j]
@@ -46,8 +48,10 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
             sd = 0.0
             s = 0.0
             for i_p = 1:d
-                sd = sd + (wk[w_offset + (i_p - 1) * d + j] * xd[(i - 1) * d + i_p] + x[(i - 1) * d + i_p] * wkd[w_offset + (i_p - 1) * d + j])
-                s = s + x[(i - 1) * d + i_p] * wk[w_offset + (i_p - 1) * d + j]
+                __cse_2 = wk[w_offset + (i_p - 1) * d + j]
+                __cse_3 = x[(i - 1) * d + i_p]
+                sd = sd + (__cse_2 * xd[(i - 1) * d + i_p] + __cse_3 * wkd[w_offset + (i_p - 1) * d + j])
+                s = s + __cse_3 * __cse_2
             end
             kd[(i - 1) * d + j] = sd + bkd[b_offset + j]
             k[(i - 1) * d + j] = s + bk[b_offset + j]
@@ -60,8 +64,10 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
             sd = 0.0
             s = 0.0
             for i_p = 1:d
-                sd = sd + (wv[w_offset + (i_p - 1) * d + j] * xd[(i - 1) * d + i_p] + x[(i - 1) * d + i_p] * wvd[w_offset + (i_p - 1) * d + j])
-                s = s + x[(i - 1) * d + i_p] * wv[w_offset + (i_p - 1) * d + j]
+                __cse_4 = wv[w_offset + (i_p - 1) * d + j]
+                __cse_5 = x[(i - 1) * d + i_p]
+                sd = sd + (__cse_4 * xd[(i - 1) * d + i_p] + __cse_5 * wvd[w_offset + (i_p - 1) * d + j])
+                s = s + __cse_5 * __cse_4
             end
             vd[(i - 1) * d + j] = sd + bvd[b_offset + j]
             v[(i - 1) * d + j] = s + bv[b_offset + j]
@@ -79,8 +85,10 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
                 sd = 0.0
                 s = 0.0
                 for i_p = 1:dk
-                    sd = sd + (k[(j - 1) * d + head_offset + i_p] * qd[(i - 1) * d + head_offset + i_p] + q[(i - 1) * d + head_offset + i_p] * kd[(j - 1) * d + head_offset + i_p])
-                    s = s + q[(i - 1) * d + head_offset + i_p] * k[(j - 1) * d + head_offset + i_p]
+                    __cse_6 = k[(j - 1) * d + head_offset + i_p]
+                    __cse_7 = q[(i - 1) * d + head_offset + i_p]
+                    sd = sd + (__cse_6 * qd[(i - 1) * d + head_offset + i_p] + __cse_7 * kd[(j - 1) * d + head_offset + i_p])
+                    s = s + __cse_7 * __cse_6
                 end
                 scoresd[score_off + (i - 1) * n + j] = inv_sqrt_dk * sd
                 scores[score_off + (i - 1) * n + j] = s * inv_sqrt_dk
@@ -89,14 +97,16 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
                 row_maxd = scoresd[score_off + (i - 1) * n + 1]
                 row_max = scores[score_off + (i - 1) * n + 1]
                 for i_j = 2:n
-                    row_maxd = (0.5 * (1.0 + sign(row_max - scores[score_off + (i - 1) * n + i_j]))) * row_maxd + (0.5 * (1.0 + sign(scores[score_off + (i - 1) * n + i_j] - row_max))) * scoresd[score_off + (i - 1) * n + i_j]
-                    row_max = max(row_max, scores[score_off + (i - 1) * n + i_j])
+                    __cse_8 = scores[score_off + (i - 1) * n + i_j]
+                    row_maxd = (0.5 * (1.0 + sign(row_max - __cse_8))) * row_maxd + (0.5 * (1.0 + sign(__cse_8 - row_max))) * scoresd[score_off + (i - 1) * n + i_j]
+                    row_max = max(row_max, __cse_8)
                 end
                 for j = 1:n
                     kkd = 0.0
                     kk = score_off + (i - 1) * n + j
-                    probsd[kk] = exp(scores[kk] - row_max) * (scoresd[kk] + -row_maxd)
-                    probs[kk] = exp(scores[kk] - row_max)
+                    __cse_9 = exp(scores[kk] - row_max)
+                    probsd[kk] = __cse_9 * (scoresd[kk] + -row_maxd)
+                    probs[kk] = __cse_9
                 end
                 row_sumd = 0.0
                 row_sum = 0.0
@@ -107,8 +117,9 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
                 for j = 1:n
                     kkd = 0.0
                     kk = score_off + (i - 1) * n + j
-                    probsd[kk] = (1.0 / row_sum) * probsd[kk] + -(probs[kk] / row_sum ^ 2) * row_sumd
-                    probs[kk] = probs[kk] / row_sum
+                    __cse_10 = probs[kk]
+                    probsd[kk] = (1.0 / row_sum) * probsd[kk] + -(__cse_10 / row_sum ^ 2) * row_sumd
+                    probs[kk] = __cse_10 / row_sum
                 end
             end
             for idx3 = 1:n * dk
@@ -119,8 +130,10 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
                 sd = 0.0
                 s = 0.0
                 for i_j = 1:n
-                    sd = sd + (v[(i_j - 1) * d + head_offset + p] * probsd[score_off + (i - 1) * n + i_j] + probs[score_off + (i - 1) * n + i_j] * vd[(i_j - 1) * d + head_offset + p])
-                    s = s + probs[score_off + (i - 1) * n + i_j] * v[(i_j - 1) * d + head_offset + p]
+                    __cse_11 = v[(i_j - 1) * d + head_offset + p]
+                    __cse_12 = probs[score_off + (i - 1) * n + i_j]
+                    sd = sd + (__cse_11 * probsd[score_off + (i - 1) * n + i_j] + __cse_12 * vd[(i_j - 1) * d + head_offset + p])
+                    s = s + __cse_12 * __cse_11
                 end
                 ctxd[(i - 1) * d + head_offset + p] = sd
                 ctx[(i - 1) * d + head_offset + p] = s
@@ -134,8 +147,10 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
             sd = 0.0
             s = 0.0
             for i_p = 1:d
-                sd = sd + (wo[w_offset + (i_p - 1) * d + j] * ctxd[(i - 1) * d + i_p] + ctx[(i - 1) * d + i_p] * wod[w_offset + (i_p - 1) * d + j])
-                s = s + ctx[(i - 1) * d + i_p] * wo[w_offset + (i_p - 1) * d + j]
+                __cse_13 = wo[w_offset + (i_p - 1) * d + j]
+                __cse_14 = ctx[(i - 1) * d + i_p]
+                sd = sd + (__cse_13 * ctxd[(i - 1) * d + i_p] + __cse_14 * wod[w_offset + (i_p - 1) * d + j])
+                s = s + __cse_14 * __cse_13
             end
             attn_outd[(i - 1) * d + j] = sd + bod[b_offset + j]
             attn_out[(i - 1) * d + j] = s + bo[b_offset + j]
@@ -158,18 +173,23 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
             for i_j = 1:d
                 diffd = resid1d[(i - 1) * d + i_j] + -row_meand
                 diff = resid1[(i - 1) * d + i_j] - row_mean
-                s2d = s2d + (diff * diffd + diff * diffd)
+                __cse_15 = diff * diffd
+                s2d = s2d + (__cse_15 + __cse_15)
                 s2 = s2 + diff * diff
             end
             row_vard = (1.0 / d) * s2d
             row_var = s2 / d
-            denomd = (1.0 / (2.0 * sqrt(row_var + eps))) * (row_vard + epsd)
-            denom = sqrt(row_var + eps)
+            __cse_16 = sqrt(row_var + eps)
+            denomd = (1.0 / (2.0__cse_16)) * (row_vard + epsd)
+            denom = __cse_16
             for j = 1:d
                 kkd = 0.0
                 kk = (i - 1) * d + j
-                normed1d[kk] = (ln1_gain[ln_offset + j] * ((1.0 / denom) * (resid1d[kk] + -row_meand) + -((resid1[kk] - row_mean) / denom ^ 2) * denomd) + ((resid1[kk] - row_mean) / denom) * ln1_gaind[ln_offset + j]) + ln1_biasd[ln_offset + j]
-                normed1[kk] = ((resid1[kk] - row_mean) / denom) * ln1_gain[ln_offset + j] + ln1_bias[ln_offset + j]
+                __cse_17 = ln1_gain[ln_offset + j]
+                __cse_18 = resid1[kk] - row_mean
+                __cse_19 = __cse_18 / denom
+                normed1d[kk] = (__cse_17 * ((1.0 / denom) * (resid1d[kk] + -row_meand) + -(__cse_18 / denom ^ 2) * denomd) + __cse_19 * ln1_gaind[ln_offset + j]) + ln1_biasd[ln_offset + j]
+                normed1[kk] = __cse_19 * __cse_17 + ln1_bias[ln_offset + j]
             end
         end
         for idx = 1:n_dff
@@ -180,11 +200,14 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
             sd = 0.0
             s = 0.0
             for i_p = 1:d
-                sd = sd + (w1[w1_offset + (i_p - 1) * dff + j] * normed1d[(i - 1) * d + i_p] + normed1[(i - 1) * d + i_p] * w1d[w1_offset + (i_p - 1) * dff + j])
-                s = s + normed1[(i - 1) * d + i_p] * w1[w1_offset + (i_p - 1) * dff + j]
+                __cse_20 = w1[w1_offset + (i_p - 1) * dff + j]
+                __cse_21 = normed1[(i - 1) * d + i_p]
+                sd = sd + (__cse_20 * normed1d[(i - 1) * d + i_p] + __cse_21 * w1d[w1_offset + (i_p - 1) * dff + j])
+                s = s + __cse_21 * __cse_20
             end
-            ff_hiddend[(i - 1) * dff + j] = (0.5 * (1.0 + sign(s + b1[b1_offset + j]))) * (sd + b1d[b1_offset + j])
-            ff_hidden[(i - 1) * dff + j] = max(s + b1[b1_offset + j], 0.0)
+            __cse_22 = s + b1[b1_offset + j]
+            ff_hiddend[(i - 1) * dff + j] = (0.5 * (1.0 + sign(__cse_22))) * (sd + b1d[b1_offset + j])
+            ff_hidden[(i - 1) * dff + j] = max(__cse_22, 0.0)
         end
         for idx = 1:n_d
             id = 0.0
@@ -194,8 +217,10 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
             sd = 0.0
             s = 0.0
             for i_p = 1:dff
-                sd = sd + (w2[w2_offset + (i_p - 1) * d + j] * ff_hiddend[(i - 1) * dff + i_p] + ff_hidden[(i - 1) * dff + i_p] * w2d[w2_offset + (i_p - 1) * d + j])
-                s = s + ff_hidden[(i - 1) * dff + i_p] * w2[w2_offset + (i_p - 1) * d + j]
+                __cse_23 = w2[w2_offset + (i_p - 1) * d + j]
+                __cse_24 = ff_hidden[(i - 1) * dff + i_p]
+                sd = sd + (__cse_23 * ff_hiddend[(i - 1) * dff + i_p] + __cse_24 * w2d[w2_offset + (i_p - 1) * d + j])
+                s = s + __cse_24 * __cse_23
             end
             ff_outd[(i - 1) * d + j] = sd + b2d[b2_offset + j]
             ff_out[(i - 1) * d + j] = s + b2[b2_offset + j]
@@ -218,18 +243,23 @@ function transformer_d(x, xd, wq, wqd, bq, bqd, wk, wkd, bk, bkd, wv, wvd, bv, b
             for i_j = 1:d
                 diffd = resid2d[(i - 1) * d + i_j] + -row_meand
                 diff = resid2[(i - 1) * d + i_j] - row_mean
-                s2d = s2d + (diff * diffd + diff * diffd)
+                __cse_25 = diff * diffd
+                s2d = s2d + (__cse_25 + __cse_25)
                 s2 = s2 + diff * diff
             end
             row_vard = (1.0 / d) * s2d
             row_var = s2 / d
-            denomd = (1.0 / (2.0 * sqrt(row_var + eps))) * (row_vard + epsd)
-            denom = sqrt(row_var + eps)
+            __cse_26 = sqrt(row_var + eps)
+            denomd = (1.0 / (2.0__cse_26)) * (row_vard + epsd)
+            denom = __cse_26
             for j = 1:d
                 kkd = 0.0
                 kk = (i - 1) * d + j
-                x_nextd[kk] = (ln2_gain[ln2_offset + j] * ((1.0 / denom) * (resid2d[kk] + -row_meand) + -((resid2[kk] - row_mean) / denom ^ 2) * denomd) + ((resid2[kk] - row_mean) / denom) * ln2_gaind[ln2_offset + j]) + ln2_biasd[ln2_offset + j]
-                x_next[kk] = ((resid2[kk] - row_mean) / denom) * ln2_gain[ln2_offset + j] + ln2_bias[ln2_offset + j]
+                __cse_27 = ln2_gain[ln2_offset + j]
+                __cse_28 = resid2[kk] - row_mean
+                __cse_29 = __cse_28 / denom
+                x_nextd[kk] = (__cse_27 * ((1.0 / denom) * (resid2d[kk] + -row_meand) + -(__cse_28 / denom ^ 2) * denomd) + __cse_29 * ln2_gaind[ln2_offset + j]) + ln2_biasd[ln2_offset + j]
+                x_next[kk] = __cse_29 * __cse_27 + ln2_bias[ln2_offset + j]
             end
         end
         for idx = 1:n_d

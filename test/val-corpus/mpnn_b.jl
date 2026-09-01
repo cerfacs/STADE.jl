@@ -50,8 +50,9 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
         end
         for k = 1:n_msg_feat
             __idx_msg_scratch_stack_0 = max(0, div(n_edges - 1, 1) + 1) * max(0, div(n_msg_feat - 1, 1) + 1) + (((e - 1) * (div(n_msg_feat - 1, 1) + 1) + (k - 1)) + 1)
-            msg_scratch_stack[__idx_msg_scratch_stack_0] = msg_scratch[msg_off + k]
-            msg_scratch[msg_off + k] = max(msg_scratch[msg_off + k], 0.0)
+            __cse_0 = msg_scratch[msg_off + k]
+            msg_scratch_stack[__idx_msg_scratch_stack_0] = __cse_0
+            msg_scratch[msg_off + k] = max(__cse_0, 0.0)
         end
         for k = 1:n_msg_feat
             messages[msg_off + k] = msg_scratch[msg_off + k]
@@ -91,8 +92,9 @@ function mpnn_b(node_feat, node_featb, edge_feat, edge_featb, src, dst, w_msg, w
         end
         for k = 1:n_node_feat
             __idx_upd_scratch_stack_0 = max(0, div(n_nodes - 1, 1) + 1) * max(0, div(n_node_feat - 1, 1) + 1) + (((v - 1) * (div(n_node_feat - 1, 1) + 1) + (k - 1)) + 1)
-            upd_scratch_stack[__idx_upd_scratch_stack_0] = upd_scratch[node_off + k]
-            upd_scratch[node_off + k] = max(upd_scratch[node_off + k], 0.0)
+            __cse_1 = upd_scratch[node_off + k]
+            upd_scratch_stack[__idx_upd_scratch_stack_0] = __cse_1
+            upd_scratch[node_off + k] = max(__cse_1, 0.0)
         end
         for k = 1:n_node_feat
             node_feat_out[node_off + k] = upd_scratch[node_off + k]

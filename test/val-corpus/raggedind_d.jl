@@ -5,10 +5,13 @@ function raggedind_d(out, outd, u, ud, x, xd, n, m0)
         sd = 0.0
         s = 0.0
         for i_j = 1:w
-            sd = sd + (u[i_x] * xd[i_j] + x[i_j] * ud[i_x])
-            s = s + x[i_j] * u[i_x]
+            __cse_0 = u[i_x]
+            __cse_1 = x[i_j]
+            sd = sd + (__cse_0 * xd[i_j] + __cse_1 * ud[i_x])
+            s = s + __cse_1 * __cse_0
         end
-        outd[i_x] = s * sd + s * sd
+        __cse_2 = s * sd
+        outd[i_x] = __cse_2 + __cse_2
         out[i_x] = s * s
     end
     return nothing

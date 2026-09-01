@@ -18,27 +18,37 @@ function bnd_branch_hv(x, xb, flag, flagb, i_n, i_m, out, outb, xd, xbd, flagd, 
             sd = 0.0
             s = 0.0
             for i_j = 1:i_m
-                sd = sd + (x[i_i] * xd[i_j] + x[i_j] * xd[i_i])
-                s = s + x[i_j] * x[i_i]
+                __cse_3 = x[i_i]
+                __cse_4 = x[i_j]
+                sd = sd + (__cse_3 * xd[i_j] + __cse_4 * xd[i_i])
+                s = s + __cse_4 * __cse_3
             end
-            outd[i_i] = outd[i_i] + (s * sd + s * sd)
+            __cse_5 = s * sd
+            outd[i_i] = outd[i_i] + (__cse_5 + __cse_5)
             out[i_i] = out[i_i] + s * s
         else
             branch_stack[1] = 0
         end
         __branch = branch_stack[1]
         if __branch == 1
-            sbd = sbd + (outb[i_i] * sd + s * outbd[i_i])
-            sb = sb + s * outb[i_i]
-            sbd = sbd + (outb[i_i] * sd + s * outbd[i_i])
-            sb = sb + s * outb[i_i]
+            __cse_6 = outb[i_i]
+            __cse_0d = __cse_6 * sd + s * outbd[i_i]
+            __cse_0 = s * __cse_6
+            sbd = sbd + __cse_0d
+            sb = sb + __cse_0
+            sbd = sbd + __cse_0d
+            sb = sb + __cse_0
             for i_j = 1:i_m
-                sd = sd + (x[i_i] * xd[i_j] + x[i_j] * xd[i_i])
-                s = s + x[i_j] * x[i_i]
-                xbd[i_j] = xbd[i_j] + (sb * xd[i_i] + x[i_i] * sbd)
-                xb[i_j] = xb[i_j] + x[i_i] * sb
-                xbd[i_i] = xbd[i_i] + (sb * xd[i_j] + x[i_j] * sbd)
-                xb[i_i] = xb[i_i] + x[i_j] * sb
+                __cse_1d = xd[i_j]
+                __cse_1 = x[i_j]
+                __cse_2d = xd[i_i]
+                __cse_2 = x[i_i]
+                sd = sd + (__cse_2 * __cse_1d + __cse_1 * __cse_2d)
+                s = s + __cse_1 * __cse_2
+                xbd[i_j] = xbd[i_j] + (sb * __cse_2d + __cse_2 * sbd)
+                xb[i_j] = xb[i_j] + __cse_2 * sb
+                xbd[i_i] = xbd[i_i] + (sb * __cse_1d + __cse_1 * sbd)
+                xb[i_i] = xb[i_i] + __cse_1 * sb
             end
             sbd = 0.0
             sb = 0.0
