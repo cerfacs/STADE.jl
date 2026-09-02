@@ -37,9 +37,11 @@ function retire_empty_b(u, ub, x, xb, i_npass, i_w0, tripcount_stack, u_stack, p
         for i_j = w:-1:1
             __idx_u_stack_1_0 = prefix_u_stack_1[(i_p - 1) + 1] + ((i_j - 1) + 1)
             u[i_j] = u_stack[__idx_u_stack_1_0]
-            __cse_1 = ub[i_j]
-            xb[i_j] = xb[i_j] + u[i_j] * __cse_1
-            ub[i_j] = __cse_1 + x[i_j] * __cse_1
+            __oldb_2 = ub[i_j]
+            ub[i_j] = 0.0
+            ub[i_j] = ub[i_j] + __oldb_2
+            xb[i_j] = xb[i_j] + u[i_j] * __oldb_2
+            ub[i_j] = ub[i_j] + x[i_j] * __oldb_2
         end
     end
     return nothing

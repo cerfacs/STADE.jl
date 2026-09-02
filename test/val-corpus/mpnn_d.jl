@@ -19,11 +19,12 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
         dst_offd = 0.0
         dst_off = (d_node - 1) * n_node_feat
         edge_offd = 0.0
-        edge_off = (e - 1) * n_edge_feat
+        __icse_0 = e - 1
+        edge_off = __icse_0 * n_edge_feat
         in_offd = 0.0
-        in_off = (e - 1) * n_in_msg
+        in_off = __icse_0 * n_in_msg
         msg_offd = 0.0
-        msg_off = (e - 1) * n_msg_feat
+        msg_off = __icse_0 * n_msg_feat
         for k = 1:n_node_feat
             msg_inputd[in_off + k] = node_featd[src_off + k]
             msg_input[in_off + k] = node_feat[src_off + k]
@@ -42,18 +43,18 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
             for i_i = 1:n_in_msg
                 widxd = 0.0
                 widx = (o - 1) * n_in_msg + i_i
-                __cse_0 = msg_input[in_off + i_i]
-                __cse_1 = w_msg[widx]
-                sd = sd + (__cse_0 * w_msgd[widx] + __cse_1 * msg_inputd[in_off + i_i])
-                s = s + __cse_1 * __cse_0
+                __cse_1 = msg_input[in_off + i_i]
+                __cse_2 = w_msg[widx]
+                sd = sd + (__cse_1 * w_msgd[widx] + __cse_2 * msg_inputd[in_off + i_i])
+                s = s + __cse_2 * __cse_1
             end
             msg_scratchd[msg_off + o] = sd
             msg_scratch[msg_off + o] = s
         end
         for k = 1:n_msg_feat
-            __cse_2 = msg_scratch[msg_off + k]
-            msg_scratchd[msg_off + k] = (0.5 * (1.0 + sign(__cse_2))) * msg_scratchd[msg_off + k]
-            msg_scratch[msg_off + k] = max(__cse_2, 0.0)
+            __cse_3 = msg_scratch[msg_off + k]
+            msg_scratchd[msg_off + k] = (0.5 * (1.0 + sign(__cse_3))) * msg_scratchd[msg_off + k]
+            msg_scratch[msg_off + k] = max(__cse_3, 0.0)
         end
         for k = 1:n_msg_feat
             messagesd[msg_off + k] = msg_scratchd[msg_off + k]
@@ -74,11 +75,12 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
     end
     for v = 1:n_nodes
         node_offd = 0.0
-        node_off = (v - 1) * n_node_feat
+        __icse_4 = v - 1
+        node_off = __icse_4 * n_node_feat
         agg_offd = 0.0
-        agg_off = (v - 1) * n_msg_feat
+        agg_off = __icse_4 * n_msg_feat
         uin_offd = 0.0
-        uin_off = (v - 1) * n_in_upd
+        uin_off = __icse_4 * n_in_upd
         for k = 1:n_node_feat
             upd_inputd[uin_off + k] = node_featd[node_off + k]
             upd_input[uin_off + k] = node_feat[node_off + k]
@@ -93,18 +95,18 @@ function mpnn_d(node_feat, node_featd, edge_feat, edge_featd, src, dst, w_msg, w
             for i_i = 1:n_in_upd
                 widxd = 0.0
                 widx = (o - 1) * n_in_upd + i_i
-                __cse_3 = upd_input[uin_off + i_i]
-                __cse_4 = w_upd[widx]
-                sd = sd + (__cse_3 * w_updd[widx] + __cse_4 * upd_inputd[uin_off + i_i])
-                s = s + __cse_4 * __cse_3
+                __cse_5 = upd_input[uin_off + i_i]
+                __cse_6 = w_upd[widx]
+                sd = sd + (__cse_5 * w_updd[widx] + __cse_6 * upd_inputd[uin_off + i_i])
+                s = s + __cse_6 * __cse_5
             end
             upd_scratchd[node_off + o] = sd
             upd_scratch[node_off + o] = s
         end
         for k = 1:n_node_feat
-            __cse_5 = upd_scratch[node_off + k]
-            upd_scratchd[node_off + k] = (0.5 * (1.0 + sign(__cse_5))) * upd_scratchd[node_off + k]
-            upd_scratch[node_off + k] = max(__cse_5, 0.0)
+            __cse_7 = upd_scratch[node_off + k]
+            upd_scratchd[node_off + k] = (0.5 * (1.0 + sign(__cse_7))) * upd_scratchd[node_off + k]
+            upd_scratch[node_off + k] = max(__cse_7, 0.0)
         end
         for k = 1:n_node_feat
             node_feat_outd[node_off + k] = upd_scratchd[node_off + k]

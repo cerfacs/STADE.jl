@@ -34,9 +34,10 @@ function bnd_branch_b(x, xb, flag, flagb, i_n, i_m, out, outb, branch_stack, s_s
             sb = 0.0
         end
     end
-    __idx_s_stack_2 = max(0, div(i_n - 1, 1) + 1) + 1
+    __icse_3 = max(0, div(i_n - 1, 1) + 1) + 1
+    __idx_s_stack_2 = __icse_3
     s_stack[__idx_s_stack_2] = s
-    __idx_s_stack_0 = max(0, div(i_n - 1, 1) + 1) + 1
+    __idx_s_stack_0 = __icse_3
     s = s_stack[__idx_s_stack_0]
     sb = 0.0
     return nothing

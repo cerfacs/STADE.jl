@@ -27,10 +27,10 @@ function advection_multi_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_n
         for i_x_advection_diff_c1 = i_nnode:-1:2
             __idx_du_stack_0 = ((i_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x_advection_diff_c1 - 2)) + 1
             du[i_x_advection_diff_c1] = du_stack[__idx_du_stack_0]
-            __cse_3 = dub[i_x_advection_diff_c1]
-            ub[i_x_advection_diff_c1] = ub[i_x_advection_diff_c1] + __cse_3
-            ub[i_x_advection_diff_c1 - 1] = ub[i_x_advection_diff_c1 - 1] + -__cse_3
+            __oldb_2 = dub[i_x_advection_diff_c1]
             dub[i_x_advection_diff_c1] = 0.0
+            ub[i_x_advection_diff_c1] = ub[i_x_advection_diff_c1] + __oldb_2
+            ub[i_x_advection_diff_c1 - 1] = ub[i_x_advection_diff_c1 - 1] + -__oldb_2
         end
     end
     return (cb, dxb, dtb)

@@ -1,18 +1,19 @@
 function matvec_loss_d(loss, lossd, a, ad, u, ud, v, vd, i_m, i_n)
     for idx = 1:i_m * i_n
         i_id = 0.0
-        i_i = div(idx - 1, i_n) + 1
+        __icse_0 = idx - 1
+        i_i = div(__icse_0, i_n) + 1
         i_jd = 0.0
-        i_j = mod(idx - 1, i_n) + 1
-        __cse_0 = u[i_j]
-        __cse_1 = a[i_i, i_j]
-        vd[i_i] = vd[i_i] + (__cse_0 * ad[i_i, i_j] + __cse_1 * ud[i_j])
-        v[i_i] = v[i_i] + __cse_1 * __cse_0
+        i_j = mod(__icse_0, i_n) + 1
+        __cse_1 = u[i_j]
+        __cse_2 = a[i_i, i_j]
+        vd[i_i] = vd[i_i] + (__cse_1 * ad[i_i, i_j] + __cse_2 * ud[i_j])
+        v[i_i] = v[i_i] + __cse_2 * __cse_1
     end
     for i_i2 = 1:i_m
-        __cse_2 = v[i_i2]
-        lossd[1] = lossd[1] + (2__cse_2) * vd[i_i2]
-        loss[1] = loss[1] + __cse_2 ^ 2
+        __cse_3 = v[i_i2]
+        lossd[1] = lossd[1] + (2__cse_3) * vd[i_i2]
+        loss[1] = loss[1] + __cse_3 ^ 2
     end
     return nothing
 end

@@ -22,10 +22,10 @@ function cellscatter_hv(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i
             end
             for i_loc = 1:4
                 i_lnode = i_cell_to_node[i_loc, i_cell]
-                __cse_3 = cell_vol[i_cell]
-                __cse_4 = auxu + up[i_lnode]
-                mupd[i_lnode] = mupd[i_lnode] + (__cse_3 * (auxud + upd[i_lnode]) + __cse_4 * cell_vold[i_cell])
-                mup[i_lnode] = mup[i_lnode] + __cse_4 * __cse_3
+                __hcse_0 = cell_vol[i_cell]
+                __hcse_1 = auxu + up[i_lnode]
+                mupd[i_lnode] = mupd[i_lnode] + (__hcse_0 * (auxud + upd[i_lnode]) + __hcse_1 * cell_vold[i_cell])
+                mup[i_lnode] = mup[i_lnode] + __hcse_1 * __hcse_0
             end
             __idx_auxu_stack_3 = ((i_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1
             auxu_stack_d[__idx_auxu_stack_3] = auxud
@@ -57,22 +57,23 @@ function cellscatter_hv(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i
                 i_lnode = i_cell_to_node[i_loc, i_cell]
                 __cse_1d = mupbd[i_lnode]
                 __cse_1 = mupb[i_lnode]
-                __cse_5 = cell_vol[i_cell]
-                __cse_2d = __cse_1 * cell_vold[i_cell] + __cse_5 * __cse_1d
-                __cse_2 = __cse_5 * __cse_1
+                __hcse_2 = cell_vol[i_cell]
+                __cse_2d = __cse_1 * cell_vold[i_cell] + __hcse_2 * __cse_1d
+                __cse_2 = __hcse_2 * __cse_1
                 auxubd = auxubd + __cse_2d
                 auxub = auxub + __cse_2
                 upbd[i_lnode] = upbd[i_lnode] + __cse_2d
                 upb[i_lnode] = upb[i_lnode] + __cse_2
-                __cse_6 = auxu + up[i_lnode]
-                cell_volbd[i_cell] = cell_volbd[i_cell] + (__cse_1 * (auxud + upd[i_lnode]) + __cse_6 * __cse_1d)
-                cell_volb[i_cell] = cell_volb[i_cell] + __cse_6 * __cse_1
+                __hcse_3 = auxu + up[i_lnode]
+                cell_volbd[i_cell] = cell_volbd[i_cell] + (__cse_1 * (auxud + upd[i_lnode]) + __hcse_3 * __cse_1d)
+                cell_volb[i_cell] = cell_volb[i_cell] + __hcse_3 * __cse_1
             end
             for i_loc = 1:4
-                i_lnode = i_cell_to_node[i_loc, i_cell]
+                __icse_3 = i_cell_to_node[i_loc, i_cell]
+                i_lnode = __icse_3
                 auxud = auxud + upd[i_lnode]
                 auxu = auxu + up[i_lnode]
-                i_lnode = i_cell_to_node[i_loc, i_cell]
+                i_lnode = __icse_3
                 upbd[i_lnode] = upbd[i_lnode] + auxubd
                 upb[i_lnode] = upb[i_lnode] + auxub
             end

@@ -16,14 +16,15 @@ function pipeline_b(loss, lossb, u, ub, v, vb, w, wb, i_n)
         wb[i_x2] = wb[i_x2] + lossb[1]
     end
     for i_x = i_n:-1:1
-        __cse_0 = wb[i_x]
-        vb[i_x] = vb[i_x] + u[i_x] * __cse_0
-        ub[i_x] = ub[i_x] + v[i_x] * __cse_0
+        __oldb_0 = wb[i_x]
         wb[i_x] = 0.0
+        vb[i_x] = vb[i_x] + u[i_x] * __oldb_0
+        ub[i_x] = ub[i_x] + v[i_x] * __oldb_0
     end
     for i_x = i_n:-1:1
-        ub[i_x] = ub[i_x] + (2 * u[i_x]) * vb[i_x]
+        __oldb_0 = vb[i_x]
         vb[i_x] = 0.0
+        ub[i_x] = ub[i_x] + (2 * u[i_x]) * __oldb_0
     end
     return nothing
 end

@@ -18,17 +18,21 @@ function prefixscan_hv(loss, lossb, y, yb, x, xb, n, lossd, lossbd, yd, ybd, xd,
         yb[i_j] = yb[i_j] + lossb[1]
     end
     for i_k = n:-1:2
-        ybd[i_k - 1] = ybd[i_k - 1] + ybd[i_k]
-        yb[i_k - 1] = yb[i_k - 1] + yb[i_k]
-        xbd[i_k] = xbd[i_k] + ybd[i_k]
-        xb[i_k] = xb[i_k] + yb[i_k]
+        __oldb_0d = ybd[i_k]
+        __oldb_0 = yb[i_k]
         ybd[i_k] = 0.0
         yb[i_k] = 0.0
+        ybd[i_k - 1] = ybd[i_k - 1] + __oldb_0d
+        yb[i_k - 1] = yb[i_k - 1] + __oldb_0
+        xbd[i_k] = xbd[i_k] + __oldb_0d
+        xb[i_k] = xb[i_k] + __oldb_0
     end
-    xbd[1] = xbd[1] + ybd[1]
-    xb[1] = xb[1] + yb[1]
+    __oldb_0d = ybd[1]
+    __oldb_0 = yb[1]
     ybd[1] = 0.0
     yb[1] = 0.0
+    xbd[1] = xbd[1] + __oldb_0d
+    xb[1] = xb[1] + __oldb_0
     return nothing
 end
 

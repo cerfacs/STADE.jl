@@ -15,13 +15,15 @@ function bnd_carried_b(x, xb, y, yb, i_n, out, outb, t_stack)
         __cse_2 = t * outb[i_i]
         tb = tb + __cse_2
         tb = tb + __cse_2
-        xb[i_i] = xb[i_i] + __cse_1 * tb
-        yb[i_i] = yb[i_i] + __cse_0 * tb
+        __oldb_0 = tb
         tb = 0.0
+        xb[i_i] = xb[i_i] + __cse_1 * __oldb_0
+        yb[i_i] = yb[i_i] + __cse_0 * __oldb_0
     end
-    __idx_t_stack_2 = max(0, div(i_n - 1, 1) + 1) + 1
+    __icse_3 = max(0, div(i_n - 1, 1) + 1) + 1
+    __idx_t_stack_2 = __icse_3
     t_stack[__idx_t_stack_2] = t
-    __idx_t_stack_0 = max(0, div(i_n - 1, 1) + 1) + 1
+    __idx_t_stack_0 = __icse_3
     t = t_stack[__idx_t_stack_0]
     tb = 0.0
     return nothing

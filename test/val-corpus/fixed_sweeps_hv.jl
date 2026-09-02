@@ -21,12 +21,14 @@ function fixed_sweeps_hv(y, yb, x, xb, i_n, yd, ybd, xd, xbd, y_stack)
             __idx_y_stack_0 = ((i_k - 1) * (div(i_n - 1, 1) + 1) + (i_i - 1)) + 1
             yd[i_i] = y_stack_d[__idx_y_stack_0]
             y[i_i] = y_stack[__idx_y_stack_0]
-            __cse_1d = ybd[i_i]
-            __cse_1 = yb[i_i]
-            xbd[i_i] = xbd[i_i] + __cse_1d
-            xb[i_i] = xb[i_i] + __cse_1
-            ybd[i_i] = 0.5__cse_1d
-            yb[i_i] = 0.5__cse_1
+            __oldb_2d = ybd[i_i]
+            __oldb_2 = yb[i_i]
+            ybd[i_i] = 0.0
+            yb[i_i] = 0.0
+            ybd[i_i] = ybd[i_i] + 0.5__oldb_2d
+            yb[i_i] = yb[i_i] + 0.5__oldb_2
+            xbd[i_i] = xbd[i_i] + __oldb_2d
+            xb[i_i] = xb[i_i] + __oldb_2
         end
     end
     return nothing

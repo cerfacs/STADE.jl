@@ -149,19 +149,22 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 end
                 right = 0.0
                 if i_j < n
-                    __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                    __icse_0 = div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1
+                    __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, __icse_0)) + (((i_k - 1) * __icse_0 + (i_j - 1)) + 1)
                     branch_stack[__idx_branch_stack_1_0] = 1
                     right = u[i_j + 1, i_level]
                 else
-                    __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                    __icse_1 = div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1
+                    __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, __icse_1)) + (((i_k - 1) * __icse_1 + (i_j - 1)) + 1)
                     branch_stack[__idx_branch_stack_1_0] = 0
                 end
-                __idx_u_stack_1_4 = prefix_u_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __icse_2 = ((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_u_stack_1_4 = prefix_u_stack_1[(i_level - 1) + 1] + __icse_2
                 u_stack[__idx_u_stack_1_4] = u[i_j, i_level]
                 u[i_j, i_level] = 0.5 * (hl2 * f[i_j, i_level] + left + right)
-                __idx_left_stack_1_7 = prefix_left_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_left_stack_1_7 = prefix_left_stack_1[(i_level - 1) + 1] + __icse_2
                 left_stack[__idx_left_stack_1_7] = left
-                __idx_right_stack_1_9 = prefix_right_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_right_stack_1_9 = prefix_right_stack_1[(i_level - 1) + 1] + __icse_2
                 right_stack[__idx_right_stack_1_9] = right
             end
         end
@@ -170,28 +173,36 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         for j = 1:n
             left = 0.0
             if j > 1
-                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + (max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+                __icse_3 = max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + (__icse_3 + __icse_3)) + ((j - 1) + 1)
                 branch_stack[__idx_branch_stack_1_0] = 1
                 left = u[j - 1, i_level]
             else
-                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + (max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+                __icse_4 = max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + (__icse_4 + __icse_4)) + ((j - 1) + 1)
                 branch_stack[__idx_branch_stack_1_0] = 0
             end
             right = 0.0
             if j < n
-                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + ((max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+                __icse_5 = max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+                __icse_6 = max(0, div(nu1 - 1, 1) + 1) * __icse_5
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + ((__icse_6 + __icse_6) + __icse_5)) + ((j - 1) + 1)
                 branch_stack[__idx_branch_stack_1_0] = 1
                 right = u[j + 1, i_level]
             else
-                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + ((max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+                __icse_7 = max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+                __icse_8 = max(0, div(nu1 - 1, 1) + 1) * __icse_7
+                __idx_branch_stack_1_0 = (prefix_branch_stack_1[(i_level - 1) + 1] + ((__icse_8 + __icse_8) + __icse_7)) + ((j - 1) + 1)
                 branch_stack[__idx_branch_stack_1_0] = 0
             end
-            __idx_r_stack_1_4 = prefix_r_stack_1[(i_level - 1) + 1] + ((j - 1) + 1)
+            __icse_9 = (j - 1) + 1
+            __idx_r_stack_1_4 = prefix_r_stack_1[(i_level - 1) + 1] + __icse_9
             r_stack[__idx_r_stack_1_4] = r[j, i_level]
             r[j, i_level] = f[j, i_level] - ((2.0 * u[j, i_level] - left) - right) / hl2
-            __idx_left_stack_1_7 = (prefix_left_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            __icse_10 = max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+            __idx_left_stack_1_7 = (prefix_left_stack_1[(i_level - 1) + 1] + __icse_10) + __icse_9
             left_stack[__idx_left_stack_1_7] = left
-            __idx_right_stack_1_9 = (prefix_right_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            __idx_right_stack_1_9 = (prefix_right_stack_1[(i_level - 1) + 1] + __icse_10) + __icse_9
             right_stack[__idx_right_stack_1_9] = right
         end
         ncg = div(nl, 2)
@@ -238,9 +249,9 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         for j = 1:nc
             jf = j * 2
             __idx_u_stack_2_1 = ((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
-            __cse_0 = u[jf, i_level]
-            u_stack[__idx_u_stack_2_1] = __cse_0
-            u[jf, i_level] = __cse_0 + u[j, i_level + 1]
+            __cse_11 = u[jf, i_level]
+            u_stack[__idx_u_stack_2_1] = __cse_11
+            u[jf, i_level] = __cse_11 + u[j, i_level + 1]
         end
         __idx_tripcount_stack_2_13 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + 1) + 1
         tripcount_stack[__idx_tripcount_stack_2_13] = nc
@@ -264,13 +275,14 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)
                 branch_stack[__idx_branch_stack_2_0] = 0
             end
-            __idx_u_stack_2_5 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
-            __cse_1 = u[jf, i_level]
-            u_stack[__idx_u_stack_2_5] = __cse_1
-            u[jf, i_level] = __cse_1 + 0.5 * (cl + cr)
-            __idx_cl_stack_2_8 = prefix_cl_stack_2[div(i_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
+            __icse_12 = (j - 1) + 1
+            __idx_u_stack_2_5 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + __icse_12
+            __cse_13 = u[jf, i_level]
+            u_stack[__idx_u_stack_2_5] = __cse_13
+            u[jf, i_level] = __cse_13 + 0.5 * (cl + cr)
+            __idx_cl_stack_2_8 = prefix_cl_stack_2[div(i_level - (num_levels - 1), -1) + 1] + __icse_12
             cl_stack[__idx_cl_stack_2_8] = cl
-            __idx_cr_stack_2_10 = prefix_cr_stack_2[div(i_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
+            __idx_cr_stack_2_10 = prefix_cr_stack_2[div(i_level - (num_levels - 1), -1) + 1] + __icse_12
             cr_stack[__idx_cr_stack_2_10] = cr
         end
         for i_k = 1:nu2
@@ -279,50 +291,63 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             for i_j = 1:n
                 left = 0.0
                 if i_j > 1
-                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                    __icse_14 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
+                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (__icse_14 + __icse_14)) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                     branch_stack[__idx_branch_stack_2_0] = 1
                     left = u[i_j - 1, i_level]
                 else
-                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                    __icse_15 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
+                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (__icse_15 + __icse_15)) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                     branch_stack[__idx_branch_stack_2_0] = 0
                 end
                 right = 0.0
                 if i_j < n
-                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + max(0, div(nu2 - 1, 1) + 1) * max(0, div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                    __icse_16 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
+                    __icse_17 = div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1
+                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((__icse_16 + __icse_16) + max(0, div(nu2 - 1, 1) + 1) * max(0, __icse_17))) + (((i_k - 1) * __icse_17 + (i_j - 1)) + 1)
                     branch_stack[__idx_branch_stack_2_0] = 1
                     right = u[i_j + 1, i_level]
                 else
-                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + max(0, div(nu2 - 1, 1) + 1) * max(0, div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                    __icse_18 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
+                    __icse_19 = div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1
+                    __idx_branch_stack_2_0 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((__icse_18 + __icse_18) + max(0, div(nu2 - 1, 1) + 1) * max(0, __icse_19))) + (((i_k - 1) * __icse_19 + (i_j - 1)) + 1)
                     branch_stack[__idx_branch_stack_2_0] = 0
                 end
-                __idx_u_stack_2_4 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __icse_20 = val_nc_2[div(i_level - (num_levels - 1), -1) + 1]
+                __icse_21 = ((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_u_stack_2_4 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div(__icse_20 - 1, 1) + 1) + max(0, div((__icse_20 + 1) - 1, 1) + 1))) + __icse_21
                 u_stack[__idx_u_stack_2_4] = u[i_j, i_level]
                 u[i_j, i_level] = 0.5 * (hl2 * f[i_j, i_level] + left + right)
-                __idx_left_stack_2_7 = (__tot_left_stack_1 + prefix_left_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_left_stack_2_7 = (__tot_left_stack_1 + prefix_left_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + __icse_21
                 left_stack[__idx_left_stack_2_7] = left
-                __idx_right_stack_2_9 = (__tot_right_stack_1 + prefix_right_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_right_stack_2_9 = (__tot_right_stack_1 + prefix_right_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + __icse_21
                 right_stack[__idx_right_stack_2_9] = right
             end
         end
     end
-    __idx_hl_stack_11 = (__tot_hl_stack_1 + __tot_hl_stack_2) + 1
+    __icse_22 = (__tot_hl_stack_1 + __tot_hl_stack_2) + 1
+    __idx_hl_stack_11 = __icse_22
     hl_stack[__idx_hl_stack_11] = hl
-    __idx_hl2_stack_13 = ((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1
+    __icse_23 = ((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1
+    __idx_hl2_stack_13 = __icse_23
     hl2_stack[__idx_hl2_stack_13] = hl2
-    __idx_hl_stack_0 = (__tot_hl_stack_1 + __tot_hl_stack_2) + 1
+    __idx_hl_stack_0 = __icse_22
     hl = hl_stack[__idx_hl_stack_0]
-    __idx_hl2_stack_2 = ((__tot_hl2_stack_1 + 1) + __tot_hl2_stack_2) + 1
+    __idx_hl2_stack_2 = __icse_23
     hl2 = hl2_stack[__idx_hl2_stack_2]
     for i_level = 1:num_levels - 1
         for i_k = nu2:-1:1
             __idx_tripcount_stack_2_0 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (1 + 1)) + ((i_k - 1) + 1)
             n = tripcount_stack[__idx_tripcount_stack_2_0]
             for i_j = n:-1:1
-                __idx_left_stack_2_0 = (__tot_left_stack_1 + prefix_left_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __icse_24 = div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1
+                __icse_25 = ((i_k - 1) * __icse_24 + (i_j - 1)) + 1
+                __idx_left_stack_2_0 = (__tot_left_stack_1 + prefix_left_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + __icse_25
                 left = left_stack[__idx_left_stack_2_0]
-                __idx_right_stack_2_2 = (__tot_right_stack_1 + prefix_right_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_right_stack_2_2 = (__tot_right_stack_1 + prefix_right_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + __icse_25
                 right = right_stack[__idx_right_stack_2_2]
-                __idx_branch_stack_2_4 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + max(0, div(nu2 - 1, 1) + 1) * max(0, div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __icse_26 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
+                __idx_branch_stack_2_4 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((__icse_26 + __icse_26) + max(0, div(nu2 - 1, 1) + 1) * max(0, __icse_24))) + __icse_25
                 __branch_pre_4 = branch_stack[__idx_branch_stack_2_4]
                 right = 0.0
                 if __branch_pre_4 == 1
@@ -330,7 +355,8 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 else
                     right = 0.0
                 end
-                __idx_branch_stack_2_8 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __icse_27 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
+                __idx_branch_stack_2_8 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (__icse_27 + __icse_27)) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                 __branch_pre_2 = branch_stack[__idx_branch_stack_2_8]
                 left = 0.0
                 if __branch_pre_2 == 1
@@ -338,22 +364,26 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 else
                     left = 0.0
                 end
-                __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __icse_28 = val_nc_2[div(i_level - (num_levels - 1), -1) + 1]
+                __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div(__icse_28 - 1, 1) + 1) + max(0, div((__icse_28 + 1) - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                 u[i_j, i_level] = u_stack[__idx_u_stack_2_0]
-                __cse_2 = 0.5 * ub[i_j, i_level]
-                hl2b = hl2b + f[i_j, i_level] * __cse_2
-                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_2
-                leftb = leftb + __cse_2
-                rightb = rightb + __cse_2
+                __oldb_2 = ub[i_j, i_level]
                 ub[i_j, i_level] = 0.0
+                __cse_29 = 0.5__oldb_2
+                hl2b = hl2b + f[i_j, i_level] * __cse_29
+                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_29
+                leftb = leftb + __cse_29
+                rightb = rightb + __cse_29
                 if __branch_pre_4 == 1
-                    ub[i_j + 1, i_level] = ub[i_j + 1, i_level] + rightb
+                    __oldb_0 = rightb
                     rightb = 0.0
+                    ub[i_j + 1, i_level] = ub[i_j + 1, i_level] + __oldb_0
                 end
                 rightb = 0.0
                 if __branch_pre_2 == 1
-                    ub[i_j - 1, i_level] = ub[i_j - 1, i_level] + leftb
+                    __oldb_0 = leftb
                     leftb = 0.0
+                    ub[i_j - 1, i_level] = ub[i_j - 1, i_level] + __oldb_0
                 end
                 leftb = 0.0
             end
@@ -361,12 +391,13 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         __idx_tripcount_stack_2_1 = ((__tot_tripcount_stack_1 + prefix_tripcount_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + 1) + 1
         nc = tripcount_stack[__idx_tripcount_stack_2_1]
         for j = nc + 1:-1:1
-            __idx_cl_stack_2_0 = prefix_cl_stack_2[div(i_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
+            __icse_30 = (j - 1) + 1
+            __idx_cl_stack_2_0 = prefix_cl_stack_2[div(i_level - (num_levels - 1), -1) + 1] + __icse_30
             cl = cl_stack[__idx_cl_stack_2_0]
-            __idx_cr_stack_2_2 = prefix_cr_stack_2[div(i_level - (num_levels - 1), -1) + 1] + ((j - 1) + 1)
+            __idx_cr_stack_2_2 = prefix_cr_stack_2[div(i_level - (num_levels - 1), -1) + 1] + __icse_30
             cr = cr_stack[__idx_cr_stack_2_2]
             jf = j * 2 - 1
-            __idx_branch_stack_2_5 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + ((j - 1) + 1)
+            __idx_branch_stack_2_5 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + __icse_30
             __branch_pre_5 = branch_stack[__idx_branch_stack_2_5]
             cr = 0.0
             if __branch_pre_5 == 1
@@ -384,17 +415,19 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             end
             __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
             u[jf, i_level] = u_stack[__idx_u_stack_2_0]
-            __cse_3 = 0.5 * ub[jf, i_level]
-            clb = clb + __cse_3
-            crb = crb + __cse_3
+            __cse_31 = 0.5 * ub[jf, i_level]
+            clb = clb + __cse_31
+            crb = crb + __cse_31
             if __branch_pre_5 == 1
-                ub[j, i_level + 1] = ub[j, i_level + 1] + crb
+                __oldb_0 = crb
                 crb = 0.0
+                ub[j, i_level + 1] = ub[j, i_level + 1] + __oldb_0
             end
             crb = 0.0
             if __branch_pre_3 == 1
-                ub[j - 1, i_level + 1] = ub[j - 1, i_level + 1] + clb
+                __oldb_0 = clb
                 clb = 0.0
+                ub[j - 1, i_level + 1] = ub[j - 1, i_level + 1] + __oldb_0
             end
             clb = 0.0
         end
@@ -408,58 +441,67 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
         end
         __idx_hl2_stack_2_0 = ((__tot_hl2_stack_1 + 1) + prefix_hl2_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + 1
         hl2 = hl2_stack[__idx_hl2_stack_2_0]
-        __cse_4 = hl * hl2b
-        hlb = hlb + __cse_4
-        hlb = hlb + __cse_4
+        __oldb_2 = hl2b
         hl2b = 0.0
+        __cse_32 = hl * __oldb_2
+        hlb = hlb + __cse_32
+        hlb = hlb + __cse_32
         __idx_hl_stack_2_0 = (__tot_hl_stack_1 + prefix_hl_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + 1
         hl = hl_stack[__idx_hl_stack_2_0]
-        hlb = 0.5hlb
+        __oldb_2 = hlb
+        hlb = 0.0
+        hlb = hlb + 0.5__oldb_2
     end
     __idx_u_stack_0 = __tot_u_stack_1 + 1
     u[1, num_levels] = u_stack[__idx_u_stack_0]
-    __cse_5 = ub[1, num_levels]
-    hl2b = hl2b + (0.5 * f[1, num_levels]) * __cse_5
-    fb[1, num_levels] = fb[1, num_levels] + (0.5hl2) * __cse_5
+    __oldb_2 = ub[1, num_levels]
     ub[1, num_levels] = 0.0
+    hl2b = hl2b + (0.5 * f[1, num_levels]) * __oldb_2
+    fb[1, num_levels] = fb[1, num_levels] + (0.5hl2) * __oldb_2
     __idx_hl2_stack_0 = __tot_hl2_stack_1 + 1
     hl2 = hl2_stack[__idx_hl2_stack_0]
-    __cse_6 = hl * hl2b
-    hlb = hlb + __cse_6
-    hlb = hlb + __cse_6
+    __oldb_2 = hl2b
     hl2b = 0.0
+    __cse_33 = hl * __oldb_2
+    hlb = hlb + __cse_33
+    hlb = hlb + __cse_33
     for i_level = num_levels - 1:-1:1
         __idx_hl_stack_1_0 = prefix_hl_stack_1[(i_level - 1) + 1] + 1
         hl = hl_stack[__idx_hl_stack_1_0]
-        hlb = 2.0hlb
-        __idx_tripcount_stack_1_3 = (prefix_tripcount_stack_1[(i_level - 1) + 1] + ((max(0, div(nu1 - 1, 1) + 1) + 1) + 1)) + 1
-        nc = tripcount_stack[__idx_tripcount_stack_1_3]
+        __oldb_2 = hlb
+        hlb = 0.0
+        hlb = hlb + 2.0__oldb_2
+        __idx_tripcount_stack_1_5 = (prefix_tripcount_stack_1[(i_level - 1) + 1] + ((max(0, div(nu1 - 1, 1) + 1) + 1) + 1)) + 1
+        nc = tripcount_stack[__idx_tripcount_stack_1_5]
         for j = nc:-1:1
             __idx_u_stack_1_0 = (prefix_u_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
             u[j, i_level + 1] = u_stack[__idx_u_stack_1_0]
             ub[j, i_level + 1] = 0.0
         end
-        __idx_tripcount_stack_1_6 = (prefix_tripcount_stack_1[(i_level - 1) + 1] + (max(0, div(nu1 - 1, 1) + 1) + 1)) + 1
-        nc = tripcount_stack[__idx_tripcount_stack_1_6]
+        __idx_tripcount_stack_1_8 = (prefix_tripcount_stack_1[(i_level - 1) + 1] + (max(0, div(nu1 - 1, 1) + 1) + 1)) + 1
+        nc = tripcount_stack[__idx_tripcount_stack_1_8]
         for j = nc:-1:1
             jf = j * 2
             __idx_f_stack_1_0 = prefix_f_stack_1[(i_level - 1) + 1] + ((j - 1) + 1)
             f[j, i_level + 1] = f_stack[__idx_f_stack_1_0]
-            __cse_7 = fb[j, i_level + 1]
-            __cse_8 = 0.25__cse_7
-            rb[jf - 1, i_level] = rb[jf - 1, i_level] + __cse_8
-            rb[jf, i_level] = rb[jf, i_level] + 0.5__cse_7
-            rb[jf + 1, i_level] = rb[jf + 1, i_level] + __cse_8
+            __oldb_2 = fb[j, i_level + 1]
             fb[j, i_level + 1] = 0.0
+            __cse_34 = 0.25__oldb_2
+            rb[jf - 1, i_level] = rb[jf - 1, i_level] + __cse_34
+            rb[jf, i_level] = rb[jf, i_level] + 0.5__oldb_2
+            rb[jf + 1, i_level] = rb[jf + 1, i_level] + __cse_34
         end
-        __idx_tripcount_stack_1_9 = (prefix_tripcount_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1)) + 1
-        n = tripcount_stack[__idx_tripcount_stack_1_9]
+        __idx_tripcount_stack_1_11 = (prefix_tripcount_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1)) + 1
+        n = tripcount_stack[__idx_tripcount_stack_1_11]
         for j = n:-1:1
-            __idx_left_stack_1_0 = (prefix_left_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            __icse_35 = max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+            __icse_36 = max(0, div(nu1 - 1, 1) + 1) * __icse_35
+            __icse_37 = (j - 1) + 1
+            __idx_left_stack_1_0 = (prefix_left_stack_1[(i_level - 1) + 1] + __icse_36) + __icse_37
             left = left_stack[__idx_left_stack_1_0]
-            __idx_right_stack_1_2 = (prefix_right_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            __idx_right_stack_1_2 = (prefix_right_stack_1[(i_level - 1) + 1] + __icse_36) + __icse_37
             right = right_stack[__idx_right_stack_1_2]
-            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_level - 1) + 1] + ((max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_level - 1) + 1] + ((__icse_36 + __icse_36) + __icse_35)) + __icse_37
             __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
             right = 0.0
             if __branch_pre_4 == 1
@@ -467,7 +509,8 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             else
                 right = 0.0
             end
-            __idx_branch_stack_1_8 = (prefix_branch_stack_1[(i_level - 1) + 1] + (max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1))) + ((j - 1) + 1)
+            __icse_38 = max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+            __idx_branch_stack_1_8 = (prefix_branch_stack_1[(i_level - 1) + 1] + (__icse_38 + __icse_38)) + ((j - 1) + 1)
             __branch_pre_2 = branch_stack[__idx_branch_stack_1_8]
             left = 0.0
             if __branch_pre_2 == 1
@@ -477,24 +520,26 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             end
             __idx_r_stack_1_0 = prefix_r_stack_1[(i_level - 1) + 1] + ((j - 1) + 1)
             r[j, i_level] = r_stack[__idx_r_stack_1_0]
-            __cse_9 = rb[j, i_level]
-            fb[j, i_level] = fb[j, i_level] + __cse_9
-            __cse_10 = -__cse_9
-            __cse_11 = (1.0 / hl2) * __cse_10
-            ub[j, i_level] = ub[j, i_level] + 2.0__cse_11
-            __cse_12 = -__cse_11
-            leftb = leftb + __cse_12
-            rightb = rightb + __cse_12
-            hl2b = hl2b + -(((2.0 * u[j, i_level] - left) - right) / hl2 ^ 2) * __cse_10
+            __oldb_2 = rb[j, i_level]
             rb[j, i_level] = 0.0
+            fb[j, i_level] = fb[j, i_level] + __oldb_2
+            __cse_39 = -__oldb_2
+            __cse_40 = (1.0 / hl2) * __cse_39
+            ub[j, i_level] = ub[j, i_level] + 2.0__cse_40
+            __cse_41 = -__cse_40
+            leftb = leftb + __cse_41
+            rightb = rightb + __cse_41
+            hl2b = hl2b + -(((2.0 * u[j, i_level] - left) - right) / hl2 ^ 2) * __cse_39
             if __branch_pre_4 == 1
-                ub[j + 1, i_level] = ub[j + 1, i_level] + rightb
+                __oldb_0 = rightb
                 rightb = 0.0
+                ub[j + 1, i_level] = ub[j + 1, i_level] + __oldb_0
             end
             rightb = 0.0
             if __branch_pre_2 == 1
-                ub[j - 1, i_level] = ub[j - 1, i_level] + leftb
+                __oldb_0 = leftb
                 leftb = 0.0
+                ub[j - 1, i_level] = ub[j - 1, i_level] + __oldb_0
             end
             leftb = 0.0
         end
@@ -502,11 +547,13 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
             __idx_tripcount_stack_1_0 = prefix_tripcount_stack_1[(i_level - 1) + 1] + ((i_k - 1) + 1)
             n = tripcount_stack[__idx_tripcount_stack_1_0]
             for i_j = n:-1:1
-                __idx_left_stack_1_0 = prefix_left_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __icse_42 = div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1
+                __icse_43 = ((i_k - 1) * __icse_42 + (i_j - 1)) + 1
+                __idx_left_stack_1_0 = prefix_left_stack_1[(i_level - 1) + 1] + __icse_43
                 left = left_stack[__idx_left_stack_1_0]
-                __idx_right_stack_1_2 = prefix_right_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_right_stack_1_2 = prefix_right_stack_1[(i_level - 1) + 1] + __icse_43
                 right = right_stack[__idx_right_stack_1_2]
-                __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)) + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, __icse_42)) + __icse_43
                 __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
                 right = 0.0
                 if __branch_pre_4 == 1
@@ -524,33 +571,38 @@ function mg_vcycle_b(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2, 
                 end
                 __idx_u_stack_1_0 = prefix_u_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
                 u[i_j, i_level] = u_stack[__idx_u_stack_1_0]
-                __cse_13 = 0.5 * ub[i_j, i_level]
-                hl2b = hl2b + f[i_j, i_level] * __cse_13
-                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_13
-                leftb = leftb + __cse_13
-                rightb = rightb + __cse_13
+                __oldb_2 = ub[i_j, i_level]
                 ub[i_j, i_level] = 0.0
+                __cse_44 = 0.5__oldb_2
+                hl2b = hl2b + f[i_j, i_level] * __cse_44
+                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_44
+                leftb = leftb + __cse_44
+                rightb = rightb + __cse_44
                 if __branch_pre_4 == 1
-                    ub[i_j + 1, i_level] = ub[i_j + 1, i_level] + rightb
+                    __oldb_0 = rightb
                     rightb = 0.0
+                    ub[i_j + 1, i_level] = ub[i_j + 1, i_level] + __oldb_0
                 end
                 rightb = 0.0
                 if __branch_pre_2 == 1
-                    ub[i_j - 1, i_level] = ub[i_j - 1, i_level] + leftb
+                    __oldb_0 = leftb
                     leftb = 0.0
+                    ub[i_j - 1, i_level] = ub[i_j - 1, i_level] + __oldb_0
                 end
                 leftb = 0.0
             end
         end
         __idx_hl2_stack_1_0 = prefix_hl2_stack_1[(i_level - 1) + 1] + 1
         hl2 = hl2_stack[__idx_hl2_stack_1_0]
-        __cse_14 = hl * hl2b
-        hlb = hlb + __cse_14
-        hlb = hlb + __cse_14
+        __oldb_2 = hl2b
         hl2b = 0.0
+        __cse_45 = hl * __oldb_2
+        hlb = hlb + __cse_45
+        hlb = hlb + __cse_45
     end
-    h1b = h1b + hlb
+    __oldb_0 = hlb
     hlb = 0.0
+    h1b = h1b + __oldb_0
     return h1b
 end
 

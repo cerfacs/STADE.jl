@@ -46,9 +46,10 @@ function cellscatter_b(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i_
                 cell_volb[i_cell] = cell_volb[i_cell] + (auxu + up[i_lnode]) * __cse_1
             end
             for i_loc = 1:4
-                i_lnode = i_cell_to_node[i_loc, i_cell]
+                __icse_3 = i_cell_to_node[i_loc, i_cell]
+                i_lnode = __icse_3
                 auxu = auxu + up[i_lnode]
-                i_lnode = i_cell_to_node[i_loc, i_cell]
+                i_lnode = __icse_3
                 upb[i_lnode] = upb[i_lnode] + auxub
             end
             auxub = 0.0

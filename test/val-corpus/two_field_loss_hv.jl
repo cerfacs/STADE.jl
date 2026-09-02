@@ -4,14 +4,14 @@ end
 
 function two_field_loss_hv(loss, lossb, u, ub, v, vb, p, pb, q, qb, i_n, lossd, lossbd, ud, ubd, vd, vbd, pd, pbd, qd, qbd)
     for i_x = 1:i_n
-        __cse_1 = u[i_x]
-        pd[i_x] = (2__cse_1) * ud[i_x]
-        p[i_x] = __cse_1 ^ 2
+        __hcse_0 = u[i_x]
+        pd[i_x] = (2__hcse_0) * ud[i_x]
+        p[i_x] = __hcse_0 ^ 2
     end
     for i_x = 1:i_n
-        __cse_2 = v[i_x]
-        qd[i_x] = (3 * __cse_2 ^ 2) * vd[i_x]
-        q[i_x] = __cse_2 ^ 3
+        __hcse_1 = v[i_x]
+        qd[i_x] = (3 * __hcse_1 ^ 2) * vd[i_x]
+        q[i_x] = __hcse_1 ^ 3
     end
     for i_x2 = 1:i_n
         lossd[1] = (lossd[1] + pd[i_x2]) + qd[i_x2]
@@ -26,21 +26,23 @@ function two_field_loss_hv(loss, lossb, u, ub, v, vb, p, pb, q, qb, i_n, lossd, 
         qb[i_x2] = qb[i_x2] + __cse_0
     end
     for i_x = i_n:-1:1
-        __cse_3 = qb[i_x]
-        __cse_4 = v[i_x]
-        __cse_5 = 3 * __cse_4 ^ 2
-        vbd[i_x] = vbd[i_x] + (__cse_3 * (3 * ((2__cse_4) * vd[i_x])) + __cse_5 * qbd[i_x])
-        vb[i_x] = vb[i_x] + __cse_5 * __cse_3
+        __oldb_0d = qbd[i_x]
+        __oldb_0 = qb[i_x]
         qbd[i_x] = 0.0
         qb[i_x] = 0.0
+        __hcse_2 = v[i_x]
+        __hcse_3 = 3 * __hcse_2 ^ 2
+        vbd[i_x] = vbd[i_x] + (__oldb_0 * (3 * ((2__hcse_2) * vd[i_x])) + __hcse_3 * __oldb_0d)
+        vb[i_x] = vb[i_x] + __hcse_3 * __oldb_0
     end
     for i_x = i_n:-1:1
-        __cse_6 = pb[i_x]
-        __cse_7 = 2 * u[i_x]
-        ubd[i_x] = ubd[i_x] + (__cse_6 * (2 * ud[i_x]) + __cse_7 * pbd[i_x])
-        ub[i_x] = ub[i_x] + __cse_7 * __cse_6
+        __oldb_0d = pbd[i_x]
+        __oldb_0 = pb[i_x]
         pbd[i_x] = 0.0
         pb[i_x] = 0.0
+        __hcse_4 = 2 * u[i_x]
+        ubd[i_x] = ubd[i_x] + (__oldb_0 * (2 * ud[i_x]) + __hcse_4 * __oldb_0d)
+        ub[i_x] = ub[i_x] + __hcse_4 * __oldb_0
     end
     return nothing
 end

@@ -23,6 +23,15 @@ statement writes any variable `rhs` reads, every later read of `__cse_N` is a vi
 name can never be read across a loop header or out of a branch. A read with no definition ahead of
 it in the same run is reported.
 
+**The shadow invariant (HVP only).** `emit_cse_stmts` runs twice on an HVP body. The `__cse_*`
+temporaries are bound before `hvp_double_body` and so must each be given a second-order shadow;
+without one, `hvp_tangent_expr` resolves the name to the literal 0.0 and every second-order term
+flowing through it is silently dropped. The `__hcse_*` temporaries are bound after doubling, when
+nothing differentiates the body again, and must NOT have one. The check: if a `__cse_N`'s defining
+expression reads anything that itself has a shadow in this body, `__cse_Nd` has to be defined too.
+The escape clause is what keeps this sound -- a temporary whose inputs are all shadowless has a zero
+tangent and correctly gets no shadow.
+
     cd test && julia validate_cse.jl
 """
 function validate_cse(dir::String = joinpath(@__DIR__, "val-corpus"))
@@ -41,6 +50,7 @@ function validate_cse(dir::String = joinpath(@__DIR__, "val-corpus"))
             problems = String[]
             bound = Int[0]
             check_block!(expr.args[2].args, problems, bound)
+            mode == :hvp && check_shadows!(expr, problems)
             checks += 1
             if isempty(problems)
                 println(rpad("$(name) [$(mode)]", 32), " ok  ", lpad(bound[1], 4), " temporaries")
@@ -146,6 +156,67 @@ function check_block!(stmts, problems, bound)
         end
     end
     check_run!(run, problems, bound)
+    return nothing
+end
+
+# Every name the body brings into existence: its parameters and everything it assigns to.
+function defined_names(fexpr)
+    acc = Set{Symbol}()
+    for a in fexpr.args[1].args[2:end]
+        a isa Symbol && push!(acc, a)
+    end
+    collect_targets!(fexpr.args[2], acc)
+    return acc
+end
+
+function collect_targets!(e, acc)
+    if e isa Expr
+        if e.head == :(=)
+            lhs = e.args[1]
+            lhs isa Symbol && push!(acc, lhs)
+            lhs isa Expr && lhs.head == :ref && lhs.args[1] isa Symbol && push!(acc, lhs.args[1])
+        end
+        for a in e.args
+            collect_targets!(a, acc)
+        end
+    end
+    return nothing
+end
+
+# tgen_shadow appends "d" to a variable; hvp_stack_shadow appends "_d" to a STACK. The two spellings
+# are not interchangeable: accepting "_d" for an ordinary variable made this predicate report that
+# transformer's `n` was differentiable, on the strength of an unrelated kernel scalar named `n_d`
+# (which is n * d). That is a false positive, and a guard that fires for the wrong reason is worse
+# than one that does not fire -- it invites a real defect to be explained away as noise.
+has_shadow(v, defined) =
+    endswith(string(v), "_stack") ? Symbol(string(v) * "_d") in defined :
+                                    Symbol(string(v) * "d") in defined
+
+# `__cse_0` is bound before doubling and needs a shadow; `__cse_0d` IS that shadow and must not be
+# mistaken for another temporary owing one.
+is_pre_double_temp(x) = x isa Symbol && occursin(r"^__cse_\d+$", string(x))
+
+function check_shadows!(fexpr, problems)
+    defined = defined_names(fexpr)
+    defs = Dict{Symbol,Set{Symbol}}()
+    collect_temp_defs!(fexpr.args[2], defs)
+    for (v, srcs) in defs
+        any(has_shadow(x, defined) for x in srcs) || continue
+        has_shadow(v, defined) && continue
+        push!(problems, "$(v) has a differentiable definition but no second-order shadow")
+    end
+    return nothing
+end
+
+function collect_temp_defs!(e, defs)
+    if e isa Expr
+        if e.head == :(=) && is_pre_double_temp(e.args[1])
+            defs[e.args[1]] = reads_of!(e.args[2], Set{Symbol}())
+        end
+        for a in e.args
+            collect_temp_defs!(a, defs)
+        end
+    end
     return nothing
 end
 

@@ -25,8 +25,9 @@ function relu_field_b(loss, lossb, u, ub, v, vb, i_n, branch_stack)
         __idx_branch_stack_0 = (i_x - 1) + 1
         __branch = branch_stack[__idx_branch_stack_0]
         if __branch == 1
-            ub[i_x] = ub[i_x] + (2 * u[i_x]) * vb[i_x]
+            __oldb_0 = vb[i_x]
             vb[i_x] = 0.0
+            ub[i_x] = ub[i_x] + (2 * u[i_x]) * __oldb_0
         else
             vb[i_x] = 0.0
         end

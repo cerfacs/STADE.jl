@@ -23,8 +23,9 @@ function clamped_sumsq_b(loss, lossb, u, ub, i_n, branch_stack)
         __idx_branch_stack_1 = (i_x - 1) + 1
         __branch = branch_stack[__idx_branch_stack_1]
         if __branch == 1
-            ub[i_x] = ub[i_x] + (2 * u[i_x]) * wb
+            __oldb_0 = wb
             wb = 0.0
+            ub[i_x] = ub[i_x] + (2 * u[i_x]) * __oldb_0
         else
             wb = 0.0
         end

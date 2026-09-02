@@ -25,17 +25,19 @@ function ii_kill_b(x, xb, u, ub, i_n, i_w0, out, outb, acc, accb, v_stack)
     vb = vb + __cse_2
     vb = vb + __cse_2
     for i_j = w:-1:1
-        __cse_3 = u[i_j] * vb
-        ub[i_j] = ub[i_j] + __cse_3
-        ub[i_j] = ub[i_j] + __cse_3
+        __oldb_0 = vb
         vb = 0.0
+        __cse_3 = u[i_j] * __oldb_0
+        ub[i_j] = ub[i_j] + __cse_3
+        ub[i_j] = ub[i_j] + __cse_3
     end
     for i_i = i_n:-1:1
         vb = vb + accb[i_i]
-        __cse_4 = x[i_i] * vb
-        xb[i_i] = xb[i_i] + __cse_4
-        xb[i_i] = xb[i_i] + __cse_4
+        __oldb_0 = vb
         vb = 0.0
+        __cse_4 = x[i_i] * __oldb_0
+        xb[i_i] = xb[i_i] + __cse_4
+        xb[i_i] = xb[i_i] + __cse_4
     end
     vb = 0.0
     return nothing

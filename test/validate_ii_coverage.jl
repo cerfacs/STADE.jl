@@ -34,6 +34,13 @@ function validate_ii_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
         "bnd_nested_only" => 0, "bnd_readfirst" => 1, "branchsel" => 0,
         "cascadic_mg_prolong" => 0, "cellscatter" => 1, "clamped_sumsq" => 0,
         "coarsen_retire" => 0, "cond_field_choice" => 0, "cond_loop_choice" => 0,
+        # CSE coverage kernels. cse_branch's row loop is iteration-independent and
+        # classifies; the other two are sequential (a retiring window, a ragged
+        # accumulator) and correctly classify nothing.
+        "cse_branch" => 1, "cse_zerotrip" => 0, "cse_intoffset" => 0,
+        # gather_alias's loop is sequential -- it reads y at a gathered index an earlier
+        # iteration may have written -- so nothing here is eligible for fusion.
+        "gather_alias" => 0,
         "dotprod" => 0, "fixed_sweeps" => 0, "geomrecur" => 0,
         "halo_assembly" => 0,
         "entry_branch" => 0, "entry_dead" => 2, "entry_empty" => 0,

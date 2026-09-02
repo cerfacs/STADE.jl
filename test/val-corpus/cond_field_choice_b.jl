@@ -24,13 +24,15 @@ function cond_field_choice_b(loss, lossb, u, ub, v, vb, w, wb, i_branch, i_n, br
     __branch = branch_stack[1]
     if __branch == 1
         for i_x = i_n:-1:1
-            ub[i_x] = ub[i_x] + (2 * u[i_x]) * wb[i_x]
+            __oldb_0 = wb[i_x]
             wb[i_x] = 0.0
+            ub[i_x] = ub[i_x] + (2 * u[i_x]) * __oldb_0
         end
     else
         for i_x = i_n:-1:1
-            vb[i_x] = vb[i_x] + (2 * v[i_x]) * wb[i_x]
+            __oldb_0 = wb[i_x]
             wb[i_x] = 0.0
+            vb[i_x] = vb[i_x] + (2 * v[i_x]) * __oldb_0
         end
     end
     return nothing

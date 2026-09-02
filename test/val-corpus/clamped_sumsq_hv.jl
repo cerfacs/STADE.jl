@@ -12,9 +12,9 @@ function clamped_sumsq_hv(loss, lossb, u, ub, i_n, lossd, lossbd, ud, ubd, branc
         if u[i_x] > 0.0
             __idx_branch_stack_0 = (i_x - 1) + 1
             branch_stack[__idx_branch_stack_0] = 1
-            __cse_0 = u[i_x]
-            wd = (2__cse_0) * ud[i_x]
-            w = __cse_0 ^ 2
+            __hcse_0 = u[i_x]
+            wd = (2__hcse_0) * ud[i_x]
+            w = __hcse_0 ^ 2
         else
             __idx_branch_stack_0 = (i_x - 1) + 1
             branch_stack[__idx_branch_stack_0] = 0
@@ -30,11 +30,13 @@ function clamped_sumsq_hv(loss, lossb, u, ub, i_n, lossd, lossbd, ud, ubd, branc
         __idx_branch_stack_1 = (i_x - 1) + 1
         __branch = branch_stack[__idx_branch_stack_1]
         if __branch == 1
-            __cse_1 = 2 * u[i_x]
-            ubd[i_x] = ubd[i_x] + (wb * (2 * ud[i_x]) + __cse_1 * wbd)
-            ub[i_x] = ub[i_x] + __cse_1 * wb
+            __oldb_0d = wbd
+            __oldb_0 = wb
             wbd = 0.0
             wb = 0.0
+            __hcse_1 = 2 * u[i_x]
+            ubd[i_x] = ubd[i_x] + (__oldb_0 * (2 * ud[i_x]) + __hcse_1 * __oldb_0d)
+            ub[i_x] = ub[i_x] + __hcse_1 * __oldb_0
         else
             wbd = 0.0
             wb = 0.0

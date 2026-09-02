@@ -71,9 +71,10 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
                 branch_stack[__idx_branch_stack_1_0] = 0
             end
             u[i_j] = 0.5 * (dx2 * f[i_j] + left + right)
-            __idx_left_stack_1_5 = prefix_left_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
+            __icse_0 = (i_j - 1) + 1
+            __idx_left_stack_1_5 = prefix_left_stack_1[(i_pass - 1) + 1] + __icse_0
             left_stack[__idx_left_stack_1_5] = left
-            __idx_right_stack_1_7 = prefix_right_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
+            __idx_right_stack_1_7 = prefix_right_stack_1[(i_pass - 1) + 1] + __icse_0
             right_stack[__idx_right_stack_1_7] = right
         end
     end
@@ -81,11 +82,12 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
         __idx_tripcount_stack_1_0 = prefix_tripcount_stack_1[(i_pass - 1) + 1] + 1
         w = tripcount_stack[__idx_tripcount_stack_1_0]
         for i_j = w:-1:1
-            __idx_left_stack_1_0 = prefix_left_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
+            __icse_1 = (i_j - 1) + 1
+            __idx_left_stack_1_0 = prefix_left_stack_1[(i_pass - 1) + 1] + __icse_1
             left = left_stack[__idx_left_stack_1_0]
-            __idx_right_stack_1_2 = prefix_right_stack_1[(i_pass - 1) + 1] + ((i_j - 1) + 1)
+            __idx_right_stack_1_2 = prefix_right_stack_1[(i_pass - 1) + 1] + __icse_1
             right = right_stack[__idx_right_stack_1_2]
-            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_pass - 1) + 1] + (1 + max(0, div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + ((i_j - 1) + 1)
+            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_pass - 1) + 1] + (1 + max(0, div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + __icse_1
             __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
             right = 0.0
             if __branch_pre_4 == 1
@@ -101,20 +103,23 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
             else
                 left = 0.0
             end
-            __cse_0 = 0.5 * ub[i_j]
-            dx2b = dx2b + f[i_j] * __cse_0
-            fb[i_j] = fb[i_j] + dx2 * __cse_0
-            leftb = leftb + __cse_0
-            rightb = rightb + __cse_0
+            __oldb_0 = ub[i_j]
             ub[i_j] = 0.0
+            __cse_2 = 0.5__oldb_0
+            dx2b = dx2b + f[i_j] * __cse_2
+            fb[i_j] = fb[i_j] + dx2 * __cse_2
+            leftb = leftb + __cse_2
+            rightb = rightb + __cse_2
             if __branch_pre_4 == 1
-                ub[i_j + 1] = ub[i_j + 1] + rightb
+                __oldb_0 = rightb
                 rightb = 0.0
+                ub[i_j + 1] = ub[i_j + 1] + __oldb_0
             end
             rightb = 0.0
             if __branch_pre_2 == 1
-                ub[i_j - 1] = ub[i_j - 1] + leftb
+                __oldb_0 = leftb
                 leftb = 0.0
+                ub[i_j - 1] = ub[i_j - 1] + __oldb_0
             end
             leftb = 0.0
         end
@@ -123,10 +128,11 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
         if __branch == 1
         end
     end
-    __cse_1 = dx * dx2b
-    dxb = dxb + __cse_1
-    dxb = dxb + __cse_1
+    __oldb_0 = dx2b
     dx2b = 0.0
+    __cse_3 = dx * __oldb_0
+    dxb = dxb + __cse_3
+    dxb = dxb + __cse_3
     return (dxb, nb)
 end
 

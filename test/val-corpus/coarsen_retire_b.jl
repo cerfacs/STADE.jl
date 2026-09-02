@@ -37,27 +37,30 @@ function coarsen_retire_b(x, xb, y, yb, n, levels, out, outb, tripcount_stack, t
         t_stack[__idx_t_stack_1_4] = t
     end
     out[1] = y[1]
-    __idx_t_stack_3 = __tot_t_stack_1 + 1
+    __icse_1 = __tot_t_stack_1 + 1
+    __idx_t_stack_3 = __icse_1
     t_stack[__idx_t_stack_3] = t
-    __idx_t_stack_0 = __tot_t_stack_1 + 1
+    __idx_t_stack_0 = __icse_1
     t = t_stack[__idx_t_stack_0]
-    yb[1] = yb[1] + outb[1]
+    __oldb_0 = outb[1]
     outb[1] = 0.0
+    yb[1] = yb[1] + __oldb_0
     for i_l = levels:-1:1
         __idx_t_stack_1_0 = (prefix_t_stack_1[(i_l - 1) + 1] + max(0, div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1)) + 1
         t = t_stack[__idx_t_stack_1_0]
         __idx_tripcount_stack_1_2 = prefix_tripcount_stack_1[(i_l - 1) + 1] + 1
         cur = tripcount_stack[__idx_tripcount_stack_1_2]
         for i = cur:-1:1
-            __cse_1 = t * yb[i]
-            tb = tb + __cse_1
-            tb = tb + __cse_1
+            __cse_2 = t * yb[i]
+            tb = tb + __cse_2
+            tb = tb + __cse_2
             __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + ((i - 1) + 1)
             t = t_stack[__idx_t_stack_1_0]
-            __cse_2 = x[i] * tb
-            xb[i] = xb[i] + __cse_2
-            xb[i] = xb[i] + __cse_2
+            __oldb_2 = tb
             tb = 0.0
+            __cse_3 = x[i] * __oldb_2
+            xb[i] = xb[i] + __cse_3
+            xb[i] = xb[i] + __cse_3
         end
     end
     return nothing

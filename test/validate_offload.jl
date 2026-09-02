@@ -55,6 +55,16 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "cellscatter" => 3,
         "clamped_sumsq" => 0, "coarsen_retire" => 4, "cond_field_choice" => 0,
         "cond_loop_choice" => 0, "dotprod" => 0,
+    # CSE coverage kernels, at the loop counts they reach today. cse_branch and
+    # cse_intoffset keep only their row loops on the host. cse_zerotrip keeps 6 of 7,
+    # the same shape as entry_empty (7): its window is a runtime scalar reassigned each
+    # pass, so cgen_last_assign_is_zero cannot prove the zeroing write happens and
+    # declines to split. Each kernel's HVP matches its adjoint, which is the property
+    # this file exists to hold.
+        "cse_branch" => 1, "cse_zerotrip" => 6, "cse_intoffset" => 2,
+    # gather_alias keeps all three of its loops on the host: the gathered read makes the sweep
+    # sequential, so cgen_ cannot split it, and the stack-init loop goes with it.
+        "gather_alias" => 3,
     # entry_empty and mpnn sit one or two loops above what they reached before
     # cgen_last_assign_is_zero started requiring the zeroing write to be GUARANTEED. For
     # entry_empty the split it gave up was unsafe: the shadow is zeroed inside a loop that

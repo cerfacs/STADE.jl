@@ -48,31 +48,38 @@ function richardson_substep_b(y_init, y_initb, out, outb, a_coef, a_coefb, dt_st
         __idx_y_stack_1_9 = (prefix_y_stack_1[(i_stage - 1) + 1] + max(0, div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1)) + 1
         y_stack[__idx_y_stack_1_9] = y
     end
-    __idx_h_stack_2 = __tot_h_stack_1 + 1
+    __icse_0 = __tot_h_stack_1 + 1
+    __idx_h_stack_2 = __icse_0
     h_stack[__idx_h_stack_2] = h
-    __idx_h_stack_0 = __tot_h_stack_1 + 1
+    __idx_h_stack_0 = __icse_0
     h = h_stack[__idx_h_stack_0]
     for i_stage = num_stages:-1:1
         __idx_y_stack_1_0 = (prefix_y_stack_1[(i_stage - 1) + 1] + max(0, div(val_nsub_1[(i_stage - 1) + 1] - 1, 1) + 1)) + 1
         y = y_stack[__idx_y_stack_1_0]
-        yb = yb + outb[i_stage]
+        __oldb_0 = outb[i_stage]
         outb[i_stage] = 0.0
-        __idx_tripcount_stack_1_4 = prefix_tripcount_stack_1[(i_stage - 1) + 1] + 1
-        nsub = tripcount_stack[__idx_tripcount_stack_1_4]
+        yb = yb + __oldb_0
+        __idx_tripcount_stack_1_5 = prefix_tripcount_stack_1[(i_stage - 1) + 1] + 1
+        nsub = tripcount_stack[__idx_tripcount_stack_1_5]
         for i_sub = nsub:-1:1
             __idx_y_stack_1_0 = prefix_y_stack_1[(i_stage - 1) + 1] + ((i_sub - 1) + 1)
             y = y_stack[__idx_y_stack_1_0]
-            __cse_0 = -yb
-            hb = hb + (a_coef * y) * __cse_0
-            a_coefb = a_coefb + (h * y) * __cse_0
-            yb = yb + (h * a_coef) * __cse_0
+            __oldb_2 = yb
+            yb = 0.0
+            yb = yb + __oldb_2
+            __cse_1 = -__oldb_2
+            hb = hb + (a_coef * y) * __cse_1
+            a_coefb = a_coefb + (h * y) * __cse_1
+            yb = yb + (h * a_coef) * __cse_1
         end
-        y_initb = y_initb + yb
+        __oldb_0 = yb
         yb = 0.0
+        y_initb = y_initb + __oldb_0
         __idx_h_stack_1_0 = prefix_h_stack_1[(i_stage - 1) + 1] + 1
         h = h_stack[__idx_h_stack_1_0]
-        dt_stageb = dt_stageb + (1.0 / nsub) * hb
+        __oldb_2 = hb
         hb = 0.0
+        dt_stageb = dt_stageb + (1.0 / nsub) * __oldb_2
     end
     return (y_initb, a_coefb, dt_stageb)
 end

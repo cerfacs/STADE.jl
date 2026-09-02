@@ -14,12 +14,14 @@ function prefixscan_b(loss, lossb, y, yb, x, xb, n)
         yb[i_j] = yb[i_j] + lossb[1]
     end
     for i_k = n:-1:2
-        yb[i_k - 1] = yb[i_k - 1] + yb[i_k]
-        xb[i_k] = xb[i_k] + yb[i_k]
+        __oldb_0 = yb[i_k]
         yb[i_k] = 0.0
+        yb[i_k - 1] = yb[i_k - 1] + __oldb_0
+        xb[i_k] = xb[i_k] + __oldb_0
     end
-    xb[1] = xb[1] + yb[1]
+    __oldb_0 = yb[1]
     yb[1] = 0.0
+    xb[1] = xb[1] + __oldb_0
     return nothing
 end
 

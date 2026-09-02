@@ -18,10 +18,10 @@ function geomrecur_b(loss, lossb, u, ub, c, cb, i_n, u_stack)
     for i_x = i_n:-1:2
         __idx_u_stack_0 = (i_x - 2) + 1
         u[i_x] = u_stack[__idx_u_stack_0]
-        __cse_0 = ub[i_x]
-        cb = cb + u[i_x - 1] * __cse_0
-        ub[i_x - 1] = ub[i_x - 1] + c * __cse_0
+        __oldb_2 = ub[i_x]
         ub[i_x] = 0.0
+        cb = cb + u[i_x - 1] * __oldb_2
+        ub[i_x - 1] = ub[i_x - 1] + c * __oldb_2
     end
     return cb
 end

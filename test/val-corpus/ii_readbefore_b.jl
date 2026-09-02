@@ -17,37 +17,42 @@ function ii_readbefore_b(x, xb, i_n, i_m, out, outb, s_stack)
             s = s + x[i_j] * x[i_i]
         end
         out[i_i] = out[i_i] + s * s
-        __idx_s_stack_5 = (max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)
+        __icse_1 = max(0, div(i_n - 1, 1) + 1)
+        __idx_s_stack_5 = (__icse_1 + __icse_1 * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)
         s_stack[__idx_s_stack_5] = s
     end
-    __idx_s_stack_3 = ((max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + max(0, div(i_n - 1, 1) + 1)) + 1
+    __icse_2 = max(0, div(i_n - 1, 1) + 1)
+    __icse_3 = ((__icse_2 + __icse_2 * max(0, div(i_m - 1, 1) + 1)) + __icse_2) + 1
+    __idx_s_stack_3 = __icse_3
     s_stack[__idx_s_stack_3] = s
-    __idx_s_stack_0 = ((max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + max(0, div(i_n - 1, 1) + 1)) + 1
+    __idx_s_stack_0 = __icse_3
     s = s_stack[__idx_s_stack_0]
     for i_i = i_n:-1:1
-        __idx_s_stack_0 = (max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1) * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)
+        __icse_4 = max(0, div(i_n - 1, 1) + 1)
+        __idx_s_stack_0 = (__icse_4 + __icse_4 * max(0, div(i_m - 1, 1) + 1)) + ((i_i - 1) + 1)
         s = s_stack[__idx_s_stack_0]
-        __cse_1 = s * outb[i_i]
-        sb = sb + __cse_1
-        sb = sb + __cse_1
+        __cse_5 = s * outb[i_i]
+        sb = sb + __cse_5
+        sb = sb + __cse_5
         for i_j = 1:i_m
-            __cse_2 = x[i_j]
-            __cse_3 = x[i_i]
-            s = s + __cse_2 * __cse_3
-            xb[i_j] = xb[i_j] + __cse_3 * sb
-            xb[i_i] = xb[i_i] + __cse_2 * sb
+            __cse_6 = x[i_j]
+            __cse_7 = x[i_i]
+            s = s + __cse_6 * __cse_7
+            xb[i_j] = xb[i_j] + __cse_7 * sb
+            xb[i_i] = xb[i_i] + __cse_6 * sb
         end
         __idx_s_stack_0 = (i_i - 1) + 1
         s = s_stack[__idx_s_stack_0]
         sb = 0.0
     end
-    __cse_4 = s * outb[1]
-    sb = sb + __cse_4
-    sb = sb + __cse_4
-    __cse_5 = x[1] * sb
-    xb[1] = xb[1] + __cse_5
-    xb[1] = xb[1] + __cse_5
+    __cse_8 = s * outb[1]
+    sb = sb + __cse_8
+    sb = sb + __cse_8
+    __oldb_0 = sb
     sb = 0.0
+    __cse_9 = x[1] * __oldb_0
+    xb[1] = xb[1] + __cse_9
+    xb[1] = xb[1] + __cse_9
     return nothing
 end
 
