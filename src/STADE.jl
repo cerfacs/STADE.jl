@@ -1525,10 +1525,10 @@ end
 # lets a kernel call) plus array reads. Everything else -- push!, pop!, sizehint!, Vector{...} --
 # falls outside, which is what keeps a stack pop, whose two evaluations return DIFFERENT values,
 # from ever being treated as a repeated expression.
-emit_cse_candidate(e, ctx) = e isa Expr &&
+emit_cse_candidate(e, ctx, in_index) = e isa Expr &&
     ((e.head == :call && !isempty(e.args) && e.args[1] isa Symbol && e.args[1] in ctx.pure) ||
      (e.head == :ref && !isempty(e.args) && e.args[1] isa Symbol)) &&
-    emit_cse_touches_float(e, ctx)
+    emit_cse_bindable(e, ctx, in_index)
 
 # An integer-valued expression is deliberately never a candidate, even when it repeats. An index
 # formula like `i_x - 1` is where cgen_/jgen_ read the thread variable to decide which loops can be
@@ -1537,12 +1537,46 @@ emit_cse_candidate(e, ctx) = e isa Expr &&
 # subtraction. Every temporary this pass creates is float-valued, so a `__cse_*` read counts as
 # touching a float -- an hvp body goes through the pass twice and the second pass has to recognize
 # the first pass's names.
+function emit_cse_bindable(e, ctx, in_index)
+    emit_cse_touches_float(e, ctx) && return true
+    # Inside an array subscript nothing is bindable. A subscript is Int-valued, and its text is what
+    # cgen_/jgen_ pattern-match to decide thread mapping and atomics. Rewriting any part of one -- it
+    # was `2n_node_feat` inside `msg_input[in_off + 2n_node_feat + k]` -- stops cgen_ offloading
+    # mpnn's whole outer edge loop and leaves it launching six inner kernels from the host instead.
+    #
+    # This is the ONLY restriction integer expressions need. An earlier version also refused any
+    # expression mentioning a loop variable, on the theory that naming `i_x - 1` hides the thread
+    # variable. That theory was wrong: with subscripts left alone, allowing loop-variable-carrying
+    # expressions keeps validate_offload byte-identical to the pre-CSE run, and refusing them cost
+    # 4.4 percentage points of the saving.
+    in_index && return false
+    return true
+end
+
 function emit_cse_touches_float(e, ctx)
     for v in emit_cse_reads!(e, Set{Symbol}())
-        (v in ctx.floats || startswith(string(v), "__cse_")) && return true
+        (v in ctx.floats || emit_cse_is_float_temp(v)) && return true
     end
     return false
 end
+
+# Four prefixes, along two axes that both matter downstream.
+#
+# Float vs integer: a float temporary that is bound before doubling must be given a second-order
+# shadow, and an integer one must not -- `__icse_0 = div(n - 1, 1) + 1` has no tangent. Splitting
+# them is what lets validate_cse.jl state the shadow requirement as a rule rather than a guess.
+#
+# Before vs after doubling: an hvp body goes through this pass twice, and the second run must not
+# adopt, prune, or renumber the first run's names.
+# `__oldb_*` belongs here too: agen_backward_assign's captured incoming adjoint is float-valued, and
+# an expression whose only non-constant read is one of them would otherwise be classed as integer,
+# take the `__icse_` prefix, and be denied the second-order shadow it needs.
+emit_cse_is_float_temp(v) = v isa Symbol &&
+    (startswith(string(v), "__cse_") || startswith(string(v), "__hcse_") ||
+     startswith(string(v), "__oldb_"))
+
+emit_cse_is_temp(v) = v isa Symbol &&
+    (emit_cse_is_float_temp(v) || startswith(string(v), "__icse_") || startswith(string(v), "__ihcse_"))
 
 # Every variable an expression reads: bare symbols, and the NAME of any array it indexes.
 function emit_cse_reads!(e, acc)
@@ -1593,15 +1627,15 @@ end
 
 # Pass 1: count every candidate occurrence, keyed as above. Walks rvalue positions only -- an
 # assignment's target is a store, though the index expressions inside it are ordinary reads.
-function emit_cse_count!(e, gen, barrier, counts, ctx)
-    if emit_cse_candidate(e, ctx)
+function emit_cse_count!(e, gen, barrier, counts, ctx, in_index = false)
+    if emit_cse_candidate(e, ctx, in_index)
         key = emit_cse_key(e, gen, barrier)
         counts[key] = get(counts, key, 0) + 1
     end
     if e isa Expr
         start = (e.head == :call || e.head == :ref) ? 2 : 1
         for a in e.args[start:end]
-            emit_cse_count!(a, gen, barrier, counts, ctx)
+            emit_cse_count!(a, gen, barrier, counts, ctx, in_index || e.head == :ref)
         end
     end
     return nothing
@@ -1613,7 +1647,7 @@ function emit_cse_count_stmt!(s, gen, barrier, counts, ctx)
         lhs = s.args[1]
         if lhs isa Expr && lhs.head == :ref
             for a in lhs.args[2:end]
-                emit_cse_count!(a, gen, barrier, counts, ctx)
+                emit_cse_count!(a, gen, barrier, counts, ctx, true)
             end
         end
     else
@@ -1626,25 +1660,26 @@ end
 # are rewritten before their parent, but the parent's KEY is taken from the original expression --
 # otherwise a parent whose child got named would key differently in the two passes and never match.
 # Naming children first is also what puts `__cse_0 = -(ub[i_x])` ahead of the `__cse_1` that uses it.
-function emit_cse_rewrite(e, gen, barrier, counts, names, pending, counter, ctx)
-    emit_cse_candidate(e, ctx) || return emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx)
+function emit_cse_rewrite(e, gen, barrier, counts, names, pending, counter, ctx, in_index = false)
+    emit_cse_candidate(e, ctx, in_index) ||
+        return emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx, in_index)
     key = emit_cse_key(e, gen, barrier)
     haskey(names, key) && return names[key]
-    rebuilt = emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx)
+    rebuilt = emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx, in_index)
     get(counts, key, 0) > 1 || return rebuilt
-    tmp = Symbol("__cse_t", counter[])
+    tmp = Symbol(emit_cse_touches_float(e, ctx) ? ctx.fprefix : ctx.iprefix, "t", counter[])
     counter[] += 1
     push!(pending, Expr(:(=), tmp, rebuilt))
     names[key] = tmp
     return tmp
 end
 
-function emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx)
+function emit_cse_rewrite_args(e, gen, barrier, counts, names, pending, counter, ctx, in_index = false)
     e isa Expr || return e
     start = (e.head == :call || e.head == :ref) ? 2 : 1
     args = Any[e.args[1:(start - 1)]...]
     for a in e.args[start:end]
-        push!(args, emit_cse_rewrite(a, gen, barrier, counts, names, pending, counter, ctx))
+        push!(args, emit_cse_rewrite(a, gen, barrier, counts, names, pending, counter, ctx, in_index || e.head == :ref))
     end
     return Expr(e.head, args...)
 end
@@ -1654,7 +1689,7 @@ function emit_cse_rewrite_stmt(s, gen, barrier, counts, names, pending, counter,
         rhs = emit_cse_rewrite(s.args[2], gen, barrier, counts, names, pending, counter, ctx)
         lhs = s.args[1]
         if lhs isa Expr && lhs.head == :ref
-            lhs = emit_cse_rewrite_args(lhs, gen, barrier, counts, names, pending, counter, ctx)
+            lhs = emit_cse_rewrite_args(lhs, gen, barrier, counts, names, pending, counter, ctx, false)
         end
         return Expr(:(=), lhs, rhs)
     end
@@ -1664,7 +1699,7 @@ end
 # Counts references to each `__cse_*` name, reading positions only.
 function emit_cse_tally!(e, counts)
     if e isa Symbol
-        startswith(string(e), "__cse_") && (counts[e] = get(counts, e, 0) + 1)
+        emit_cse_is_temp(e) && (counts[e] = get(counts, e, 0) + 1)
     elseif e isa Expr
         if e.head == :(=)
             emit_cse_tally!(e.args[2], counts)
@@ -1677,12 +1712,17 @@ function emit_cse_tally!(e, counts)
     return nothing
 end
 
+# Only this pass's own prefix is pruned. An hvp body goes through the pass a second time after
+# doubling, and the `__cse_*` names and their `__cse_*d` shadows from the first pass are ordinary
+# variables to that second run -- folding one of them away is value-preserving but dissolves the
+# structure validate_cse.jl checks the shadow invariant against.
+#
 # A temporary loses uses to a LARGER one bound around it: `1.0 / dx` is named because it occurs
 # three times, then all three occurrences vanish into the single `(1.0 / dx) * -(ub[i_x])` that
 # replaces them. What is left with one use, or none, is folded back into that use and dropped, to a
 # fixpoint. Without this the pass would trade an operation for an assignment and emit a chain of
 # one-use names -- more lines than it started with, and no faster.
-function emit_cse_prune(stmts)
+function emit_cse_prune(stmts, prefixes)
     while true
         counts = Dict{Symbol,Int}()
         for s in stmts
@@ -1694,7 +1734,7 @@ function emit_cse_prune(stmts)
         for s in stmts
             s2 = isempty(subst) ? s : agen_substitute_vars(s, subst)
             if s2 isa Expr && s2.head == :(=) && s2.args[1] isa Symbol &&
-               startswith(string(s2.args[1]), "__cse_") && get(counts, s2.args[1], 0) <= 1
+               any(startswith(string(s2.args[1]), p) for p in prefixes) && get(counts, s2.args[1], 0) <= 1
                 subst[s2.args[1]] = s2.args[2]
                 removed = true
                 continue
@@ -1727,18 +1767,22 @@ function emit_cse_run(run, counter, ctx)
         push!(out, rewritten)
         emit_cse_apply_writes!(s, gen, barrier)
     end
-    return emit_cse_renumber(emit_cse_prune(out), counter)
+    return emit_cse_renumber(emit_cse_prune(out, ctx.prefixes), counter, ctx.prefixes)
 end
 
 # Pruning leaves holes in the numbering, since a name that was bound and then folded back still
 # consumed one. Survivors are renumbered in definition order after the fixpoint, so what reaches the
 # file runs 0, 1, 2, ... -- this output is meant to be read.
-function emit_cse_renumber(stmts, counter)
+function emit_cse_renumber(stmts, counter, prefixes)
     subst = Dict{Symbol,Any}()
     for s in stmts
-        if s isa Expr && s.head == :(=) && s.args[1] isa Symbol && startswith(string(s.args[1]), "__cse_t")
-            subst[s.args[1]] = Symbol("__cse_", counter[])
-            counter[] += 1
+        if s isa Expr && s.head == :(=) && s.args[1] isa Symbol
+            for p in prefixes
+                startswith(string(s.args[1]), p * "t") || continue
+                subst[s.args[1]] = Symbol(p, counter[])
+                counter[] += 1
+                break
+            end
         end
     end
     isempty(subst) && return stmts
@@ -1771,7 +1815,9 @@ function emit_cse_block(stmts, counter, ctx)
     return out
 end
 
-emit_cse_stmts(stmts, counter, floats) = emit_cse_block(stmts, counter, (pure = Set(keys(der_table())), floats = floats))
+emit_cse_stmts(stmts, counter, floats; prefix = "__cse_", int_prefix = "__icse_") =
+    emit_cse_block(stmts, counter, (pure = Set(keys(der_table())), floats = floats,
+                                    fprefix = prefix, iprefix = int_prefix, prefixes = (prefix, int_prefix)))
 
 # Rewrites a whole `function f(args...) ... end` Expr in place of its body.
 
@@ -4386,13 +4432,17 @@ function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned,
                 # normally: lhsb is both the seed read from and the target written to, so `lhsb = lhsb +
                 # contribution` reads its own not-yet-updated self, and the next line's reset then throws
                 # that sum away. Collected separately and applied as a replacement of lhsb instead.
-                self_terms = Any[]
-                agen_distribute!(stmt.tree, lhsb, exprs; self_expr = stmt.lhs, self_terms = self_terms)
-                if isempty(self_terms)
-                    push!(exprs, Expr(:(=), lhsb, 0.0))
-                else
-                    push!(exprs, Expr(:(=), lhsb, der_sum_terms(self_terms)))
-                end
+                # Read the incoming adjoint into a scalar, consume the output slot, THEN distribute.
+                # In that order a leaf reading the lhs's own slot needs no special case: it
+                # accumulates onto the zero this just wrote, giving `lhsb = partial * seed`, which is
+                # what the self_terms path used to build by hand. It also stays correct when the leaf
+                # only aliases the lhs at RUNTIME -- `y[i_r] = y[i_k] * x[i_r]` with a gathered `i_k`
+                # -- which the syntactic self_expr match could never see, and which produced a
+                # silently wrong adjoint whenever i_k == i_r.
+                seed = Symbol("__oldb_", length(exprs))
+                push!(exprs, Expr(:(=), seed, lhsb))
+                push!(exprs, Expr(:(=), lhsb, 0.0))
+                agen_distribute!(stmt.tree, seed, exprs)
             end
         elseif !is_accum
             # This write's rhs carries no active leaf, so there's nothing to distribute, but
@@ -4407,17 +4457,18 @@ function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned,
 end
 
 # Recursively distributes `seed` through a lin_node tree, accumulating `target = target + contribution` at every active leaf
-# whose slot differs from both `skip_expr` and `self_expr`. `skip_expr` is honored only against a direct child of the node it's
-# passed to -- the top-level slot a pure accumulation's lhs occupies. `self_expr`/`self_terms` propagate to any depth, since a
-# self-reference can appear anywhere; matching leaves push onto `self_terms` instead of an accumulate statement.
-function agen_distribute!(node, seed, exprs; skip_expr = nothing, self_expr = nothing, self_terms = nothing)
+# whose slot differs from `skip_expr`. `skip_expr` is honored only against a direct child of the node it's passed to -- the
+# top-level slot a pure accumulation's lhs occupies.
+#
+# There used to be a second exemption here, `self_expr`/`self_terms`, which diverted a leaf reading the statement's own lhs
+# into a list the caller summed into `lhsb` by hand. It matched syntactically, so it saw `y[i] = y[i] * x` but not
+# `y[i_r] = y[i_k] * x` with a gathered `i_k`, and the latter got the ordinary accumulate followed by `yb[i_r] = 0.0`, which
+# discarded the contribution whenever the two aliased at runtime. agen_backward_assign now zeroes the slot BEFORE
+# distributing, so a self-reading leaf accumulates onto that zero and needs no exemption at all.
+function agen_distribute!(node, seed, exprs; skip_expr = nothing)
     node.active || return nothing
     if node.kind == :leaf
         skip_expr !== nothing && node.expr == skip_expr && return nothing
-        if self_expr !== nothing && node.expr == self_expr
-            push!(self_terms, seed)
-            return nothing
-        end
         target = agen_shadow(node.expr)
         push!(exprs, Expr(:(=), target, Expr(:call, :+, target, seed)))
         return nothing
@@ -4426,7 +4477,7 @@ function agen_distribute!(node, seed, exprs; skip_expr = nothing, self_expr = no
     for (child, contrib) in zip(node.children, contributions)
         skip_expr !== nothing && child.expr == skip_expr && continue
         child.active || continue
-        agen_distribute!(child, contrib, exprs; self_expr = self_expr, self_terms = self_terms)
+        agen_distribute!(child, contrib, exprs)
     end
     return nothing
 end
@@ -4489,8 +4540,8 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     bwd = emit_cse_stmts(agen_backward_body(lin_plan, kernel.body, sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx), cse_counter, cse_floats)
 
     shadow_of = hvp_shadow_map(kernel, sites)
-    hvp_register_cse_shadows!(shadow_of, fwd)
-    hvp_register_cse_shadows!(shadow_of, bwd)
+    hvp_register_temp_shadows!(shadow_of, fwd)
+    hvp_register_temp_shadows!(shadow_of, bwd)
 
     fname = hvp_fname(sig.name)
     seed_args = Symbol[]
@@ -4524,23 +4575,26 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     end
     push!(body, emit_return_scalars(ret))
 
-    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, emit_cse_stmts(body, cse_counter, cse_floats)...))
+    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, emit_cse_stmts(body, Ref(0), cse_floats; prefix = "__hcse_", int_prefix = "__ihcse_")...))
 end
 
-# emit_cse_stmts' temporaries are locals invented after shape inference, so kernel.sig.kinds has
-# never heard of them and hvp_shadow_map cannot see them. Left unregistered, hvp_tangent_expr
+# Temporaries invented after shape inference -- emit_cse_stmts' bound subexpressions and
+# agen_backward_assign's captured incoming adjoints -- are locals kernel.sig.kinds has never heard
+# of, so hvp_shadow_map cannot see them. Left unregistered, hvp_tangent_expr
 # resolves each one to the literal 0.0 and hvp_double_stmt emits no shadow line, silently dropping
 # every second-order term that flows through a bound subexpression -- the corpus catches this on
 # some kernels but not all. Registered in program order, so a temporary defined from an earlier one
 # sees it. A temporary whose own tangent is 0.0 (a pure index computation) needs no shadow, and
 # giving it one would only emit a dead `__cse_Nd = 0.0`.
-function hvp_register_cse_shadows!(shadow_of, stmts)
+function hvp_register_temp_shadows!(shadow_of, stmts)
     for e in stmts
-        if e isa Expr && e.head == :(=) && e.args[1] isa Symbol && startswith(string(e.args[1]), "__cse_")
+        if e isa Expr && e.head == :(=) && e.args[1] isa Symbol &&
+           (startswith(string(e.args[1]), "__cse_") || startswith(string(e.args[1]), "__oldb_"))
+            any(haskey(shadow_of, v) for v in emit_cse_reads!(e.args[2], Set{Symbol}())) || continue
             hvp_tangent_expr(e.args[2], shadow_of) == 0.0 && continue
             shadow_of[e.args[1]] = tgen_shadow(e.args[1])
         elseif e isa Expr
-            hvp_register_cse_shadows!(shadow_of, e.args)
+            hvp_register_temp_shadows!(shadow_of, e.args)
         end
     end
     return nothing
