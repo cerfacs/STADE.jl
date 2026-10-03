@@ -1,6 +1,6 @@
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
-# `keep_all_atomic = false` had no test that ran it. validate_corpus runs
+# The reduction lowering had no test that ran it. validate_corpus runs
 # on the CPU, where the reduction path is never emitted, and
 # validate_offload counts loops without executing anything. So the
 # emitted `dot(u, v)` went unexercised until a real device rejected it:
@@ -11,14 +11,14 @@ include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 # This script is the cheap half of the fix. It runs in a sandbox with no
 # GPU and asserts that nothing in the emitted code reaches a vendor BLAS
 # routine. The other half is a cluster job that actually runs a
-# keep_all_atomic = false adjoint; a codegen check cannot replace it, it
+# lowered adjoint; a codegen check cannot replace it, it
 # only makes the failure visible one step earlier.
 
 """
     validate_gpu_callees(dir = "val-corpus")
 
 Check every emitted GPU function for a call this cluster cannot execute,
-and check that `keep_all_atomic = false` still changes what is emitted.
+and check that `reduction_threshold` still changes what is emitted.
 """
 function validate_gpu_callees(dir::String = joinpath(@__DIR__, "val-corpus"))
     # Reach GPUArrays' generic machinery, verified working on device.
@@ -44,8 +44,12 @@ function validate_gpu_callees(dir::String = joinpath(@__DIR__, "val-corpus"))
             end
             e = mode == :hvp ? gen.hvp : gen.adjoint
             src = Dict{Bool,String}()
+            # 0 forces every matched reduction to lower, a huge value forces
+            # none. The boolean that used to select this is gone: those two
+            # extremes of reduction_threshold span exactly what it did.
             for kaa in (true, false)
-                out = try STADE.stade_gpu(e, STADE.cgen_backend_cuda(); keep_all_atomic = kaa) catch er; continue end
+                th = kaa ? 1_000_000_000 : 0
+                out = try STADE.stade_gpu(e, STADE.cgen_backend_cuda(); reduction_threshold = th) catch er; continue end
                 s = join(vcat([STADE.io_expr_to_source(k) for k in out.kernels],
                               [STADE.io_expr_to_source(out.host)]), "\n")
                 src[kaa] = s
@@ -88,7 +92,7 @@ function validate_gpu_callees(dir::String = joinpath(@__DIR__, "val-corpus"))
                 continue
             end
             ex = mode == :hvp ? gen.hvp : gen.adjoint
-            out = try STADE.stade_gpu(ex, STADE.cgen_backend_cuda(); keep_all_atomic = false) catch er; continue end
+            out = try STADE.stade_gpu(ex, STADE.cgen_backend_cuda(); reduction_threshold = 0) catch er; continue end
             walk2(x) = begin
                 if x isa Expr
                     if x.head == :call && x.args[1] in (:mapreduce, :sum)
@@ -116,10 +120,10 @@ function validate_gpu_callees(dir::String = joinpath(@__DIR__, "val-corpus"))
     # A flag that never changes the output is a flag nobody is testing.
     checks += 1
     if differs > 0
-        println(rpad("keep_all_atomic=false changes the emission", 52), " ok  ", differs, " subjects")
+        println(rpad("reduction_threshold changes the emission", 52), " ok  ", differs, " subjects")
     else
         bad += 1
-        println(rpad("keep_all_atomic=false changes the emission", 52), " FAIL  no subject differs")
+        println(rpad("reduction_threshold changes the emission", 52), " FAIL  no subject differs")
     end
 
     println("\n", checks - bad, "/", checks, " checks passed",

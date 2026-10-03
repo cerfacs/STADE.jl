@@ -58,7 +58,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         # back where it was before the reduction lowering existed.
         "mlp1d" => 2,
         # Reduction stress subjects. Ceilings measured with the script's own
-        # counter, which generates with keep_all_atomic = true.
+        # counter, which generates with the default reduction_threshold.
         "partialdot" => 0,   # witness for the view-bounded reduction
         "red_single_cube" => 0, "red_three_arrays" => 0, "red_subtract" => 0,
         "red_reverse" => 0, "red_strided" => 0, "red_refuse_invariant" => 0,
