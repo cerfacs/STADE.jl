@@ -69,7 +69,7 @@ end
 ## Wishlist 💡
 
 - [x] ✅ [v0.2.2] Wrap common subexpressions into auxiliary variables
-- [ ] Add `bgen_` stage for mini-batch execution code via GPU-aware MPI
+- [x] ✅ [v0.2.4] Add `bgen_` stage for mini-batch execution code via GPU-aware MPI
 - [ ] Replace reduction-related atomic writes with more performant alternatives
 - [ ] Add support to `:while` statement
 - [ ] Add support to efficient differentiation of fixed-point loops 
