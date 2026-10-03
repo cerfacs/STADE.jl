@@ -7254,6 +7254,584 @@ function val_validate_hvp(kernel, primal_expr::Expr, adjoint_out, hvp_out, basel
 end
 
 
+# ==================== bgen_* (data-parallel epilogue) =============
+# Every rank runs the unmodified single-sample kernel on its own
+# samples. This stage derives which buffers must be summed across ranks
+# and which must not, then generates the reset and collective functions
+# that surround the call. It reads the primal only: the role table and
+# the companion names follow from the primal signature and the frozen
+# argument layout, so no generated derivative file is an input.
+#
+# The user declares one fact. Which read-only arrays change from one
+# sample to the next is a property of the caller's outer loop, not of
+# the kernel: in `a[i] * u[i]` the two factors are symmetric, so no
+# analysis separates a parameter from an input feature.
+
+# Array-valued float arguments the kernel never writes. Only these can
+# be named in `per_sample`; everything else already has a derived role.
+function bgen_readonly_float_args(kernel)
+    written = Set{Symbol}()
+    bgen_collect_written!(kernel.body, written)
+    return [a for a in kernel.sig.args
+            if kernel.sig.kinds[a] == :array_float && !(a in written)]
+end
+
+# Union collector: an unexecuted loop can only leave names out, never
+# add a false one, so no runs-once proof is needed here.
+function bgen_collect_written!(body::Vector{NamedTuple}, out::Set{Symbol})
+    for st in body
+        if st.kind == :assign
+            lhs = st.lhs
+            lhs isa Symbol && push!(out, lhs)
+            lhs isa Expr && lhs.head == :ref && push!(out, lhs.args[1])
+        elseif st.kind == :for
+            bgen_collect_written!(st.body, out)
+        elseif st.kind == :if
+            bgen_collect_written!(st.then, out)
+            bgen_collect_written!(st.els, out)
+        end
+    end
+    return out
+end
+
+# `per_sample` and `reduced` are user-facing channels, not classes. A name
+# in `per_sample` resolves to class :per_sample when the kernel does not
+# write it, and to :scratch when it does. Both get no reset and no
+# collective, and only the read-only one can be checked for differing
+# across ranks, so keeping them one class would overload it.
+function bgen_check_declaration(kernel, per_sample::Vector{Symbol},
+                                reduced::Vector{Symbol} = Symbol[])
+    args = Set(kernel.sig.args)
+    written = Set{Symbol}()
+    bgen_collect_written!(kernel.body, written)
+    _, ambiguous = bgen_reduced_outputs(kernel)
+    amb = Set(ambiguous)
+
+    for (kw, names) in (("per_sample", per_sample), ("reduced", reduced))
+        not_args = [p for p in names if !(p in args)]
+        isempty(not_args) || error("bgen_check_declaration: $kw names `" *
+            join(not_args, "`, `") * "`, which " * (length(not_args) == 1 ? "is" : "are") *
+            " not an argument of $(kernel.sig.name)")
+        not_float_array = [p for p in names if kernel.sig.kinds[p] != :array_float]
+        isempty(not_float_array) || error("bgen_check_declaration: $kw names `" *
+            join(not_float_array, "`, `") * "`, which is not a float array argument")
+        dups = [p for p in unique(names) if count(==(p), names) > 1]
+        isempty(dups) || error("bgen_check_declaration: $kw names `" *
+            join(dups, "`, `") * "` more than once")
+    end
+
+    both = [p for p in per_sample if p in reduced]
+    isempty(both) || error("bgen_check_declaration: `" * join(both, "`, `") *
+        "` appears in per_sample and in reduced. An array is one or the other")
+
+    # A written array may be named only when its shape is genuinely
+    # ambiguous. A plain overwrite already has one derived role, so naming
+    # it would give it two.
+    bad_ps = [p for p in per_sample if p in written && !(p in amb)]
+    isempty(bad_ps) || error("bgen_check_declaration: per_sample names `" *
+        join(bad_ps, "`, `") * "`, which the kernel writes by plain overwrite. " *
+        "That array already takes a derived role, so naming it here would give it two")
+    bad_rd = [p for p in reduced if !(p in amb)]
+    isempty(bad_rd) || error("bgen_check_declaration: reduced names `" *
+        join(bad_rd, "`, `") * "`, whose role is already derived. `reduced` " *
+        "resolves an array whose writes are all additive at an index that varies " *
+        "with an enclosing loop, and no other")
+
+    # Every ambiguous array must be resolved. Leaving one out is the error
+    # this refusal exists to catch: both readings run without complaint and
+    # only one is right.
+    unresolved = [a for a in ambiguous if !(a in per_sample) && !(a in reduced)]
+    isempty(unresolved) || error("bgen_check_declaration: `" *
+        join(unresolved, "`, `") * "` takes only additive writes at an index that " *
+        "varies with an enclosing loop. Two readings fit that shape and the kernel " *
+        "does not say which. Name it in `per_sample` if it holds one sample's own " *
+        "result, which needs no communication. Name it in `reduced` if it " *
+        "accumulates across samples, which is summed across ranks")
+    return nothing
+end
+
+# A `:reduced` output accumulates across samples, so the epilogue sums it
+# across ranks. Two conditions, both necessary.
+#
+# Every write must add the array to itself. A plain overwrite means the
+# array carries no value in from the caller, so it is scratch. `agg` in
+# mpnn is excluded by this: the kernel zeroes it first.
+#
+# The index must not contain an enclosing loop variable. `loss[1]` hits
+# one slot on every iteration and is a reduction. `v[i_x]` hits a
+# different slot each time, which is an elementwise accumulate into
+# caller-zeroed storage and holds a per-sample result. The two have the
+# same write shape and differ only here, so an index test is the only
+# thing separating a quantity to sum from one to keep local.
+function bgen_reduced_outputs(kernel)
+    acc = Dict{Symbol,Symbol}()   # array => :reduced | :ambiguous | :scratch
+    bgen_classify_writes!(kernel.body, Set{Symbol}(), acc)
+    return sort([a for (a, v) in acc if v == :reduced]),
+           sort([a for (a, v) in acc if v == :ambiguous])
+end
+
+# `dep` holds every symbol whose value can vary with an enclosing loop
+# index. It is seeded with the loop variables and grows through scalar
+# assignments, because a flattened nest reaches its indices through
+# block-local scalars: matvec_loss writes v[i_i] with
+# i_i = div(idx - 1, i_n) + 1, so a test against the loop variable alone
+# sees a loop-invariant index and calls a per-sample accumulator a
+# reduction.
+#
+# The set only grows. A symbol is never removed on reassignment, so the
+# analysis over-approximates dependence and errs toward :ambiguous, which
+# refuses. That is the safe direction: a refusal is read by a human, and
+# a wrong :reduced sums a per-sample result across ranks in silence.
+function bgen_classify_writes!(body::Vector{NamedTuple}, dep::Set{Symbol},
+                               acc::Dict{Symbol,Symbol})
+    for st in body
+        if st.kind == :assign
+            lhs = st.lhs
+            if lhs isa Expr && lhs.head == :ref
+                arr = lhs.args[1]
+                verdict = if !bgen_adds_to_itself(lhs, st.rhs)
+                    :scratch
+                elseif bgen_expr_uses_any(lhs.args[2:end], dep)
+                    :ambiguous
+                else
+                    :reduced
+                end
+                # :scratch wins over everything: one plain overwrite means
+                # the array does not carry a value in from the caller.
+                prev = get(acc, arr, nothing)
+                acc[arr] = (prev === :scratch || verdict === :scratch) ? :scratch :
+                           (prev === :ambiguous || verdict === :ambiguous) ? :ambiguous : :reduced
+            elseif lhs isa Symbol && bgen_expr_uses_any(Any[st.rhs], dep)
+                push!(dep, lhs)
+            end
+        elseif st.kind == :for
+            inner = copy(dep)
+            push!(inner, st.var)
+            bgen_classify_writes!(st.body, inner, acc)
+        elseif st.kind == :if
+            bgen_classify_writes!(st.then, copy(dep), acc)
+            bgen_classify_writes!(st.els, copy(dep), acc)
+        end
+    end
+    return acc
+end
+
+# True when `rhs` is a sum with `lhs` as one of its terms.
+function bgen_adds_to_itself(lhs, rhs)
+    terms = bgen_flatten_sum(rhs)
+    return any(t -> t == lhs, terms)
+end
+
+function bgen_flatten_sum(expr)
+    if expr isa Expr && expr.head == :call && expr.args[1] == :+
+        out = Any[]
+        for a in expr.args[2:end]
+            append!(out, bgen_flatten_sum(a))
+        end
+        return out
+    end
+    return Any[expr]
+end
+
+function bgen_expr_uses_any(exprs, names)
+    isempty(names) && return false
+    for e in exprs
+        bgen_expr_uses_any_one(e, names) && return true
+    end
+    return false
+end
+
+function bgen_expr_uses_any_one(expr, names)
+    expr isa Symbol && return expr in names
+    if expr isa Expr
+        for a in expr.args
+            bgen_expr_uses_any_one(a, names) && return true
+        end
+    end
+    return false
+end
+
+# Companion names for one primal argument, in every mode. The layout is
+# frozen: agen_signature_args interleaves the adjoint after each float
+# argument, and hvp appends tgen_shadow(a) and tgen_shadow(agen_shadow(a))
+# for each. Building the names from those helpers keeps this stage
+# correct if the shadow spelling ever changes.
+function bgen_companion_map(sig, mode::Symbol)
+    mode in (:tangent, :adjoint, :hvp) ||
+        error("bgen_companion_map: mode must be :tangent, :adjoint or :hvp, got $mode")
+    out = Dict{Symbol,NamedTuple}()
+    for a in sig.args
+        sig.kinds[a] in (:scalar_float, :array_float) || continue
+        tangent = mode in (:tangent, :hvp) ? tgen_shadow(a) : nothing
+        adjoint = mode in (:adjoint, :hvp) ? agen_shadow(a) : nothing
+        adjtan  = mode == :hvp ? tgen_shadow(agen_shadow(a)) : nothing
+        out[a] = (primal = a, tangent = tangent, adjoint = adjoint, adjoint_of_tangent = adjtan)
+    end
+    return out
+end
+
+# The role of every buffer, from two axes. The class of the primal
+# argument, and whether the buffer is an input (primal- or
+# tangent-valued) or an output (adjoint-valued).
+#
+#   class         input buffer     adjoint-valued buffer
+#   :shared       :shared          :accum
+#   :reduced      :reduced         :seed
+#   :per_sample   :per_sample      :local
+#   :scratch      :scratch         :local
+#
+# :shared and :reduced swap columns, which is the duality this design
+# rests on: the adjoint of a broadcast is a sum, and the adjoint of a sum
+# is a broadcast.
+function bgen_roles(kernel, per_sample::Vector{Symbol}, mode::Symbol;
+                   reduced::Vector{Symbol} = Symbol[])
+    bgen_check_declaration(kernel, per_sample, reduced)
+    derived_reduced, _ = bgen_reduced_outputs(kernel)
+    readonly = bgen_readonly_float_args(kernel)
+    written = Set{Symbol}()
+    bgen_collect_written!(kernel.body, written)
+    all_reduced = union(Set(derived_reduced), Set(reduced))
+    class = Dict{Symbol,Symbol}()
+    for a in kernel.sig.args
+        kernel.sig.kinds[a] in (:scalar_float, :array_float) || continue
+        # a declared per_sample name that the kernel writes is a per-rank
+        # output, which is class :scratch; only a read-only one is an input
+        # the caller fills and can be checked for differing across ranks
+        class[a] = (a in per_sample && !(a in written)) ? :per_sample :
+                   (a in per_sample)                    ? :scratch :
+                   a in all_reduced                     ? :reduced :
+                   a in readonly                        ? :shared : :scratch
+    end
+    companions = bgen_companion_map(kernel.sig, mode)
+    roles = Dict{Symbol,Symbol}()
+    for (a, c) in class
+        cm = companions[a]
+        input_role = c
+        # A scalar float argument's adjoint is RETURNED by value, not
+        # accumulated into a buffer. It can be neither fill!ed nor
+        # Allreduce!d in place, so it takes its own role and stays out of
+        # every emitted function. The header table lists it, because a
+        # buffer omitted in silence is the failure mode this design spends
+        # its whole guard budget avoiding.
+        out_role = kernel.sig.kinds[a] == :scalar_float ? :returned :
+                   c == :shared ? :accum : c == :reduced ? :seed : :local
+        roles[cm.primal] = input_role
+        cm.tangent === nothing || (roles[cm.tangent] = input_role)
+        cm.adjoint === nothing || (roles[cm.adjoint] = out_role)
+        cm.adjoint_of_tangent === nothing || (roles[cm.adjoint_of_tangent] = out_role)
+    end
+    return roles
+end
+
+# Buffers carrying one role, in signature order. The epilogue needs a
+# deterministic argument order, and the roles Dict has none.
+function bgen_role_args(kernel, roles::Dict{Symbol,Symbol}, mode::Symbol, want::Symbol;
+                        arrays_only::Bool = false)
+    layout = mode == :tangent ? tgen_signature_args(kernel.sig) :
+             mode == :adjoint ? agen_signature_args(kernel.sig) :
+             bgen_hvp_signature_args(kernel.sig)
+    out = [b for b in layout if get(roles, b, nothing) === want]
+    arrays_only || return out
+    scalars = bgen_scalar_float_buffers(kernel.sig, mode)
+    return [b for b in out if !(b in scalars)]
+end
+
+# Every buffer that is a scalar rather than an array, in this mode's
+# layout. fill! and Allreduce! both need an array.
+function bgen_scalar_float_buffers(sig, mode::Symbol)
+    out = Set{Symbol}()
+    for a in sig.args
+        sig.kinds[a] == :scalar_float || continue
+        cm = bgen_companion_map(sig, mode)[a]
+        push!(out, cm.primal)
+        cm.tangent === nothing || push!(out, cm.tangent)
+        cm.adjoint === nothing || push!(out, cm.adjoint)
+        cm.adjoint_of_tangent === nothing || push!(out, cm.adjoint_of_tangent)
+    end
+    return out
+end
+
+function bgen_hvp_signature_args(sig)
+    seed_args = Symbol[]
+    for a in sig.args
+        sig.kinds[a] in (:scalar_float, :array_float) || continue
+        push!(seed_args, tgen_shadow(a))
+        push!(seed_args, tgen_shadow(agen_shadow(a)))
+    end
+    return vcat(agen_signature_args(sig), seed_args)
+end
+
+# ---- phase 5: an optimization, not a requirement ------------------
+# bgen_reset_local! already makes a stale :local buffer unrepresentable.
+# This proves the write unnecessary for a buffer the sweep leaves at
+# zero, so the epilogue can skip one fill!.
+#
+# The recursion is deliberately the same shape as
+# cgen_last_assign_is_zero, including `found = cgen_loop_runs_once(st) &&
+# ...`. That shape is where all six instances of the zero-trip bug lived,
+# and copying the corrected one is safer than inventing a new one. A loop
+# whose bounds are not literal proves nothing, and an unprovable write
+# also destroys a fact established earlier, so `found` is assigned rather
+# than or-ed.
+#
+# Coverage is the obligation the scalar version does not have. An array
+# needs every element the sweep touched to be zero, not merely one write
+# of 0.0 somewhere. This proves that only when EVERY write to the array
+# is a zeroing write, which removes the need to compare index ranges: if
+# nothing ever writes a non-zero, no touched element can hold one.
+function bgen_array_left_zeroed(body::Vector{NamedTuple}, arr::Symbol)
+    bgen_all_writes_are_zero(body, arr) || return false
+    return bgen_zero_write_reached(body, arr)
+end
+
+function bgen_all_writes_are_zero(body::Vector{NamedTuple}, arr::Symbol)
+    for st in body
+        if st.kind == :assign && st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == arr
+            (st.rhs isa Number && st.rhs == 0.0) || return false
+        elseif st.kind == :assign && st.lhs isa Symbol && st.lhs == arr
+            return false
+        elseif st.kind == :for
+            bgen_all_writes_are_zero(st.body, arr) || return false
+        elseif st.kind == :if
+            bgen_all_writes_are_zero(st.then, arr) || return false
+            bgen_all_writes_are_zero(st.els, arr) || return false
+        end
+    end
+    return true
+end
+
+# `loopvars` carries the enclosing loop variables. A zeroing write proves
+# coverage only when its index IS one of them: vb[3] = 0.0 zeroes one
+# element, not the array, and an earlier version of this function read it
+# as a whole-array proof. An index that merely mentions a loop variable
+# does not count either, since vb[i + 1] leaves an element behind.
+function bgen_zero_write_reached(body::Vector{NamedTuple}, arr::Symbol,
+                                 loopvars::Vector{Symbol} = Symbol[])
+    found = false
+    for st in body
+        if st.kind == :assign && st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == arr
+            idx = st.lhs.args[2:end]
+            found = st.rhs isa Number && st.rhs == 0.0 &&
+                    length(idx) == 1 && idx[1] isa Symbol && idx[1] in loopvars
+        elseif st.kind == :for
+            if bgen_writes_array(st.body, arr)
+                found = cgen_loop_runs_once(st) &&
+                        bgen_zero_write_reached(st.body, arr, vcat(loopvars, st.var))
+            end
+        elseif st.kind == :if
+            tw = bgen_writes_array(st.then, arr)
+            ew = bgen_writes_array(st.els, arr)
+            if tw || ew
+                found = tw && ew && bgen_zero_write_reached(st.then, arr, loopvars) &&
+                        bgen_zero_write_reached(st.els, arr, loopvars)
+            end
+        end
+    end
+    return found
+end
+
+function bgen_writes_array(body::Vector{NamedTuple}, arr::Symbol)
+    for st in body
+        if st.kind == :assign && st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == arr
+            return true
+        elseif st.kind == :for
+            bgen_writes_array(st.body, arr) && return true
+        elseif st.kind == :if
+            (bgen_writes_array(st.then, arr) || bgen_writes_array(st.els, arr)) && return true
+        end
+    end
+    return false
+end
+
+# ---- emission ----------------------------------------------------
+# The epilogue never names the function it wraps. It operates on buffers
+# only, so one generated file serves the CPU, CUDA and JACC targets.
+
+bgen_fname(name::Symbol, mode::Symbol, suffix::String) =
+    Symbol(string(name) * bgen_mode_suffix(mode) * suffix)
+
+bgen_mode_suffix(mode::Symbol) =
+    mode == :tangent ? "_d" : mode == :adjoint ? "_b" : "_hv"
+
+# `fill!` and not a loop: the buffer may be a host Array or a device
+# array, and `fill!` is defined for both.
+function bgen_fill_fn(fname::Symbol, bufs::Vector{Symbol}, doc::String)
+    body = Any[]
+    for b in bufs
+        push!(body, Expr(:call, :fill!, b, 0.0))
+    end
+    push!(body, Expr(:return, :nothing))
+    return (doc = doc, expr = Expr(:function, Expr(:call, fname, bufs...), Expr(:block, body...)))
+end
+
+function bgen_reset_accum_expr(kernel, roles, mode)
+    bufs = bgen_role_args(kernel, roles, mode, :accum; arrays_only = true)
+    return bgen_fill_fn(bgen_fname(kernel.sig.name, mode, "_reset_accum!"), bufs,
+        "Zero the :accum buffers. Call once per step, on every rank. The " *
+        "Allreduce sums each rank's contribution, so a buffer entering the step " *
+        "non-zero is counted once per rank.")
+end
+
+function bgen_reset_reduced_expr(kernel, roles, mode)
+    bufs = bgen_role_args(kernel, roles, mode, :reduced; arrays_only = true)
+    return bgen_fill_fn(bgen_fname(kernel.sig.name, mode, "_reset_reduced!"), bufs,
+        "Zero the :reduced buffers. Separate from the :accum reset because the " *
+        "two roles may take two reset periods; their communication is the same.")
+end
+
+function bgen_reset_local_expr(kernel, roles, mode)
+    bufs = bgen_role_args(kernel, roles, mode, :local; arrays_only = true)
+    return bgen_fill_fn(bgen_fname(kernel.sig.name, mode, "_reset_local!"), bufs,
+        "Zero the :local buffers. Call before each local sample, or one sample's " *
+        "intermediate adjoints seed the next one's reverse sweep. Only " *
+        "adjoint-valued buffers appear here: a tangent-valued companion is an " *
+        "input the caller loads.")
+end
+
+# One collective per role, not one for both. The two roles can take two
+# periods: a training loop that accumulates gradients over several
+# batches before one optimizer step sums :accum once per window, while a
+# per-batch quantity such as a loss is summed every batch.
+#
+# A single collective forces a caller who wants both to sum the gradients
+# every batch and again at the window boundary, which multiplies them by
+# the window length and raises nothing. Two collectives make the period
+# an explicit choice at the call site.
+function bgen_allreduce_accum_expr(kernel, roles, mode)
+    bufs = bgen_role_args(kernel, roles, mode, :accum; arrays_only = true)
+    fname = bgen_fname(kernel.sig.name, mode, "_allreduce_accum!")
+    args = vcat(bufs, [:n_local, :comm])
+    body = Any[]
+    for b in bufs
+        push!(body, Expr(:call, Expr(:., :MPI, QuoteNode(Symbol("Allreduce!"))), b, :+, :comm))
+    end
+    # returned so a mean objective divides by the same number on every rank
+    push!(body, Expr(:return, Expr(:call, Expr(:., :MPI, QuoteNode(:Allreduce)), :n_local, :+, :comm)))
+    return (doc = "Sum the :accum buffers across ranks, once per accumulation " *
+                  "window. Pair it with reset_accum!, which must run at the same " *
+                  "boundary. Buffers pass to MPI untouched, so a CUDA-aware build " *
+                  "keeps them on device. Returns the global sample count of the " *
+                  "window, so a mean objective divides by the same number on every rank.",
+            expr = Expr(:function, Expr(:call, fname, args...), Expr(:block, body...)))
+end
+
+function bgen_allreduce_reduced_expr(kernel, roles, mode)
+    bufs = bgen_role_args(kernel, roles, mode, :reduced; arrays_only = true)
+    fname = bgen_fname(kernel.sig.name, mode, "_allreduce_reduced!")
+    args = vcat(bufs, [:comm])
+    body = Any[]
+    for b in bufs
+        push!(body, Expr(:call, Expr(:., :MPI, QuoteNode(Symbol("Allreduce!"))), b, :+, :comm))
+    end
+    push!(body, Expr(:return, :nothing))
+    return (doc = "Sum the :reduced buffers across ranks. Pair it with " *
+                  "reset_reduced!, which must run at the same boundary. That " *
+                  "boundary need not be the one the :accum buffers use.",
+            expr = Expr(:function, Expr(:call, fname, args...), Expr(:block, body...)))
+end
+
+# Two checksums per buffer, compared by min against max across ranks.
+# Agreement is evidence and not proof: this finds a mis-declared array or
+# a failed broadcast, not a crafted collision.
+function bgen_check_expr(kernel, roles, mode)
+    bufs = vcat(bgen_role_args(kernel, roles, mode, :shared; arrays_only = true),
+                bgen_role_args(kernel, roles, mode, :seed; arrays_only = true))
+    fname = bgen_fname(kernel.sig.name, mode, "_check_replicas")
+    args = vcat(bufs, [:comm])
+    pairs = Any[Expr(:tuple, string(b), b) for b in bufs]
+    body = Any[
+        Expr(:(=), :bad, Expr(:ref, :String)),
+        Expr(:for, Expr(:(=), Expr(:tuple, :nm, :arr), Expr(:tuple, pairs...)),
+            Expr(:block,
+                Expr(:(=), :c1, Expr(:call, :sum, :arr)),
+                Expr(:(=), :c2, Expr(:call, :sum, :abs, :arr)),
+                Expr(:(=), :agree, Expr(:&&,
+                    Expr(:call, :(==), Expr(:call, Expr(:., :MPI, QuoteNode(:Allreduce)), :c1, :min, :comm),
+                                        Expr(:call, Expr(:., :MPI, QuoteNode(:Allreduce)), :c1, :max, :comm)),
+                    Expr(:call, :(==), Expr(:call, Expr(:., :MPI, QuoteNode(:Allreduce)), :c2, :min, :comm),
+                                        Expr(:call, Expr(:., :MPI, QuoteNode(:Allreduce)), :c2, :max, :comm)))),
+                Expr(:||, :agree, Expr(:call, :push!, :bad, :nm)))),
+        Expr(:||, Expr(:call, :isempty, :bad),
+            Expr(:call, :error, Expr(:call, :*,
+                string(fname) * ": `",
+                Expr(:call, :join, :bad, "`, `"),
+                "` differ across ranks. A :shared or :seed buffer must hold " *
+                "identical values on every rank. The usual cause is a per-sample " *
+                "array left out of per_sample"))),
+        Expr(:return, :nothing)]
+    return (doc = "Check that the :shared and :seed buffers match on every rank. " *
+                  "Call after the first sample is loaded, on the first step. " *
+                  "Uninitialised buffers match everywhere, so an earlier call " *
+                  "reports nothing.",
+            expr = Expr(:function, Expr(:call, fname, args...), Expr(:block, body...)))
+end
+
+function bgen_preamble(kernel, roles, per_sample, reduced, mode)
+    layout = mode == :tangent ? tgen_signature_args(kernel.sig) :
+             mode == :adjoint ? agen_signature_args(kernel.sig) :
+             bgen_hvp_signature_args(kernel.sig)
+    treat = Dict(:returned => "none. Returned by value; sum it yourself.",
+                 :shared => "none. Must match on every rank.",
+                 :seed => "none. Must match on every rank.",
+                 :accum => "Allreduce!(+), zeroed per step",
+                 :reduced => "Allreduce!(+), zeroed per step",
+                 :local => "none. Zeroed before each sample.",
+                 :per_sample => "none. The caller loads it.",
+                 :scratch => "none. The kernel overwrites it.")
+    lines = ["# Generated by STADE.jl -- do not edit.",
+             "#",
+             "# Data-parallel epilogue for $(bgen_fname(kernel.sig.name, mode, "")). Every rank runs the",
+             "# unmodified single-sample kernel on its own samples. These functions",
+             "# zero the buffers between calls and sum what must be summed.",
+             "#",
+             "#   mode       = :$(mode)",
+             "#   per_sample = $(per_sample)",
+             "#   reduced    = $(reduced)",
+             "#",
+             "# ---- derived role table ----"]
+    for b in layout
+        haskey(roles, b) || continue
+        push!(lines, "#   " * rpad(string(b), 12) * rpad(":" * string(roles[b]), 13) * treat[roles[b]])
+    end
+    push!(lines, "#")
+    push!(lines, "# Read the role table, not the numbers. A wrong communication plan")
+    push!(lines, "# still returns plausible values on every rank.")
+    return join(lines, "\n") * "\n\nusing MPI\n"
+end
+
+# Six functions. Each keeps its one-line contract as a comment above it. The
+# generated file is read by whoever writes the training loop, and a role
+# table with no statement of what to call when is half a plan.
+function stade_batch_file(in_path::String, out_path::String;
+                          per_sample::Vector{Symbol}, mode::Symbol,
+                          reduced::Vector{Symbol} = Symbol[])
+    primal = io_read_corpus_entry(in_path)
+    r = stade_batch(primal; per_sample = per_sample, mode = mode, reduced = reduced)
+    parts = String[]
+    for f in (r.reset_accum, r.reset_reduced, r.reset_local,
+              r.allreduce_accum, r.allreduce_reduced, r.check)
+        push!(parts, "# " * f.doc * "\n" * io_expr_to_source(f.expr))
+    end
+    open(out_path, "w") do io
+        write(io, r.preamble * "\n" * join(parts, "\n\n") * "\n")
+    end
+    return r.roles
+end
+
+function stade_batch(primal::Expr; per_sample::Vector{Symbol}, mode::Symbol,
+                     reduced::Vector{Symbol} = Symbol[])
+    kernel = parse_kernel(primal)
+    roles = bgen_roles(kernel, per_sample, mode; reduced = reduced)
+    return (reset_accum   = bgen_reset_accum_expr(kernel, roles, mode),
+            reset_reduced = bgen_reset_reduced_expr(kernel, roles, mode),
+            reset_local   = bgen_reset_local_expr(kernel, roles, mode),
+            allreduce_accum   = bgen_allreduce_accum_expr(kernel, roles, mode),
+            allreduce_reduced = bgen_allreduce_reduced_expr(kernel, roles, mode),
+            check         = bgen_check_expr(kernel, roles, mode),
+            preamble      = bgen_preamble(kernel, roles, per_sample, reduced, mode),
+            roles         = roles)
+end
+
 # ==================== io_* ====================================
 # File-level entry points. The only stage permitted to touch the
 # filesystem -- everything above operates purely on Expr in memory.
