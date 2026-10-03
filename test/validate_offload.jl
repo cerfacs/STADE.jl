@@ -51,6 +51,21 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         # The ddp_* subjects for the bgen_ stage. Every one offloads fully,
         # adjoint and HVP alike. bgen_ adds no code path to this script, so
         # any movement in these rows is a regression in cgen_, not in bgen_.
+        # The output-layer accumulation into the local s3 lowers to a
+        # view-bounded mapreduce, measured 2.64x faster on a V100. The
+        # adjoint reaches 0 host loops; the HVP keeps 1, because its
+        # doubled statement leaves a body CSE has split in two.
+        "mlp1d" => 1,
+        # Reduction stress subjects. Ceilings measured with the script's own
+        # counter, which generates with keep_all_atomic = true.
+        "partialdot" => 0,   # witness for the view-bounded reduction
+        "red_single_cube" => 0, "red_three_arrays" => 0, "red_subtract" => 0,
+        "red_reverse" => 0, "red_strided" => 0, "red_refuse_invariant" => 0,
+        "red_refuse_barevar" => 0, "red_nested_inner" => 0,
+        # Two top-level reductions into locals. Only the first lowers:
+        # CSE splits the second body into two statements and
+        # cgen_idiomatic_scalar_reduction requires exactly one.
+        "red_two_locals" => 4,
         "ddp_affine" => 0,
         "ddp_ambiguous_reduce" => 0,
         "ddp_batch_hist" => 0,
@@ -72,7 +87,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # pass, so cgen_last_assign_is_zero cannot prove the zeroing write happens and
     # declines to split. Each kernel's HVP matches its adjoint, which is the property
     # this file exists to hold.
-        "cse_branch" => 1, "cse_zerotrip" => 6, "cse_intoffset" => 2,
+        "cse_branch" => 1, "cse_zerotrip" => 5, "cse_intoffset" => 2,
     # gather_alias keeps all three of its loops on the host: the gathered read makes the sweep
     # sequential, so cgen_ cannot split it, and the stack-init loop goes with it.
         "gather_alias" => 3,

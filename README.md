@@ -64,13 +64,16 @@ end
 
 - `stade_cuda/amdgpu/metal/jacc_file(in_path::String, out_path::String; ...)`: writes to `out_path` a Julia source result of GPU porting by STADE of the (multi-)kernel file at `in_path`.
 
+  `keep_all_atomic = false` is the default. A loop whose whole body is one scalar accumulation, reading arrays indexed exactly by the loop variable, becomes `target = target + mapreduce(f, +, view(a, lo:step:hi), ...)` rather than an atomic kernel. The view matches the loop's own range, so a loop that does not start at 1 reduces only the elements it visited, and an explicit `init` keeps a zero-trip loop contributing zero. Pass `keep_all_atomic = true` to get the atomic kernel back.
+
 - `stade_batch_file(in_path::String, out_path::String; per_sample, mode, reduced = Symbol[])`: writes to `out_path` a Julia source epilogue that runs the kernel at `in_path` over a mini-batch, one sample per rank, with GPU-aware MPI. The kernel needs no batch loop and no rewriting: every rank runs it unchanged on its own sample, and the epilogue sums the parameter gradients across ranks. `per_sample` names the read-only arrays whose values change from one sample to the next; every other read-only array is treated as replicated. The generated file carries the derived role of every buffer as a comment, so the communication plan is auditable without re-running STADE.
 
 ## Wishlist 💡
 
 - [x] ✅ [v0.2.2] Wrap common subexpressions into auxiliary variables
 - [x] ✅ [v0.2.4] Add `bgen_` stage for mini-batch execution code via GPU-aware MPI
-- [ ] Replace reduction-related atomic writes with more performant alternatives
+- [ ] Replace reduction-related atomic writes with more performant alternatives\
+  Partly done in v0.2.5. `keep_all_atomic` now defaults to `false`, so a whole-array reduction lowers to a view-bounded `mapreduce` instead of an atomic kernel: 72.6 us against 132.5 us for `dotprod` on a Tesla V100, and 2.64x on the full `mlp1d` adjoint. That covers 29 of the corpus's 160 atomic writes. The remaining 131 are scatter-accumulates at a data-dependent index (`res[i_cell_to_node[e]] += ...`), multi-statement loop bodies, and reductions nested inside an offloaded outer loop, none of which a `mapreduce` over aligned views can express.
 - [ ] Add support to `:while` statement
 - [ ] Add support to efficient differentiation of fixed-point loops 
 - [ ] Add support to un-inlined call graphs
