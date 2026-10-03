@@ -6147,10 +6147,24 @@ cgen_kernel_fname(owner::Symbol, idx::Int, backend) =
 # swing, while the atomic timings on those runs agreed within a few
 # percent. Whatever causes that, a threshold cannot be fitted to it.
 #
+# The JACC path reaches its reductions through `JACC.@parallel_reduce`, a
+# different primitive, and was measured separately on a Tesla V100:
+#
+#        n     atomic      reduce   speedup
+#     1024   735.31 us  1043.96 us      0.70
+#    16384   808.66 us   978.51 us      0.83
+#    65536   780.64 us   726.00 us      1.08
+#   262144  1592.85 us   641.37 us      2.48
+#
+# That crossover sits near 65000, against roughly 24000 for CUDA on the
+# A30. One shared default is used rather than one per backend, because the
+# two numbers bracket it and neither measurement is precise enough to
+# justify splitting them.
+#
 # 32768 is therefore chosen to avoid a regression rather than to capture
-# every win: on the clean data the atomic path is still ahead at 16384 and
-# behind at 32768. A user who has measured their own hardware can pass
-# `reduction_threshold` to lower it. Being slower than optimal is
+# every win: on the clean CUDA data the atomic path is still ahead at 16384
+# and behind at 32768. A user who has measured their own hardware can pass
+# `reduction_threshold` to change it. Being slower than optimal is
 # recoverable; being slower than the code STADE used to emit is not.
 const CGEN_REDUCTION_THRESHOLD_DEFAULT = 32768
 
@@ -6411,7 +6425,7 @@ end
 # device-array-backed ref) via a bare host assignment is a host setindex! against a device array; unlike
 # CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch (confirmed live: 'Scalar indexing is disallowed'). Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = false, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
     # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
@@ -6454,7 +6468,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # the first full-corpus live GPU run.
             cond = cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ?
                    Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
+            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -6501,14 +6515,34 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     # `GPUCompiler.InvalidIRError` on a live GPU run. `widx` is unique per write-back site, so the temp
                     # name can't collide with another reduction in the same body.
                     redvar = Symbol("__jgen_redval_", widx)
-                    push!(exprs, Expr(:(=), redvar, signed_value))
                     # NOT boxed via JACC.array here, despite that being jgen_emit's reduce_vars convention: a live GPU
                     # diagnostic confirmed `JACC.@parallel_reduce` already returns a device-resident `CuArray{Float64,1}`
                     # directly, not a host Float64. Wrapping it again via `JACC.array([redvar])` (an earlier fix) tried to
                     # build a CuArray whose element type is itself a CuArray -- illegal, confirmed live. `redvar` is
                     # passed straight through as the kernel argument; the kernel indexes `[1]` on it on-device.
                     push!(kernels, jgen_reduction_writeback_kernel(owner, widx, target, wfargs))
-                    push!(exprs, jgen_reduction_writeback_launch(owner, widx, wfargs, redvar))
+                    # Same run-time trip-count test cgen_body applies. JACC
+                    # reaches its reductions through JACC.@parallel_reduce
+                    # rather than mapreduce, so the crossover is its own
+                    # measurement, but the shape of the problem is identical:
+                    # a tree reduction pays a fixed cost a short loop cannot
+                    # amortise, while an atomic on one address serialises its
+                    # threads. Both kernels are emitted and only the launch
+                    # is chosen.
+                    #
+                    # Without this, keep_all_atomic = false lowered every
+                    # JACC reduction unconditionally at any trip count. That
+                    # is the state the CUDA path was in at v0.2.5, measured
+                    # there as a regression below the threshold.
+                    red_exprs = Any[Expr(:(=), redvar, signed_value),
+                                    jgen_reduction_writeback_launch(owner, widx, wfargs, redvar)]
+                    aidx = length(kernels) + 1
+                    afargs = cgen_free_vars(stmt, stmt.var)
+                    union!(reduce_vars, loop_reduce_vars)
+                    push!(kernels, jgen_kernel_def(stmt, owner, aidx, afargs, loop_reduce_vars, synth))
+                    push!(exprs, emit_if(Expr(:call, :<, n_iter, reduction_threshold),
+                                         Any[jgen_launch_expr(stmt, owner, aidx, afargs)],
+                                         red_exprs))
                 else
                     idx = length(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
@@ -6517,7 +6551,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             end
             delete!(known_consts, stmt.var)
             # See cgen_body's matching comment: update via cgen_loop_convergent_constant rather
@@ -6648,12 +6682,12 @@ jgen_host_fname(name::Symbol) = Symbol(string(name) * "_jacc")
 # JACC API: a future AMDGPU/Metal-backed image needs a different default.
 jgen_default_allowscalar_macro() = Expr(:., :CUDA, QuoteNode(Symbol("@allowscalar")))
 
-function jgen_emit(gk; keep_all_atomic::Bool = false, allowscalar_macro = jgen_default_allowscalar_macro())
+function jgen_emit(gk; keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, allowscalar_macro = jgen_default_allowscalar_macro())
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
     outer_defs = cgen_scalar_def_map(gk.body)
-    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, outer_defs)
+    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, reduction_threshold, outer_defs)
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the reverse.
     reduce_vars_sorted = sort(collect(reduce_vars); by = string)
@@ -8508,20 +8542,20 @@ stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Ty
 # locked default here for the same reason: Float64 unless the caller asks otherwise.
 # keep_all_atomic: same meaning as stade_gpu_file's; on JACC a matched reduction becomes one
 # JACC.@parallel_reduce call instead of @parallel_for + Atomix.@atomic.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false)
-    plan = jgen_emit(cgen_ingest(expr); keep_all_atomic)
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+    plan = jgen_emit(cgen_ingest(expr); keep_all_atomic, reduction_threshold)
     p = precision === nothing ? Float64 : precision
     p === Float64 && return plan
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_jacc(expr; precision, keep_all_atomic)
+        plan = stade_jacc(expr; precision, keep_all_atomic, reduction_threshold)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
