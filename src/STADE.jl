@@ -2091,14 +2091,6 @@ end
 function snap_value_needed_vars(kernel)
     acc = Set{Symbol}()
     snap_collect_value_needed!(kernel.body, acc)
-    # Section 1.4 of the while plan. Inside a `for`, the backward sweep can
-    # rebuild a primal value from the loop variable. A `while` has none, and
-    # no closed form for the state at iteration k, so nothing in its body can
-    # be recomputed. Every scalar the body assigns must therefore be
-    # snapshotted, including an integer index: without this the replay reads
-    # the value the counter held when the loop ENDED, the same one on every
-    # iteration.
-    snap_collect_while_carried!(kernel.body, acc)
     return acc
 end
 
@@ -2160,22 +2152,6 @@ function snap_while_carry_walk!(body, kinds, out, defined)
         end
     end
     return nothing
-end
-
-function snap_collect_while_carried!(body, acc, inside::Bool = false)
-    for stmt in body
-        if stmt.kind == :assign
-            inside && stmt.lhs isa Symbol && push!(acc, stmt.lhs)
-        elseif stmt.kind == :while
-            snap_collect_while_carried!(stmt.body, acc, true)
-        elseif stmt.kind == :for
-            snap_collect_while_carried!(stmt.body, acc, inside)
-        elseif stmt.kind == :if
-            snap_collect_while_carried!(stmt.then, acc, inside)
-            snap_collect_while_carried!(stmt.els, acc, inside)
-        end
-    end
-    return acc
 end
 
 function snap_collect_value_needed!(body, acc)
