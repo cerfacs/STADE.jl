@@ -5642,7 +5642,7 @@ function cgen_stack_device_expr(rhs::Expr, backend)
     return Expr(:call, Expr(:curly, backend.arrtype, T), :undef, size_expr)
 end
 
-# ---- idiomatic scalar-reduction detection (keep_all_atomic=false) ----
+# ---- idiomatic scalar-reduction detection ----
 # Recognizes the narrow shape `target = target +/- f(arr_1[loopvar], ..., free scalars)` as the whole and only statement in a loop body
 # already proven safe to split -- a bare dot-product-style `loss[1]=loss[1]+u[i]*v[i]`, not a case with an :if picking the term (a second
 # statement, so this declines, falling back to today's atomic-kernel codegen). Returns `(target, op, arrs, term)` or `nothing`; the caller
@@ -5727,7 +5727,7 @@ end
 # Level-1 entry point raises `DivideError: integer division error`, measured on a Tesla V100 for `dot`
 # and `norm`, for Float32 and Float64, at length 16 and 4096. `gemv` on the same device is fine, so
 # cuBLAS is present and only its Level-1 bindings fail. Nothing in the test suite could see it:
-# validate_corpus runs on the CPU and validate_offload is codegen only, so `keep_all_atomic = false`
+# validate_corpus runs on the CPU and validate_offload is codegen only, so the reduction path
 # emitted code that failed at runtime for as long as the branch existed.
 #
 # The generic form costs nothing to prefer. On the same device, dotprod's adjoint reduces in 72.6 us
@@ -5786,7 +5786,7 @@ function jgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Sym
                 Expr(:(=), :range, n_iter), Expr(:call, closure, arrs...))
 end
 
-# ---- JACC idiomatic-reduction write-back (keep_all_atomic=false) ---
+# ---- JACC idiomatic-reduction write-back ---
 # `target` (an `arr[idx...]` ref) must never be read or written from the host once `arr` may be a JACC device array. This accumulates `target
 # += value` inside a trivial one-thread device kernel instead, reusing the `Atomix.@atomic target += ...` shape jgen_device_assign already
 # emits for reduce_vars. `__jgen_redval` is a synthetic parameter for the reduction result, passed through as a `CuArray{Float64,1}` --
@@ -5836,7 +5836,7 @@ end
 # ---- host-side body walk: splits device kernels off ----
 # Host-side body walk: splits off one device kernel per eligible iteration-independent loop; anything left over runs as ordinary host-side
 # Julia, wrapped in one allowscalar_macro block if a touched statement reads a device array (confirmed live-GPU crash otherwise).
-# keep_all_atomic=false additionally offers a splittable loop to cgen_idiomatic_scalar_reduction. outer_defs: scalar definitions from the
+# A splittable loop is additionally offered to cgen_idiomatic_scalar_reduction. outer_defs: scalar definitions from the
 # kernel's top-level body, threaded through so the array-privacy proof can see a size relationship defined outside any candidate loop.
 
 # Splitting a loop moves its assignments onto the DEVICE, leaving the host's copy of every local scalar behind. Any later HOST read of one
@@ -5915,7 +5915,7 @@ function cgen_collect_loop_vars(body, acc)
     return acc
 end
 
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
     exprs = Any[]
     # Seeded from the enclosing body's own known_consts at the point this body was reached (never written back) -- a scalar
     # reset at the tail of a non-split ancestor loop's body converges by induction to the same literal on every iteration, so
@@ -5959,7 +5959,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -5993,7 +5993,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # through the atomic kernel, measured at 132.5 us against
             # mapreduce's 72.6 us on a V100.
             local_red = nothing
-            if !keep_all_atomic && !safe_scope && !cgen_contains_stackop(stmt.body)
+            if !safe_scope && !cgen_contains_stackop(stmt.body)
                 cand = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 cand !== nothing && cand[1] isa Symbol && (local_red = cand)
             end
@@ -6005,7 +6005,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # statement reads, which would read them stale
             eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth)
             if eligible
-                red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
+                red = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
                     target, op, arrs, term = red
                     value = cgen_idiomatic_reduction_value(arrs, term, stmt.var, stmt.lo, stmt.step, stmt.hi)
@@ -6067,8 +6067,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 # The reduction still wins by a wide margin at large trip
                 # counts, so the choice is the trip count, not the shape.
                 loop_branch = emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step,
-                                           cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args;
-                                                     keep_all_atomic, reduction_threshold, outer_defs,
+                                           cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs,
                                                      outer_known_consts = known_consts, root_body))
                 # the target is a host scalar and every array is read through
                 # a view, so this branch needs no allowscalar
@@ -6079,7 +6078,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                                           reduction_threshold),
                                      Any[loop_branch], Any[red_branch]))
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             end
             delete!(known_consts, stmt.var)
             # Blind invalidation here would throw away entries that remain true: if this loop's own body
@@ -6354,12 +6353,12 @@ end
 
 cgen_host_fname(name::Symbol, backend) = Symbol(string(name) * backend.suffix)
 
-function cgen_emit(gk, backend; keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+function cgen_emit(gk, backend; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
     outer_defs = cgen_scalar_def_map(gk.body)
-    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs)
+    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; reduction_threshold, outer_defs)
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     # Every scalar cross-thread reduction free var must already be a 1-element device array
     # before the first kernel launch that atomically writes it, and must be unboxed to a plain
@@ -6420,12 +6419,12 @@ function jgen_stack_device_expr(rhs::Expr)
     return Expr(:call, Expr(:., :JACC, QuoteNode(:zeros)), T, size_expr)
 end
 
-# keep_all_atomic: same meaning as cgen_body's -- a matched loop is replaced by one `JACC.@parallel_reduce` call
+# A matched loop is replaced by one `JACC.@parallel_reduce` call
 # instead of a synthesized per-element atomic kernel. Writing its plain host-scalar result back into `target` (a
 # device-array-backed ref) via a bare host assignment is a host setindex! against a device array; unlike
 # CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch (confirmed live: 'Scalar indexing is disallowed'). Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
     # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
@@ -6468,7 +6467,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # the first full-corpus live GPU run.
             cond = cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ?
                    Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -6494,7 +6493,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # measured at max_rel_err 0.85 (adjoint) and 1.23 (HVP) live while the CUDA path was exact.
             eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth)
             if eligible
-                red = keep_all_atomic ? nothing : cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
+                red = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 if red !== nothing
                     target, op, arrs, term = red
                     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
@@ -6530,7 +6529,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     # threads. Both kernels are emitted and only the launch
                     # is chosen.
                     #
-                    # Without this, keep_all_atomic = false lowered every
+                    # Without this = false lowered every
                     # JACC reduction unconditionally at any trip count. That
                     # is the state the CUDA path was in at v0.2.5, measured
                     # there as a regression below the threshold.
@@ -6551,7 +6550,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             end
             delete!(known_consts, stmt.var)
             # See cgen_body's matching comment: update via cgen_loop_convergent_constant rather
@@ -6682,12 +6681,12 @@ jgen_host_fname(name::Symbol) = Symbol(string(name) * "_jacc")
 # JACC API: a future AMDGPU/Metal-backed image needs a different default.
 jgen_default_allowscalar_macro() = Expr(:., :CUDA, QuoteNode(Symbol("@allowscalar")))
 
-function jgen_emit(gk; keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, allowscalar_macro = jgen_default_allowscalar_macro())
+function jgen_emit(gk; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, allowscalar_macro = jgen_default_allowscalar_macro())
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
     outer_defs = cgen_scalar_def_map(gk.body)
-    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; keep_all_atomic, reduction_threshold, outer_defs)
+    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs)
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the reverse.
     reduce_vars_sorted = sort(collect(reduce_vars); by = string)
@@ -8494,35 +8493,35 @@ end
 # (Float64 for CUDA/AMDGPU, Float32 for Metal); an explicit precision overrides that, except for a precision_locked
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
-function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     p = precision === nothing ? backend.default_precision : precision
     if backend.precision_locked && p !== backend.default_precision
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
-    plan = cgen_emit(cgen_ingest(expr), backend; keep_all_atomic, reduction_threshold)
+    plan = cgen_emit(cgen_ingest(expr), backend; reduction_threshold)
     p === Float64 && return plan
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, keep_all_atomic)
-stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false) =
-    stade_gpu(expr, cgen_backend_amdgpu(); precision, keep_all_atomic)
-stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false) =
-    stade_gpu(expr, cgen_backend_metal(); precision, keep_all_atomic)
+stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold)
+stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
+    stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold)
+stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
+    stade_gpu(expr, cgen_backend_metal(); precision, reduction_threshold)
 
 # Path in, path out. Reads every function def in in_path and writes one file: every device kernel first, then every host
 # function in original order. precision applies uniformly to every function converted in this call; for per-function
-# control, call stade_gpu directly on each def. The input file is only ever read, never rewritten. keep_all_atomic
-# (default true): pass false to let a pure scalar reduction generate as a dot/sum/mapreduce call instead of a hand-rolled
-# atomic-accumulate kernel.
-function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false)
+# control, call stade_gpu directly on each def. The input file is only ever read, never rewritten. A pure scalar
+# reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
+# loop's own trip count; reduction_threshold sets where that switch happens.
+function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, keep_all_atomic)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
@@ -8530,32 +8529,32 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
     return out_path
 end
 
-stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, keep_all_atomic)
-stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false) =
-    stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, keep_all_atomic)
-stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false) =
-    stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision, keep_all_atomic)
+stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold)
+stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
+    stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold)
+stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
+    stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision, reduction_threshold)
 
 # JACC has no gpu_backend value at all -- there's only one JACC target from cgen_/jgen_'s point
 # of view, since which vendor it runs on is chosen later, outside this call. precision has no
 # locked default here for the same reason: Float64 unless the caller asks otherwise.
-# keep_all_atomic: same meaning as stade_gpu_file's; on JACC a matched reduction becomes one
+# On JACC a matched reduction becomes one
 # JACC.@parallel_reduce call instead of @parallel_for + Atomix.@atomic.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
-    plan = jgen_emit(cgen_ingest(expr); keep_all_atomic, reduction_threshold)
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+    plan = jgen_emit(cgen_ingest(expr); reduction_threshold)
     p = precision === nothing ? Float64 : precision
     p === Float64 && return plan
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_jacc(expr; precision, keep_all_atomic, reduction_threshold)
+        plan = stade_jacc(expr; precision, reduction_threshold)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
@@ -8966,7 +8965,8 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   trials::Int = 3, rtol::Union{Float64,Nothing} = nothing,
                                   self_check::Bool = true,
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
-                                  mode::Symbol = :adjoint, keep_all_atomic::Bool = false)
+                                  mode::Symbol = :adjoint,
+                                  reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -8981,12 +8981,12 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
     gpu_init = stade_gpu(gen_out.initstacks, backend)
-    # keep_all_atomic reaches the GPU parity oracle. Without it the flag had
+    # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; keep_all_atomic = keep_all_atomic)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the
@@ -9041,7 +9041,8 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
                                    trials::Int = 3, rtol::Union{Float64,Nothing} = nothing,
                                    self_check::Bool = true,
                                    keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
-                                   mode::Symbol = :adjoint, keep_all_atomic::Bool = false)
+                                   mode::Symbol = :adjoint,
+                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     keep_push_pop &&
         error("stade_validate_jacc_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -9057,7 +9058,7 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
     backend = val_jacc_backend()
     jacc_init = stade_jacc(gen_out.initstacks)
-    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; keep_all_atomic = keep_all_atomic)
+    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     tan_seeds   = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
