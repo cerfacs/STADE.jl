@@ -37,6 +37,36 @@ function lint(path::String)
     end
     scan_base(ex, 0)
 
+    # --- trap 1b: a loop variable or function argument shadowing an
+    # exported Base binding. Inside a function the lint above does not
+    # look, and `for round in 1:3` then makes `round(x, digits = 1)` call
+    # an Int64. Only flagged when the shadowed name is also CALLED in the
+    # same file, so a loop over `i`, `n` or `step` stays quiet.
+    called = Set{Symbol}()
+    function collect_calls(e)
+        e isa Expr || return
+        e.head == :call && e.args[1] isa Symbol && push!(called, e.args[1])
+        foreach(collect_calls, e.args)
+    end
+    collect_calls(ex)
+    function scan_binders(e)
+        e isa Expr || return
+        if e.head == :for && e.args[1] isa Expr && e.args[1].head == :(=) &&
+           e.args[1].args[1] isa Symbol
+            n = e.args[1].args[1]
+            isdefined(Base, n) && Base.isexported(Base, n) && n in called &&
+                push!(problems, "loop variable `$n` shadows Base.$n, which this file calls")
+        elseif e.head == :function && e.args[1] isa Expr && e.args[1].head == :call
+            for a in e.args[1].args[2:end]
+                a isa Symbol || continue
+                isdefined(Base, a) && Base.isexported(Base, a) && a in called &&
+                    push!(problems, "argument `$a` shadows Base.$a, which this file calls")
+            end
+        end
+        foreach(scan_binders, e.args)
+    end
+    scan_binders(ex)
+
     # --- trap 2: soft-scope reassignment in a top-level for/try ---
     bound = Set{Symbol}()
     function collect_bound(e)
