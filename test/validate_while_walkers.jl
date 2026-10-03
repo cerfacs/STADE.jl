@@ -61,8 +61,23 @@ function validate_while_walkers()
     # --- shape_: a name written only in the loop must get a kind ---
     expect("shape_ infers a kind for a while-local", :wonly_s, keys(kernel.sig.kinds))
 
-    # --- act_: activity must propagate through the body ---
-    expect("act_ sees a while-body write", :wonly_s, keys(STADE.act_analyze(kernel)))
+    # --- act_: activity must propagate INTO the body ---
+    # Membership is not the test. An earlier version of this check asked only
+    # whether `wonly_s` appeared in the map, and it passed while
+    # act_propagate! had no `:while` clause at all: the name was present and
+    # its activity was FALSE. tgen_ then emitted the tangent of the
+    # definition and dropped it at every use, so the derivative came out
+    # silently zero. The value is what matters.
+    checks += 1
+    let am = STADE.act_analyze(kernel)
+        if get(am, :wonly_s, false) && get(am, :v, false)
+            println(rpad("act_ propagates activity into a while body", 46), " ok")
+        else
+            bad += 1
+            println(rpad("act_ propagates activity into a while body", 46),
+                    " FAIL  wonly_s=", get(am, :wonly_s, "absent"), " v=", get(am, :v, "absent"))
+        end
+    end
 
     # --- agen_: reassignment collection ---
     expect("agen_collect_reassigned descends", :i_k,
