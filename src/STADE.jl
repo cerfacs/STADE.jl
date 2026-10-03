@@ -196,6 +196,12 @@ function inl_build_call_graph(kernels::Dict{Symbol,Expr})
             error("inl_inline_calls: kernel dict key :$(name) doesn't match its own function name :$(kname)")
         callees = Set{Symbol}()
         inl_collect_calls!(body_block, name, callees, kernels)
+        # A one-node cycle is still a cycle. The topo sort would find it, but
+        # io_read_corpus_entry short-circuits a single-kernel file before the
+        # inliner runs at all, so a self-call escaped to parse_kernel and was
+        # reported as an unsupported STATEMENT FORM. The user had written a
+        # recursive function and was told their syntax was unrecognised.
+        name in callees && error(inl_recursion_message([name, name]))
         parsed[name] = (kargs, body_block)
         graph[name] = callees
     end
@@ -216,12 +222,34 @@ function inl_collect_calls!(body_block::Expr, caller_name::Symbol, callees::Set{
             push!(callees, callee)
         elseif stmt isa Expr && stmt.head == :for
             inl_collect_calls!(stmt.args[2], caller_name, callees, kernels)
+        elseif stmt isa Expr && stmt.head == :while
+            inl_collect_calls!(stmt.args[2], caller_name, callees, kernels)
         elseif stmt isa Expr && stmt.head == :if
             inl_collect_calls!(stmt.args[2], caller_name, callees, kernels)
             length(stmt.args) == 3 && inl_collect_calls!(stmt.args[3], caller_name, callees, kernels)
         end
     end
     return nothing
+end
+
+# Recursion is refused, and the message says what is unsupported rather
+# than what the algorithm found. A user who writes a recursive kernel needs
+# to know whether this is a permanent limit, an unimplemented feature, or a
+# mistake of theirs. It is the first, for a concrete reason: recursive depth
+# is unknown until the code runs, so the tape has no closed-form size, so
+# `keep_push_pop = false` could not size its stacks and the GPU path could
+# not run it. That is the same limit a `while` loop has.
+#
+# There is usually a rewrite. A recursion over a fixed depth is a loop with
+# an explicit level index, which STADE handles today. `mg_vcycle` in the
+# corpus is exactly that: a multigrid V-cycle written as loops.
+function inl_recursion_message(chain::Vector{Symbol})
+    what = length(chain) == 2 ? "`$(chain[1])` calls itself" :
+                                "recursion: " * join(chain, " -> ")
+    return "inl_inline_calls: " * what * ". STADE inlines every call, and a " *
+           "recursive call has no depth known before it runs, so its tape has " *
+           "no closed-form size. Rewrite the recursion as a loop over an " *
+           "explicit level index, as `mg_vcycle` does"
 end
 
 # postorder DFS: a kernel is only appended to `order` after every
@@ -236,7 +264,7 @@ function inl_topo_sort(graph::Dict{Symbol,Set{Symbol}})
         state[n] == :done && return nothing
         if state[n] == :visiting
             idx = findfirst(==(n), stack)
-            error("inl_inline_calls: cycle detected in kernel call graph: " * join(vcat(stack[idx:end], n), " -> "))
+            error(inl_recursion_message(vcat(stack[idx:end], n)))
         end
         state[n] = :visiting
         push!(stack, n)
@@ -306,6 +334,15 @@ function inl_inline_body(caller_name::Symbol, caller_args::Vector{Symbol}, confi
             callee_body = finalized[callee_name].body_block
             call_args = inl_check_call_kinds(caller_name, confirmed, stmt, callee_kernel)
             counter[] += 1
+            # An expression argument is bound to a temporary here rather than
+            # substituted at every use. That keeps the substitution
+            # symbol-to-symbol, so nothing downstream changes, and it avoids
+            # duplicating the expression once per use of the parameter. It is
+            # also the right semantics: the expression is evaluated once at
+            # the call site, and once per iteration when the call sits in a
+            # loop, exactly as a real call would.
+            (call_args, prelude) = inl_bind_arg_exprs(callee_name, callee_kernel, call_args, counter[])
+            append!(result, prelude)
             rename_subst = inl_rename_map(callee_kernel, callee_body, counter[])
             renamed_body = inl_substitute_expr(callee_body, rename_subst)
             params_subst = Dict{Symbol,Symbol}(zip(callee_kernel.sig.args, call_args))
@@ -334,14 +371,54 @@ end
 # is skipped: it is shape_infer's no-evidence default, matching a pass-
 # through arg. `:array_float`/`:array_int`/`:scalar_int` are never defaults,
 # so they are always enforced.
+# Which parameters MUST be a bare symbol at the call site. Two kinds:
+# anything the callee assigns to, because the callee returns through it and
+# an expression is not assignable, and every array, because an expression is
+# not an array and a kernel has no view concept. A read-only scalar takes
+# any expression.
+function inl_must_be_symbol(callee_kernel)
+    written = Set{Symbol}()
+    parse_collect_written!(callee_kernel.body, written)
+    return Set(a for a in callee_kernel.sig.args
+               if a in written || callee_kernel.sig.kinds[a] in (:array_float, :array_int))
+end
+
+# Emits `__inl_<callee>_<n>_<i> = <expr>` for each expression argument and
+# returns the argument list with those names in place.
+function inl_bind_arg_exprs(callee_name::Symbol, callee_kernel, call_args, site::Int)
+    prelude = Any[]
+    out = Any[]
+    for (i, a) in enumerate(call_args)
+        if a isa Symbol
+            push!(out, a)
+        else
+            tmp = Symbol("__inl_", callee_name, "_", site, "_", i)
+            push!(prelude, Expr(:(=), tmp, a))
+            push!(out, tmp)
+        end
+    end
+    return (out, prelude)
+end
+
 function inl_check_call_kinds(caller_name::Symbol, confirmed::Dict{Symbol,Symbol},
                                call_stmt::Expr, callee_kernel)
     call_args = call_stmt.args[2:end]
-    all(a -> a isa Symbol, call_args) ||
-        error("inl_inline_calls: call to :$(callee_kernel.sig.name) inside :$(caller_name) must pass bare symbol arguments only, got `$(call_stmt)`")
+    must = inl_must_be_symbol(callee_kernel)
+    for (i, a) in enumerate(call_args)
+        i <= length(callee_kernel.sig.args) || break
+        param = callee_kernel.sig.args[i]
+        (a isa Symbol || !(param in must)) ||
+            error("inl_inline_calls: call to :$(callee_kernel.sig.name) inside :$(caller_name) " *
+                  "passes `$(a)` for parameter :$(param), which must be a bare symbol. " *
+                  (callee_kernel.sig.kinds[param] in (:array_float, :array_int) ?
+                   "It is an array" : "The callee assigns to it, so the call returns through it"))
+    end
     length(call_args) == length(callee_kernel.sig.args) ||
         error("inl_inline_calls: call to :$(callee_kernel.sig.name) inside :$(caller_name) passes $(length(call_args)) argument(s), expected $(length(callee_kernel.sig.args))")
     for (i, a) in enumerate(call_args)
+        # an expression argument has no entry in the caller's kind map; its
+        # kind is settled by shape_ on the temporary bound above
+        a isa Symbol || continue
         haskey(confirmed, a) ||
             error("inl_inline_calls: call to :$(callee_kernel.sig.name) inside :$(caller_name) passes undefined variable :$(a)")
         caller_kind = confirmed[a]
@@ -8614,7 +8691,13 @@ end
 function io_read_corpus_entry(path::String)
     kernels = io_read_kernel_corpus(path)
     entry_name = io_corpus_entry_name(path, kernels)
-    length(kernels) == 1 && return kernels[entry_name]
+    if length(kernels) == 1
+        # Nothing to inline, but the call graph is still built: it is the only
+        # place a self-call is caught, and skipping it let one escape to
+        # parse_kernel to be misreported as an unsupported statement form.
+        inl_build_call_graph(kernels)
+        return kernels[entry_name]
+    end
     inlined = inl_inline_calls(kernels)
     return inlined[entry_name]
 end
