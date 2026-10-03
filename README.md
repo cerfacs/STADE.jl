@@ -84,7 +84,8 @@ end
   Partly done in v0.3.0. A whole-array reduction lowers to a view-bounded `mapreduce` instead of an atomic kernel above the trip-count threshold: 72.6 us against 132.5 us for `dotprod` on a Tesla V100, and 2.64x on the full `mlp1d` adjoint. That covers 29 of the corpus's 160 atomic writes, and only above the trip-count threshold. The remaining 131 are scatter-accumulates at a data-dependent index (`res[i_cell_to_node[e]] += ...`), multi-statement loop bodies, and reductions nested inside an offloaded outer loop, none of which a `mapreduce` over aligned views can express.
 
   Replacing every atomic is not the goal. An atomic is expensive only under contention: on a V100, one million threads accumulating into a single address cost 2400.78 us, into 4096 addresses 13.85 us. A scatter-accumulate spreads its writes and is already near-free, so the case worth replacing is exactly the single-target reduction, which is the case a tree reduction serves.
-- [ ] Add support to `:while` statement
+- [x] ✅ [v0.4.0] Add support to `:while` statement\
+  The forward sweep records each loop's trip count and the backward sweep replays it as a `for`. The forward sweep still contains the `while`, since it has to run the loop to learn the count. The gradient is therefore taken at a fixed trip count, which is correct almost everywhere and wrong where the count jumps. A `while` runs on the host and needs `keep_push_pop = true`, since no launch can size itself around an unknown trip count and that mode has no closed-form stack size to offer; loops inside the body still offload. A condition that assigns, or that reads nothing the body writes, is refused at parse time.
 - [ ] Add support to efficient differentiation of fixed-point loops 
 - [ ] Add support to un-inlined call graphs
 - [ ] Benchmark against mainstream frameworks (e.g., JAX, PyTorch)
