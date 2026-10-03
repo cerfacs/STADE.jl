@@ -101,7 +101,6 @@ closed-form size. Write the recursion as a loop over an explicit level index, as
 
   Replacing every atomic is not the goal. An atomic is expensive only under contention: on a V100, one million threads accumulating into a single address cost 2400.78 us, into 4096 addresses 13.85 us. A scatter-accumulate spreads its writes and is already near-free, so the case worth replacing is exactly the single-target reduction, which is the case a tree reduction serves.
 - [x] ✅ [v0.4.0] Add support to `:while` statement\
-  Fixed in v0.4.3: activity did not propagate into a `while` body, so a body local was treated as passive at every use and the tangent came out silently zero. Any kernel whose `while` body assigns a scalar that then feeds an array must be regenerated.\
   The forward sweep records each loop's trip count and the backward sweep replays it as a `for`. The forward sweep still contains the `while`, since it has to run the loop to learn the count. The gradient is therefore taken at a fixed trip count, which is correct almost everywhere and wrong where the count jumps. A `while` runs on the host and needs `keep_push_pop = true`, since no launch can size itself around an unknown trip count and that mode has no closed-form stack size to offer; loops inside the body still offload. A condition that assigns, or that reads nothing the body writes, is refused at parse time.
 - [ ] Add support to efficient differentiation of fixed-point loops 
 - [ ] Add support to un-inlined call graphs
