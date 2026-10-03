@@ -6052,10 +6052,32 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             elseif local_red !== nothing
                 lt, lop, larrs, lterm = local_red
                 lvalue = cgen_idiomatic_reduction_value(larrs, lterm, stmt.var, stmt.lo, stmt.step, stmt.hi)
-                push!(pending, Expr(:(=), lt, Expr(:call, lop, lt, lvalue)))
-                # deliberately NOT pending_has_array: the target is a host
-                # scalar and every array is read through a view, so no scalar
-                # indexing happens and no allowscalar is needed
+                # Same run-time test as the array-element case, against the
+                # host loop rather than an atomic kernel. An earlier version
+                # lowered this unconditionally, on the reasoning that a
+                # device reduction must beat a host loop doing one scalar
+                # read per element. That was one unrepeated measurement and
+                # it is wrong at small trip counts: on a Tesla V100 with
+                # n_h = 16, three consecutive best-of-5 runs put the host
+                # loop ahead at 1600.9, 1599.1 and 1524.6 us against
+                # mapreduce's 1820.5, 1872.0 and 1668.0. The full mlp1d
+                # training took 178.0 s lowered against 86.6 s looped, with
+                # bit-identical gradients.
+                #
+                # The reduction still wins by a wide margin at large trip
+                # counts, so the choice is the trip count, not the shape.
+                loop_branch = emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step,
+                                           cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args;
+                                                     keep_all_atomic, reduction_threshold, outer_defs,
+                                                     outer_known_consts = known_consts, root_body))
+                # the target is a host scalar and every array is read through
+                # a view, so this branch needs no allowscalar
+                red_branch = Expr(:(=), lt, Expr(:call, lop, lt, lvalue))
+                flush_pending!()
+                push!(exprs, emit_if(Expr(:call, :<,
+                                          cgen_trip_count(stmt.lo, stmt.step, stmt.hi),
+                                          reduction_threshold),
+                                     Any[loop_branch], Any[red_branch]))
             else
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             end
