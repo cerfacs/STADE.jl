@@ -15,7 +15,7 @@ const WHILE_PROBE = quote
         i_k = 1
         while i_k <= i_n
             wonly_s = a[i_k] * u[i_k]
-            v[i_k] = wonly_s + wonly_s
+            v[i_k] = wonly_s * wonly_s
             i_k = i_k + 1
         end
         for i_x = 1:i_n
@@ -37,20 +37,11 @@ function validate_while_walkers()
     kernel = STADE.parse_kernel(expr)
     checks = 0; bad = 0
 
-    pending = 0
-    # A check listed here is known-unimplemented, not broken. It belongs to a
-    # later phase of the plan and must flip to a hard failure once that phase
-    # lands, so the list is deliberately short and named.
-    PENDING = Set([:snap_value_needed])
-
-    function expect(label, want::Symbol, got; tag::Symbol = :now)
+    function expect(label, want::Symbol, got)
         checks += 1
         names = got isa Set ? got : Set(got)
         if want in names
             println(rpad(label, 46), " ok")
-        elseif tag in PENDING
-            pending += 1
-            println(rpad(label, 46), " pending  `", want, "` not reported yet")
         else
             bad += 1
             println(rpad(label, 46), " FAIL  `", want, "` not reported")
@@ -78,10 +69,30 @@ function validate_while_walkers()
            STADE.agen_collect_reassigned(kernel.body))
 
     # --- snap_: value-needed analysis ---
-    # Section 1.4 of the plan: a while body cannot be recomputed, so every
-    # value in it must be snapshotted. That is phase 3 work.
+    # snap_: a while body's own local must reach the value-needed analysis
+    # through the ordinary walk, exactly as a `for` body's does. The probe
+    # uses wonly_s NONLINEARLY, because the analysis reports values a
+    # partial derivative needs, not every variable: `wonly_s + wonly_s` is
+    # linear and its value is correctly not needed.
     expect("snap_value_needed_vars descends", :wonly_s,
-           STADE.agen_value_needed_vars(kernel); tag = :snap_value_needed)
+           STADE.agen_value_needed_vars(kernel))
+
+    # snap_: the carried integer gets its own site. This replaces a check
+    # that asserted the whole body was marked value_needed, which was the
+    # design of a failed first attempt: snap_check_assign! gates a site on
+    # activity, and a loop counter is an inactive integer, so marking it
+    # produced no site at all. A :whilecarry site with its own Int64 stack
+    # is what actually carries the value across the two sweeps.
+    checks += 1
+    let sites = STADE.snap_plan(kernel, STADE.act_analyze(kernel)),
+        carry = [s.array for s in sites if s.kind === :whilecarry]
+        if :i_k in carry
+            println(rpad("snap_ emits a :whilecarry site for i_k", 46), " ok")
+        else
+            bad += 1
+            println(rpad("snap_ emits a :whilecarry site for i_k", 46), " FAIL  ", carry)
+        end
+    end
 
     # --- lin_: the linearized body must exist ---
     checks += 1
@@ -104,8 +115,7 @@ function validate_while_walkers()
         expect("cgen_collect_all_assigned! descends", :wonly_s, out)
     end
 
-    println("\n", checks - bad - pending, "/", checks, " checks passed, ",
-            pending, " pending",
+    println("\n", checks - bad, "/", checks, " checks passed",
             bad == 0 ? "" : "   *** $bad NOT OK ***")
     return bad
 end
