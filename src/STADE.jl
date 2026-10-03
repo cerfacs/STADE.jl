@@ -6009,8 +6009,39 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 if red !== nothing
                     target, op, arrs, term = red
                     value = cgen_idiomatic_reduction_value(arrs, term, stmt.var, stmt.lo, stmt.step, stmt.hi)
-                    push!(pending, Expr(:(=), target, Expr(:call, op, target, value)))
-                    pending_has_array = true
+                    # Emit BOTH lowerings and pick at run time on the trip
+                    # count. Neither wins everywhere, measured on a Tesla
+                    # V100 with dotprod's adjoint:
+                    #
+                    #        n        atomic    mapreduce
+                    #       16       8.66 us     53.73 us
+                    #      256      10.46 us     58.37 us
+                    #     4096     164.18 us     72.11 us
+                    #  1048576    2506.31 us    150.12 us
+                    #
+                    # A tree reduction pays a fixed multi-pass cost that a
+                    # small loop cannot amortise, while an atomic on ONE
+                    # address serialises its contributing threads. The
+                    # crossover sits between 256 and 4096, so the threshold
+                    # is 1024. The trip count is already computed for the
+                    # launch, so the test costs one host comparison.
+                    #
+                    # Only the array-element target gets this branch. A
+                    # local accumulator has no atomic alternative: its loop
+                    # would otherwise run on the host, one scalar device
+                    # read per element, which mapreduce beats at every size.
+                    idx = length(kernels) + 1
+                    fargs = cgen_free_vars(stmt, stmt.var)
+                    union!(reduce_vars, loop_reduce_vars)
+                    push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth))
+                    atomic_branch = cgen_launch_expr(stmt, owner, idx, fargs, backend)
+                    reduce_branch = Expr(:macrocall, backend.allowscalar_macro, nothing,
+                                         Expr(:block, Expr(:(=), target, Expr(:call, op, target, value))))
+                    flush_pending!()
+                    push!(exprs, emit_if(Expr(:call, :<,
+                                              cgen_trip_count(stmt.lo, stmt.step, stmt.hi),
+                                              cgen_reduction_threshold()),
+                                         Any[atomic_branch], Any[reduce_branch]))
                 else
                     idx = length(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
@@ -6076,6 +6107,11 @@ cgen_kernel_fname(owner::Symbol, idx::Int, backend) =
 #
 # |step| == 1 keeps the original expression, so every file STADE already
 # emits is unchanged and only the strided case moves.
+# Below this many iterations an atomic kernel beats a tree reduction. See
+# the table at the emission site: 1024 sits inside the measured crossover
+# band, between 256 (atomic 5.6x faster) and 4096 (mapreduce 2.3x faster).
+cgen_reduction_threshold() = 1024
+
 function cgen_trip_count(lo, step, hi)
     step isa Number && abs(step) == 1 &&
         return Expr(:call, :+, Expr(:call, :div, Expr(:call, :-, hi, lo), step), 1)
