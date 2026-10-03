@@ -311,6 +311,50 @@ function stencil(x::Vector{Float64}, n::Int64; pad=0.0)
 end
 ```
 
+## `while` loops, and what their gradient means
+
+A `while` loop is supported. Write it as you would in the primal.
+
+Two things about it are not obvious.
+
+**The gradient holds the trip count fixed.** The forward sweep records how
+many times the loop ran and the backward sweep replays that number. So the
+derivative is taken at a fixed number of iterations. When the condition
+reads a value the body updates, the true trip count is a step function of
+the inputs: constant almost everywhere, jumping where the loop takes one
+more turn. The recorded-count gradient is correct almost everywhere and
+wrong at a jump. Every AD tool behaves this way, and none can do better
+without differentiating a discontinuity.
+
+If the loop runs to a tolerance, this is usually what you want: the
+derivative of the converged answer, not of the path taken to it.
+
+**A `while` runs on the host, and needs `keep_push_pop = true`.** No GPU
+launch can size itself around a loop whose trip count is unknown until it
+has run, so the loop itself stays on the CPU. Loops INSIDE the body still
+offload normally. For the same reason `keep_push_pop = false` refuses a
+kernel containing one: that mode gives every stack a closed-form size, and
+a `while` has none.
+
+If you need the loop on the GPU, write a counted loop with a guard instead:
+
+```julia
+for i_k = 1:i_n_max
+    if not_converged > 0.0
+        ...
+    end
+end
+```
+
+That form has a trip count in its header, so it offloads and sizes its
+stacks like any other loop.
+
+Two shapes are refused at parse time. A condition that assigns is not
+allowed, because the forward sweep evaluates it once per iteration and the
+backward sweep never evaluates it at all. A condition that reads nothing
+the body writes is refused as a loop that cannot end. STADE does not prove
+termination; it checks only that the condition can change.
+
 ## Mini-batch training needs no batch loop
 
 Write the kernel for **one** sample. Do not add a loop over samples, and
