@@ -5915,7 +5915,7 @@ function cgen_collect_loop_vars(body, acc)
     return acc
 end
 
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = false, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
     exprs = Any[]
     # Seeded from the enclosing body's own known_consts at the point this body was reached (never written back) -- a scalar
     # reset at the tail of a non-split ancestor loop's body converges by induction to the same literal on every iteration, so
@@ -5959,7 +5959,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -6040,7 +6040,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     flush_pending!()
                     push!(exprs, emit_if(Expr(:call, :<,
                                               cgen_trip_count(stmt.lo, stmt.step, stmt.hi),
-                                              cgen_reduction_threshold()),
+                                              reduction_threshold),
                                          Any[atomic_branch], Any[reduce_branch]))
                 else
                     idx = length(kernels) + 1
@@ -6057,7 +6057,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 # scalar and every array is read through a view, so no scalar
                 # indexing happens and no allowscalar is needed
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs, outer_known_consts = known_consts, root_body)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
             end
             delete!(known_consts, stmt.var)
             # Blind invalidation here would throw away entries that remain true: if this loop's own body
@@ -6107,10 +6107,30 @@ cgen_kernel_fname(owner::Symbol, idx::Int, backend) =
 #
 # |step| == 1 keeps the original expression, so every file STADE already
 # emits is unchanged and only the strided case moves.
-# Below this many iterations an atomic kernel beats a tree reduction. See
-# the table at the emission site: 1024 sits inside the measured crossover
-# band, between 256 (atomic 5.6x faster) and 4096 (mapreduce 2.3x faster).
-cgen_reduction_threshold() = 1024
+# Below this many iterations an atomic kernel beats a tree reduction.
+#
+# The default is deliberately high, because the only measurement that
+# reproduced says so. On an NVIDIA A30, best-of-5 after 30 warmup calls,
+# dotprod's adjoint gave a smooth monotone curve crossing over near 24000:
+#
+#        n     atomic   mapreduce   speedup
+#     1024    11.72 us    71.59 us     0.16
+#     8192    35.70 us    71.91 us     0.50
+#    16384    62.25 us    72.12 us     0.86
+#    32768   117.09 us    73.38 us     1.60
+#   262144   876.21 us    85.36 us    10.27
+#
+# The same benchmark on a Tesla V100 does NOT reproduce. Two identical
+# runs gave 1160.74 us and 88.60 us for mapreduce at n = 262144, a 13x
+# swing, while the atomic timings on those runs agreed within a few
+# percent. Whatever causes that, a threshold cannot be fitted to it.
+#
+# 32768 is therefore chosen to avoid a regression rather than to capture
+# every win: on the clean data the atomic path is still ahead at 16384 and
+# behind at 32768. A user who has measured their own hardware can pass
+# `reduction_threshold` to lower it. Being slower than optimal is
+# recoverable; being slower than the code STADE used to emit is not.
+const CGEN_REDUCTION_THRESHOLD_DEFAULT = 32768
 
 function cgen_trip_count(lo, step, hi)
     step isa Number && abs(step) == 1 &&
@@ -6298,12 +6318,12 @@ end
 
 cgen_host_fname(name::Symbol, backend) = Symbol(string(name) * backend.suffix)
 
-function cgen_emit(gk, backend; keep_all_atomic::Bool = false)
+function cgen_emit(gk, backend; keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
     outer_defs = cgen_scalar_def_map(gk.body)
-    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; keep_all_atomic, outer_defs)
+    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; keep_all_atomic, reduction_threshold, outer_defs)
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     # Every scalar cross-thread reduction free var must already be a 1-element device array
     # before the first kernel launch that atomically writes it, and must be unboxed to a plain
@@ -8418,12 +8438,12 @@ end
 # (Float64 for CUDA/AMDGPU, Float32 for Metal); an explicit precision overrides that, except for a precision_locked
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
-function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false)
+function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, keep_all_atomic::Bool = false, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     p = precision === nothing ? backend.default_precision : precision
     if backend.precision_locked && p !== backend.default_precision
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
-    plan = cgen_emit(cgen_ingest(expr), backend; keep_all_atomic)
+    plan = cgen_emit(cgen_ingest(expr), backend; keep_all_atomic, reduction_threshold)
     p === Float64 && return plan
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
