@@ -76,12 +76,16 @@
 #     (kind=:assign, lhs, rhs)                                  # lhs/rhs :: Expr|Symbol|Number
 #     (kind=:for, var::Symbol, lo, hi, step, body)               # body :: statement_list
 #     (kind=:if, cond, then::statement_list, els::statement_list)
-#     -- :while intentionally unsupported for now, see skill-stade-dev.md
+#     (kind=:while, cond, body::statement_list)
+#        cond follows the same rules as an :if condition. It is never
+#        differentiated and takes no shadow: the trip count is recorded by
+#        the forward sweep and replayed by the backward one, so the
+#        gradient is the derivative at FIXED trip count.
 #     -- lo/hi/step are all Expr|Symbol|Number; a plain `lo:hi` header
 #        parses with `step` set to the Int64 literal `1`.
 # statement_list :: Vector{NamedTuple}
 # active_map    :: Dict{Symbol,Bool}                # var/array name -> is-active
-# snapshot_site :: (kind=:value|:array|:branch|:tripcount, array::Symbol, at::Int)
+# snapshot_site :: (kind=:value|:array|:branch|:tripcount|:whilecount, array::Symbol, at::Int)
 # snapshot_plan :: Vector{snapshot_site}
 # lin_node/lin_plan :: internal-only shape, documented at the lin_*
 #     section header below.
@@ -516,7 +520,7 @@ function parse_statement(stmt)
     elseif stmt.head == :if
         return parse_if(stmt)
     elseif stmt.head == :while
-        error("parse_kernel: `while` loops aren't supported yet (see skill-stade-dev.md)")
+        return parse_while(stmt)
     elseif stmt.head in (:+=, :-=, :*=, :/=, :^=)
         return parse_assign(parse_desugar_compound(stmt))
     elseif stmt.head in (:÷=, :%=, Symbol("\\="), :.=)
@@ -589,6 +593,92 @@ function parse_for(stmt::Expr)
 end
 
 # ---- if statement (plain if/else only -- no elseif chains yet) ----
+
+# A `while` carries no trip count. The forward sweep counts its own
+# iterations and pushes the total; the backward sweep replays it as a
+# plain `for`. So the adjoint of a `while` contains no `:while`, and every
+# stage that ingests generated code stays unchanged.
+#
+# Two refusals are cheap and worth making here, at the only point that
+# sees the user's source.
+function parse_while(stmt::Expr)
+    length(stmt.args) == 2 ||
+        error("parse_kernel: unsupported `while` form `$(stmt)`")
+    cond = stmt.args[1]
+    # before parse_check_expr, which would reject an assignment with its
+    # generic message. This one names the fix.
+    parse_while_check_pure(cond)
+    parse_check_expr(cond, true)
+
+    body_block = stmt.args[2]
+    body_block isa Expr && body_block.head == :block ||
+        error("parse_kernel: malformed `while` body")
+    body = parse_statements(parse_strip_lines(body_block))
+
+    # The condition must read at least one name the body writes. STADE
+    # cannot prove termination and does not try. This far weaker property
+    # catches the loop that plainly cannot end, at generation time rather
+    # than by hanging a job.
+    read_vars = Set{Symbol}()
+    parse_collect_expr_vars!(cond, read_vars)
+    written = Set{Symbol}()
+    parse_collect_written!(body, written)
+    isempty(intersect(read_vars, written)) &&
+        error("parse_kernel: this `while` condition reads `" *
+              join(sort(collect(read_vars)), "`, `") *
+              "`, and the body writes none of them, so the loop cannot end. " *
+              "STADE does not prove termination; it checks only that the " *
+              "condition can change")
+    return (kind = :while, cond = cond, body = body)
+end
+
+# An assignment inside a condition has no place in either sweep: the
+# forward sweep evaluates the condition once per iteration, and the
+# backward sweep never evaluates it at all, so a side effect there would
+# happen a different number of times in each.
+function parse_while_check_pure(expr)
+    expr isa Expr || return nothing
+    expr.head in (:(=), :+=, :-=, :*=, :/=, :^=) &&
+        error("parse_kernel: `while` condition `$(expr)` assigns. A condition " *
+              "is an expression; move the assignment into the body")
+    for a in expr.args
+        parse_while_check_pure(a)
+    end
+    return nothing
+end
+
+function parse_collect_expr_vars!(expr, out::Set{Symbol})
+    expr isa Symbol && (push!(out, expr); return out)
+    if expr isa Expr
+        if expr.head == :ref
+            expr.args[1] isa Symbol && push!(out, expr.args[1])
+            for a in expr.args[2:end]; parse_collect_expr_vars!(a, out); end
+        elseif expr.head == :call
+            for a in expr.args[2:end]; parse_collect_expr_vars!(a, out); end
+        else
+            for a in expr.args; parse_collect_expr_vars!(a, out); end
+        end
+    end
+    return out
+end
+
+function parse_collect_written!(body::Vector{NamedTuple}, out::Set{Symbol})
+    for st in body
+        if st.kind == :assign
+            st.lhs isa Symbol && push!(out, st.lhs)
+            st.lhs isa Expr && st.lhs.head == :ref && push!(out, st.lhs.args[1])
+        elseif st.kind == :for
+            push!(out, st.var)
+            parse_collect_written!(st.body, out)
+        elseif st.kind == :while
+            parse_collect_written!(st.body, out)
+        elseif st.kind == :if
+            parse_collect_written!(st.then, out)
+            parse_collect_written!(st.els, out)
+        end
+    end
+    return out
+end
 
 function parse_if(stmt::Expr)
     length(stmt.args) in (2, 3) || error("parse_kernel: unsupported `if` form")
@@ -756,6 +846,8 @@ function shape_collect_vars!(body::Vector{NamedTuple}, vars::Set{Symbol})
             shape_collect_expr_vars!(stmt.hi, vars)
             shape_collect_expr_vars!(stmt.step, vars)
             shape_collect_vars!(stmt.body, vars)
+        elseif stmt.kind == :while
+            shape_collect_vars!(stmt.body, vars)
         elseif stmt.kind == :if
             shape_collect_expr_vars!(stmt.cond, vars)
             shape_collect_vars!(stmt.then, vars)
@@ -798,6 +890,8 @@ function shape_mark_arrays!(body::Vector{NamedTuple}, is_array::Dict{Symbol,Bool
             shape_mark_arrays_expr!(stmt.lo, is_array)
             shape_mark_arrays_expr!(stmt.hi, is_array)
             shape_mark_arrays_expr!(stmt.step, is_array)
+            shape_mark_arrays!(stmt.body, is_array)
+        elseif stmt.kind == :while
             shape_mark_arrays!(stmt.body, is_array)
         elseif stmt.kind == :if
             shape_mark_arrays_expr!(stmt.cond, is_array)
@@ -842,6 +936,8 @@ function shape_mark_int_direct!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bo
             shape_mark_int_from_div_and_index!(stmt.lo, is_int)
             shape_mark_int_from_div_and_index!(stmt.hi, is_int)
             shape_mark_int_from_div_and_index!(stmt.step, is_int)
+            shape_mark_int_direct!(stmt.body, is_int)
+        elseif stmt.kind == :while
             shape_mark_int_direct!(stmt.body, is_int)
         elseif stmt.kind == :if
             shape_mark_int_from_div_and_index!(stmt.cond, is_int)
@@ -938,6 +1034,8 @@ function shape_propagate_int!(body::Vector{NamedTuple}, is_int::Dict{Symbol,Bool
                 changed = shape_force_int_expr!(stmt.rhs, is_int) || changed
             end
         elseif stmt.kind == :for
+            changed = shape_propagate_int!(stmt.body, is_int) || changed
+        elseif stmt.kind == :while
             changed = shape_propagate_int!(stmt.body, is_int) || changed
         elseif stmt.kind == :if
             changed = shape_propagate_int!(stmt.then, is_int) || changed
@@ -1494,6 +1592,13 @@ function emit_forloop(var::Symbol, lo, hi, step, body_exprs::Vector)
     return Expr(:for, Expr(:(=), var, range_expr), Expr(:block, body_exprs...))
 end
 
+# while cond ... end. The condition is emitted verbatim: it is never
+# differentiated, because the trip count is recorded by the forward sweep
+# and replayed by the backward one.
+function emit_while(cond, body_exprs::Vector)
+    return Expr(:while, cond, Expr(:block, body_exprs...))
+end
+
 # if cond ... else ... end -- omits the else clause entirely when
 # else_exprs is empty (rather than emitting an empty `else end`
 # block), matching skill-stade's "keep if/else to the strict minimum"
@@ -1799,6 +1904,13 @@ function emit_cse_block(stmts, counter, ctx)
         if s isa Expr && s.head == :for
             append!(out, emit_cse_run(run, counter, ctx)); empty!(run)
             push!(out, Expr(:for, s.args[1], Expr(:block, emit_cse_block(s.args[2].args, counter, ctx)...)))
+        elseif s isa Expr && s.head == :while
+            # Without this clause a whole `while` joins the straight-line run,
+            # and CSE hoists subexpressions out of it, past the loop
+            # variables of any `for` inside. That produced
+            # `__cse_0 = u[i_x]` above the loop that binds i_x.
+            append!(out, emit_cse_run(run, counter, ctx)); empty!(run)
+            push!(out, Expr(:while, s.args[1], Expr(:block, emit_cse_block(s.args[2].args, counter, ctx)...)))
         elseif s isa Expr && s.head == :if
             append!(out, emit_cse_run(run, counter, ctx)); empty!(run)
             args = Any[s.args[1]]
@@ -1979,6 +2091,90 @@ end
 function snap_value_needed_vars(kernel)
     acc = Set{Symbol}()
     snap_collect_value_needed!(kernel.body, acc)
+    # Section 1.4 of the while plan. Inside a `for`, the backward sweep can
+    # rebuild a primal value from the loop variable. A `while` has none, and
+    # no closed form for the state at iteration k, so nothing in its body can
+    # be recomputed. Every scalar the body assigns must therefore be
+    # snapshotted, including an integer index: without this the replay reads
+    # the value the counter held when the loop ENDED, the same one on every
+    # iteration.
+    snap_collect_while_carried!(kernel.body, acc)
+    return acc
+end
+
+# Integer scalars a while body assigns directly. Nested `for` bodies are
+# skipped: their own index is regenerated by the reversed header, and a
+# scalar they assign belongs to that loop rather than to this one. A nested
+# `while` gets its own sites when snap_walk! reaches it.
+function snap_while_carried_ints(body, kinds)
+    out = Set{Symbol}()
+    snap_while_carry_walk!(body, kinds, out, Set{Symbol}())
+    # ...and written somewhere in the body. One the body only reads is
+    # loop-invariant: its value is the same on every iteration, so the
+    # backward sweep can read it directly and recording it would push a
+    # constant once per iteration. `i_n` and an outer loop's index both
+    # land here.
+    written = Set{Symbol}()
+    parse_collect_written!(body, written)
+    return intersect(out, written)
+end
+
+# A scalar is CARRIED only if the body reads it before assigning it. One the
+# body defines first is fresh each iteration, so its earlier value is not
+# needed and pushing it reads an undefined variable: in a nested pair, the
+# outer body's `i_k = 1` made the outer loop push `i_k` before anything had
+# set it.
+#
+# The read-before-write test also keeps the two loops of a nested pair off
+# each other's stack. The inner `i_k` is carried and the outer one is not,
+# so only one loop pushes it.
+function snap_while_carry_walk!(body, kinds, out, defined)
+    for stmt in body
+        if stmt.kind == :assign
+            rd = Set{Symbol}()
+            snap_collect_expr_vars!(stmt.rhs, rd)
+            stmt.lhs isa Expr && for a in stmt.lhs.args[2:end]; snap_collect_expr_vars!(a, rd); end
+            for v in rd
+                get(kinds, v, :none) == :scalar_int && !(v in defined) && push!(out, v)
+            end
+            stmt.lhs isa Symbol && push!(defined, stmt.lhs)
+        elseif stmt.kind == :if
+            rd = Set{Symbol}()
+            snap_collect_expr_vars!(stmt.cond, rd)
+            for v in rd
+                get(kinds, v, :none) == :scalar_int && !(v in defined) && push!(out, v)
+            end
+            snap_while_carry_walk!(stmt.then, kinds, out, copy(defined))
+            snap_while_carry_walk!(stmt.els, kinds, out, copy(defined))
+        elseif stmt.kind == :for
+            # the loop variable is defined by the header, so a read of it
+            # inside is not a carry out of the enclosing while
+            snap_while_carry_walk!(stmt.body, kinds, out, union(defined, Set([stmt.var])))
+        elseif stmt.kind == :while
+            rd = Set{Symbol}()
+            snap_collect_expr_vars!(stmt.cond, rd)
+            for v in rd
+                get(kinds, v, :none) == :scalar_int && !(v in defined) && push!(out, v)
+            end
+            snap_while_carry_walk!(stmt.body, kinds, out, copy(defined))
+        end
+    end
+    return nothing
+end
+
+function snap_collect_while_carried!(body, acc, inside::Bool = false)
+    for stmt in body
+        if stmt.kind == :assign
+            inside && stmt.lhs isa Symbol && push!(acc, stmt.lhs)
+        elseif stmt.kind == :while
+            snap_collect_while_carried!(stmt.body, acc, true)
+        elseif stmt.kind == :for
+            snap_collect_while_carried!(stmt.body, acc, inside)
+        elseif stmt.kind == :if
+            snap_collect_while_carried!(stmt.then, acc, inside)
+            snap_collect_while_carried!(stmt.els, acc, inside)
+        end
+    end
     return acc
 end
 
@@ -1987,6 +2183,8 @@ function snap_collect_value_needed!(body, acc)
         if stmt.kind == :assign
             snap_var_value_needed!(stmt.rhs, acc, false)
         elseif stmt.kind == :for
+            snap_collect_value_needed!(stmt.body, acc)
+        elseif stmt.kind == :while
             snap_collect_value_needed!(stmt.body, acc)
         elseif stmt.kind == :if
             snap_var_value_needed!(stmt.cond, acc, true)
@@ -2008,6 +2206,10 @@ function snap_count_assign_sites(body)
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             counts[var] = get(counts, var, 0) + 1
         elseif stmt.kind == :for
+            for (k, v) in snap_count_assign_sites(stmt.body)
+                counts[k] = get(counts, k, 0) + v
+            end
+        elseif stmt.kind == :while
             for (k, v) in snap_count_assign_sites(stmt.body)
                 counts[k] = get(counts, k, 0) + v
             end
@@ -2035,6 +2237,9 @@ function snap_read_before_walk(body, target, var)
         elseif stmt.kind == :for
             (found, reached) = snap_read_before_walk(stmt.body, target, var)
             (found || reached) && return (found, true)
+        elseif stmt.kind == :while
+            (found, reached) = snap_read_before_walk(stmt.body, target, var)
+            (found || reached) && return (found, true)
         elseif stmt.kind == :if
             snap_count_var_refs(stmt.cond, var) > 0 && return (true, true)
             (found_t, reached_t) = snap_read_before_walk(stmt.then, target, var)
@@ -2059,6 +2264,8 @@ function snap_collect_reassigned(body, in_loop = false)
         if stmt.kind == :assign
             in_loop && stmt.lhs isa Symbol && push!(reassigned, stmt.lhs)
         elseif stmt.kind == :for
+            union!(reassigned, snap_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :while
             union!(reassigned, snap_collect_reassigned(stmt.body, true))
         elseif stmt.kind == :if
             union!(reassigned, snap_collect_reassigned(stmt.then, in_loop))
@@ -2096,6 +2303,26 @@ function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, co
             snap_check_assign!(stmt, active_map, kinds, value_needed, sites, counter, in_loop, assign_counts, full_body, body, idx, site_needed)
         elseif stmt.kind == :for
             snap_check_tripcount!(stmt, reassigned, sites, counter)
+            snap_walk!(stmt.body, active_map, kinds, reassigned, value_needed, sites, counter,
+                       true, assign_counts, full_body, site_needed)
+        elseif stmt.kind == :while
+            counter[] = counter[] + 1
+            push!(sites, (kind = :whilecount, array = :count, at = counter[]))
+            # A `while` has no loop variable, so the backward sweep cannot
+            # rebuild a carried scalar at iteration k the way it rebuilds a
+            # `for` index. Active floats already get a :value site through
+            # the ordinary gate. The INTEGERS do not: snap_check_assign!
+            # gates on activity, and a loop counter is inactive. They get
+            # their own site here, on their own Int64 stack, pushed inside
+            # the body and popped inside the replay. Without this the replay
+            # reads the value the counter held when the loop ENDED,
+            # identically on every iteration.
+            for cv in sort(collect(snap_while_carried_ints(stmt.body, kinds)))
+                counter[] = counter[] + 1
+                push!(sites, (kind = :whilecarry, array = cv, at = counter[]))
+            end
+            # in_loop = true: a while body re-executes, so a write inside it
+            # needs its site exactly as one inside a `for` does.
             snap_walk!(stmt.body, active_map, kinds, reassigned, value_needed, sites, counter,
                        true, assign_counts, full_body, site_needed)
         elseif stmt.kind == :if
@@ -2240,6 +2467,8 @@ function snap_collect_exempt_vars!(body, value_needed, assign_counts, full_body,
             end
         elseif stmt.kind == :for
             snap_collect_exempt_vars!(stmt.body, value_needed, assign_counts, full_body, true, exempt)
+        elseif stmt.kind == :while
+            snap_collect_exempt_vars!(stmt.body, value_needed, assign_counts, full_body, true, exempt)
         elseif stmt.kind == :if
             snap_collect_exempt_vars!(stmt.then, value_needed, assign_counts, full_body, in_loop, exempt)
             snap_collect_exempt_vars!(stmt.els, value_needed, assign_counts, full_body, in_loop, exempt)
@@ -2271,6 +2500,8 @@ function snap_boundary_kill_vars(body, bvars)
             stmt.lhs isa Symbol && push!(top, stmt.lhs)
         elseif stmt.kind == :for
             union!(nested, snap_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :while
+            union!(nested, snap_collect_reassigned(stmt.body, true))
         elseif stmt.kind == :if
             union!(nested, snap_collect_reassigned(stmt.then, true))
             union!(nested, snap_collect_reassigned(stmt.els, true))
@@ -2291,6 +2522,9 @@ end
 function snap_boundary_walk!(body, bvars, out)
     for stmt in body
         if stmt.kind == :for
+            union!(out, intersect(snap_collect_reassigned(stmt.body, true), bvars))
+            snap_boundary_walk!(stmt.body, bvars, out)
+        elseif stmt.kind == :while
             union!(out, intersect(snap_collect_reassigned(stmt.body, true), bvars))
             snap_boundary_walk!(stmt.body, bvars, out)
         elseif stmt.kind == :if
@@ -2328,6 +2562,8 @@ function snap_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}()
             seen_els  = snap_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars)
             seen = union(seen_then, seen_els)
         elseif stmt.kind == :for
+            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
+        elseif stmt.kind == :while
             seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
         end
     end
@@ -2383,6 +2619,8 @@ function snap_site_vars_walk!(body, vars)
             vars[agen_site_key(body, idx)] = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
         elseif stmt.kind == :for
             snap_site_vars_walk!(stmt.body, vars)
+        elseif stmt.kind == :while
+            snap_site_vars_walk!(stmt.body, vars)
         elseif stmt.kind == :if
             snap_site_vars_walk!(stmt.then, vars)
             snap_site_vars_walk!(stmt.els, vars)
@@ -2416,6 +2654,12 @@ function lin_build_stmt(stmt, active_map)
         return (kind = :assign, lhs = stmt.lhs, active = tree.active, tree = tree)
     elseif stmt.kind == :for
         return (kind = :for, var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step,
+                body = lin_build_body(stmt.body, active_map))
+    elseif stmt.kind == :while
+        # The condition is not linearized. It selects how many times the
+        # body runs, and the trip count is replayed from a recorded value
+        # rather than differentiated.
+        return (kind = :while, cond = stmt.cond,
                 body = lin_build_body(stmt.body, active_map))
     elseif stmt.kind == :if
         return (kind = :if, cond = stmt.cond,
@@ -2515,6 +2759,11 @@ function tgen_body(plan)
         elseif stmt.kind == :for
             inner = tgen_body(stmt.body)
             push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
+        elseif stmt.kind == :while
+            # Forward mode runs alongside the primal, so the tangent needs no
+            # trip count: the same condition over the same values selects the
+            # same iterations. Only the reverse mode has to record anything.
+            push!(exprs, emit_while(stmt.cond, tgen_body(stmt.body)))
         elseif stmt.kind == :if
             then_exprs = tgen_body(stmt.then)
             els_exprs = tgen_body(stmt.els)
@@ -2555,6 +2804,8 @@ function tgen_collect_reassigned_scalar_args!(body, arg_set, kinds, out)
             end
         elseif stmt.kind == :for
             tgen_collect_reassigned_scalar_args!(stmt.body, arg_set, kinds, out)
+        elseif stmt.kind == :while
+            tgen_collect_reassigned_scalar_args!(stmt.body, arg_set, kinds, out)
         elseif stmt.kind == :if
             tgen_collect_reassigned_scalar_args!(stmt.then, arg_set, kinds, out)
             tgen_collect_reassigned_scalar_args!(stmt.els, arg_set, kinds, out)
@@ -2575,6 +2826,7 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     layout = nothing
     value_needed = exempt = stacks = nothing
     if !keep_push_pop
+        agen_refuse_while_sized(kernel.body)
         # Tier B kernels (a ragged/data-dependent loop bound) are no longer refused: agen_layout resolves as
         # much as possible into closed-form ragged-block tables, using plain :stack semantics only for what a
         # block can't resolve. ii_plan/fuse_ii_loops is exercised with keep_push_pop=false against the full
@@ -2698,6 +2950,8 @@ function agen_seed_unsafe_self_ref!(body, kinds, unsafe)
             end
         elseif stmt.kind == :for
             agen_seed_unsafe_self_ref!(stmt.body, kinds, unsafe)
+        elseif stmt.kind == :while
+            agen_seed_unsafe_self_ref!(stmt.body, kinds, unsafe)
         elseif stmt.kind == :if
             agen_seed_unsafe_self_ref!(stmt.then, kinds, unsafe)
             agen_seed_unsafe_self_ref!(stmt.els, kinds, unsafe)
@@ -2721,6 +2975,8 @@ function agen_propagate_unsafe!(body, kinds, unsafe)
             end
         elseif stmt.kind == :for
             changed = agen_propagate_unsafe!(stmt.body, kinds, unsafe) || changed
+        elseif stmt.kind == :while
+            changed = agen_propagate_unsafe!(stmt.body, kinds, unsafe) || changed
         elseif stmt.kind == :if
             changed = agen_propagate_unsafe!(stmt.then, kinds, unsafe) || changed
             changed = agen_propagate_unsafe!(stmt.els, kinds, unsafe) || changed
@@ -2737,9 +2993,30 @@ end
 # another -- matches how snap_plan tags every :branch site's `array`
 # field with the fixed sentinel :cond, so they naturally collapse to
 # one name here
+# Every :whilecount site shares one stack, as :branch and :tripcount do. It
+# is kept separate from :tripcount_stack on purpose: the two are pushed at
+# different moments, a trip count before its loop and a while count after
+# it, so one shared stack would interleave them and a wrong count would be
+# hard to attribute. See section 8.1 of the plan.
+# The counter a `while` forward sweep increments. Named from the site key so
+# the backward sweep can never pick a different one, and so two `while`
+# statements in one body cannot collide.
+agen_whilecount_var(body, idx) =
+    Symbol("__wcount_", string(hash(agen_site_key(body, idx)), base = 16)[1:6])
+
+# The replay loop's own index. It indexes nothing and exists only to run the
+# body the recorded number of times, but it still needs a name no primal
+# statement can shadow.
+agen_whilecount_iter_var(body, idx) =
+    Symbol("__witer_", string(hash(agen_site_key(body, idx)), base = 16)[1:6])
+
 function agen_site_stack_name(site)
     site.kind in (:array, :value) && return Symbol(string(site.array) * "_stack")
     site.kind == :branch && return :branch_stack
+    site.kind == :whilecount && return :whilecount_stack
+    # one stack per carried variable, not one shared: the first version of
+    # this will get a value wrong, and a shared stack makes that unattributable
+    site.kind == :whilecarry && return Symbol("__wcarry_", site.array, "_stack")
     return :tripcount_stack
 end
 
@@ -2754,6 +3031,46 @@ function agen_stack_names(sites)
 end
 
 # (kind, array) -> stack name, for quick lookup during codegen
+# Section 3 of the while plan. keep_push_pop = false gives every stack a
+# closed-form size so nothing allocates inside the kernel. A `while` states
+# no trip count, so its count and carry stacks have no size formula and the
+# mode cannot be honoured. Refused with the alternative named, rather than
+# failing later inside the sizing pass with a message about a stack.
+#
+# This confines a `while` to the CPU path, since the GPU stages require
+# this mode. That is a real limit of the feature and not an oversight.
+function agen_refuse_while_sized(body)
+    for stmt in body
+        if stmt.kind == :while
+            error("stade_adjoint: `keep_push_pop = false` needs a closed-form size for " *
+                  "every stack, and a `while` loop has no trip count until it has run. " *
+                  "Use keep_push_pop = true, or write a counted loop with an early exit " *
+                  "(`for i = 1:n_max ... end` with a guard), which is supported and offloads")
+        elseif stmt.kind == :for
+            agen_refuse_while_sized(stmt.body)
+        elseif stmt.kind == :if
+            agen_refuse_while_sized(stmt.then); agen_refuse_while_sized(stmt.els)
+        end
+    end
+    return nothing
+end
+
+function agen_refuse_while(body)
+    for stmt in body
+        if stmt.kind == :while
+            error("stade_adjoint: reverse mode over a `while` loop is not finished " *
+                  "(phase 4 of the while plan). The forward count is correct, but the " *
+                  "scalars the body carries are not yet snapshotted, so the gradient " *
+                  "would be silently wrong. `stade_tangent` works on this kernel today")
+        elseif stmt.kind == :for
+            agen_refuse_while(stmt.body)
+        elseif stmt.kind == :if
+            agen_refuse_while(stmt.then); agen_refuse_while(stmt.els)
+        end
+    end
+    return nothing
+end
+
 function agen_stack_map(sites)
     m = Dict{Tuple{Symbol,Symbol},Symbol}()
     for s in sites
@@ -2922,6 +3239,8 @@ function agen_collect_reassigned(body, in_loop = false)
             in_loop && stmt.lhs isa Symbol && push!(reassigned, stmt.lhs)
         elseif stmt.kind == :for
             union!(reassigned, agen_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :while
+            union!(reassigned, agen_collect_reassigned(stmt.body, true))
         elseif stmt.kind == :if
             union!(reassigned, agen_collect_reassigned(stmt.then, in_loop))
             union!(reassigned, agen_collect_reassigned(stmt.els, in_loop))
@@ -2939,6 +3258,8 @@ function agen_nested_write_vars(body, kinds)
     vars = Set{Symbol}()
     for stmt in body
         if stmt.kind == :for
+            union!(vars, agen_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :while
             union!(vars, agen_collect_reassigned(stmt.body, true))
         elseif stmt.kind == :if
             # This function's concern (a var written only inside a sub-
@@ -2965,6 +3286,10 @@ function agen_ii_covered_write_check(body, var, ii_plan, in_covered)
                 in_covered || return false
             end
         elseif stmt.kind == :for
+            key = agen_site_key(body, idx)
+            covered_here = in_covered || get(ii_plan, key, nothing) in (:independent, :reduction, :mixed, :recompute)
+            agen_ii_covered_write_check(stmt.body, var, ii_plan, covered_here) || return false
+        elseif stmt.kind == :while
             key = agen_site_key(body, idx)
             covered_here = in_covered || get(ii_plan, key, nothing) in (:independent, :reduction, :mixed, :recompute)
             agen_ii_covered_write_check(stmt.body, var, ii_plan, covered_here) || return false
@@ -3010,6 +3335,9 @@ function agen_boundary_guaranteed_below(body, var, kinds, value_needed, exempt)
         if st.kind == :for
             agen_boundary_guaranteed_here(st.body, var, kinds, value_needed, exempt) && return true
             agen_boundary_guaranteed_below(st.body, var, kinds, value_needed, exempt) && return true
+        elseif st.kind == :while
+            agen_boundary_guaranteed_here(st.body, var, kinds, value_needed, exempt) && return true
+            agen_boundary_guaranteed_below(st.body, var, kinds, value_needed, exempt) && return true
         elseif st.kind == :if
             for b in (st.then, st.els)
                 agen_boundary_guaranteed_here(b, var, kinds, value_needed, exempt) && return true
@@ -3041,6 +3369,8 @@ function agen_boundary_kill_vars(body, bvars)
         if stmt.kind == :assign
             stmt.lhs isa Symbol && push!(top, stmt.lhs)
         elseif stmt.kind == :for
+            union!(nested, agen_collect_reassigned(stmt.body, true))
+        elseif stmt.kind == :while
             union!(nested, agen_collect_reassigned(stmt.body, true))
         elseif stmt.kind == :if
             union!(nested, agen_collect_reassigned(stmt.then, true))
@@ -3117,6 +3447,8 @@ function agen_collect_value_needed!(body, acc)
             agen_var_value_needed!(stmt.rhs, acc, false)
         elseif stmt.kind == :for
             agen_collect_value_needed!(stmt.body, acc)
+        elseif stmt.kind == :while
+            agen_collect_value_needed!(stmt.body, acc)
         elseif stmt.kind == :if
             agen_var_value_needed!(stmt.cond, acc, true)
             agen_collect_value_needed!(stmt.then, acc)
@@ -3182,6 +3514,8 @@ function agen_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}()
             seen_els  = agen_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars)
             seen = union(seen_then, seen_els)
         elseif stmt.kind == :for
+            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
+        elseif stmt.kind == :while
             seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
         end
     end
@@ -3284,6 +3618,10 @@ function agen_count_assign_sites(body)
             for (k, v) in agen_count_assign_sites(stmt.body)
                 counts[k] = get(counts, k, 0) + v
             end
+        elseif stmt.kind == :while
+            for (k, v) in agen_count_assign_sites(stmt.body)
+                counts[k] = get(counts, k, 0) + v
+            end
         elseif stmt.kind == :if
             for (k, v) in agen_count_assign_sites(stmt.then)
                 counts[k] = get(counts, k, 0) + v
@@ -3302,6 +3640,9 @@ function agen_read_before_walk(body, target, var)
         if stmt.kind == :assign
             agen_count_var_refs(stmt.rhs, var) > 0 && return (true, true)
         elseif stmt.kind == :for
+            (found, reached) = agen_read_before_walk(stmt.body, target, var)
+            (found || reached) && return (found, true)
+        elseif stmt.kind == :while
             (found, reached) = agen_read_before_walk(stmt.body, target, var)
             (found || reached) && return (found, true)
         elseif stmt.kind == :if
@@ -3331,6 +3672,8 @@ function agen_collect_exempt_vars!(body, value_needed, assign_counts, full_body,
                 push!(exempt, var)
             end
         elseif stmt.kind == :for
+            agen_collect_exempt_vars!(stmt.body, value_needed, assign_counts, full_body, true, exempt)
+        elseif stmt.kind == :while
             agen_collect_exempt_vars!(stmt.body, value_needed, assign_counts, full_body, true, exempt)
         elseif stmt.kind == :if
             agen_collect_exempt_vars!(stmt.then, value_needed, assign_counts, full_body, in_loop, exempt)
@@ -4052,6 +4395,8 @@ function agen_ii_force_no_snapshot!(body, vn_local, override)
             var in vn_local && (override[agen_site_key(body, idx)] = false)
         elseif stmt.kind == :for
             agen_ii_force_no_snapshot!(stmt.body, vn_local, override)
+        elseif stmt.kind == :while
+            agen_ii_force_no_snapshot!(stmt.body, vn_local, override)
         elseif stmt.kind == :if
             agen_ii_force_no_snapshot!(stmt.then, vn_local, override)
             agen_ii_force_no_snapshot!(stmt.els, vn_local, override)
@@ -4169,6 +4514,35 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
                 pop!(ectx.loop_ctx)
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
             end
+        elseif stmt.kind == :while
+            # The whole feature in one place. A `while` states no trip count,
+            # so the forward sweep counts its own iterations and pushes the
+            # total; the backward sweep pops it and replays the body that
+            # many times as a plain `for`.
+            #
+            # The counter is per site, so two sequential loops and a nested
+            # pair never share one. The push is AFTER the loop, because the
+            # total is not known until it ends. That is the reason
+            # :whilecount does not share :tripcount's stack, whose pushes
+            # happen before their loops.
+            cnt = agen_whilecount_var(body, idx)
+            push!(exprs, Expr(:(=), cnt, 0))
+            inner = Any[]
+            # Pushed at the TOP of the body, before the body updates them, so
+            # the value recorded for an iteration is the one that iteration
+            # actually used. Pushing after the update would record the NEXT
+            # iteration's value.
+            carried = sort(collect(snap_while_carried_ints(stmt.body, kinds)))
+            for cv in carried
+                agen_emit_push!(inner, stacks[(:whilecarry, cv)], cv, ectx, agen_site_key(body, idx, cv))
+            end
+            append!(inner, agen_forward_body(stmt.body, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                       ectx = ectx,
+                                       lin_body = lin_body === nothing ? nothing : lin_body[idx].body,
+                                       unsafe = unsafe))
+            push!(inner, Expr(:(=), cnt, Expr(:call, :+, cnt, 1)))
+            push!(exprs, emit_while(stmt.cond, inner))
+            agen_emit_push!(exprs, stacks[(:whilecount, :count)], cnt, ectx, agen_site_key(body, idx))
         elseif stmt.kind == :if
             nm = stacks[(:branch, :cond)]
             key = agen_site_key(body, idx)
@@ -4412,6 +4786,35 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                 end
                 push!(exprs, loop_expr)
             end
+        elseif stmt.kind == :while
+            # Pop the count the forward sweep pushed, then replay the body
+            # that many times as a plain `for`. The condition is never
+            # re-evaluated: by now the values it read have been overwritten
+            # by the reverse walk, and the number of iterations is a
+            # recorded fact rather than something to recompute.
+            #
+            # The loop runs 1:n rather than n:-1:1 only because the counter
+            # is not an index. The BODY is still differentiated in reverse
+            # by agen_backward_body, which is what the reversal has to
+            # achieve.
+            cnt = agen_whilecount_var(primal_body, idx)
+            push!(exprs, Expr(:(=), cnt,
+                              agen_emit_pop(stacks[(:whilecount, :count)], ectx,
+                                            agen_site_key(primal_body, idx), exprs)))
+            inner = Any[]
+            # LIFO: the replay runs the iterations in reverse, so each one
+            # pops the value its own forward iteration pushed. Popped BEFORE
+            # the body's adjoint, which reads them as indices.
+            # primal_body, not stmt.body: stmt comes from the lin plan, whose
+            # assign nodes carry .tree rather than .rhs
+            for cv in sort(collect(snap_while_carried_ints(primal_body[idx].body, kinds)))
+                push!(inner, Expr(:(=), cv,
+                                  agen_emit_pop(stacks[(:whilecarry, cv)], ectx,
+                                                agen_site_key(primal_body, idx, cv), inner)))
+            end
+            append!(inner, agen_backward_body(stmt.body, primal_body[idx].body, kinds, active_map, unsafe,
+                                        value_needed, reassigned, stacks, exempt; ectx = ectx))
+            push!(exprs, emit_forloop(agen_whilecount_iter_var(primal_body, idx), 1, cnt, 1, inner))
         elseif stmt.kind == :if
             skip = get(hoisted_vars, idx, Set{Symbol}())
             then_exprs = agen_backward_body(stmt.then, primal_body[idx].then, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt, skip; ectx = ectx)
@@ -4736,6 +5139,13 @@ function hvp_double_stmt(e::Expr, shadow_of)
     elseif e.head == :for
         inner = hvp_double_body(e.args[2].args, shadow_of)
         return Any[Expr(:for, e.args[1], Expr(:block, inner...))]
+    elseif e.head == :while
+        # The adjoint's forward sweep replays the primal, so a `while`
+        # survives into generated code even though the backward sweep is a
+        # plain `for`. The condition is not doubled: it reads primal values
+        # and selects iterations, and a shadow of it would mean nothing.
+        inner = hvp_double_body(e.args[2].args, shadow_of)
+        return Any[Expr(:while, e.args[1], Expr(:block, inner...))]
     elseif e.head == :if
         then_inner = hvp_double_body(e.args[2].args, shadow_of)
         if length(e.args) == 3
@@ -4842,6 +5252,15 @@ function cgen_parse_generated_statement(stmt)
         return cgen_parse_generated_assign(stmt)
     elseif stmt.head == :for
         return cgen_parse_generated_for(stmt)
+    elseif stmt.head == :while
+        # The adjoint's forward sweep replays the primal, so a `while`
+        # reaches this parser even though the backward sweep is a plain
+        # `for`. cgen_body keeps it on the host: no launch can size itself
+        # around a loop whose trip count is unknown until it has run.
+        length(stmt.args) == 2 && stmt.args[2] isa Expr && stmt.args[2].head == :block ||
+            error("cgen_parse_generated: malformed `while` `$(stmt)`")
+        return (kind = :while, cond = stmt.args[1],
+                body = cgen_parse_generated_statements(parse_strip_lines(stmt.args[2])))
     elseif stmt.head == :if
         return cgen_parse_generated_if(stmt)
     elseif stmt.head == :call && stmt.args[1] == :push!
@@ -4941,6 +5360,8 @@ function cgen_contains_stackop(body::Vector{NamedTuple})
             return true
         elseif stmt.kind == :for
             cgen_contains_stackop(stmt.body) && return true
+        elseif stmt.kind == :while
+            cgen_contains_stackop(stmt.body) && return true
         elseif stmt.kind == :if
             (cgen_contains_stackop(stmt.then) || cgen_contains_stackop(stmt.els)) && return true
         end
@@ -4993,6 +5414,8 @@ function cgen_collect_locally_assigned!(body::Vector{NamedTuple}, names::Set{Sym
         elseif stmt.kind == :for
             push!(names, stmt.var)
             cgen_collect_locally_assigned!(stmt.body, names)
+        elseif stmt.kind == :while
+            cgen_collect_locally_assigned!(stmt.body, names)
         elseif stmt.kind == :if
             cgen_collect_locally_assigned!(stmt.then, names)
             cgen_collect_locally_assigned!(stmt.els, names)
@@ -5020,6 +5443,8 @@ function cgen_collect_scalar_reductions!(body::Vector{NamedTuple}, names::Set{Sy
             cgen_collect_scalar_reductions!(stmt.els, names)
         elseif stmt.kind == :for
             cgen_collect_scalar_reductions!(stmt.body, names)
+        elseif stmt.kind == :while
+            cgen_collect_scalar_reductions!(stmt.body, names)
         end
     end
     return nothing
@@ -5044,6 +5469,8 @@ function cgen_collect_all_assigned!(body::Vector{NamedTuple}, names::Set{Symbol}
             cgen_collect_all_assigned!(stmt.then, names)
             cgen_collect_all_assigned!(stmt.els, names)
         elseif stmt.kind == :for
+            cgen_collect_all_assigned!(stmt.body, names)
+        elseif stmt.kind == :while
             cgen_collect_all_assigned!(stmt.body, names)
         end
     end
@@ -5171,6 +5598,10 @@ function cgen_deep_array_occurrences!(stmts, arr::Symbol, chain::Vector{Tuple{Sy
             down = stmt.hi isa Integer && stmt.hi == 1 && stmt.step isa Integer && stmt.step == -1
             (up || down) || return nothing
             cgen_deep_array_occurrences!(stmt.body, arr, vcat(chain, [(stmt.var, up ? stmt.hi : stmt.lo)]), out) === nothing && return nothing
+        elseif stmt.kind == :while
+            # A while contributes no index variable, so the chain of
+            # (loopvar, bound) pairs to strip is unchanged.
+            cgen_deep_array_occurrences!(stmt.body, arr, chain, out) === nothing && return nothing
         elseif stmt.kind == :if
             writes = Dict{Any,Vector{Any}}(); reads = Dict{Any,Vector{Any}}()
             cgen_collect_array_accesses!(NamedTuple[stmt], writes, reads)
@@ -5202,6 +5633,9 @@ end
 function cgen_elide_snapshot_saves(stmt, arr::Symbol)
     if stmt.kind == :for
         return (kind = :for, var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step,
+                body = cgen_elide_snapshot_saves_body(stmt.body, arr))
+    elseif stmt.kind == :while
+        return (kind = :while, cond = stmt.cond,
                 body = cgen_elide_snapshot_saves_body(stmt.body, arr))
     elseif stmt.kind == :if
         return (kind = :if, cond = stmt.cond,
@@ -5391,6 +5825,8 @@ function cgen_var_assigned_anywhere(body::Vector{NamedTuple}, var::Symbol)
             (cgen_var_assigned_anywhere(stmt.then, var) || cgen_var_assigned_anywhere(stmt.els, var)) && return true
         elseif stmt.kind == :for
             cgen_var_assigned_anywhere(stmt.body, var) && return true
+        elseif stmt.kind == :while
+            cgen_var_assigned_anywhere(stmt.body, var) && return true
         end
     end
     return false
@@ -5422,6 +5858,23 @@ function cgen_terminal_value_walk(body::Vector{NamedTuple}, var::Symbol, state, 
                 :unknown
             end
         elseif stmt.kind == :for
+            if cgen_var_assigned_anywhere(stmt.body, var)
+                # A var touched inside a nested loop isn't automatically :unknown -- if that nested loop's own body provably converges `var` to
+                # the same literal on every path too, that literal is what `var` holds after it finishes. Needed once this proof runs on loops
+                # whose reset lives one level deeper than the reduction. But only when the nested loop is GUARANTEED to run: with a runtime
+                # bound there are two outcomes, and the claim survives only if they agree -- taking `inner` unconditionally made entry_empty's
+                # GPU adjoint wrong by 1.43 while its CPU adjoint was correct.
+                held = state === :unchanged ? entry : state
+                inner = cgen_loop_convergent_constant(stmt.body, var, held)
+                state = if cgen_loop_runs_once(stmt)
+                    inner === nothing ? :unknown : inner
+                elseif inner !== nothing && held isa Number && held == inner
+                    inner
+                else
+                    :unknown
+                end
+            end
+        elseif stmt.kind == :while
             if cgen_var_assigned_anywhere(stmt.body, var)
                 # A var touched inside a nested loop isn't automatically :unknown -- if that nested loop's own body provably converges `var` to
                 # the same literal on every path too, that literal is what `var` holds after it finishes. Needed once this proof runs on loops
@@ -5482,6 +5935,10 @@ function cgen_use_before_def(body::Vector{NamedTuple}, local_names::Set{Symbol},
             # before-def case at all, unlike a genuine local scalar.
             ok, _ = cgen_use_before_def(stmt.body, local_names, synth, union(defined, Set([stmt.var])))
             ok || return (false, defined)
+        elseif stmt.kind == :while
+            # no loop variable to add to the defined set
+            ok, _ = cgen_use_before_def(stmt.body, local_names, synth, defined)
+            ok || return (false, defined)
         end
     end
     return (true, defined)
@@ -5503,6 +5960,8 @@ function cgen_collect_array_accesses!(body::Vector{NamedTuple}, writes::Dict, re
             cgen_collect_array_accesses!(stmt.then, writes, reads)
             cgen_collect_array_accesses!(stmt.els, writes, reads)
         elseif stmt.kind == :for
+            cgen_collect_array_accesses!(stmt.body, writes, reads)
+        elseif stmt.kind == :while
             cgen_collect_array_accesses!(stmt.body, writes, reads)
         end
     end
@@ -5533,6 +5992,8 @@ function cgen_collect_vars!(body::Vector{NamedTuple}, vars::Set{Symbol})
             cgen_collect_expr_vars!(stmt.step, vars)
             cgen_collect_vars!(stmt.body, vars)
             push!(vars, stmt.var)
+        elseif stmt.kind == :while
+            cgen_collect_vars!(stmt.body, vars)
         elseif stmt.kind == :if
             cgen_collect_expr_vars!(stmt.cond, vars)
             cgen_collect_vars!(stmt.then, vars)
@@ -5873,6 +6334,10 @@ function cgen_last_assign_is_zero(body, v)
             if cgen_writes_var(st.body, v)
                 found = cgen_loop_runs_once(st) && cgen_last_assign_is_zero(st.body, v)
             end
+        elseif st.kind == :while
+            if cgen_writes_var(st.body, v)
+                found = cgen_loop_runs_once(st) && cgen_last_assign_is_zero(st.body, v)
+            end
         elseif st.kind == :if
             tw = cgen_writes_var(st.then, v)
             ew = cgen_writes_var(st.els, v)
@@ -5895,6 +6360,8 @@ function cgen_writes_var(body, v)
             return true
         elseif st.kind == :for
             cgen_writes_var(st.body, v) && return true
+        elseif st.kind == :while
+            cgen_writes_var(st.body, v) && return true
         elseif st.kind == :if
             (cgen_writes_var(st.then, v) || cgen_writes_var(st.els, v)) && return true
         end
@@ -5908,6 +6375,8 @@ function cgen_collect_loop_vars(body, acc)
     for st in body
         if st.kind == :for
             push!(acc, st.var); cgen_collect_loop_vars(st.body, acc)
+        elseif st.kind == :while
+            cgen_collect_loop_vars(st.body, acc)   # a while has no loop variable
         elseif st.kind == :if
             cgen_collect_loop_vars(st.then, acc); cgen_collect_loop_vars(st.els, acc)
         end
@@ -5956,6 +6425,16 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     delete!(known_consts, stmt.lhs)
                 end
             end
+        elseif stmt.kind == :while
+            # A `while` stays on the host. No launch can size itself around a
+            # loop whose trip count is unknown until it has run, and no thread
+            # can be assigned an iteration. Loops INSIDE the body still offload
+            # normally, which is why this recurses rather than refusing.
+            #
+            # A missing clause here would be silent: the statement would fall
+            # through and vanish from the generated host function.
+            flush_pending!()
+            push!(exprs, emit_while(stmt.cond, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
@@ -6263,6 +6742,11 @@ function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend,
             push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep)), cgen_device_body(stmt.els, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :for
             push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep))))
+        elseif stmt.kind == :while
+            # A while has no trip count, so no launch can size itself around
+            # it and no thread can be assigned an iteration. cgen_body must
+            # have kept the enclosing loop on the host before reaching here.
+            error("cgen_device_body: a `while` cannot run inside a device kernel")
         end
     end
     return exprs
@@ -6458,6 +6942,16 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     delete!(known_consts, stmt.lhs)
                 end
             end
+        elseif stmt.kind == :while
+            # A `while` stays on the host. No launch can size itself around a
+            # loop whose trip count is unknown until it has run, and no thread
+            # can be assigned an iteration. Loops INSIDE the body still offload
+            # normally, which is why this recurses rather than refusing.
+            #
+            # A missing clause here would be silent: the statement would fall
+            # through and vanish from the generated host function.
+            flush_pending!()
+            push!(exprs, emit_while(stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
         elseif stmt.kind == :if
             flush_pending!()
             # A host-side branch condition that reads a device array element needs the same @allowscalar
@@ -6636,6 +7130,11 @@ function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_v
             push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep)), jgen_device_body(stmt.els, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :for
             push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep))))
+        elseif stmt.kind == :while
+            # A while has no trip count, so no launch can size itself around
+            # it and no thread can be assigned an iteration. jgen_body must
+            # have kept the enclosing loop on the host before reaching here.
+            error("jgen_device_body: a `while` cannot run inside a device kernel")
         end
     end
     return exprs
@@ -6794,6 +7293,8 @@ function val_scan_ndims!(body, arr::Symbol, found::Ref{Int})
             val_scan_expr_ndims!(stmt.lo, arr, found)
             val_scan_expr_ndims!(stmt.hi, arr, found)
             val_scan_ndims!(stmt.body, arr, found)
+        elseif stmt.kind == :while
+            val_scan_ndims!(stmt.body, arr, found)
         elseif stmt.kind == :if
             val_scan_expr_ndims!(stmt.cond, arr, found)
             val_scan_ndims!(stmt.then, arr, found)
@@ -6834,6 +7335,8 @@ function val_collect_reassigned_scalar_float!(body, arg_set, kinds, out)
                 push!(out, stmt.lhs)
             end
         elseif stmt.kind == :for
+            val_collect_reassigned_scalar_float!(stmt.body, arg_set, kinds, out)
+        elseif stmt.kind == :while
             val_collect_reassigned_scalar_float!(stmt.body, arg_set, kinds, out)
         elseif stmt.kind == :if
             val_collect_reassigned_scalar_float!(stmt.then, arg_set, kinds, out)
@@ -6961,6 +7464,8 @@ function val_scan_divisors!(body, found::Set{Symbol})
         elseif stmt.kind == :for
             val_scan_expr_divisors!(stmt.lo, found)
             val_scan_expr_divisors!(stmt.hi, found)
+            val_scan_divisors!(stmt.body, found)
+        elseif stmt.kind == :while
             val_scan_divisors!(stmt.body, found)
         elseif stmt.kind == :if
             val_scan_expr_divisors!(stmt.cond, found)
@@ -7506,6 +8011,8 @@ function bgen_collect_written!(body::Vector{NamedTuple}, out::Set{Symbol})
             lhs isa Expr && lhs.head == :ref && push!(out, lhs.args[1])
         elseif st.kind == :for
             bgen_collect_written!(st.body, out)
+        elseif st.kind == :while
+            bgen_collect_written!(st.body, out)
         elseif st.kind == :if
             bgen_collect_written!(st.then, out)
             bgen_collect_written!(st.els, out)
@@ -7627,6 +8134,8 @@ function bgen_classify_writes!(body::Vector{NamedTuple}, dep::Set{Symbol},
         elseif st.kind == :for
             inner = copy(dep)
             push!(inner, st.var)
+            bgen_classify_writes!(st.body, inner, acc)
+        elseif st.kind == :while
             bgen_classify_writes!(st.body, inner, acc)
         elseif st.kind == :if
             bgen_classify_writes!(st.then, copy(dep), acc)
@@ -7812,6 +8321,8 @@ function bgen_all_writes_are_zero(body::Vector{NamedTuple}, arr::Symbol)
             return false
         elseif st.kind == :for
             bgen_all_writes_are_zero(st.body, arr) || return false
+        elseif st.kind == :while
+            bgen_all_writes_are_zero(st.body, arr) || return false
         elseif st.kind == :if
             bgen_all_writes_are_zero(st.then, arr) || return false
             bgen_all_writes_are_zero(st.els, arr) || return false
@@ -7838,6 +8349,12 @@ function bgen_zero_write_reached(body::Vector{NamedTuple}, arr::Symbol,
                 found = cgen_loop_runs_once(st) &&
                         bgen_zero_write_reached(st.body, arr, vcat(loopvars, st.var))
             end
+        elseif st.kind == :while
+            # A while has no literal bounds, so cgen_loop_runs_once can never
+            # prove it runs. Rule 11: a loop that may not run has not run.
+            if bgen_writes_array(st.body, arr)
+                found = false
+            end
         elseif st.kind == :if
             tw = bgen_writes_array(st.then, arr)
             ew = bgen_writes_array(st.els, arr)
@@ -7855,6 +8372,8 @@ function bgen_writes_array(body::Vector{NamedTuple}, arr::Symbol)
         if st.kind == :assign && st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == arr
             return true
         elseif st.kind == :for
+            bgen_writes_array(st.body, arr) && return true
+        elseif st.kind == :while
             bgen_writes_array(st.body, arr) && return true
         elseif st.kind == :if
             (bgen_writes_array(st.then, arr) || bgen_writes_array(st.els, arr)) && return true
@@ -8349,6 +8868,8 @@ function norm_first_touch(body, v)
             if t === :write && st.lo isa Number && st.hi isa Number && st.step isa Number
                 (st.step > 0 ? st.hi >= st.lo : st.hi <= st.lo) && return :write
             end
+        elseif st.kind == :while
+            t = norm_first_touch(st.body, v)
         elseif st.kind == :if
             reads = Set{Symbol}()
             agen_var_value_needed!(st.cond, reads, true)
@@ -8376,6 +8897,12 @@ function norm_reset_body(body, kinds, value_needed)
     out = NamedTuple[]
     for st in body
         if st.kind == :for
+            inner = norm_reset_body(st.body, kinds, value_needed)
+            for v in reverse(norm_dead_entry_vars(st.body, kinds, value_needed))
+                pushfirst!(inner, (kind = :assign, lhs = v, rhs = 0.0))
+            end
+            push!(out, merge(st, (body = inner,)))
+        elseif st.kind == :while
             inner = norm_reset_body(st.body, kinds, value_needed)
             for v in reverse(norm_dead_entry_vars(st.body, kinds, value_needed))
                 pushfirst!(inner, (kind = :assign, lhs = v, rhs = 0.0))
@@ -9180,6 +9707,14 @@ function ii_kill_and_collect!(body, alive, escaped, value_only = false)
             # witness, at 0.39.
             inner = ii_kill_and_collect!(stmt.body, copy(alive), escaped, value_only)
             cgen_loop_runs_once(stmt) && (alive = inner)
+        elseif stmt.kind == :while
+            # A kill inside a loop only counts when the loop is GUARANTEED to run -- a runtime bound may execute zero
+            # times, leaving the incoming value for a later read. Reads are collected either way; only the kill is
+            # conditional. The `:if` arm above is the same rule as an intersection: kill only when both branches kill.
+            # Getting this wrong under-reports escapes, fusing a loop whose scalar is still live -- ii_kill is the
+            # witness, at 0.39.
+            inner = ii_kill_and_collect!(stmt.body, copy(alive), escaped, value_only)
+            cgen_loop_runs_once(stmt) && (alive = inner)
         end
     end
     return alive
@@ -9193,6 +9728,15 @@ end
 function ii_find_ancestor_path(body, target, body_repeats::Bool)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :for
+            if stmt.body === target
+                return Any[(body, idx, body_repeats)]
+            end
+            sub = ii_find_ancestor_path(stmt.body, target, true)
+            if sub !== nothing
+                push!(sub, (body, idx, body_repeats))
+                return sub
+            end
+        elseif stmt.kind == :while
             if stmt.body === target
                 return Any[(body, idx, body_repeats)]
             end
@@ -9280,6 +9824,8 @@ function ii_collect_array_writes!(body, kinds, active_map, acc)
             get(kinds, arr, nothing) == :array_float && get(active_map, arr, false) && push!(acc, arr)
         elseif stmt.kind == :for
             ii_collect_array_writes!(stmt.body, kinds, active_map, acc)
+        elseif stmt.kind == :while
+            ii_collect_array_writes!(stmt.body, kinds, active_map, acc)
         elseif stmt.kind == :if
             ii_collect_array_writes!(stmt.then, kinds, active_map, acc)
             ii_collect_array_writes!(stmt.els, kinds, active_map, acc)
@@ -9329,6 +9875,9 @@ function ii_array_reads_walk!(walk_body, target, arrs, acc)
         elseif stmt.kind == :for
             stmt.body === target && continue
             ii_array_reads_walk!(stmt.body, target, arrs, acc)
+        elseif stmt.kind == :while
+            stmt.body === target && continue
+            ii_array_reads_walk!(stmt.body, target, arrs, acc)
         end
     end
     return nothing
@@ -9346,6 +9895,9 @@ function ii_assigned_vars!(body, acc, skip = nothing)
         elseif stmt.kind == :for
             stmt.body === skip && continue
             ii_assigned_vars!(stmt.body, acc, skip)
+        elseif stmt.kind == :while
+            stmt.body === skip && continue
+            ii_assigned_vars!(stmt.body, acc, skip)
         elseif stmt.kind == :if
             ii_assigned_vars!(stmt.then, acc, skip)
             ii_assigned_vars!(stmt.els, acc, skip)
@@ -9361,6 +9913,8 @@ function ii_collect_defs!(body, defs, loop_vars)
             push!(get!(defs, var, Any[]), stmt)
         elseif stmt.kind == :for
             push!(loop_vars, stmt.var)
+            ii_collect_defs!(stmt.body, defs, loop_vars)
+        elseif stmt.kind == :while
             ii_collect_defs!(stmt.body, defs, loop_vars)
         elseif stmt.kind == :if
             ii_collect_defs!(stmt.then, defs, loop_vars)
@@ -9389,6 +9943,8 @@ function ii_scalar_live_in(body, var)
             stmt.lhs isa Symbol && stmt.lhs == var && return :killed
         elseif stmt.kind == :for
             ii_scalar_live_in(stmt.body, var) === :live && return :live
+        elseif stmt.kind == :while
+            ii_scalar_live_in(stmt.body, var) === :live && return :live
         elseif stmt.kind == :if
             cond_reads = Set{Symbol}()
             agen_collect_expr_vars!(stmt.cond, cond_reads)
@@ -9415,6 +9971,9 @@ function ii_array_writes_walk!(walk_body, target, arrs, acc)
             ii_array_writes_walk!(stmt.then, target, arrs, acc)
             ii_array_writes_walk!(stmt.els, target, arrs, acc)
         elseif stmt.kind == :for
+            stmt.body === target && continue
+            ii_array_writes_walk!(stmt.body, target, arrs, acc)
+        elseif stmt.kind == :while
             stmt.body === target && continue
             ii_array_writes_walk!(stmt.body, target, arrs, acc)
         end
@@ -9495,6 +10054,8 @@ function ii_assigns_any(body, vars)
             (stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]) in vars && return true
         elseif stmt.kind == :for
             ii_assigns_any(stmt.body, vars) && return true
+        elseif stmt.kind == :while
+            ii_assigns_any(stmt.body, vars) && return true
         elseif stmt.kind == :if
             (ii_assigns_any(stmt.then, vars) || ii_assigns_any(stmt.els, vars)) && return true
         end
@@ -9505,6 +10066,14 @@ end
 function ii_fused_var_in_nested_for(body, vars, plan = nothing)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :for
+            # A nested loop that is ITSELF classified re-establishes its own scalars per inner iteration -- but only
+            # for a read INSIDE that loop. A read at THIS level that precedes the loop is reversed in the fused body's
+            # `bwd` half, running after the whole forward nest, so it sees the scalar's last inner-iteration value
+            # instead of what it read going forward. A read that FOLLOWS the loop is safe for the same reason: going
+            # forward it already read that last inner value.
+            covered = plan !== nothing && haskey(plan, agen_site_key(body, idx))
+            (!covered && ii_assigns_any(stmt.body, vars)) && return true
+        elseif stmt.kind == :while
             # A nested loop that is ITSELF classified re-establishes its own scalars per inner iteration -- but only
             # for a read INSIDE that loop. A read at THIS level that precedes the loop is reversed in the fused body's
             # `bwd` half, running after the whole forward nest, so it sees the scalar's last inner-iteration value
@@ -9544,6 +10113,20 @@ function ii_pending_reads!(body, vars, pending, plan = nothing, limit = nothing)
                 delete!(pending, stmt.lhs)
             end
         elseif stmt.kind == :for
+            # A read inside a loop that is ITSELF classified is not this candidate's problem
+            # for the scalars that loop assigns: its own fused body or backward-position
+            # recompute rebuilds them for its own reads, so nothing downstream has to preserve
+            # them. unet's two max-pool blocks are exactly this -- both name their taps a11/m1,
+            # and without the exemption the second block inherits the first block's reads.
+            own = plan !== nothing && haskey(plan, agen_site_key(body, idx)) ?
+                      Set{Symbol}(v for v in vars if ii_assigns_any(stmt.body, Set([v]))) :
+                      Set{Symbol}()
+            # A nested loop otherwise contributes its reads but never kills: it may run zero
+            # times, leaving the incoming value in place. Conservative in the safe direction,
+            # since an un-killed var only adds refusals.
+            ii_pending_reads!(stmt.body, setdiff(vars, own), pending, plan)
+            setdiff!(pending, own)
+        elseif stmt.kind == :while
             # A read inside a loop that is ITSELF classified is not this candidate's problem
             # for the scalars that loop assigns: its own fused body or backward-position
             # recompute rebuilds them for its own reads, so nothing downstream has to preserve
@@ -9604,6 +10187,8 @@ function ii_collect_written_arrays!(body, acc)
             stmt.lhs isa Expr && stmt.lhs.head == :ref && push!(acc, stmt.lhs.args[1])
         elseif stmt.kind == :for
             ii_collect_written_arrays!(stmt.body, acc)
+        elseif stmt.kind == :while
+            ii_collect_written_arrays!(stmt.body, acc)
         elseif stmt.kind == :if
             ii_collect_written_arrays!(stmt.then, acc)
             ii_collect_written_arrays!(stmt.els, acc)
@@ -9621,6 +10206,8 @@ function ii_scalar_reads_arrays(body, arrs)
                 isempty(reads) || return true
             end
         elseif stmt.kind == :for
+            ii_scalar_reads_arrays(stmt.body, arrs) && return true
+        elseif stmt.kind == :while
             ii_scalar_reads_arrays(stmt.body, arrs) && return true
         elseif stmt.kind == :if
             (ii_scalar_reads_arrays(stmt.then, arrs) ||
@@ -9644,6 +10231,9 @@ function ii_body_has_surviving_snapshot(body, kinds, active_map, sites, vn_local
                 get(sites, agen_site_key(body, idx), false) &&
                 !(var in vn_local) && return true
         elseif stmt.kind == :for
+            isempty(agen_tripcount_bound_vars(stmt, reassigned)) || return true
+            ii_body_has_surviving_snapshot(stmt.body, kinds, active_map, sites, vn_local, reassigned) && return true
+        elseif stmt.kind == :while
             isempty(agen_tripcount_bound_vars(stmt, reassigned)) || return true
             ii_body_has_surviving_snapshot(stmt.body, kinds, active_map, sites, vn_local, reassigned) && return true
         elseif stmt.kind == :if
