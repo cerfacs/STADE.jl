@@ -48,6 +48,17 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # cleared the rest; each one's scalar is genuinely read after the loop, so the split
     # cannot be made safe by removing a redundant push. Six host loops corpus-wide is the
     # measured price of the guard.
+        # The ddp_* subjects for the bgen_ stage. Every one offloads fully,
+        # adjoint and HVP alike. bgen_ adds no code path to this script, so
+        # any movement in these rows is a regression in cgen_, not in bgen_.
+        "ddp_affine" => 0,
+        "ddp_ambiguous_reduce" => 0,
+        "ddp_batch_hist" => 0,
+        "ddp_branch" => 0,
+        "ddp_ragged" => 1,   # Tier B, same as raggedii
+        "ddp_tangent_input" => 0,
+        "ddp_twoparam" => 0,
+        "ddp_written_per_sample" => 0,
         "advection" => 3, "advection_multi" => 3, "affine_loss" => 0,
         "bilinear" => 0, "bnd_branch" => 3, "bnd_carried" => 1,
         "bnd_nested_only" => 5, "bnd_readfirst" => 6,

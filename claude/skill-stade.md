@@ -311,6 +311,34 @@ function stencil(x::Vector{Float64}, n::Int64; pad=0.0)
 end
 ```
 
+## Mini-batch training needs no batch loop
+
+Write the kernel for **one** sample. Do not add a loop over samples, and
+do not add offset arithmetic to index into a batch.
+
+`stade_batch_file` runs the kernel unchanged, once per sample, and sums
+the parameter gradients across MPI ranks. Adding a batch loop yourself
+costs more than it gives: the reverse sweep snapshots every iteration, so
+the tape grows with the batch count, and the loop must then be sharded
+before it can run on more than one rank.
+
+The one fact the tool cannot derive is which read-only arrays change from
+one sample to the next. In `a[i] * u[i]` the two factors are symmetric,
+so nothing in the kernel says that `a` is a weight and `u` is an input.
+Name the ones that vary in `per_sample`. Every other read-only array is
+treated as replicated, and its gradient is summed across ranks.
+
+Two habits make that declaration easier to get right.
+
+Keep a per-sample output as an array the kernel overwrites, rather than
+one the caller zeroes and the kernel accumulates into. An accumulate at a
+data-dependent index reads the same as a quantity summed over the whole
+batch, and the tool refuses it until you say which you meant.
+
+Use a length-1 array for a scalar output, as `loss` does throughout this
+corpus. A scalar argument's adjoint is returned by value rather than
+accumulated in a buffer, so it cannot be summed across ranks in place.
+
 ## Self-check before returning code
 
 Read the draft back and confirm all of the following, fixing anything
