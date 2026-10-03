@@ -76,6 +76,22 @@ end
 
 - `stade_batch_file(in_path::String, out_path::String; per_sample, mode, reduced = Symbol[])`: writes to `out_path` a Julia source epilogue that runs the kernel at `in_path` over a mini-batch, one sample per rank, with GPU-aware MPI. The kernel needs no batch loop and no rewriting: every rank runs it unchanged on its own sample, and the epilogue sums the parameter gradients across ranks. `per_sample` names the read-only arrays whose values change from one sample to the next; every other read-only array is treated as replicated. The generated file carries the derived role of every buffer as a comment, so the communication plan is auditable without re-running STADE.
 
+## Multi-kernel files
+
+A file may define several kernels. The one no other kernel calls is the entry
+point, and every call in its body is inlined before differentiation.
+
+A call argument must be a bare symbol when the parameter is an array, or when the
+callee assigns to it, because the callee returns through it. A read-only scalar
+parameter takes any expression: `stage(t, w, x, i_n - 1)` and `stage(t, w, x, 3)`
+are both accepted, and the expression is bound to a temporary at the call site so
+it is evaluated once per call.
+
+Recursion is refused, directly or through a cycle. Inlining a recursive call
+would need a depth that is not known before the code runs, so its tape has no
+closed-form size. Write the recursion as a loop over an explicit level index, as
+`mg_vcycle` does.
+
 ## Wishlist 💡
 
 - [x] ✅ [v0.2.2] Wrap common subexpressions into auxiliary variables
