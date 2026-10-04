@@ -33,8 +33,13 @@ Agreement alone catches only the first of those three. The other two do not
 change which loops are offloaded -- they change how the host code around them is
 written -- so each gets its own property check below:
 
-  * every `JACC.@parallel_for` must sit inside a `> 0` trip guard, since JACC has
-    no per-thread bounds check to fall back on the way a CUDA kernel does;
+  * every `JACC.@parallel_for` AND every `JACC.@parallel_reduce` must sit inside a
+    `> 0` trip guard, since JACC has no per-thread bounds check to fall back on the
+    way a CUDA kernel does. The reduce half was added after a benchmark run found
+    `@parallel_reduce range = 0` raising "Grid dimensions CuDim3(0x0, 0x1, 0x1) are
+    not positive" on a V100 where CUDA's `mapreduce` returned zero: this check had
+    been looking only at `@parallel_for`, so it flagged the harmless `range = 1`
+    write-back beside the reduce while the reduce itself went uninspected;
   * every host `if` whose condition reads an array must have that condition
     wrapped in `@allowscalar`, in both backends.
 
@@ -65,6 +70,28 @@ measured boundary. This is a JACC/Julia limitation that STADE triggers by
 emitting wide kernels, not a STADE codegen bug, but catching it here beats
 discovering it on a device.
 
+One class of divergence is BY DESIGN and is excluded from the kernel count, after
+being mistaken for a defect. The idiomatic scalar reduction lowers differently on
+the two backends: CUDA reduces with `mapreduce`/`sum` and folds the result into
+the target on the host under `@allowscalar`, while JACC must do that fold in a
+device kernel, because a JACC array cannot be touched from the host. So a JACC
+adjoint carrying a reduction legitimately has exactly one more kernel than its
+CUDA twin, and this script reported all 30 such corpus kernels as
+`cuda=N jacc=N+1` failures for as long as the write-back has existed -- 30 of its
+142 pairs, every one a false alarm, which is enough noise to bury a real one.
+
+The rule adopted is to exclude reduction write-back kernels from the count and the
+positional arity pairing, recognised by the synthetic `__jgen_redval` parameter
+`jgen_reduction_writeback_kernel` gives them. Counting the CUDA host fold as a
+kernel instead was the alternative and was rejected: it is not a kernel, it has no
+arity to pair against, and inventing one would make the comparison depend on how
+the host statement happens to be written.
+
+The exclusion is bounded rather than blanket. A write-back exists only to fold a
+`@parallel_reduce` result, so a separate check asserts the two counts are equal.
+A write-back kernel appearing without its reduction, or a reduction without its
+write-back, still fails here.
+
 What this does NOT check is that the agreed decision is CORRECT. Both backends
 sharing a wrong gate looks identical to both sharing a right one. Numeric parity
 against the CPU (`validate_corpus_gpu.jl`, or a submitted
@@ -92,24 +119,48 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
         endswith(f, ".jl") && !any(endswith(f, s) for s in ("_b.jl", "_d.jl", "_hv.jl", "_cuda.jl", "_jacc.jl"))
     end)
 
-    # every JACC launch must be inside a `<trip> > 0` guard
-    function unguarded_launches(e, guarded = false, acc = Any[])
+    # every JACC device entry must be inside a `<trip> > 0` guard. Both macros are checked, not just
+    # @parallel_for: JACC sizes its grid from `range` for @parallel_reduce too, and a zero range there is
+    # an error and not an empty sum -- "Grid dimensions CuDim3(0x0, 0x1, 0x1) are not positive", measured
+    # on a V100. That hazard sat in the reduce call, which this check did not look at, while the message
+    # it did print named the harmless `range = 1` write-back beside it.
+    function unguarded_entries(e, mac::Symbol, guarded = false, acc = Any[])
         if e isa Expr
-            if e.head === :macrocall && any(a -> a === Symbol("@parallel_for") ||
-                   (a isa QuoteNode && a.value === Symbol("@parallel_for")) ||
+            if e.head === :macrocall && any(a -> a === mac ||
+                   (a isa QuoteNode && a.value === mac) ||
                    (a isa Expr && a.head === :. && a.args[2] isa QuoteNode &&
-                    a.args[2].value === Symbol("@parallel_for")), e.args)
+                    a.args[2].value === mac), e.args)
                 guarded || push!(acc, e)
                 return acc
             end
             if e.head === :if && e.args[1] isa Expr && e.args[1].head === :call && e.args[1].args[1] === :>
-                unguarded_launches(e.args[2], true, acc)
-                length(e.args) > 2 && unguarded_launches(e.args[3], guarded, acc)
+                unguarded_entries(e.args[2], mac, true, acc)
+                length(e.args) > 2 && unguarded_entries(e.args[3], mac, guarded, acc)
                 return acc
             end
-            foreach(a -> unguarded_launches(a, guarded, acc), e.args)
+            foreach(a -> unguarded_entries(a, mac, guarded, acc), e.args)
         end
         return acc
+    end
+
+    # How many times `mac` is invoked anywhere in `e`, guarded or not.
+    function count_macro(e, mac::Symbol)
+        e isa Expr || return 0
+        here = (e.head === :macrocall && any(a -> a === mac ||
+                   (a isa QuoteNode && a.value === mac) ||
+                   (a isa Expr && a.head === :. && a.args[2] isa QuoteNode &&
+                    a.args[2].value === mac), e.args)) ? 1 : 0
+        return here + sum(a -> count_macro(a, mac), e.args; init = 0)
+    end
+
+    # A JACC reduction write-back kernel, recognised by the synthetic `__jgen_redval` parameter
+    # jgen_reduction_writeback_kernel gives it. See the header note on why these are excluded from the
+    # kernel-count comparison.
+    function is_reduction_writeback(k)
+        k isa Expr && k.head === :function || return false
+        sig = k.args[1]
+        sig isa Expr && sig.head === :call && length(sig.args) >= 2 || return false
+        return sig.args[end] === :__jgen_redval
     end
 
     # every host `if` reading an array must wrap its condition in @allowscalar
@@ -148,15 +199,24 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
                 cu_shapes == ja_shapes ||
                     push!(problems, "host loops differ: cuda=$(length(cu_shapes)) jacc=$(length(ja_shapes))" *
                                     (length(cu_shapes) == length(ja_shapes) ? " (same count, different loops)" : ""))
-                length(cu.kernels) == length(ja.kernels) ||
-                    push!(problems, "device kernel count: cuda=$(length(cu.kernels)) jacc=$(length(ja.kernels))")
-                if length(cu.kernels) == length(ja.kernels)
+                # Write-back kernels are compared separately, below, not here -- see the header.
+                ja_cmp = filter(k -> !is_reduction_writeback(k), ja.kernels)
+                length(cu.kernels) == length(ja_cmp) ||
+                    push!(problems, "device kernel count: cuda=$(length(cu.kernels)) jacc=$(length(ja_cmp))" *
+                                    (length(ja_cmp) == length(ja.kernels) ? "" : " (+$(length(ja.kernels) - length(ja_cmp)) reduction write-back)"))
+                if length(cu.kernels) == length(ja_cmp)
                     # JACC kernels take a leading index argument; CUDA derives it from the thread id
-                    for (i, (kc, kj)) in enumerate(zip(cu.kernels, ja.kernels))
+                    for (i, (kc, kj)) in enumerate(zip(cu.kernels, ja_cmp))
                         kernel_arity(kc) + 1 == kernel_arity(kj) ||
                             push!(problems, "kernel $(i) arity: cuda=$(kernel_arity(kc)) jacc=$(kernel_arity(kj))")
                     end
                 end
+                # The exclusion is bounded, not a blanket one: a write-back exists only to fold a
+                # @parallel_reduce result, so their counts must match exactly.
+                n_wb = length(ja.kernels) - length(ja_cmp)
+                n_red = count_macro(ja.host, Symbol("@parallel_reduce"))
+                n_wb == n_red ||
+                    push!(problems, "jacc reduction write-backs=$(n_wb) but @parallel_reduce calls=$(n_red)")
             else
                 # Structural comparison is abandoned here, not merely relaxed. Holding a
                 # wide outer loop on the host does not subtract one kernel: its inner
@@ -176,8 +236,10 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
                     push!(problems, "jacc kernel $(i) takes $(n) splatted args (ceiling $(STADE.JGEN_MAX_SPLAT_ARGS)) -- the jgen_body gate let it through")
             end
 
-            ug = unguarded_launches(ja.host)
+            ug = unguarded_entries(ja.host, Symbol("@parallel_for"))
             isempty(ug) || push!(problems, "$(length(ug)) JACC launch(es) with no zero-trip guard")
+            ur = unguarded_entries(ja.host, Symbol("@parallel_reduce"))
+            isempty(ur) || push!(problems, "$(length(ur)) JACC @parallel_reduce call(s) with no zero-trip guard")
             for (lbl, h) in (("cuda", cu.host), ("jacc", ja.host))
                 bc = bare_array_conditions(h)
                 isempty(bc) || push!(problems, "$(lbl): $(length(bc)) host if-condition(s) read an array unwrapped")
