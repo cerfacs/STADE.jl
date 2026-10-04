@@ -6311,13 +6311,49 @@ cgen_reduction_range(lo, step, hi) =
 
 # JACC: no confirmed BLAS-level acceleration to special-case, so every matched shape goes through the
 # same `JACC.@parallel_reduce range=N f(args...)` primitive, replacing the `@parallel_for` +
-# `Atomix.@atomic` kernel it would otherwise get. Unlike CUDA/AMDGPU/Metal, `term` needs no
-# substitution: JACC's convention is a closure whose first parameter IS the loop index, so reusing
-# loopvar's name and leaving `arr[loopvar]` as written is already correct.
-function jgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Symbol, n_iter)
-    closure = Expr(:->, Expr(:tuple, loopvar, arrs...), term)
+# `Atomix.@atomic` kernel it would otherwise get.
+#
+# JACC's convention is a closure whose first parameter is the POSITION in `1:range`, not the loop's own
+# value. The two coincide only for a loop that starts at 1 with step 1. The comment that used to sit here
+# claimed they always coincide, and the closure therefore left `arr[loopvar]` as written -- so every
+# reduction whose loop had another lower bound, a stride, or a descending direction silently summed
+# elements `1 .. trip_count` instead of the ones the loop actually visited. Measured on a Tesla V100 with
+# reduction_threshold = 0: `2:i_n` at n = 100 returned 90.974668 against CUDA's exact 90.616806, and
+# `3:3:i_n` was out by 45%. A wrong value, never an error. Nothing saw it because the reduce branch needs
+# n_iter >= CGEN_REDUCTION_THRESHOLD_DEFAULT and corpus integers are drawn from 3..5 -- the same
+# invisibility that hid the cross-thread write-overlap race.
+#
+# The position is therefore mapped back to the loop's value, `lo + (k - 1) * step`, and substituted into
+# the term's array indices. cgen_idiomatic_scalar_reduction has already proven that every :ref in `term`
+# is indexed by exactly `loopvar` and that `loopvar` appears nowhere else, so that rewrite is total. A
+# negative step needs no special case: `i_n:-1:3` maps k = 1 to i_n and counts down, which is the order
+# the loop ran in.
+#
+# `lo == 1 && step == 1` keeps the original closure verbatim, because the mapping is the identity there
+# and dotprod, matvec_loss and every `1:n` loss wrapper must stay byte-identical.
+function jgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Symbol, lo, step, n_iter)
+    if lo == 1 && step == 1
+        closure = Expr(:->, Expr(:tuple, loopvar, arrs...), term)
+    else
+        k = :__jgen_k
+        shift = Expr(:call, :-, k, 1)
+        pos = step == 1 ? Expr(:call, :+, lo, shift) :
+                          Expr(:call, :+, lo, Expr(:call, :*, shift, step))
+        closure = Expr(:->, Expr(:tuple, k, arrs...), jgen_substitute_loop_index(term, loopvar, pos))
+    end
     return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_reduce"))), nothing,
                 Expr(:(=), :range, n_iter), Expr(:call, closure, arrs...))
+end
+
+# Rewrites `arr[loopvar]` to `arr[idx]` everywhere in `e`. Narrower than substituting the bare symbol on
+# purpose: cgen_idiomatic_scalar_reduction accepts a term only when loopvar occurs nowhere except as a
+# sole :ref index, so any other thing wearing that name is not this loop's variable.
+function jgen_substitute_loop_index(e, loopvar::Symbol, idx)
+    e isa Expr || return e
+    if e.head == :ref && length(e.args) == 2 && e.args[2] === loopvar
+        return Expr(:ref, e.args[1], idx)
+    end
+    return Expr(e.head, Any[jgen_substitute_loop_index(a, loopvar, idx) for a in e.args]...)
 end
 
 # ---- JACC idiomatic-reduction write-back ---
@@ -7270,7 +7306,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 if red !== nothing
                     target, op, arrs, term = red
                     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
-                    value = jgen_idiomatic_reduction_value(arrs, term, stmt.var, n_iter)
+                    value = jgen_idiomatic_reduction_value(arrs, term, stmt.var, stmt.lo, stmt.step, n_iter)
                     # `target - value` (op==:-) is normalized to a signed
                     # additive term here, matching cgen_flatten_sum's/
                     # jgen_device_assign's own convention of only ever
@@ -7306,8 +7342,18 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     # JACC reduction unconditionally at any trip count. That
                     # is the state the CUDA path was in at v0.2.5, measured
                     # there as a regression below the threshold.
-                    red_exprs = Any[Expr(:(=), redvar, signed_value),
-                                    jgen_reduction_writeback_launch(owner, widx, wfargs, redvar)]
+                    # The same `> 0` guard jgen_launch_expr puts on a @parallel_for, for the same reason:
+                    # JACC computes its grid from `range` and a zero range is not a no-op but an error
+                    # ("Grid dimensions CuDim3(0x0, 0x1, 0x1) are not positive", measured on a V100 for all
+                    # four of lo/step/direction witness kernels). The atomic branch was already guarded,
+                    # and the `n_iter < reduction_threshold` test above sends a zero trip count there at any
+                    # positive threshold -- which is why this was latent rather than visible. At
+                    # reduction_threshold = 0 the test is `0 < 0`, false, and the reduce branch ran empty.
+                    # CUDA has no matching hazard: its mapreduce carries `init`, so it returns zero.
+                    red_exprs = Any[emit_if(Expr(:call, :>, n_iter, 0),
+                                            Any[Expr(:(=), redvar, signed_value),
+                                                jgen_reduction_writeback_launch(owner, widx, wfargs, redvar)],
+                                            Any[])]
                     aidx = length(kernels) + 1
                     afargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
