@@ -275,7 +275,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                               run_cuda::Bool = true, run_jacc::Bool = true,
                               write_generated::Bool = true,
                               modes::Vector{Symbol} = [:adjoint, :hvp],
-                              only::Union{Vector{String},Nothing} = nothing)
+                              only::Union{Vector{String},Nothing} = nothing,
+                              int_lo::Int = 3, int_hi::Int = 5, grow_max::Int = 512)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") ||
            endswith(f, ".yaml") || endswith(f, ".gpu.yaml") ||
@@ -298,7 +299,12 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         # draws every integer from [0, 2] and leaves its baselines behind, and a GPU
         # run inheriting that draw executes no device code and reports a pass
         yp = STADE.io_gpu_yaml_path(path)
-        isfile(yp) || STADE.stade_generate_baseline_file(path; yaml_path = yp)
+        # int_lo/int_hi reach the draw so a run can be forced past one warp. A race between
+        # threads of the same warp is serialised by the hardware, so every integer argument a
+        # corpus baseline draws by default (3 to 5) hides a lost-update race completely --
+        # stencil_loss's adjoint was exact at i_n = 4 and wrong, differently on each run, from
+        # i_n = 256 up. See test/validate_write_overlap.jl for the static gate on the same defect.
+        isfile(yp) || STADE.stade_generate_baseline_file(path; yaml_path = yp, int_lo = int_lo, int_hi = int_hi, grow_max = grow_max)
         primal_expr = STADE.io_read_corpus_entry(path)
         kernel = STADE.parse_kernel(primal_expr)
         baseline = STADE.io_read_baseline_yaml(yp)
