@@ -6746,7 +6746,7 @@ function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, b
     for (v, c) in synth
         push!(body, Expr(:(=), v, c))
     end
-    append!(body, cgen_device_body(stmt.body, stmt.var, backend, reduce_vars))
+    append!(body, cgen_device_body(stmt.body, stmt.var, backend, reduce_vars, cgen_race_write_arrays(stmt.body, stmt.var)))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...), Expr(:block, body...))
 end
@@ -6786,14 +6786,215 @@ end
 cgen_expr_injective_ok(xs::Vector, injective_dep::Set{Symbol}, thread_dep::Set{Symbol}) =
     all(x -> cgen_expr_injective_ok(x, injective_dep, thread_dep), xs)
 
+# ---- cross-thread write-overlap analysis ----------------------------------
+# An index injective in the thread variable proves a thread never collides with ITSELF. It proves nothing about two
+# DIFFERENT writes in the same body: `ub[i-1]`, `ub[i]` and `ub[i+1]` are each injective, yet thread i and thread i+2
+# both land on `ub[i+1]`, and a plain read-modify-write there loses updates. Measured on a V100 as a wrong, run-to-run-
+# varying `ub` from stencil_loss's and advection's adjoints at n >= 256 -- invisible below one warp, where the hardware's
+# lockstep serialises the updates for free. Pairing a site with ITSELF is what catches the companion shape `a[i+j]` under
+# an inner serial loop over j, where one thread's later iteration collides with another thread's earlier one.
+#
+# Every write to an array whose accumulation sites can overlap becomes an atomic accumulation.
+#
+# Two deliberate limits on scope. Only ADDITIVE sites are paired: `+=` is what an atomic repairs, and a lost-update race
+# is what the measured defect was. A plain assignment racing another plain assignment is a different hazard with no
+# atomic form, and refusing the kernel for it rejects correct code here -- mpnn writes three disjoint slices of one
+# concatenated buffer at `(e-1)*n_in_msg + k`, `+ n_node_feat + k` and `+ 2n_node_feat + k`, whose disjointness needs the
+# symbolic stride's relation to the inner loop's range and is not provable from the indices alone. That hazard stays
+# where it already sat, with cgen_device_assign's existing non-additive tolerance. Second, only pairs of DIFFERENT index
+# expressions: whether ONE expression collides with itself across threads is what thread_invariant and
+# cgen_expr_injective_ok already decide, and they answer it with this same atomic rewrite.
+function cgen_race_write_arrays(body::Vector{NamedTuple}, thread_var::Symbol)
+    varying = cgen_all_assigned_scalars(body)
+    cgen_collect_loop_vars!(body, varying)
+    writes = Dict{Symbol,Vector{Any}}()
+    reads = Dict{Symbol,Vector{Any}}()
+    cgen_collect_subst_accesses!(body, Dict{Symbol,Any}(), writes, reads)
+    racy = Set{Symbol}()
+    for (arr, all_sites) in writes
+        sites = Any[s[1] for s in all_sites if s[2]]
+        for p in eachindex(sites), q in (p + 1):lastindex(sites)
+            sites[p] == sites[q] && continue
+            if cgen_writes_may_overlap(sites[p], sites[q], thread_var, varying)
+                push!(racy, arr)
+                break
+            end
+        end
+    end
+    return racy
+end
+
+# Can two index vectors address one element from two DIFFERENT threads? Disjointness only has to be proven in ONE
+# dimension, since a collision needs every dimension to agree -- that is what keeps `a[i, j]` and `a[i, j+1]` apart
+# across threads however the inner index moves.
+function cgen_writes_may_overlap(a::Vector, b::Vector, thread_var::Symbol, varying::Set{Symbol})
+    length(a) == length(b) || return true
+    for d in eachindex(a)
+        pa = cgen_index_affine(a[d], thread_var)
+        pb = cgen_index_affine(b[d], thread_var)
+        (pa === nothing || pb === nothing) && continue
+        (cgen_affine_invariant(pa[2], varying) && cgen_affine_invariant(pb[2], varying)) || continue
+        pa[1] == pb[1] || continue
+        # identical offsets: `c*t1 + k == c*t2 + k` forces t1 == t2, so no CROSS-thread collision
+        pa[1] != 0 && pa[2] == pb[2] && return false
+        ka, kb = pa[2], pb[2]
+        (ka isa Integer && kb isa Integer) || continue
+        # `c*t1 + ka == c*t2 + kb` needs c to divide the offset difference; c == 0 leaves two fixed addresses
+        pa[1] == 0 ? (ka != kb && return false) : ((kb - ka) % pa[1] != 0 && return false)
+    end
+    return true
+end
+
+# `expr` written as `c * v + k` with `k` free of `v`, or nothing when it isn't affine in `v`. div/mod/rem and any array
+# read are deliberately absent, so they fall through to nothing and the caller assumes overlap.
+function cgen_index_affine(expr, v::Symbol)
+    expr isa Symbol && return expr === v ? (1, 0) : (0, expr)
+    expr isa Number && return expr isa Integer ? (0, expr) : nothing
+    expr isa Expr || return nothing
+    if expr.head == :call && expr.args[1] === :+ && length(expr.args) >= 2
+        c, k = 0, 0
+        for a in expr.args[2:end]
+            p = cgen_index_affine(a, v)
+            p === nothing && return nothing
+            c += p[1]
+            k = cgen_affine_add(k, p[2])
+        end
+        return (c, k)
+    elseif expr.head == :call && expr.args[1] === :- && length(expr.args) == 3
+        a = cgen_index_affine(expr.args[2], v)
+        b = cgen_index_affine(expr.args[3], v)
+        (a === nothing || b === nothing) && return nothing
+        return (a[1] - b[1], cgen_affine_add(a[2], cgen_affine_neg(b[2])))
+    elseif expr.head == :call && expr.args[1] === :- && length(expr.args) == 2
+        a = cgen_index_affine(expr.args[2], v)
+        a === nothing && return nothing
+        return (-a[1], cgen_affine_neg(a[2]))
+    elseif expr.head == :call && expr.args[1] === :* && length(expr.args) == 3
+        a = cgen_index_affine(expr.args[2], v)
+        b = cgen_index_affine(expr.args[3], v)
+        (a === nothing || b === nothing) && return nothing
+        a[1] == 0 && a[2] isa Integer && return (a[2] * b[1], cgen_affine_scale(a[2], b[2]))
+        b[1] == 0 && b[2] isa Integer && return (b[2] * a[1], cgen_affine_scale(b[2], a[2]))
+        a[1] == 0 && b[1] == 0 && return (0, Expr(:call, :*, a[2], b[2]))
+        return nothing
+    end
+    return nothing
+end
+
+cgen_affine_add(a, b) =
+    a isa Integer && b isa Integer ? a + b :
+    a isa Integer && a == 0 ? b :
+    b isa Integer && b == 0 ? a : Expr(:call, :+, a, b)
+cgen_affine_neg(a) = a isa Integer ? -a : Expr(:call, :-, a)
+cgen_affine_scale(s::Integer, a) = a isa Integer ? s * a : s == 1 ? a : Expr(:call, :*, s, a)
+
+# Does `k` hold one value across every thread and every inner-loop iteration? Any symbol a loop or an assignment can
+# move, and any array read, says no.
+function cgen_affine_invariant(k, varying::Set{Symbol})
+    k isa Integer && return true
+    k isa Symbol && return !(k in varying)
+    k isa Expr || return false
+    k.head == :ref && return false
+    return all(a -> cgen_affine_invariant(a, varying), k.args)
+end
+
+function cgen_collect_loop_vars!(body::Vector{NamedTuple}, vars::Set{Symbol})
+    for stmt in body
+        if stmt.kind == :for
+            push!(vars, stmt.var)
+            cgen_collect_loop_vars!(stmt.body, vars)
+        elseif stmt.kind == :while
+            cgen_collect_loop_vars!(stmt.body, vars)
+        elseif stmt.kind == :if
+            cgen_collect_loop_vars!(stmt.then, vars)
+            cgen_collect_loop_vars!(stmt.els, vars)
+        end
+    end
+    return nothing
+end
+
+# Array accesses with same-body scalar let-bindings folded in, so `b = i + 1; a[b]` is compared as `a[i + 1]` rather
+# than as an opaque name. A binding is dropped the moment it stops being a straight-line fact: reassigned in a branch
+# or a loop it outlives, array-derived, self-referential, or expanded past a size bound. A dropped name stays in
+# `varying`, so the index reading it is simply never proven disjoint. Writes carry whether they are an additive
+# self-reference, since only those have an atomic rewrite available.
+function cgen_collect_subst_accesses!(body::Vector{NamedTuple}, subst::Dict{Symbol,Any}, writes::Dict{Symbol,Vector{Any}}, reads::Dict{Symbol,Vector{Any}})
+    for stmt in body
+        if stmt.kind == :assign
+            if stmt.lhs isa Expr && stmt.lhs.head == :ref && stmt.lhs.args[1] isa Symbol
+                idxs = Any[cgen_subst_expr(a, subst) for a in stmt.lhs.args[2:end]]
+                additive = findfirst(t -> t == stmt.lhs, cgen_flatten_sum(stmt.rhs)) !== nothing
+                push!(get!(writes, stmt.lhs.args[1], Any[]), (idxs, additive))
+                for a in stmt.lhs.args[2:end]
+                    cgen_collect_subst_refs!(a, subst, reads, nothing, Ref(false))
+                end
+                cgen_collect_subst_refs!(stmt.rhs, subst, reads, stmt.lhs, Ref(false))
+            else
+                cgen_collect_subst_refs!(stmt.rhs, subst, reads, nothing, Ref(false))
+            end
+            if stmt.lhs isa Symbol
+                if cgen_expr_has_ref(stmt.rhs) || cgen_expr_contains(stmt.rhs, stmt.lhs)
+                    delete!(subst, stmt.lhs)
+                else
+                    e = cgen_subst_expr(stmt.rhs, subst)
+                    cgen_expr_node_count(e) <= 64 ? (subst[stmt.lhs] = e) : delete!(subst, stmt.lhs)
+                end
+            end
+        elseif stmt.kind == :if
+            cgen_collect_subst_refs!(stmt.cond, subst, reads, nothing, Ref(false))
+            cgen_collect_subst_accesses!(stmt.then, copy(subst), writes, reads)
+            cgen_collect_subst_accesses!(stmt.els, copy(subst), writes, reads)
+            for v in cgen_all_assigned_scalars(stmt.then)
+                delete!(subst, v)
+            end
+            for v in cgen_all_assigned_scalars(stmt.els)
+                delete!(subst, v)
+            end
+        elseif stmt.kind == :for || stmt.kind == :while
+            # A binding assigned anywhere in the body is cleared BEFORE the walk too: the body re-runs, so the value
+            # standing at the body's first statement is the previous iteration's, not the one carried in from outside.
+            inner = copy(subst)
+            for v in cgen_all_assigned_scalars(stmt.body)
+                delete!(inner, v)
+                delete!(subst, v)
+            end
+            cgen_collect_subst_accesses!(stmt.body, inner, writes, reads)
+        end
+    end
+    return nothing
+end
+
+function cgen_collect_subst_refs!(e, subst::Dict{Symbol,Any}, reads::Dict{Symbol,Vector{Any}}, skip, skipped::Base.RefValue{Bool})
+    e isa Expr || return nothing
+    if e.head == :ref && e.args[1] isa Symbol
+        if skip !== nothing && !skipped[] && e == skip
+            skipped[] = true
+        else
+            push!(get!(reads, e.args[1], Any[]), Any[cgen_subst_expr(a, subst) for a in e.args[2:end]])
+        end
+    end
+    for a in e.args
+        cgen_collect_subst_refs!(a, subst, reads, skip, skipped)
+    end
+    return nothing
+end
+
+function cgen_subst_expr(e, subst::Dict{Symbol,Any})
+    e isa Symbol && return get(subst, e, e)
+    e isa Expr || return e
+    return Expr(e.head, Any[cgen_subst_expr(a, subst) for a in e.args]...)
+end
+
+cgen_expr_node_count(e) = e isa Expr ? 1 + sum(a -> cgen_expr_node_count(a), e.args; init = 0) : 1
+
 # device-side body walk -- never sees :stackpush or a pop!-rhs assign,
 # since cgen_body only reaches here for a loop cgen_contains_stackop
 # already confirmed is clean at every depth
-function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend, reduce_vars::Set{Symbol}, thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
+function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend, reduce_vars::Set{Symbol}, race_arrays::Set{Symbol} = Set{Symbol}(), thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
-            push!(exprs, cgen_device_assign(stmt, thread_var, thread_dep, injective_dep, backend, reduce_vars))
+            push!(exprs, cgen_device_assign(stmt, thread_var, thread_dep, injective_dep, backend, reduce_vars, race_arrays))
             # A write's index can be computed through a same-body scalar let-binding one or more hops from the thread variable, not just written literally
             # in the index -- extend thread_dep transitively so cgen_device_assign's occurs-check sees through it, tracking CURRENT dependency per
             # variable (removed on a reassignment breaking the chain). injective_dep is tracked the same way, one level stricter: a chain stays injective
@@ -6812,9 +7013,9 @@ function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend,
                 end
             end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep)), cgen_device_body(stmt.els, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep))))
+            push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep)), cgen_device_body(stmt.els, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, copy(thread_dep), copy(injective_dep))))
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :while
             # A while has no trip count, so no launch can size itself around
             # it and no thread can be assigned an iteration. cgen_body must
@@ -6830,7 +7031,11 @@ end
 # with an atomic +=, a plain replacement is not, so it's refused outright. A thread-DEPENDENT index isn't automatically race-free either: a gather-
 # derived index is thread-dependent but not injective, and gets the same atomic treatment as the invariant case; a non-additive write through it is
 # left untouched, since an atomic can't fix a replacement race either way.
-function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, injective_dep::Set{Symbol}, backend, reduce_vars::Set{Symbol})
+#
+# An index that passes both tests is still only proven unique PER THREAD. `race_arrays` carries the separate cross-write
+# verdict from cgen_race_write_arrays, forcing the atomic rewrite for every write to an array whose accumulation sites
+# can land on one element from two threads.
+function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, injective_dep::Set{Symbol}, backend, reduce_vars::Set{Symbol}, race_arrays::Set{Symbol} = Set{Symbol}())
     if stmt.lhs isa Symbol && stmt.lhs in reduce_vars
         # Scalar cross-thread reduction (e.g. an adjoint accumulator like `cb`): cgen_emit
         # already boxed this free var into a 1-element device array before any kernel
@@ -6845,8 +7050,9 @@ function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, i
                     Expr(:(+=), Expr(:ref, stmt.lhs, 1), other))
     end
     if stmt.lhs isa Expr && stmt.lhs.head == :ref
+        overlapping_writes = stmt.lhs.args[1] isa Symbol && stmt.lhs.args[1] in race_arrays
         thread_invariant = !cgen_expr_contains_any(stmt.lhs.args[2:end], thread_dep)
-        needs_atomic_check = thread_invariant || !cgen_expr_injective_ok(stmt.lhs.args[2:end], injective_dep, thread_dep)
+        needs_atomic_check = thread_invariant || overlapping_writes || !cgen_expr_injective_ok(stmt.lhs.args[2:end], injective_dep, thread_dep)
         if needs_atomic_check
             terms = cgen_flatten_sum(stmt.rhs)
             self_idx = findfirst(t -> t == stmt.lhs, terms)
@@ -7158,7 +7364,7 @@ function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, r
     for (v, c) in synth
         push!(body, Expr(:(=), v, c))
     end
-    append!(body, jgen_device_body(stmt.body, stmt.var, reduce_vars))
+    append!(body, jgen_device_body(stmt.body, stmt.var, reduce_vars, cgen_race_write_arrays(stmt.body, stmt.var)))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
 end
@@ -7176,11 +7382,11 @@ function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
     return Expr(:if, Expr(:call, :>, n_iter, 0), Expr(:block, launch))
 end
 
-function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol}, thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
+function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol}, race_arrays::Set{Symbol} = Set{Symbol}(), thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
-            push!(exprs, jgen_device_assign(stmt, thread_var, thread_dep, injective_dep, reduce_vars))
+            push!(exprs, jgen_device_assign(stmt, thread_var, thread_dep, injective_dep, reduce_vars, race_arrays))
             # Mirrors cgen_device_body's thread_dep/injective_dep tracking
             # exactly -- see that function's comment. This brings the JACC
             # target up to the same transitive occurs-check parity
@@ -7200,9 +7406,9 @@ function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_v
                 end
             end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep)), jgen_device_body(stmt.els, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep))))
+            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep)), jgen_device_body(stmt.els, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars, copy(thread_dep), copy(injective_dep))))
+            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :while
             # A while has no trip count, so no launch can size itself around
             # it and no thread can be assigned an iteration. jgen_body must
@@ -7218,7 +7424,7 @@ end
 # reduce_vars was boxed into a 1-element JACC.array by jgen_emit, so `cb = cb + other` becomes an atomic add against index
 # 1. The array-ref branch now also mirrors the thread-invariant refusal and injective_dep distinction -- previously this
 # used a bare, non-transitive thread_var check with no refusal path for a genuine non-additive race.
-function jgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, injective_dep::Set{Symbol}, reduce_vars::Set{Symbol})
+function jgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, injective_dep::Set{Symbol}, reduce_vars::Set{Symbol}, race_arrays::Set{Symbol} = Set{Symbol}())
     if stmt.lhs isa Symbol && stmt.lhs in reduce_vars
         terms = cgen_flatten_sum(stmt.rhs)
         self_idx = findfirst(t -> t == stmt.lhs, terms)
@@ -7228,8 +7434,9 @@ function jgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, i
                     Expr(:(+=), Expr(:ref, stmt.lhs, 1), other))
     end
     if stmt.lhs isa Expr && stmt.lhs.head == :ref
+        overlapping_writes = stmt.lhs.args[1] isa Symbol && stmt.lhs.args[1] in race_arrays
         thread_invariant = !cgen_expr_contains_any(stmt.lhs.args[2:end], thread_dep)
-        needs_atomic_check = thread_invariant || !cgen_expr_injective_ok(stmt.lhs.args[2:end], injective_dep, thread_dep)
+        needs_atomic_check = thread_invariant || overlapping_writes || !cgen_expr_injective_ok(stmt.lhs.args[2:end], injective_dep, thread_dep)
         if needs_atomic_check
             terms = cgen_flatten_sum(stmt.rhs)
             self_idx = findfirst(t -> t == stmt.lhs, terms)
@@ -9552,11 +9759,13 @@ end
 # once, hand-edit the result, then validate repeatedly against it.
 function stade_generate_baseline_file(in_path::String; yaml_path::Union{String,Nothing} = nothing,
                                        scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
+                                       grow_max::Int = 512,
                                        self_check::Bool = true,
                                        divisible_by::Union{Dict{Symbol,Int},Nothing} = nothing)
     primal_expr = io_read_corpus_entry(in_path)
     kernel = parse_kernel(primal_expr)
     baseline = val_generate_baseline(kernel, primal_expr; scale = scale, int_lo = int_lo, int_hi = int_hi,
+                                      grow_max = grow_max,
                                       self_check = self_check, divisible_by = divisible_by)
     yp = yaml_path === nothing ? io_default_yaml_path(in_path) : yaml_path
     io_write_baseline_yaml(yp, kernel.sig.name, baseline.int_args, baseline.values)
