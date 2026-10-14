@@ -85,13 +85,15 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "cellscatter" => 3,
         "clamped_sumsq" => 0, "coarsen_retire" => 4, "cond_field_choice" => 0,
         "cond_loop_choice" => 0, "dotprod" => 0,
+    # cse_intoffset, mg_vcycle and mg_vcycle_multi each offload one more loop since the split gate
+    # accepts accumulate-only and consume-only reverse loops (idiom relaxation).
     # CSE coverage kernels, at the loop counts they reach today. cse_branch and
     # cse_intoffset keep only their row loops on the host. cse_zerotrip keeps 6 of 7,
     # the same shape as entry_empty (7): its window is a runtime scalar reassigned each
     # pass, so cgen_last_assign_is_zero cannot prove the zeroing write happens and
     # declines to split. Each kernel's HVP matches its adjoint, which is the property
     # this file exists to hold.
-        "cse_branch" => 1, "cse_zerotrip" => 6, "cse_intoffset" => 2,
+        "cse_branch" => 1, "cse_zerotrip" => 6, "cse_intoffset" => 1,
     # gather_alias keeps all three of its loops on the host: the gathered read makes the sweep
     # sequential, so cgen_ cannot split it, and the stack-init loop goes with it.
         "gather_alias" => 3,
@@ -110,7 +112,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # unsafe loop reached the device. Do NOT lower this baseline.
     "halo_assembly" => 3,
         "fixed_sweeps" => 3, "ii_kill" => 6, "ii_readbefore" => 4, "ii_readnested" => 2,
-        "matvec_loss" => 0, "mg_vcycle" => 28, "mg_vcycle_multi" => 28,
+        "matvec_loss" => 0, "mg_vcycle" => 27, "mg_vcycle_multi" => 27,
         "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
         "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
         "retire_empty" => 4,
@@ -118,7 +120,23 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 6,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,
         "windowed_relax_retire" => 7,
+    # idm_*: the idiom relaxation of the GPU split gate (cgen_split_loop_gate). The four
+    # offloading kernels reach 0 host loops in the adjoint AND the HVP. The refuse_* kernels
+    # are negative controls: their ceilings are budgets, and REFUSALS below pins WHICH loop
+    # is refused and why, since an improvement there would mean an unsafe loop reached the device.
+        "idm_slots" => 0, "idm_zerotrip" => 0, "idm_acc_two" => 0, "idm_tile" => 0,
+        "idm_dup_write" => 0,
+        "idm_refuse_cond_read" => 2, "idm_refuse_scalar_read" => 3, "idm_refuse_consume_gap" => 3,
     )
+    # kernel => decisions that MUST appear in the offload report of its adjoint: (verdict, reason, array).
+    # A listed loop that reaches a kernel instead is a failure, not an improvement.
+    REFUSALS = Dict{String,Vector{Tuple{Symbol,Symbol,Any}}}(
+        "idm_refuse_cond_read" => [(:host, :array, :v)],
+        "idm_refuse_scalar_read" => [(:host, :scalar, nothing), (:host, :array, :vb)],
+        "idm_refuse_consume_gap" => [(:host, :scalar, nothing), (:host, :array, :u)],
+    )
+    # idiom acceptance MUST appear for these (the loop is offloaded only because of the idiom)
+    IDIOM_ACCEPTED = Dict{String,Int}("idm_slots" => 1, "idm_tile" => 1)
 
     count_for(e) = e isa Expr ? (e.head == :for) + sum(Int[count_for(a) for a in e.args]; init = 0) : 0
 
@@ -163,6 +181,34 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
                         "  host_left=", host, "/", total, " (max ", want, ")")
                 host > want && (bad += 1)
                 host < want && push!(improved, "$(name) [$(mode)]: $(want) -> $(host)")
+            end
+        end
+    end
+
+    # Refusal pins and idiom acceptance, read from the offload report (cgen_decision_record).
+    for f in kernels
+        name = splitext(f)[1]
+        (haskey(REFUSALS, name) || haskey(IDIOM_ACCEPTED, name)) || continue
+        recs = NamedTuple[]
+        try
+            recs = STADE.stade_gpu_report_file(joinpath(dir, name * "_b.jl"), STADE.cgen_backend_cuda())
+        catch e
+            println(rpad(name, 34), " FAIL  report: ", first(split(sprint(showerror, e), "\n")))
+            bad += 1
+            continue
+        end
+        checks_extra[] += 1
+        for (verdict, reason, arr) in get(REFUSALS, name, Tuple{Symbol,Symbol,Any}[])
+            if !any(r -> r.verdict == verdict && r.reason == reason && r.array == arr, recs)
+                println(rpad(name, 34), " FAIL  no ", verdict, " decision with reason ", reason, " array ", arr)
+                bad += 1
+            end
+        end
+        if haskey(IDIOM_ACCEPTED, name)
+            n = count(r -> r.verdict == :kernel && r.via_idiom, recs)
+            if n < IDIOM_ACCEPTED[name]
+                println(rpad(name, 34), " FAIL  expected >= ", IDIOM_ACCEPTED[name], " loop(s) accepted via an idiom, found ", n)
+                bad += 1
             end
         end
     end

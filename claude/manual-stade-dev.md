@@ -1312,21 +1312,67 @@ silently loses a fraction of the accumulation on real hardware.
 
 ### Proving a loop parallel
 
-`cgen_reduction_only_loop` is the gate. It runs three checks.
+Two gates decide whether a loop is independent. They share their parts and
+differ in one place.
 
-1. `cgen_use_before_def` walks in program order and refuses any read of a
-   locally-assigned scalar before its own definition inside this body.
-   This subsumes a self-assignment check, because a cross-iteration
-   dependency can exist with no self-reference on the left-hand side.
-2. Convergent-constant recovery. A local scalar that fails check 1 may
-   still be safe if it provably converges to the same literal on every
-   path, **and** that literal matches the value known coming into the
-   loop. `known_consts` carries that entry from a preceding top-level
-   literal assignment. The proof then injects `var = c` as the device
-   kernel's first statement.
-3. Array aliasing. For each written array, any structural mismatch between
-   a write index and a read index disqualifies the loop, unless one of
+The parts:
+
+1. `cgen_loop_scalar_synth` walks the body with `cgen_use_before_def` and
+   refuses any read of a locally-assigned scalar before its own definition
+   inside this body. This subsumes a self-assignment check, because a
+   cross-iteration dependency can exist with no self-reference on the
+   left-hand side. A local scalar that fails may still be safe if it provably
+   converges to the same literal on every path, **and** that literal matches
+   the value known coming into the loop. `known_consts` carries that entry
+   from a preceding top-level literal assignment. The proof then injects
+   `var = c` as the device kernel's first statement.
+2. `cgen_array_ok_strict` accepts one written array. Any structural mismatch
+   between a write index and a read index disqualifies it, unless one of
    three relaxations applies.
+3. `cgen_array_ok_idiom` accepts one written array if it is **accumulate-only**
+   or **consume-only** (next section).
+
+The gates:
+
+- `cgen_reduction_only_loop` is the **strict** gate: part 1 and part 2. The
+  `fuse_ii_loops` classifiers (`snap_ii_classify`, `agen_ii_classify`) call it,
+  and they must never see part 3. A wider answer there changes the AD output
+  and breaks the equality that `stade_ii_plan_check` asserts. `idm_src_consume`
+  and the ceiling in `validate_ii_coverage.jl` hold this line.
+- `cgen_split_loop_gate` is the **GPU** gate: part 1, then part 2 or part 3
+  for each written array. `cgen_body` and `jgen_body` call it. It returns
+  `(synth, reason, array, idiom)`; `reason` is `:ok`, `:scalar` or `:array`.
+
+### The two idioms, and the contract for plain writes
+
+Accumulate-only: every write to the array is `A[e] = A[e] + ...` and the array
+occurs nowhere else in the loop. Iterations commute, and the emitter turns
+every site into an atomic add. Consume-only: every occurrence is a read
+`old = A[e]` closed by a write `A[e] = c` with nothing touching `A` between
+them. An HVP twin statement between the two is allowed.
+
+STADE does not prove that two threads plain-write different elements. It trusts
+the source. The contract: **iterations of an offloaded loop own disjoint
+elements for plain writes.** Four controls make the trust explicit.
+
+1. The idiom classifiers work on source text alone, so they cover generated and
+   hand-written code with no metadata.
+2. `test/validate_idiom_oracle.jl` classifies the arrays of each independent
+   PRIMAL loop (read-only, write-only) and requires the matching REVERSE loop
+   to have the matching shadow class. It skips and reports a loop it cannot pair.
+3. `test/validate_ownership.jl` runs every generated CUDA plan on the CPU
+   through `test/ownership_shim.jl`, which records which thread read, wrote or
+   atomically added each element of each launch. It reports `multi_writer`,
+   `write_vs_other` and `read_vs_atomic`, independent of thread order, and it
+   repeats the run with the threads shuffled. `idm_dup_write` must be flagged.
+4. `test/validate_atomic_guarantee.jl` reads the emitted kernels and requires an
+   atomic add at every site of an accumulate-only array that has two or more
+   different index expressions.
+
+`stade_gpu_report_file(path, backend)` returns one record per loop:
+`(owner, loop_var, lo, hi, step, depth, verdict, reason, array, via_idiom)`.
+`verdict` is `:kernel`, `:reduction` or `:host`. `reason` also takes
+`:splat_limit` for JACC. `validate_offload.jl` pins the refusals with it.
 
 ### Snapshot elision gates all three relaxations
 

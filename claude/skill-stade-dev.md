@@ -229,6 +229,20 @@ kernel's own `__tid > trip_count` check; JACC's callee is a plain indexed
 function with no such guard, and `range = 0` raises `DivideError` on a
 live device. `jgen_launch_expr` must skip the launch instead.
 
+**The `ii` callers use the strict gate only.** `cgen_reduction_only_loop`
+(`snap_ii_classify`, `agen_ii_classify`) must stay byte-identical in result.
+The GPU split uses `cgen_split_loop_gate`, which adds the accumulate-only and
+consume-only idioms. Never route an `ii` caller through it, and never let the
+strict gate call `cgen_array_ok_idiom`: AD output changes with no oracle
+failing. `validate_ii_coverage.jl` pins `idm_src_consume` at zero for this.
+
+**Plain writes are trusted, and the trust is tested.** Iterations of an
+offloaded loop own disjoint elements for plain writes. After any change to a
+gate or to `cgen_device_assign`, run `validate_ownership.jl` (CPU, no GPU),
+`validate_idiom_oracle.jl` and `validate_atomic_guarantee.jl`. A new flag in
+the ownership check is a finding: reproduce it on the previous source before
+calling it a regression, and list it in `own_known()` with its reason.
+
 A GPU parity pass means nothing unless the kernel **wrote** something.
 Elements *compared* is the wrong count: an all-zero integer draw leaves
 arrays at full length while every loop bound collapses to zero trips.
