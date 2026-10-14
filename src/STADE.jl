@@ -5850,7 +5850,10 @@ function cgen_indices_cannot_alias(a, b)
     return any(i -> a[i] isa Integer && b[i] isa Integer && a[i] != b[i], eachindex(a))
 end
 
-function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
+# The loop-split gates share three parts: the scalar part below, a per-array predicate, and the loop summary that feeds both.
+# cgen_reduction_only_loop composes the scalar part with the strict array predicate. It is also the proof that snap_ii_classify and
+# agen_ii_classify use to reorder a loop, so what it accepts must not change with the GPU stage.
+function cgen_loop_scalar_synth(body::Vector{NamedTuple}, known_consts::Dict{Symbol,Any})
     local_names = cgen_locally_assigned_scalars(body)
 # A locally-assigned scalar that fails the plain use-before-def walk below may still be safe if it provably converges to
 # the same literal on every control-flow path, PROVIDED that constant matches the value known coming into the loop
@@ -5864,26 +5867,153 @@ function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, kno
         c !== nothing && c == known_consts[v] && (synth[v] = c)
     end
     cgen_use_before_def(body, local_names, synth)[1] || return nothing
+    return synth
+end
+
+function cgen_loop_array_summary(body::Vector{NamedTuple}, outer_defs::Dict{Symbol,Any})
     writes = Dict{Any,Vector{Any}}()
     reads = Dict{Any,Vector{Any}}()
     cgen_collect_array_accesses!(body, writes, reads)
+    return (writes = writes, reads = reads, defs = merge(outer_defs, cgen_scalar_def_map(body)))
+end
+
 # Deliberately not scoped to index expressions mentioning the loop's own variable: a sweep-style recurrence can carry its cross-iteration
 # coupling through an inner loop's index, with no mention of the outer variable at all. A structural mismatch between a write and read index
 # of the same array disqualifies the loop -- UNLESS cgen_array_private_to_loop can prove that array's whole access pattern is confined to a
 # private, non-overlapping per-outer-iteration region. Only tried for a written array; a purely-read array never needs proving, since
 # concurrent reads are always safe.
-    array_defs = merge(outer_defs, cgen_scalar_def_map(body))
-    for (arr, widxs) in writes
-        cgen_array_private_to_loop(body, arr, array_defs) === true && continue
-        ridxs = get(reads, arr, Any[])
-        cgen_array_sliced_by_loopvar(widxs, ridxs, loopvar) && continue
-        for w in widxs, r in ridxs
-            w == r && continue
-            cgen_indices_cannot_alias(w, r) && continue
-            return nothing
-        end
+function cgen_array_ok_strict(body::Vector{NamedTuple}, arr, widxs, ridxs, loopvar::Symbol, defs::Dict{Symbol,Any})
+    cgen_array_private_to_loop(body, arr, defs) === true && return true
+    cgen_array_sliced_by_loopvar(widxs, ridxs, loopvar) && return true
+    for w in widxs, r in ridxs
+        w == r && continue
+        cgen_indices_cannot_alias(w, r) && continue
+        return false
+    end
+    return true
+end
+
+function cgen_reduction_only_loop(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
+    synth = cgen_loop_scalar_synth(body, known_consts)
+    synth === nothing && return nothing
+    summary = cgen_loop_array_summary(body, outer_defs)
+    for (arr, widxs) in summary.writes
+        ridxs = get(summary.reads, arr, Any[])
+        cgen_array_ok_strict(body, arr, widxs, ridxs, loopvar, summary.defs) || return nothing
     end
     return synth
+end
+
+# ---- idiom classifiers and the GPU-split gate ------------------------------
+# Accumulate-only: every write is `A[e] = A[e] + ...` and A occurs nowhere else in the loop, so iterations commute.
+# Consume-only: every occurrence is a read `old = A[e]` closed by a write `A[e] = c` with nothing touching A in between.
+cgen_expr_reads_array(e, arr::Symbol) = (r = Dict{Any,Vector{Any}}(); cgen_collect_refs!(e, r); haskey(r, arr))
+
+function cgen_ref_index_reads_array(ref, arr::Symbol)
+    return ref isa Expr && ref.head == :ref && any(a -> cgen_expr_reads_array(a, arr), ref.args[2:end])
+end
+
+function cgen_array_accumulate_only(body::Vector{NamedTuple}, arr::Symbol)
+    nwrites = Ref(0)
+    return cgen_accumulate_only_walk(body, arr, nwrites) && nwrites[] > 0
+end
+
+function cgen_accumulate_only_walk(body::Vector{NamedTuple}, arr::Symbol, nwrites::Base.RefValue{Int})
+    for st in body
+        if st.kind == :assign
+            if st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == arr
+                cgen_ref_index_reads_array(st.lhs, arr) && return false
+                terms = cgen_flatten_sum(st.rhs)
+                self_idx = findfirst(t -> t == st.lhs, terms)
+                self_idx === nothing && return false
+                any(j -> j != self_idx && cgen_expr_reads_array(terms[j], arr), eachindex(terms)) && return false
+                nwrites[] += 1
+            else
+                (cgen_ref_index_reads_array(st.lhs, arr) || cgen_expr_reads_array(st.rhs, arr)) && return false
+            end
+        elseif st.kind == :for
+            any(e -> cgen_expr_reads_array(e, arr), (st.lo, st.hi, st.step)) && return false
+            cgen_accumulate_only_walk(st.body, arr, nwrites) || return false
+        elseif st.kind == :if
+            cgen_expr_reads_array(st.cond, arr) && return false
+            cgen_accumulate_only_walk(st.then, arr, nwrites) || return false
+            cgen_accumulate_only_walk(st.els, arr, nwrites) || return false
+        else
+            return false
+        end
+    end
+    return true
+end
+
+function cgen_array_consume_only(body::Vector{NamedTuple}, arr::Symbol)
+    nwrites = Ref(0)
+    return cgen_consume_only_walk(body, arr, nwrites) && nwrites[] > 0
+end
+
+# One block at a time. At most one read is open. Any other touch of `arr` while a read is open refuses the loop, so an HVP
+# twin statement between the read and its write is fine and an intervening access to `arr` is not.
+function cgen_consume_only_walk(body::Vector{NamedTuple}, arr::Symbol, nwrites::Base.RefValue{Int})
+    pending = nothing
+    for st in body
+        if st.kind == :assign
+            lhs_is_arr = st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == arr
+            rhs_is_arr = st.rhs isa Expr && st.rhs.head == :ref && st.rhs.args[1] == arr
+            if st.lhs isa Symbol && rhs_is_arr
+                pending === nothing || return false
+                cgen_ref_index_reads_array(st.rhs, arr) && return false
+                pending = st.rhs.args[2:end]
+            elseif lhs_is_arr
+                pending === nothing && return false
+                st.lhs.args[2:end] == pending || return false
+                (cgen_ref_index_reads_array(st.lhs, arr) || cgen_expr_reads_array(st.rhs, arr)) && return false
+                pending = nothing
+                nwrites[] += 1
+            else
+                (cgen_ref_index_reads_array(st.lhs, arr) || cgen_expr_reads_array(st.rhs, arr)) && return false
+            end
+        elseif st.kind == :for
+            any(e -> cgen_expr_reads_array(e, arr), (st.lo, st.hi, st.step)) && return false
+            if cgen_stmt_touches_array(st, arr)
+                pending === nothing || return false
+                cgen_consume_only_walk(st.body, arr, nwrites) || return false
+            end
+        elseif st.kind == :if
+            cgen_expr_reads_array(st.cond, arr) && return false
+            if cgen_stmt_touches_array(st, arr)
+                pending === nothing || return false
+                cgen_consume_only_walk(st.then, arr, nwrites) || return false
+                cgen_consume_only_walk(st.els, arr, nwrites) || return false
+            end
+        else
+            return false
+        end
+    end
+    return pending === nothing
+end
+
+cgen_array_ok_idiom(body::Vector{NamedTuple}, arr::Symbol) =
+    cgen_array_accumulate_only(body, arr) || cgen_array_consume_only(body, arr)
+
+# Gate for the GPU split. The strict predicate runs first, so every loop that cgen_reduction_only_loop accepts is accepted here
+# with the same synth. The idiom predicate only relaxes the array check. A refusal names the smallest failing array.
+# `idiom` is true when an accepted loop needed the idiom predicate for at least one array.
+function cgen_split_loop_gate(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
+    synth = cgen_loop_scalar_synth(body, known_consts)
+    synth === nothing && return (synth = nothing, reason = :scalar, array = nothing, idiom = false)
+    summary = cgen_loop_array_summary(body, outer_defs)
+    failing = Symbol[]
+    idiom = false
+    for (arr, widxs) in summary.writes
+        ridxs = get(summary.reads, arr, Any[])
+        cgen_array_ok_strict(body, arr, widxs, ridxs, loopvar, summary.defs) && continue
+        if arr isa Symbol && cgen_array_ok_idiom(body, arr)
+            idiom = true
+            continue
+        end
+        push!(failing, arr isa Symbol ? arr : :unknown)
+    end
+    isempty(failing) || return (synth = nothing, reason = :array, array = minimum(failing), idiom = false)
+    return (synth = synth, reason = :ok, array = nothing, idiom = idiom)
 end
 
 # Is `var` assigned anywhere within body, at any nesting depth? Used only to bail out of the
@@ -6493,7 +6623,14 @@ function cgen_collect_loop_vars(body, acc)
     return acc
 end
 
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
+# One record per `for` loop that cgen_body or jgen_body visits. `verdict`: :kernel, :reduction (a kernel or a mapreduce lowering) or :host.
+# `reason`: :ok, or the first gate that refused (:scalar, :array, :scope, :stackop, :kernel_def, :splat_limit, :liveout).
+# `via_idiom` marks a loop that was accepted only through the idiom predicate.
+cgen_decision_record(owner::Symbol, stmt, depth::Int, verdict::Symbol, reason::Symbol, array, idiom::Bool) =
+    (owner = owner, loop_var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step, depth = depth,
+     verdict = verdict, reason = reason, array = reason === :array ? array : nothing, via_idiom = reason === :ok && idiom)
+
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, depth::Int = 0)
     exprs = Any[]
     # Seeded from the enclosing body's own known_consts at the point this body was reached (never written back) -- a scalar
     # reset at the tail of a non-split ancestor loop's body converges by induction to the same literal on every iteration, so
@@ -6543,11 +6680,11 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # A missing clause here would be silent: the statement would fall
             # through and vanish from the generated host function.
             flush_pending!()
-            push!(exprs, emit_while(stmt.cond, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+            push!(exprs, emit_while(stmt.cond, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -6558,7 +6695,8 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # loop boundary (a reverse-mode reduction shadow reset each iteration but never freshly initialized at the
             # first). Running the check unconditionally costs nothing when no such scalar exists, and otherwise either
             # recovers it via synth or refuses to split -- never silently emitting a kernel reading an undefined value.
-            synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts, outer_defs)
+            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs)
+            synth = gate.synth
             # A var cgen_scalar_reduction_vars calls reduction-worthy is only safe for cgen_emit's global box-once/unbox-once treatment when it's a
             # whole-function-lifetime entity (a top-level argument like `cb`). An internal scratch scalar can satisfy the same shape by accident when
             # an enclosing loop demotes for an unrelated reason, its true reset ending up a sibling statement one level up. Globally boxing it is
@@ -6585,15 +6723,19 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 cand = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
                 cand !== nothing && cand[1] isa Symbol && (local_red = cand)
             end
-            eligible = synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
+            # `stage` names the first gate that refuses the loop, in the order the gates run
+            stage = synth === nothing ? gate.reason : !safe_scope ? :scope : cgen_contains_stackop(stmt.body) ? :stackop : :ok
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
             # codegen rather than a structural approximation of it
-            eligible = eligible && cgen_kernel_def_ok(() -> cgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), backend, loop_reduce_vars, synth))
+            stage === :ok && !cgen_kernel_def_ok(() -> cgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), backend, loop_reduce_vars, synth)) && (stage = :kernel_def)
             # see cgen_liveout_is_zeroed -- refuses a split whose local scalars a later host
             # statement reads, which would read them stale
-            eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth)
+            stage === :ok && !cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth) && (stage = :liveout)
+            eligible = stage === :ok
+            verdict = :host
             if eligible
                 red = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
+                verdict = red !== nothing ? :reduction : :kernel
                 if red !== nothing
                     target, op, arrs, term = red
                     value = cgen_idiomatic_reduction_value(arrs, term, stmt.var, stmt.lo, stmt.step, stmt.hi)
@@ -6638,6 +6780,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
                 end
             elseif local_red !== nothing
+                verdict = :reduction
                 lt, lop, larrs, lterm = local_red
                 lvalue = cgen_idiomatic_reduction_value(larrs, lterm, stmt.var, stmt.lo, stmt.step, stmt.hi)
                 # Same run-time test as the array-element case, against the
@@ -6656,7 +6799,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 # counts, so the choice is the trip count, not the shape.
                 loop_branch = emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step,
                                            cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs,
-                                                     outer_known_consts = known_consts, root_body))
+                                                     outer_known_consts = known_consts, root_body, decisions, depth = depth + 1))
                 # the target is a host scalar and every array is read through
                 # a view, so this branch needs no allowscalar
                 red_branch = Expr(:(=), lt, Expr(:call, lop, lt, lvalue))
@@ -6666,8 +6809,9 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                                           reduction_threshold),
                                      Any[loop_branch], Any[red_branch]))
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
             end
+            decisions === nothing || push!(decisions, cgen_decision_record(owner, stmt, depth, verdict, stage, gate.array, gate.idiom))
             delete!(known_consts, stmt.var)
             # Blind invalidation here would throw away entries that remain true: if this loop's own body
             # provably converges an assigned scalar to a literal by the walk cgen_reduction_only_loop
@@ -7157,7 +7301,8 @@ function cgen_emit(gk, backend; reduction_threshold::Int = CGEN_REDUCTION_THRESH
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
     outer_defs = cgen_scalar_def_map(gk.body)
-    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; reduction_threshold, outer_defs)
+    decisions = NamedTuple[]
+    host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, decisions)
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     # Every scalar cross-thread reduction free var must already be a 1-element device array
     # before the first kernel launch that atomically writes it, and must be unboxed to a plain
@@ -7174,7 +7319,7 @@ function cgen_emit(gk, backend; reduction_threshold::Int = CGEN_REDUCTION_THRESH
     end
     push!(host_body, emit_return_scalars(gk.ret))
     host = Expr(:function, Expr(:call, cgen_host_fname(gk.name, backend), gk.args...), Expr(:block, host_body...))
-    return (host = host, kernels = kernels)
+    return (host = host, kernels = kernels, decisions = decisions)
 end
 
 # Opt-in, applied only when the caller passes precision=T: converts every Float64 literal to T, leaving Int-typed
@@ -7223,7 +7368,7 @@ end
 # device-array-backed ref) via a bare host assignment is a host setindex! against a device array; unlike
 # CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch (confirmed live: 'Scalar indexing is disallowed'). Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body)
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, depth::Int = 0)
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
     # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
@@ -7266,7 +7411,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # A missing clause here would be silent: the statement would fall
             # through and vanish from the generated host function.
             flush_pending!()
-            push!(exprs, emit_while(stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+            push!(exprs, emit_while(stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
         elseif stmt.kind == :if
             flush_pending!()
             # A host-side branch condition that reads a device array element needs the same @allowscalar
@@ -7276,33 +7421,38 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # the first full-corpus live GPU run.
             cond = cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ?
                    Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
         elseif stmt.kind == :for
             flush_pending!()
-            synth = cgen_reduction_only_loop(stmt.body, stmt.var, known_consts, outer_defs)
+            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs)
+            synth = gate.synth
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
             safe_scope = issubset(loop_reduce_vars, fn_args)
-            eligible = synth !== nothing && safe_scope && !cgen_contains_stackop(stmt.body)
+            # `stage` names the first gate that refuses the loop, in the order the gates run
+            stage = synth === nothing ? gate.reason : !safe_scope ? :scope : cgen_contains_stackop(stmt.body) ? :stackop : :ok
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
             # codegen rather than a structural approximation of it
-            eligible = eligible && cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth))
+            stage === :ok && !cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth)) && (stage = :kernel_def)
             # JACC's parallel_for SPLATS its varargs into the kernel. Past Julia's inference splat limit the compiler stops unrolling and
             # emits a dynamic jl_f__apply_iterate with no GPU lowering: ttgc's HVP generated a 42-argument kernel and died with
             # InvalidIRError live. cgen_ has no such ceiling (a @cuda launch passes arguments positionally), so keeping the loop on the
             # host is slower but correct. Bracketed on hardware (25 args compile, 42 don't); 32 is Julia's MAX_TUPLE_SPLAT and the likely
             # exact threshold.
-            eligible = eligible && length(cgen_free_vars(stmt, stmt.var)) <= JGEN_MAX_SPLAT_ARGS
+            stage === :ok && length(cgen_free_vars(stmt, stmt.var)) > JGEN_MAX_SPLAT_ARGS && (stage = :splat_limit)
             # Same live-out refusal cgen_body applies -- jgen_body had no equivalent, and no root_body
             # to apply it against. A split loop's scalars live on the device; a later host statement
             # reading one gets the stale host copy instead. ii_kill is the witness: cgen keeps that loop
             # on the host, jgen offloaded it and the host's v stayed 0.0 -- silent wrong gradients,
             # measured at max_rel_err 0.85 (adjoint) and 1.23 (HVP) live while the CUDA path was exact.
-            eligible = eligible && cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth)
+            stage === :ok && !cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth) && (stage = :liveout)
+            eligible = stage === :ok
+            verdict = :host
             if eligible
                 red = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
+                verdict = red !== nothing ? :reduction : :kernel
                 if red !== nothing
                     target, op, arrs, term = red
                     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
@@ -7369,8 +7519,9 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
             end
+            decisions === nothing || push!(decisions, cgen_decision_record(owner, stmt, depth, verdict, stage, gate.array, gate.idiom))
             delete!(known_consts, stmt.var)
             # See cgen_body's matching comment: update via cgen_loop_convergent_constant rather
             # than blindly deleting -- a scalar that provably converges to a literal by this loop's
@@ -7511,7 +7662,8 @@ function jgen_emit(gk; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAU
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
     outer_defs = cgen_scalar_def_map(gk.body)
-    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs)
+    decisions = NamedTuple[]
+    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, decisions)
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the reverse.
     reduce_vars_sorted = sort(collect(reduce_vars); by = string)
@@ -7524,7 +7676,7 @@ function jgen_emit(gk; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAU
     end
     push!(host_body, emit_return_scalars(gk.ret))
     host = Expr(:function, Expr(:call, jgen_host_fname(gk.name), gk.args...), Expr(:block, host_body...))
-    return (host = host, kernels = kernels)
+    return (host = host, kernels = kernels, decisions = decisions)
 end
 
 function jgen_preamble()
@@ -9669,7 +9821,7 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
     plan = cgen_emit(cgen_ingest(expr), backend; reduction_threshold)
-    p === Float64 && return plan
+    p === Float64 && return (host = plan.host, kernels = plan.kernels)
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
@@ -9714,7 +9866,7 @@ stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Ty
 function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
     plan = jgen_emit(cgen_ingest(expr); reduction_threshold)
     p = precision === nothing ? Float64 : precision
-    p === Float64 && return plan
+    p === Float64 && return (host = plan.host, kernels = plan.kernels)
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
@@ -9730,6 +9882,17 @@ function stade_jacc_file(in_path::String, out_path::String; precision::Union{Not
     end
     io_write_gpu_file(out_path, vcat(kernels, hosts); preamble = jgen_preamble())
     return out_path
+end
+
+# Per-loop offload decisions for one input file, one record per `for` loop (see cgen_decision_record). `backend` is a gpu_backend
+# value, or `nothing` for the JACC path. The report runs the same walk as stade_gpu_file and writes no file.
+function stade_gpu_report_file(in_path::String, backend = cgen_backend_cuda(); reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+    records = NamedTuple[]
+    for expr in io_read_kernel_bundle(in_path)
+        plan = backend === nothing ? jgen_emit(cgen_ingest(expr); reduction_threshold) : cgen_emit(cgen_ingest(expr), backend; reduction_threshold)
+        append!(records, plan.decisions)
+    end
+    return records
 end
 
 
