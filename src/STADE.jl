@@ -11236,7 +11236,8 @@ end
 function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vector,
                                 gen_out, gpu_init, gpu_gen, stack_arg_names::Vector{Symbol},
                                 backend; rtol::Float64 = 2.5e-14, mode::Symbol = :adjoint,
-                                tan_seeds::Vector = Any[], shtan_seeds::Vector = Any[])
+                                tan_seeds::Vector = Any[], shtan_seeds::Vector = Any[],
+                                truth::Bool = true, truth_factor::Float64 = 20.0, truth_bits::Int = 192)
     mode in (:adjoint, :hvp) || error("val_gpu_parity_script: mode must be :adjoint or :hvp, got $(mode)")
     sig = kernel.sig
     cpu_gen_expr = mode == :hvp ? gen_out.hvp : gen_out.adjoint
@@ -11337,6 +11338,22 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
 # bound collapses to zero trips, so the arrays compare equal and `ok` is reported for a run that
 # executed no device code -- measured live at elements_compared=416, max_rel_err=0.0. What has to
 # be counted is elements the CPU reference actually CHANGED.
+# BigFloat truth. The CPU Float64 result is itself off the exact value, by up to 1e-10 on a large HVP, so a GPU-vs-CPU difference measures two
+# roundings and passes or fails by draw. The same CPU code is run in BigFloat on the same inputs, the GPU result is compared to that, and a trial
+# passes when the GPU error is at most `truth_factor` times the CPU's own error (never below the atomic-count `rtol`). A kernel whose BigFloat run
+# throws falls back to the GPU-vs-CPU comparison with `rtol`.
+    stems = String[]
+    for a in array_float_args
+        append!(stems, ["$(a)_val", "$(a)_sh"])
+        mode == :hvp && append!(stems, ["$(a)_tan", "$(a)_shtan"])
+    end
+    if truth
+        push!(lines, "setprecision(BigFloat, $(truth_bits))")
+        push!(lines, "_relerr_big(t, a) = (m = 0.0; for i in eachindex(t); d = Float64(abs(t[i] - a[i])) / max(Float64(abs(t[i])), abs(Float64(a[i])), 1.0); d > m && (m = d); end; m)")
+        init_src = io_expr_to_source(gen_out.initstacks)
+        push!(lines, replace(replace(init_src, "function $(cpu_init_name)(" => "function $(cpu_init_name)_big("), "Float64" => "BigFloat"))
+    end
+    push!(lines, "__all_ok = true", "tr_cpu_worst = 0.0", "tr_gpu_worst = 0.0", "truth_trials = 0")
     push!(lines, "max_rel_err = 0.0", "stack_max_rel_err = 0.0", "stacks_compared = 0",
                  "elements_compared = 0", "elements_changed = 0")
     push!(lines, "for __trial in 1:$(length(seeds))")
@@ -11369,9 +11386,43 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
         mode == :hvp && push!(lines, "  __pre_$(a)_tan = deepcopy($(a)_tan_cpu); __pre_$(a)_shtan = deepcopy($(a)_shtan_cpu)")
     end
     push!(lines, "  ret_cpu = $(cpu_call)")
+    if truth
+        push!(lines, "  __big = try")
+        for a in array_float_args
+            push!(lines, "    $(a)_val_big = BigFloat.(__pre_$(a)_val); $(a)_sh_big = BigFloat.(__pre_$(a)_sh)")
+            mode == :hvp && push!(lines, "    $(a)_tan_big = BigFloat.(__pre_$(a)_tan); $(a)_shtan_big = BigFloat.(__pre_$(a)_shtan)")
+        end
+        for a in array_int_args
+            push!(lines, "    $(a)_val_big = deepcopy($(a)_val_cpu)")
+        end
+        for a in scalar_args
+            push!(lines, "    $(a)_val_big = BigFloat($(a)_val_cpu); $(a)_sh_big = BigFloat($(a)_sh_cpu)")
+            mode == :hvp && push!(lines, "    $(a)_tan_big = BigFloat($(a)_tan_cpu); $(a)_shtan_big = BigFloat($(a)_shtan_cpu)")
+        end
+        push!(lines, "    stacks_big = _val_init_stacks_local($(cpu_init_name)_big, Any[$(stack_extra_cpu)])")
+        push!(lines, "    ret_big = $(replace(cpu_call, "_cpu" => "_big"))")
+        push!(lines, "    Dict{String,Any}(" * join(["\"$(st)\" => $(st)_big" for st in stems], ", ") * (isempty(stems) ? "" : ", ") * "\"__ret\" => ret_big)")
+        push!(lines, "  catch", "    nothing", "  end")
+    else
+        push!(lines, "  __big = nothing")
+    end
     push!(lines, "  ret_gpu = $(gpu_call)")
     push!(lines, "  ret_cpu_t = $(ret_tuple("ret_cpu"))")
     push!(lines, "  ret_gpu_t = $(ret_tuple("ret_gpu"))")
+    push!(lines, "  __trc = 0.0; __trg = 0.0")
+    if truth
+        push!(lines, "  if __big !== nothing")
+        for st in stems
+            push!(lines, "    __trc = max(__trc, _relerr_big(__big[\"$(st)\"], $(st)_cpu)); __trg = max(__trg, _relerr_big(__big[\"$(st)\"], Array($(st)_gpu)))")
+        end
+        if n_ret > 0
+            push!(lines, "    ret_big_t = $(ret_tuple("__big[\"__ret\"]"))")
+            for i in 1:n_ret
+                push!(lines, "    __trc = max(__trc, _relerr_scalar(Float64(ret_big_t[$(i)]), Float64(ret_cpu_t[$(i)]))); __trg = max(__trg, _relerr_scalar(Float64(ret_big_t[$(i)]), Float64(ret_gpu_t[$(i)])))")
+            end
+        end
+        push!(lines, "  end")
+    end
     push!(lines, "  local_max = 0.0")
     for a in array_float_args
         push!(lines, "  global elements_compared += length($(a)_val_cpu) + length($(a)_sh_cpu)")
@@ -11396,8 +11447,13 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
     push!(lines, "  global stack_max_rel_err = max(stack_max_rel_err, __sworst)")
     push!(lines, "  global stacks_compared += __sn")
     push!(lines, "  global max_rel_err = max(max_rel_err, local_max)")
+    push!(lines, "  __tol = __big === nothing ? $(rtol) : max($(rtol), $(truth_factor) * __trc)")
+    push!(lines, "  global __all_ok = __all_ok && ((__big === nothing ? local_max : __trg) <= __tol)")
+    push!(lines, "  if __big !== nothing")
+    push!(lines, "    global tr_cpu_worst = max(tr_cpu_worst, __trc); global tr_gpu_worst = max(tr_gpu_worst, __trg); global truth_trials += 1")
+    push!(lines, "  end")
     push!(lines, "end")
-    push!(lines, "println(JSON3.write(Dict(\"ok\" => (max_rel_err <= $(rtol)) && elements_changed > 0, \"mode\" => \"$(mode)\", \"max_rel_err\" => max_rel_err, \"stack_max_rel_err\" => stack_max_rel_err, \"stacks_compared\" => stacks_compared, \"elements_compared\" => elements_compared, \"elements_changed\" => elements_changed, \"vacuous\" => elements_changed == 0, \"device\" => $(val_gpu_device_name_expr(backend)))))")
+    push!(lines, "println(JSON3.write(Dict(\"ok\" => __all_ok && elements_changed > 0, \"mode\" => \"$(mode)\", \"max_rel_err\" => max_rel_err, \"truth_trials\" => truth_trials, \"tr_cpu\" => tr_cpu_worst, \"tr_gpu\" => tr_gpu_worst, \"stack_max_rel_err\" => stack_max_rel_err, \"stacks_compared\" => stacks_compared, \"elements_compared\" => elements_compared, \"elements_changed\" => elements_changed, \"vacuous\" => elements_changed == 0, \"device\" => $(val_gpu_device_name_expr(backend)))))")
 
     return join(lines, "\n") * "\n"
 end
