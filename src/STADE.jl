@@ -7176,7 +7176,7 @@ end
 
 # ---- GPU backend descriptor ----------------------------------------
 # gpu_backend :: (suffix, kernel_tag, launch_macro, threads_kw, blocks_kw, tid_rhs, atomic_macro, allowscalar_macro, preamble, default_precision,
-# precision_locked, precision_lock_reason). Only the launch macro, launch keywords, thread-index intrinsic, atomic/allowscalar modules, and preamble differ
+# precision_locked, precision_lock_reason, warp_atomics). Only the launch macro, launch keywords, thread-index intrinsic, atomic/allowscalar modules, and preamble differ
 # between CUDA.jl/AMDGPU.jl/Metal.jl. precision_locked exists because Metal has no FP64 hardware and refuses Float64; it makes stade_gpu refuse a non-default
 # request at codegen time rather than emit source guaranteed to fail on real hardware.
 
@@ -7195,6 +7195,7 @@ function cgen_backend_cuda()
         default_precision = Float64,
         precision_locked = false,
         precision_lock_reason = "",
+        warp_atomics = true,
     )
 end
 
@@ -7213,6 +7214,7 @@ function cgen_backend_amdgpu()
         default_precision = Float64,
         precision_locked = false,
         precision_lock_reason = "",
+        warp_atomics = false,
     )
 end
 
@@ -7236,6 +7238,7 @@ function cgen_backend_metal()
         default_precision = Float32,
         precision_locked = true,
         precision_lock_reason = "Apple GPUs have no FP64 hardware -- Metal.jl disallows constructing Float64 arrays at all, and any kernel whose arithmetic touches a Float64 fails to compile",
+        warp_atomics = false,
     )
 end
 
@@ -8191,6 +8194,98 @@ function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend,
     return exprs
 end
 
+# ---- warp-aggregated atomics (CUDA) ----
+# An atomic add whose address is the same for every lane of a warp (a weight-gradient accumulation, a boxed scalar reduction) serializes 32 lanes on one
+# address. The helper sums the 32 values with shuffles and lets lane 0 do one atomic. It stays correct for any address: it aggregates only when all 32
+# lanes are active and agree on the index, and issues the plain atomic otherwise. The summation order changes, so results differ from the plain atomic
+# in the last bits; stade_gpu(...; warp_atomics = false) restores the plain atomic exactly.
+cgen_warp_add_name() = :__stade_wa_add!
+cgen_warp_atomics_on(backend) = get(backend, :warp_atomics, false) === true
+
+# `backend.atomic_macro arr[idx] += val`, or a call of the warp helper for a single-index ref of a named array on a backend that has it
+function cgen_atomic_add(backend, target, other)
+    if cgen_warp_atomics_on(backend) && target isa Expr && target.head == :ref && length(target.args) == 2 && target.args[1] isa Symbol
+        return Expr(:call, cgen_warp_add_name(), target.args[1], target.args[2], other)
+    end
+    return Expr(:macrocall, backend.atomic_macro, nothing, Expr(:(+=), target, other))
+end
+
+function cgen_expr_calls(expr, name::Symbol)
+    expr isa Expr || return false
+    expr.head == :call && !isempty(expr.args) && expr.args[1] === name && return true
+    return any(a -> cgen_expr_calls(a, name), expr.args)
+end
+
+# Definitions the helper calls need, in file order. Shuffles move 32 bits at a time, so a Float64 or an index travels as two UInt32 halves. Lane ids
+# assume the one-dimensional blocks cgen_launch_expr emits. The lane is 1-based for shfl_sync.
+function cgen_warp_helper_exprs()
+    src = """
+    @inline function __stade_wa_xor(m::UInt32, u::UInt64, k::Int32)
+        lo = shfl_xor_sync(m, UInt32(u & 0x00000000ffffffff), k)
+        hi = shfl_xor_sync(m, UInt32(u >> 32), k)
+        return (UInt64(hi) << 32) | UInt64(lo)
+    end
+    @inline function __stade_wa_lane1(m::UInt32, u::UInt64)
+        lo = shfl_sync(m, UInt32(u & 0x00000000ffffffff), Int32(1))
+        hi = shfl_sync(m, UInt32(u >> 32), Int32(1))
+        return (UInt64(hi) << 32) | UInt64(lo)
+    end
+    @inline function __stade_wa_add!(arr, idx::Integer, val::Float64)
+        m = active_mask()
+        if m == 0xffffffff
+            i = Int64(idx)
+            if vote_all_sync(m, i == reinterpret(Int64, __stade_wa_lane1(m, reinterpret(UInt64, i))))
+                v = val
+                v += reinterpret(Float64, __stade_wa_xor(m, reinterpret(UInt64, v), Int32(16)))
+                v += reinterpret(Float64, __stade_wa_xor(m, reinterpret(UInt64, v), Int32(8)))
+                v += reinterpret(Float64, __stade_wa_xor(m, reinterpret(UInt64, v), Int32(4)))
+                v += reinterpret(Float64, __stade_wa_xor(m, reinterpret(UInt64, v), Int32(2)))
+                v += reinterpret(Float64, __stade_wa_xor(m, reinterpret(UInt64, v), Int32(1)))
+                if ((threadIdx().x - 1) & 31) == 0
+                    CUDA.@atomic arr[idx] += v
+                end
+                return nothing
+            end
+        end
+        CUDA.@atomic arr[idx] += val
+        return nothing
+    end
+    @inline function __stade_wa_add!(arr, idx::Integer, val::Float32)
+        m = active_mask()
+        if m == 0xffffffff
+            i = Int64(idx)
+            if vote_all_sync(m, i == reinterpret(Int64, __stade_wa_lane1(m, reinterpret(UInt64, i))))
+                v = val
+                v += shfl_xor_sync(m, v, Int32(16))
+                v += shfl_xor_sync(m, v, Int32(8))
+                v += shfl_xor_sync(m, v, Int32(4))
+                v += shfl_xor_sync(m, v, Int32(2))
+                v += shfl_xor_sync(m, v, Int32(1))
+                if ((threadIdx().x - 1) & 31) == 0
+                    CUDA.@atomic arr[idx] += v
+                end
+                return nothing
+            end
+        end
+        CUDA.@atomic arr[idx] += val
+        return nothing
+    end
+    @inline function __stade_wa_add!(arr, idx, val)
+        CUDA.@atomic arr[idx] += val
+        return nothing
+    end
+    """
+    return Expr[cgen_strip_macro_lines(Base.remove_linenums!(a)) for a in Meta.parseall(src).args if a isa Expr]
+end
+
+# Base.remove_linenums! leaves the line slot of a :macrocall, which would print as a `#= none:1 =#` marker
+function cgen_strip_macro_lines(expr)
+    expr isa Expr || return expr
+    args = Any[cgen_strip_macro_lines(a) for a in expr.args]
+    expr.head == :macrocall && length(args) >= 2 && args[2] isa LineNumberNode && (args[2] = nothing)
+    return Expr(expr.head, args...)
+end
+
 # A write races across threads unless the enclosing device loop's thread-mapped variable occurs in the write's index, or through a chain of let-
 # bindings (`thread_dep`) -- a real occurs-check. Any thread-invariant-indexed write is a race regardless of pattern: an accumulation is fixable
 # with an atomic +=, a plain replacement is not, so it's refused outright. A thread-DEPENDENT index isn't automatically race-free either: a gather-
@@ -8211,8 +8306,7 @@ function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, i
         self_idx = findfirst(t -> t == stmt.lhs, terms)
         self_idx === nothing && error("cgen_device_assign: `$(stmt.lhs)` was classified as a scalar reduction target (see cgen_scalar_reduction_vars) but `$(stmt.lhs) = $(stmt.rhs)` doesn't self-reference -- this should be unreachable")
         other = cgen_sum_excluding(terms, self_idx)
-        return Expr(:macrocall, backend.atomic_macro, nothing,
-                    Expr(:(+=), Expr(:ref, stmt.lhs, 1), other))
+        return cgen_atomic_add(backend, Expr(:ref, stmt.lhs, 1), other)
     end
     if stmt.lhs isa Expr && stmt.lhs.head == :ref
         overlapping_writes = stmt.lhs.args[1] isa Symbol && stmt.lhs.args[1] in race_arrays
@@ -8223,8 +8317,7 @@ function cgen_device_assign(stmt, thread_var::Symbol, thread_dep::Set{Symbol}, i
             self_idx = findfirst(t -> t == stmt.lhs, terms)
             if self_idx !== nothing
                 other = cgen_sum_excluding(terms, self_idx)
-                return Expr(:macrocall, backend.atomic_macro, nothing,
-                            Expr(:(+=), stmt.lhs, other))
+                return cgen_atomic_add(backend, stmt.lhs, other)
             end
             thread_invariant && error("cgen_device_assign: write to `$(stmt.lhs)` inside a GPU-split loop has an index that doesn't depend on the loop's own thread variable (`$thread_var`), even transitively through same-body scalar let-bindings, and isn't an additive accumulation -- this is a data race across threads, not something an atomic wrapper can fix. See skill-stade-dev.md's cgen_device_assign hardening note.")
         end
@@ -8304,7 +8397,8 @@ function cgen_emit(gk, backend; reduction_threshold::Int = CGEN_REDUCTION_THRESH
     end
     push!(host_body, emit_return_scalars(gk.ret))
     host = Expr(:function, Expr(:call, cgen_host_fname(gk.name, backend), gk.args...), Expr(:block, host_body...))
-    return (host = host, kernels = kernels, decisions = decisions)
+    helpers = any(k -> cgen_expr_calls(k, cgen_warp_add_name()), kernels) ? cgen_warp_helper_exprs() : Expr[]
+    return (host = host, kernels = kernels, decisions = decisions, helpers = helpers)
 end
 
 # Opt-in, applied only when the caller passes precision=T: converts every Float64 literal to T, leaving Int-typed
@@ -10808,19 +10902,21 @@ end
 # (Float64 for CUDA/AMDGPU, Float32 for Metal); an explicit precision overrides that, except for a precision_locked
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
-function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
+                   warp_atomics::Bool = true)
+    warp_atomics || (backend = merge(backend, (warp_atomics = false,)))
     p = precision === nothing ? backend.default_precision : precision
     if backend.precision_locked && p !== backend.default_precision
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
     plan = cgen_emit(cgen_ingest(expr), backend; reduction_threshold)
-    p === Float64 && return (host = plan.host, kernels = plan.kernels)
+    p === Float64 && return (host = plan.host, kernels = plan.kernels, helpers = plan.helpers)
     return (host = cgen_convert_precision(plan.host, p),
-            kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
+            kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels], helpers = plan.helpers)
 end
 
-stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold)
+stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -10831,21 +10927,24 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # control, call stade_gpu directly on each def. The input file is only ever read, never rewritten. A pure scalar
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
-function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
+                        warp_atomics::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
+    helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
+        isempty(helpers) && append!(helpers, plan.helpers)
     end
-    io_write_gpu_file(out_path, vcat(kernels, hosts); preamble = backend.preamble)
+    io_write_gpu_file(out_path, vcat(helpers, kernels, hosts); preamble = backend.preamble)
     return out_path
 end
 
-stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold)
+stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -11131,6 +11230,10 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
 
     push!(lines, io_expr_to_source(gen_out.initstacks))
     push!(lines, io_expr_to_source(cpu_gen_expr))
+    init_helpers = get(gpu_init, :helpers, Expr[])
+    for h in vcat(init_helpers, isempty(init_helpers) ? get(gpu_gen, :helpers, Expr[]) : Expr[])
+        push!(lines, io_expr_to_source(h))
+    end
     push!(lines, io_expr_to_source(gpu_init.host))
     for k in gpu_init.kernels
         push!(lines, io_expr_to_source(k))
@@ -11283,6 +11386,7 @@ end
 function val_count_atomic_sites(expr, atomic_macro)
     expr isa Expr || return 0
     n = (expr.head == :macrocall && !isempty(expr.args) && expr.args[1] == atomic_macro) ? 1 : 0
+    n += (expr.head == :call && !isempty(expr.args) && expr.args[1] === cgen_warp_add_name()) ? 1 : 0
     for a in expr.args
         n += val_count_atomic_sites(a, atomic_macro)
     end
@@ -11296,7 +11400,8 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   self_check::Bool = true,
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
-                                  reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+                                  reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
+                                  warp_atomics::Bool = true)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -11310,13 +11415,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the
