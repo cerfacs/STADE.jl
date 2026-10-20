@@ -4182,6 +4182,27 @@ function agen_tier_b_block_skeleton(body, kinds)
     return out
 end
 
+# Adds every variable that a loop header at any depth inside `stmt` reads (`stmt` itself included when it is a loop).
+# A bound that only a nested loop reads is still consumed once that loop has run.
+function agen_collect_nested_bound_vars!(stmt, out::Set{Symbol})
+    if stmt.kind == :for
+        agen_collect_expr_vars!(stmt.lo, out)
+        agen_collect_expr_vars!(stmt.hi, out)
+        agen_collect_expr_vars!(stmt.step, out)
+        for t in stmt.body
+            agen_collect_nested_bound_vars!(t, out)
+        end
+    elseif stmt.kind == :if
+        for t in stmt.then
+            agen_collect_nested_bound_vars!(t, out)
+        end
+        for t in stmt.els
+            agen_collect_nested_bound_vars!(t, out)
+        end
+    end
+    return nothing
+end
+
 # `blk` is one entry of agen_layout(...).blocks. For every stack this block touches, in one shared loop over AL's header:
 # allocates a `prefix_<stack>_<block_id>` table and `__tot_<stack>_<block_id>`, writes the pre-iteration total at
 # `agen_pos0(header)+1` (Phase C's read uses the same index, guaranteeing agreement), then updates the total. Also builds a
@@ -4221,10 +4242,8 @@ function agen_tier_b_block_stmts(block_id, blk, kinds)
         if st.kind == :assign && st.lhs isa Symbol && st.lhs in relevant && st.lhs in consumed
             split_at = i
             break
-        elseif st.kind == :for
-            agen_collect_expr_vars!(st.lo, consumed)
-            agen_collect_expr_vars!(st.hi, consumed)
-            agen_collect_expr_vars!(st.step, consumed)
+        elseif st.kind == :for || st.kind == :if
+            agen_collect_nested_bound_vars!(st, consumed)
         end
     end
     pre_body = split_at === nothing ? blk.body : blk.body[1:split_at - 1]
@@ -11127,7 +11146,7 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
         push!(lines, io_expr_to_source(k))
     end
 
-    push!(lines, "function _val_init_stacks_local(fn, extra_args)\n    r = fn(extra_args...)\n    r === nothing && return ()\n    r isa Tuple && return r\n    return (r,)\nend\n")
+    push!(lines, "function _val_init_stacks_local(fn, extra_args)\n    r = fn(extra_args...)\n    r === nothing && return ()\n    t = r isa Tuple ? r : (r,)\n    for s in t\n        (s isa AbstractArray && eltype(s) <: AbstractFloat) && fill!(s, 0.0)\n    end\n    return t\nend\n")
     push!(lines, "_relerr_scalar(a, b) = abs(a - b) / max(abs(a), abs(b), 1.0)\n" *
 # `init = 0.0` is load-bearing, not defensive: the baseline generator gates a draw
 # only on initstacks_* running, so an all-zero integer draw (every extent 0) is
@@ -11139,7 +11158,9 @@ function val_gpu_parity_script(kernel, int_args::Dict, values::Dict, seeds::Vect
 # leaving the host copy behind) shows up here and nowhere else, since gradients stay correct whenever that slot's restore happens to be dead
 # -- confirmed live for cellscatter (gradients to 5.5e-14, stacks off by 1.0) and raggedii. Reported rather than folded into `ok`: a nonzero
 # value means the kernel passes for a reason nothing enforces, a finding not a failure. Non-array tuple entries are skipped, since a Tier B
-# initstacks_* returns prefix tables and totals alongside the stacks.
+# initstacks_* returns prefix tables and totals alongside the stacks. Float stacks are zero-filled before the run (_val_init_stacks_local): a slot
+# that nothing writes held whatever the allocator left, so host and device differed there from run to run (a fused ttgc HVP read 1.0 in one run
+# and 5e-16 in the next, and so did the v0.4.7 code). Now an unwritten slot is 0.0 on both sides and only a written slot can differ.
     push!(lines, "function _val_stack_relerr(cpu_stacks, gpu_stacks)\n" *
                  "    worst = 0.0\n    n = 0\n" *
                  "    for (c, g) in zip(cpu_stacks, gpu_stacks)\n" *
