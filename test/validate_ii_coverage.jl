@@ -72,6 +72,12 @@ function validate_ii_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
         "sumsq_shifted" => 0, "transformer" => 13, "ttgc" => 6,
         "two_field_loss" => 0, "unet" => 2, "weightedsumsq" => 0,
         "windowed_relax_retire" => 0,
+        # baselines added for 30 kernels that had none (measured with v0.4.14); asnap_* kernels pin array-snapshot shapes, whose loops mostly stay unclassified
+        "asnap_2d" => 0, "asnap_condread" => 0, "asnap_direct" => 0, "asnap_ifwrite" => 0, "asnap_ii" => 1, "asnap_nameclash" => 0,
+        "asnap_nested" => 0, "asnap_nestedboth" => 0, "asnap_ok" => 0, "asnap_outside" => 0, "asnap_ragged" => 0, "asnap_readbefore" => 0,
+        "asnap_readbetween" => 0, "asnap_selfnl" => 0, "asnap_slice" => 0, "asnap_twoarrays" => 0, "asnap_zerocover" => 0, "asnap_zerotrip" => 0,
+        "early_stage_offset" => 0, "if_in_outer_loop" => 1, "if_scalar_then_if" => 0, "if_scalar_then_loop_if" => 0, "if_top_scalar" => 0,
+        "if_top_two" => 0, "inplace_stencil_if" => 0, "nest_if" => 0, "nest_if_scalar" => 0, "retire_if" => 0, "retire_in_if" => 0, "retire_nested" => 0,
     )
 
     kernels = sort(filter(f -> endswith(f, ".jl") &&

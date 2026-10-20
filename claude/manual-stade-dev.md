@@ -1826,6 +1826,20 @@ derived from `sig.kinds`, so `val_gpu_call_args` and `validate_corpus_gpu.jl`'s
 between those slots raises nothing anywhere; `validate_gpu_arglayout.jl` pins
 the two against the generated signature, position for position, with no GPU.
 
+The parity script compares the device result to a **BigFloat truth**, not
+to the Float64 CPU result. The Float64 CPU code is itself off the exact value
+(3e-12 on the U-Net HVP, up to 1e-10 on the transformer HVP, measured with
+192-bit BigFloat), so a device-vs-CPU difference adds two roundings and used to
+pass or fail by draw, on stock v0.4.10 as well. The script runs the same CPU
+code in BigFloat on the same inputs. A trial passes when the device error
+against that truth is at most 20 times the CPU's own error, and never below the
+atomic-count `rtol`. If the BigFloat run throws, that trial falls back to the
+device-vs-CPU comparison with `rtol`. The JSON line carries `truth_trials`
+(trials that had a truth), `tr_cpu` and `tr_gpu` (worst errors against it).
+`validate_gpu_truth.jl` pins the criterion without a GPU: it makes the device
+side a copy of the host side, so the script must pass, and then changes one
+element, so the script must fail.
+
 The parity script also reports `stack_max_rel_err`, the worst difference between
 the host stacks and the device stacks. It is informational and is not part of `ok`.
 The script zero-fills the float stacks before each run. Without that, a slot that
@@ -2422,6 +2436,7 @@ julia validate_gpu_arglayout.jl          # adjoint/HVP call layout, no GPU neede
 julia validate_gpu_stack_compare.jl      # stack comparison in the parity script, no GPU needed
 julia validate_if_nesting.jl             # nested ifs, branch scalars, nested retiring writes, early-stage size terms, with sabotage
 julia validate_elision_coverage.jl       # snapshot-elision branches, no GPU needed
+julia validate_gpu_truth.jl              # BigFloat truth criterion of the parity script, no GPU needed, with sabotage
 julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```
 

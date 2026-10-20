@@ -287,6 +287,12 @@ a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
 
+GPU parity compares to a **BigFloat truth** (the same CPU code run in 192-bit
+BigFloat), never to the Float64 CPU result alone: the CPU result is off the exact
+value by up to 1e-10 on a large HVP, so a device-vs-CPU gap is noise. A trial
+passes at 20 times the CPU's own error, floor `rtol`. A new GPU claim needs both
+`validate_gpu_truth.jl` (no GPU) and a device run.
+
 Measure **loops offloaded**, never device-kernel count — adjacent
 splittable loops merge, so fewer kernels can mean more offloaded.
 
