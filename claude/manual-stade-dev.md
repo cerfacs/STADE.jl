@@ -1176,6 +1176,21 @@ Two rules govern Tier B index expressions.
    occurrence's forward-last statement can run first in reverse, before
    any recompute of that scalar.
 
+**Where the tables are written.** The sizing loop in `initstacks_*` writes the value
+tables and adds to the totals at one point in the ancestor's body: after every
+statement that comes before the first **retiring** assignment. A retiring
+assignment writes a scalar that a size formula uses, after some loop has already
+read that scalar as a bound. It belongs to the next ancestor iteration, so the
+tables must be written before it. `agen_tier_b_block_stmts` finds the split by
+walking the loop headers in program order. The walk must reach loops at **every**
+depth (`agen_collect_nested_bound_vars!`). Through 0.4.8 it read only the headers
+of top-level statements. A body such as `for i_ ... for i_cell = 1:nc ... end end;
+nc = nc - 1` then recorded each level from the value after the `nc = nc - 1`.
+Every block was one cell short and overran its successor. With the consuming loop
+inside an `if` the result was silently wrong gradients (0.59 relative error),
+not an index error. `retire_nested` and `retire_if` are the corpus witnesses,
+next to `coarsen_retire`, which has the consumer at the top level.
+
 A stack that no block can resolve is **tainted**. It falls back to
 growable `push!`/`pop!` regardless of the flag, per stack and never per
 occurrence.
@@ -1774,6 +1789,22 @@ derived from `sig.kinds`, so `val_gpu_call_args` and `validate_corpus_gpu.jl`'s
 between those slots raises nothing anywhere; `validate_gpu_arglayout.jl` pins
 the two against the generated signature, position for position, with no GPU.
 
+The parity script also reports `stack_max_rel_err`, the worst difference between
+the host stacks and the device stacks. It is informational and is not part of `ok`.
+The script zero-fills the float stacks before each run. Without that, a slot that
+nothing writes held allocator garbage, and the value changed between runs (a fused
+`ttgc` HVP gave 1.0 in one run and 5e-16 in the next, on 0.4.7 as well). A nonzero
+value now means a written slot differs. A nonzero value does not mean a wrong
+gradient. `retire_if` reads 1.0 on a V100 with an exact gradient (adjoint and HVP):
+62 of 184 slots of `t_stack` differ. The device forward kernel runs each
+(`i_l`, `i_r`) pair in its own thread, and `t` starts at 0.0 there, while the CPU
+carries `t` over from the earlier pair. `t` is overwritten before any derivative
+expression reads it, so the restored value is not read. This is the same class as
+`cellscatter` (a slot written from a host scalar that the device did not keep).
+The exact gradient on every trial is the evidence, not a proof. Treat such a value
+as a finding to read, not as a failure. `validate_gpu_stack_compare.jl` checks the
+comparison with no GPU, with a sabotage run.
+
 A parity run also has to have done something. Counting elements *compared* is
 not enough: an all-zero integer draw leaves every array at its baseline length
 while collapsing every loop bound to zero trips, so the arrays are compared,
@@ -2343,6 +2374,7 @@ julia validate_ii_coverage.jl            # fusion coverage floor
 julia validate_offload.jl                # GPU coverage ceiling, no GPU needed
 julia validate_zerotrip.jl               # integer draws that include zero
 julia validate_gpu_arglayout.jl          # adjoint/HVP call layout, no GPU needed
+julia validate_gpu_stack_compare.jl      # stack comparison in the parity script, no GPU needed
 julia validate_elision_coverage.jl       # snapshot-elision branches, no GPU needed
 julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```

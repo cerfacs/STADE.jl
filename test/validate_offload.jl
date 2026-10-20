@@ -124,7 +124,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "matvec_loss" => 0, "mg_vcycle" => 27, "mg_vcycle_multi" => 27,
         "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
         "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
-        "retire_empty" => 4,
+        "retire_empty" => 4, "retire_nested" => 11, "retire_if" => 6,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,
         "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 6,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,

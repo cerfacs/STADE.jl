@@ -173,6 +173,11 @@ double-evaluates under `hvp_double_stmt`. Any block-local scalar a
 formula depends on must be in `value_vars` and substituted through its
 own value table, never read as a bare in-scope reference.
 
+The sizing loop writes a block's value tables and totals **before the first
+retiring assignment**: a write to a size-relevant scalar that some loop, at any
+depth, has already read as a bound. Look at nested loop headers too, not only
+top-level ones (`retire_nested`, `retire_if`).
+
 `initstacks_*`'s signature grows to accept the free variables its size
 expressions reference — including scalars **derived in the kernel body**
 (`n_d = n * d`), whose defining assignments are hoisted into its body in
