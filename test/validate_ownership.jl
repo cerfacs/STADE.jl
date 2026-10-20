@@ -79,8 +79,8 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
         seeds = [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials]
         tans  = mode == :hvp ? [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
         shts  = mode == :hvp ? [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
-        pinit = STADE.stade_gpu(gen.initstacks, backend)
-        pgen  = STADE.stade_gpu(gexpr, backend)
+        pinit = STADE.stade_gpu(gen.initstacks, backend; warp_atomics = false)
+        pgen  = STADE.stade_gpu(gexpr, backend; warp_atomics = false)
         res = Dict{Symbol,Any}()
         viol = NamedTuple[]
         for order in orders

@@ -51,6 +51,12 @@ function aga_sites!(sites::Dict{Symbol,Vector{NamedTuple}}, e, am)
             aga_sites!(sites, e.args[3].args[2], am)
             return
         end
+        if e.head == :call && length(e.args) == 4 && e.args[1] === STADE.cgen_warp_add_name() && e.args[2] isa Symbol
+            push!(get!(sites, e.args[2], NamedTuple[]), (kind = :atomic_acc, index = Any[e.args[3]]))
+            aga_sites!(sites, e.args[3], am)
+            aga_sites!(sites, e.args[4], am)
+            return
+        end
         if e.head == :(+=) && e.args[1] isa Expr && e.args[1].head == :ref && e.args[1].args[1] isa Symbol
             ref = e.args[1]
             push!(get!(sites, ref.args[1], NamedTuple[]), (kind = :plain_acc, index = ref.args[2:end]))

@@ -281,7 +281,8 @@ cancels, so it complements rather than replaces.
 ## GPU (`cgen_`/`jgen_`)
 
 `stade_gpu` ingests **already-generated** code; its only keywords are
-`precision` and `keep_all_atomic`. **Only `keep_push_pop=false` output is
+`precision`, `reduction_threshold`, and the CUDA-only `warp_atomics`
+(default on; `false` restores the old output exactly). **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.

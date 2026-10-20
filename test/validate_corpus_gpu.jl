@@ -197,6 +197,9 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
                              mode::Symbol = :adjoint,
                              tan_seeds::Vector = Any[], shtan_seeds::Vector = Any[])
     cpu_gen_expr = mode == :hvp ? gen_out.hvp : gen_out.adjoint
+    for h in vcat(get(plan_init, :helpers, Expr[]), get(plan_gen, :helpers, Expr[]))
+        Core.eval(Main, h)
+    end
     for k in plan_init.kernels
         Core.eval(Main, k)
     end
@@ -343,6 +346,9 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                 plan_gen  = STADE.stade_gpu(gen_expr, cuda_backend)
                 if write_generated
                     open(joinpath(dir, name * suffix * "_cuda.jl"), "w") do f
+                        for h in plan_gen.helpers
+                            write(f, STADE.io_expr_to_source(h))
+                        end
                         for k in plan_init.kernels
                             write(f, STADE.io_expr_to_source(k))
                         end

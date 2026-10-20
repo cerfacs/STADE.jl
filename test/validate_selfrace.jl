@@ -22,7 +22,7 @@ function validate_selfrace(dir::String = joinpath(@__DIR__, "val-corpus"))
         script = """
             include($(repr(source)))
             STADE.stade_adjoint_file($(repr(joinpath(dir, name * ".jl"))), $(repr(joinpath(work, name * "_b.jl"))); keep_push_pop = false, fuse_ii_loops = true)
-            STADE.stade_cuda_file($(repr(joinpath(work, name * "_b.jl"))), $(repr(joinpath(work, name * "_b_cuda.jl"))))
+            STADE.stade_cuda_file($(repr(joinpath(work, name * "_b.jl"))), $(repr(joinpath(work, name * "_b_cuda.jl"))); warp_atomics = false)
         """
         run(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stdout = devnull, stderr = devnull))
         return read(joinpath(work, name * "_b_cuda.jl"), String)

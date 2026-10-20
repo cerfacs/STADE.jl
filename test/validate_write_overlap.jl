@@ -208,7 +208,7 @@ end
 
 function val_overlap_backends()
     cuda = STADE.cgen_backend_cuda()
-    return [("cuda", e -> STADE.stade_gpu(e, cuda).kernels,
+    return [("cuda", e -> STADE.stade_gpu(e, cuda; warp_atomics = false).kernels,
              Any[cuda.atomic_macro]),
             ("jacc", e -> STADE.stade_jacc(e).kernels,
              Any[Expr(:., :Atomix, QuoteNode(Symbol("@atomic")))])]

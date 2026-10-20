@@ -272,10 +272,10 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, keep_all_atomic=true)
-stade_amdgpu_file(in_path, out_path; precision=nothing, keep_all_atomic=true)
-stade_metal_file(in_path, out_path;  precision=nothing, keep_all_atomic=true)
-stade_jacc_file(in_path, out_path;   precision=nothing, keep_all_atomic=true)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true)
+stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
+stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
+stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
 ```
 
 Each `_file` function has an `Expr`-in, `Expr`-out sibling without the
@@ -2278,10 +2278,18 @@ plain replacement is refused outright.
 A hardware-serialized read-modify-write, emitted as `CUDA.@atomic` or the
 backend equivalent, used to make a racing accumulation correct.
 
-**`keep_all_atomic`**
-A GPU flag. When true a matched reduction loop keeps its synthesized
-per-element atomic kernel. When false it is replaced by one idiomatic
-reduction call.
+**`reduction_threshold`**
+A GPU keyword (default 32768). A matched reduction loop gets both
+lowerings and a run-time test on its trip count: below the threshold the
+synthesized atomic kernel runs, at or above it one idiomatic reduction
+call. It replaced `keep_all_atomic`, removed in v0.3.0.
+
+**Warp aggregation** (`warp_atomics`)
+CUDA only. An array-element atomic add is emitted as a call to a
+generated helper (`__stade_wa_add!`). With all 32 lanes active and one
+shared index it adds the lane values by a shuffle tree and lane 0 issues
+the single atomic; otherwise it issues the plain atomic. The summation
+order changes, so the last bits of a result differ.
 
 **Array privacy**
 The proof that a written array's whole access pattern is confined to a

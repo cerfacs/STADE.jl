@@ -50,7 +50,7 @@ function validate_plain_write_gate(dir::String = joinpath(@__DIR__, "val-corpus"
     r = report("idm_cse_acc")
     check(any(x -> x.verdict == :kernel && x.reason == :ok, r), "idm_cse_acc: CSE'd accumulation -> offloads")
     check(has(r, :host, :rmw, :mb), "idm_cse_acc: its reverse zeroes and re-adds mb through a gather -> host (rmw, mb)")
-    STADE.stade_cuda_file(joinpath(work, "idm_cse_acc_b.jl"), joinpath(work, "idm_cse_acc_b_cuda.jl"))
+    STADE.stade_cuda_file(joinpath(work, "idm_cse_acc_b.jl"), joinpath(work, "idm_cse_acc_b_cuda.jl"); warp_atomics = false)
     check(occursin(r"@atomic m\[i_node\] \+=", read(joinpath(work, "idm_cse_acc_b_cuda.jl"), String)), "idm_cse_acc: forward scatter into m emits an atomic add")
 
     # the save-only scalar relaxation: the tile kernel offloads completely, each control keeps its refused loop on the host
