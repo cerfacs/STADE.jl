@@ -7588,7 +7588,8 @@ cgen_decision_record(owner::Symbol, stmt, depth::Int, verdict::Symbol, reason::S
      verdict = verdict, reason = reason, array = reason in (:array, :overlap, :rmw) ? array : nothing, via_idiom = reason === :ok && idiom)
 
 # Large-trip branch of an array-element reduction. A backend with sync_free_reduce adds the device-side reduction into the element with a broadcast on
-# one-element views, which never copies a scalar to the host, so the host does not wait mid-sequence and a CUDA graph can capture the call. The
+# one-element views, which never copies a scalar to the host, so the host does not wait mid-sequence. This branch is still not capturable in a CUDA
+# graph (measured: the dims reduction of CUDA.jl fails with invalid argument), so a captured call needs reduction_threshold = typemax(Int). The
 # other backends keep the host form: a mapreduce returning a host scalar inside allowscalar.
 cgen_sync_free_on(backend) = get(backend, :sync_free_reduce, false) === true
 
