@@ -2894,7 +2894,7 @@ end
 # sequential loop's direction), distributing each seed via der_rule(op).adjoint; pure accumulation skips resetting
 # the shadow, else it resets to 0.0. A snapshotted write pops its old value first.
 
-function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, push_pop = nothing, ii_plan = nothing)
+function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, push_pop = nothing, ii_plan = nothing, remat = nothing)
     active_map = act_analyze(kernel)
     layout = nothing
     value_needed = exempt = stacks = nothing
@@ -2914,7 +2914,7 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
                                       active_map = active_map, value_needed = value_needed, exempt = exempt, stacks = stacks, push_pop = push_pop)
     tier_b_extra_args = vcat(table_names, tot_names, val_names)
     adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = push_pop,
-                                      tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan)
+                                      tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan, remat = remat)
     # fuse_ii_loops can leave a stack with zero remaining push!/pop!/indexed-ref references
     # anywhere in the generated body (every site that would have used it got fused away) --
     # checked from the actual generated code, never predicted ahead of time, since a var's
@@ -2970,7 +2970,7 @@ function agen_signature_args(sig)
 end
 
 function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing,
-                            tier_b_extra_args::Vector{Symbol} = Symbol[], ii_plan = nothing)
+                            tier_b_extra_args::Vector{Symbol} = Symbol[], ii_plan = nothing, remat = nothing)
     fname = agen_fname(kernel.sig.name)
     stacks = agen_stack_map(sites)
     # `tier_b_extra_args` (Phase D) is the same table/total/value-table name list agen_init_emit
@@ -2984,7 +2984,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
     unsafe = agen_unsafe_int_vars(kernel)
     exempt = agen_exempt_vars(kernel, value_needed)
 
-    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan)
+    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan, remat = remat)
 
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map))
@@ -4274,7 +4274,7 @@ end
 # own owner/kernels threading. `loop_ctx` is temporarily extended around a `:for`'s own
 # recursion, in both agen_forward_body and agen_backward_body. Under keep_push_pop=true,
 # `layout` is never consulted (ectx.keep_push_pop short-circuits first).
-agen_ectx_stack() = (keep_push_pop = true, loop_ctx = Any[], layout = nothing, push_pop = nothing, ii_plan = nothing)
+agen_ectx_stack() = (keep_push_pop = true, loop_ctx = Any[], layout = nothing, push_pop = nothing, ii_plan = nothing, remat = nothing)
 
 # Resolves which value_needed-like info the per-statement push/pop gate should consult: the
 # site-level Dict (ectx.push_pop) when one was computed, else the ordinary whole-variable
@@ -4461,6 +4461,139 @@ end
 # sites only (`:reduction`/`:mixed` use separate handling, since fusing reads an undertotaled reduction too early). Fused vars
 # are excluded via a locally-scoped value_needed Set, not kernel-wide. `agen_ii_override_ectx` is required: site-level TBR
 # consults `ectx.push_pop`, so excluding a var from value_needed alone leaves an unmatched push.
+# ---- rematerialized restores (keep_push_pop=false) ----
+# A pre-write snapshot of scalar `v` saves the value of the nearest earlier write `v = rhs_d` in the same block. When that
+# rhs can be re-evaluated at the backward position and gives the same value, the restore is `v = rhs_d` and the slot goes.
+# The rhs may use: literals, scalars the kernel never assigns, enclosing loop vars, ints defined once at the top level of this
+# or an enclosing block (and nowhere nested in it) that the sweep recomputes up front, and loads of arrays with no write that
+# can execute after the load. No recursion into :if/:while bodies: agen_branch_pushed mirrors the forward gate there.
+function agen_stmt_assigned(stmt)
+    acc = Set{Symbol}()
+    agen_stmt_assigned!(stmt, acc)
+    return acc
+end
+
+function agen_stmt_assigned!(stmt, acc)
+    if stmt.kind == :assign
+        stmt.lhs isa Symbol && push!(acc, stmt.lhs)
+    elseif stmt.kind == :for || stmt.kind == :while
+        stmt.kind == :for && push!(acc, stmt.var)
+        foreach(st -> agen_stmt_assigned!(st, acc), stmt.body)
+    elseif stmt.kind == :if
+        foreach(st -> agen_stmt_assigned!(st, acc), stmt.then)
+        foreach(st -> agen_stmt_assigned!(st, acc), stmt.els)
+    end
+    return nothing
+end
+
+# Lexical position of every statement (`seq`, pre-order), the loops enclosing it, and every write to each array.
+function agen_remat_index!(body, chain, seq, pos, loops, writes, assigned_syms)
+    for (idx, stmt) in enumerate(body)
+        seq[] += 1
+        pos[agen_site_key(body, idx)] = seq[]
+        loops[agen_site_key(body, idx)] = chain
+        if stmt.kind == :assign
+            if stmt.lhs isa Symbol
+                push!(assigned_syms, stmt.lhs)
+            else
+                push!(get!(writes, stmt.lhs.args[1], Any[]), (seq[], chain))
+            end
+        elseif stmt.kind == :for || stmt.kind == :while
+            stmt.kind == :for && push!(assigned_syms, stmt.var)
+            agen_remat_index!(stmt.body, vcat(chain, seq[]), seq, pos, loops, writes, assigned_syms)
+        elseif stmt.kind == :if
+            agen_remat_index!(stmt.then, chain, seq, pos, loops, writes, assigned_syms)
+            agen_remat_index!(stmt.els, chain, seq, pos, loops, writes, assigned_syms)
+        end
+    end
+    return nothing
+end
+
+function agen_remat_pure(e, kinds, assigned_syms, writes, avail, d_seq, d_chain)
+    e isa Number && return true
+    if e isa Symbol
+        e in avail && return true
+        return !(e in assigned_syms) && haskey(kinds, e) && kinds[e] in (:scalar_int, :scalar_float)
+    end
+    e isa Expr || return false
+    if e.head == :call
+        e.args[1] in (:+, :-, :*, :/, :div, :mod, :÷, :%) || return false
+        return all(a -> agen_remat_pure(a, kinds, assigned_syms, writes, avail, d_seq, d_chain), e.args[2:end])
+    elseif e.head == :ref
+        a = e.args[1]
+        (a isa Symbol && haskey(kinds, a) && kinds[a] in (:array_float, :array_int)) || return false
+        # a write that runs after the load (later in program order, or anywhere in a loop enclosing it) can leave the array
+        # different at the backward position than it was at the load
+        for (wseq, wchain) in get(writes, a, Any[])
+            (wseq > d_seq || !isempty(intersect(wchain, d_chain))) && return false
+        end
+        return all(x -> agen_remat_pure(x, kinds, assigned_syms, writes, avail, d_seq, d_chain), e.args[2:end])
+    end
+    return false
+end
+
+function agen_remat_walk!(body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, avail0, plan)
+    avail = copy(avail0)
+    last_def = Dict{Symbol,Any}()   # float scalar -> rhs of its last top-level write when that rhs is rematerializable
+    for (idx, stmt) in enumerate(body)
+        if stmt.kind == :assign
+            stmt.lhs isa Symbol || continue
+            v = stmt.lhs
+            if kinds[v] == :scalar_int
+                # recomputed up front by this block's backward sweep: stable only if this is its one write in the block
+                n_here = count(st -> st.kind == :assign && st.lhs === v, body)
+                nested = any(st -> st.kind != :assign && v in agen_stmt_assigned(st), body)
+                (n_here == 1 && !nested && !(v in unsafe)) && push!(avail, v)
+            elseif kinds[v] == :scalar_float
+                key = agen_site_key(body, idx)
+                if haskey(last_def, v) && get(sites, key, false) === true && get(active_map, v, false) && !(v in exempt)
+                    plan[key] = last_def[v]
+                end
+                if agen_remat_pure(stmt.rhs, kinds, assigned_syms, writes, avail, pos[key], loops[key])
+                    last_def[v] = stmt.rhs
+                else
+                    delete!(last_def, v)
+                end
+            end
+        elseif stmt.kind == :for
+            for w in agen_stmt_assigned(stmt)
+                delete!(last_def, w)
+            end
+            agen_remat_walk!(stmt.body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, union(avail, Set([stmt.var])), plan)
+        elseif stmt.kind == :if || stmt.kind == :while
+            for w in agen_stmt_assigned(stmt)
+                delete!(last_def, w)
+            end
+        end
+    end
+    return nothing
+end
+
+function agen_remat_plan(kernel, active_map, sites)
+    kinds = kernel.sig.kinds
+    pos = Dict{Any,Int}()
+    loops = Dict{Any,Vector{Int}}()
+    writes = Dict{Symbol,Any}()
+    assigned_syms = Set{Symbol}()
+    agen_remat_index!(kernel.body, Int[], Ref(0), pos, loops, writes, assigned_syms)
+    unsafe = agen_unsafe_int_vars(kernel)
+    exempt = agen_exempt_vars(kernel, agen_value_needed_vars(kernel))
+    plan = Dict{Any,Any}()
+    agen_remat_walk!(kernel.body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, Set{Symbol}(), plan)
+    return plan
+end
+
+# Remat sites leave the site-level push/pop map, so layout, stack sizing and every emission gate see them as never pushed.
+function agen_remat_apply(kernel, active_map, sites)
+    plan = agen_remat_plan(kernel, active_map, sites)
+    isempty(plan) && return (sites, nothing)
+    out = copy(sites)
+    for k in keys(plan)
+        out[k] = false
+    end
+    return (out, plan)
+end
+
 function agen_ii_force_no_snapshot!(body, vn_local, override)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
@@ -4482,7 +4615,7 @@ function agen_ii_override_ectx(ectx, body, vn_local)
     (ectx.push_pop === nothing || isempty(vn_local)) && return ectx
     override = copy(ectx.push_pop)
     agen_ii_force_no_snapshot!(body, vn_local, override)
-    return (keep_push_pop = ectx.keep_push_pop, loop_ctx = ectx.loop_ctx, layout = ectx.layout, push_pop = override, ii_plan = ectx.ii_plan)
+    return (keep_push_pop = ectx.keep_push_pop, loop_ctx = ectx.loop_ctx, layout = ectx.layout, push_pop = override, ii_plan = ectx.ii_plan, remat = ectx.remat)
 end
 
 # ---- filtered primal recompute (backward-position fusion only) ----
@@ -4760,6 +4893,11 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
         stmt = plan[idx]
         stmt.kind == :if || continue
         vars = agen_if_branch_scalar_vars(stmt, kinds, value_needed)
+        # A later write to `var` in this block already restores the post-:if value at its own reverse position, and the up-front
+        # recompute below would clobber the later write's value for the reads that follow it.
+        later = Set{Symbol}()
+        foreach(j -> agen_stmt_assigned!(primal_body[j], later), idx + 1:length(primal_body))
+        filter!(v -> !(v in later), vars)
         isempty(vars) && continue
         resolved = Any[]
         for var in vars
@@ -4915,7 +5053,11 @@ function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned,
         # another statement's nonlinear derivative still needs even when this write's own rhs is a
         # plain inactive literal. `exempt`/`skip_restore` mirror the forward sweep's own skips -- no
         # push happened for those, so there's nothing to pop.
-        if get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), key) && !(var in exempt) && !(var in skip_restore)
+        remat_rhs = (ectx.remat === nothing || key === nothing) ? nothing : get(ectx.remat, key, nothing)
+        if remat_rhs !== nothing
+            # rematerialized: the old value is an earlier pure load in this block, recomputed instead of popped
+            push!(exprs, Expr(:(=), stmt.lhs, remat_rhs))
+        elseif get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), key) && !(var in exempt) && !(var in skip_restore)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, agen_emit_pop(nm, ectx, key, exprs)))
         end
@@ -5021,7 +5163,7 @@ end
 # mechanics: a push!/pop! of an active value gets a paired push/pop on a shadow stack.
 
 function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing,
-                   tier_b_extra_args::Vector{Symbol} = Symbol[], ii_plan = nothing)
+                   tier_b_extra_args::Vector{Symbol} = Symbol[], ii_plan = nothing, remat = nothing)
     sig = kernel.sig
     stacks = agen_stack_map(sites)
     value_needed = agen_value_needed_vars(kernel)
@@ -5029,7 +5171,7 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     unsafe = agen_unsafe_int_vars(kernel)
     exempt = agen_exempt_vars(kernel, value_needed)
 
-    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan)
+    ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan, remat = remat)
 
     cse_counter = Ref(0)
     cse_floats = agen_cse_float_names(sig, sites)
@@ -5870,6 +6012,87 @@ function cgen_loop_scalar_synth(body::Vector{NamedTuple}, known_consts::Dict{Sym
     return synth
 end
 
+# ---- save-only scalars: a local whose only read before its own definition is a stack save ----
+# `X_stack[i] = v` stores v's current value for the backward sweep. In a tile loop the first save of an iteration stores the value
+# v held on ENTRY, which a split thread does not have (the sequential loop passed it from the previous iteration). That slot is
+# dead exactly when nothing reads v's pre-definition value, which takes four structural facts, all checked below:
+#   1. every other read of v inside the loop is preceded by an assignment (cgen_use_before_def with save_ok);
+#   2. the loop body ends by pushing v's final value after its last write, so its reverse iteration starts from its own slot
+#      and never from the restoration chain the entry saves feed;
+#   3. no statement after the loop reads v before redefining it (ii_escapes_nested with save_ok);
+#   4. every non-save read of v anywhere in the program sits inside a loop that writes v and is covered there, so the value
+#      the reverse sweep restores past the loop is never read.
+# Fact 2 is what separates a per-tile loop (split) from the tap loop inside it (never split): a tap iteration's entry save
+# carries the previous tap's value, which the reverse of that previous tap reads.
+# `<var>_stack`, and `<var>_stack_d` for the stack shadow an HVP adds beside it (hvp_stack_shadow)
+cgen_is_stack_name(a) = a isa Symbol && (endswith(string(a), "_stack") || endswith(string(a), "_stack_d"))
+cgen_is_save_stmt(stmt) = stmt.kind == :assign && stmt.rhs isa Symbol && stmt.lhs isa Expr && stmt.lhs.head == :ref &&
+    cgen_is_stack_name(stmt.lhs.args[1])
+
+function cgen_ends_with_push(body::Vector{NamedTuple}, v::Symbol)
+    lw = findlast(st -> cgen_writes_var([st], v), body)
+    lw === nothing && return false
+    sv = string(v)
+    stacks = Symbol[Symbol(sv * "_stack")]
+    endswith(sv, "d") && push!(stacks, Symbol(chop(sv) * "_stack_d"))
+    return any(j -> cgen_is_save_stmt(body[j]) && body[j].rhs === v && body[j].lhs.args[1] in stacks, lw+1:length(body))
+end
+
+# Fact 4. `in_writer` is true inside a loop that writes v, where coverage was already proven for the outermost such loop.
+function cgen_saveonly_closed(body::Vector{NamedTuple}, v::Symbol, in_writer::Bool = false)
+    reads_v(e) = v in cgen_read_vars(e)
+    for st in body
+        if st.kind == :assign
+            cgen_is_save_stmt(st) && continue
+            if !in_writer
+                reads_v(st.rhs) && return false
+                st.lhs isa Expr && reads_v(st.lhs.args[2:end]) && return false
+            end
+        elseif st.kind == :if
+            !in_writer && reads_v(st.cond) && return false
+            cgen_saveonly_closed(st.then, v, in_writer) || return false
+            cgen_saveonly_closed(st.els, v, in_writer) || return false
+        elseif st.kind == :for || st.kind == :while
+            if st.kind == :for
+                !in_writer && (reads_v(st.lo) || reads_v(st.hi) || reads_v(st.step)) && return false
+            else
+                !in_writer && reads_v(st.cond) && return false
+            end
+            if !in_writer && cgen_writes_var(st.body, v)
+                cgen_use_before_def(st.body, Set{Symbol}([v]), Dict{Symbol,Any}(); save_ok = true)[1] || return false
+            elseif !cgen_saveonly_closed(st.body, v, in_writer)
+                return false
+            end
+        else
+            return false
+        end
+    end
+    return true
+end
+
+# The scalars that need the relaxation, or nothing when the loop is refused anyway. `synth0` is the convergent-constant seed.
+function cgen_saveonly_synth(body::Vector{NamedTuple}, known_consts::Dict{Symbol,Any}, root_body, protect)
+    root_body === nothing && return nothing
+    local_names = cgen_locally_assigned_scalars(body)
+    synth = Dict{Symbol,Any}()
+    for v in local_names
+        haskey(known_consts, v) || continue
+        c = cgen_loop_convergent_constant(body, v, get(known_consts, v, nothing))
+        c !== nothing && c == known_consts[v] && (synth[v] = c)
+    end
+    cgen_use_before_def(body, local_names, synth; save_ok = true)[1] || return nothing
+    saveonly = Symbol[v for v in sort(collect(local_names); by = string) if !haskey(synth, v) &&
+        !cgen_use_before_def(body, Set{Symbol}([v]), synth)[1]]
+    isempty(saveonly) && return nothing
+    for v in saveonly
+        v in protect && return nothing
+        cgen_ends_with_push(body, v) || return nothing
+        cgen_saveonly_closed(root_body, v) || return nothing
+        synth[v] = 0.0
+    end
+    return (synth = synth, saveonly = Set{Symbol}(saveonly))
+end
+
 function cgen_loop_array_summary(body::Vector{NamedTuple}, outer_defs::Dict{Symbol,Any})
     writes = Dict{Any,Vector{Any}}()
     reads = Dict{Any,Vector{Any}}()
@@ -5994,12 +6217,248 @@ end
 cgen_array_ok_idiom(body::Vector{NamedTuple}, arr::Symbol) =
     cgen_array_accumulate_only(body, arr) || cgen_array_consume_only(body, arr)
 
+# ---- plain-write overlap proof and CSE-accumulate folding (GPU split gate) ----
+# Two plain writes to one array from two DIFFERENT threads are a lost-update or last-writer race with no atomic form. The gate refuses a
+# loop only when that overlap is PROVEN, from indices affine in the loop variable with offsets that differ by a multiple of the stride
+# (`v[i]` and `v[i+1]`). An index it cannot analyse stays trusted, as the plain-write contract says: mpnn writes three slices of one
+# buffer whose disjointness is not provable from the indices, and refusing on "unknown" would drop it.
+#
+# The difference `kb - ka` of two offsets when it is a literal integer, else nothing. Shared symbolic terms cancel.
+function cgen_offset_difference(ka, kb)
+    terms = cgen_flatten_additive_terms(Expr(:call, :-, kb, ka))
+    net = Dict{String,Int}()
+    lit = 0
+    for (sg, t) in terms
+        if t isa Integer
+            lit += sg * t
+        else
+            net[string(t)] = get(net, string(t), 0) + sg
+        end
+    end
+    all(v -> v == 0, values(net)) || return nothing
+    return lit
+end
+
+# Can two writes with these index vectors hit one element from two DIFFERENT threads, and is that provable? Every dimension must be
+# analysable: either thread-independent and equal, or affine in `v` with the same non-zero stride, and all strided dimensions must agree
+# on one thread distance. Anything else answers false (unknown or provably apart).
+function cgen_writes_overlap_proven(a::Vector, b::Vector, v::Symbol, varying::Set{Symbol})
+    length(a) == length(b) || return false
+    shift = nothing
+    for d in eachindex(a)
+        pa = cgen_index_affine(a[d], v)
+        pb = cgen_index_affine(b[d], v)
+        (pa === nothing || pb === nothing) && return false
+        (cgen_affine_invariant(pa[2], varying) && cgen_affine_invariant(pb[2], varying)) || return false
+        if pa[1] == 0 && pb[1] == 0
+            cgen_offset_difference(pa[2], pb[2]) == 0 || return false
+        elseif pa[1] == pb[1]
+            diff = cgen_offset_difference(pa[2], pb[2])
+            (diff === nothing || diff == 0 || diff % pa[1] != 0) && return false
+            sh = diff // pa[1]
+            shift === nothing ? (shift = sh) : (shift == sh || return false)
+        else
+            return false
+        end
+    end
+    return shift !== nothing
+end
+
+# Arrays with two distinct write index vectors, at least one of them not an additive self-reference (an additive pair is repaired by an
+# atomic), that provably address one element from two threads. Same-body let-bindings are folded into the indices first.
+function cgen_overlap_proven_arrays(body::Vector{NamedTuple}, thread_var::Symbol)
+    varying = cgen_all_assigned_scalars(body)
+    cgen_collect_loop_vars!(body, varying)
+    writes = Dict{Symbol,Vector{Any}}()
+    reads = Dict{Symbol,Vector{Any}}()
+    cgen_collect_subst_accesses!(body, Dict{Symbol,Any}(), writes, reads)
+    proven = Set{Symbol}()
+    for (arr, sites) in writes
+        for p in eachindex(sites), q in (p + 1):lastindex(sites)
+            sites[p][1] == sites[q][1] && continue
+            (sites[p][2] && sites[q][2]) && continue
+            if cgen_writes_overlap_proven(sites[p][1], sites[q][1], thread_var, varying)
+                push!(proven, arr)
+                break
+            end
+        end
+    end
+    return proven
+end
+
+cgen_count_sym_uses(e, s::Symbol) = e isa Symbol ? Int(e === s) : e isa Expr ? sum(a -> cgen_count_sym_uses(a, s), e.args; init = 0) : 0
+
+function cgen_count_sym_uses_body(body::Vector{NamedTuple}, s::Symbol)
+    n = 0
+    for st in body
+        if st.kind == :assign
+            n += cgen_count_sym_uses(st.rhs, s) + (st.lhs isa Expr ? cgen_count_sym_uses(st.lhs, s) : 0)
+        elseif st.kind == :if
+            n += cgen_count_sym_uses(st.cond, s) + cgen_count_sym_uses_body(st.then, s) + cgen_count_sym_uses_body(st.els, s)
+        elseif st.kind == :for
+            n += cgen_count_sym_uses(st.lo, s) + cgen_count_sym_uses(st.hi, s) + cgen_count_sym_uses(st.step, s) + cgen_count_sym_uses_body(st.body, s)
+        elseif st.kind == :while
+            n += cgen_count_sym_uses(st.cond, s) + cgen_count_sym_uses_body(st.body, s)
+        end
+    end
+    return n
+end
+
+# Does any statement in `body` write array `arr` or assign a scalar in `syms`?
+function cgen_body_touches(body::Vector{NamedTuple}, arr::Symbol, syms::Set{Symbol})
+    for st in body
+        if st.kind == :assign
+            (st.lhs isa Symbol && st.lhs in syms) && return true
+            (st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] === arr) && return true
+        elseif st.kind == :if
+            (cgen_body_touches(st.then, arr, syms) || cgen_body_touches(st.els, arr, syms)) && return true
+        elseif st.kind == :for
+            (st.var in syms || cgen_body_touches(st.body, arr, syms)) && return true
+        elseif st.kind == :while
+            cgen_body_touches(st.body, arr, syms) && return true
+        end
+    end
+    return false
+end
+
+function cgen_expr_symbols(e, out::Set{Symbol} = Set{Symbol}())
+    e isa Symbol && push!(out, e)
+    e isa Expr && foreach(a -> cgen_expr_symbols(a, out), e.args)
+    return out
+end
+
+# A CSE'd read-modify-write `t = A[e]; ...; A[e] = t + x` (t used nowhere else) is the accumulation `A[e] = A[e] + x` with the read
+# hoisted. The additive test and the atomic rewrite only see the second form, so the first stays a plain write: ttgc's forward
+# re-execution scatters into mup that way, and two cells sharing a node lose an update on a real device. The fold deletes the hoisted
+# read and puts the array element back as the sum's own term. Applied to a split loop's body only, never to code that stays on the host.
+function cgen_fold_accumulates(body::Vector{NamedTuple}, root::Vector{NamedTuple} = body)
+    out = NamedTuple[]
+    skip = Set{Int}()
+    subst = Dict{Int,Tuple{Symbol,Any}}()
+    for (i, st) in enumerate(body)
+        i in skip && continue
+        if st.kind == :assign && st.lhs isa Symbol && st.rhs isa Expr && st.rhs.head == :ref && st.rhs.args[1] isa Symbol &&
+           !cgen_expr_has_ref(Expr(:tuple, st.rhs.args[2:end]...)) && cgen_count_sym_uses(st.rhs, st.lhs) == 0 &&
+           cgen_count_sym_uses_body(root, st.lhs) == 1
+            s, ref = st.lhs, st.rhs
+            watch = cgen_expr_symbols(Expr(:tuple, ref.args[2:end]...))
+            push!(watch, s)
+            for j in (i + 1):length(body)
+                w = body[j]
+                if w.kind == :assign && w.lhs == ref && !(w.rhs isa Number)
+                    terms = cgen_flatten_sum(w.rhs)
+                    k = findfirst(t -> t === s, terms)
+                    k === nothing && break
+                    new_rhs = cgen_subst_expr(w.rhs, Dict{Symbol,Any}(s => ref))
+                    push!(skip, i)
+                    subst[j] = (s, new_rhs)
+                    break
+                end
+                cgen_body_touches(NamedTuple[w], ref.args[1], watch) && break
+            end
+        end
+    end
+    for (i, st) in enumerate(body)
+        i in skip && continue
+        if haskey(subst, i)
+            push!(out, merge(st, (rhs = subst[i][2],)))
+        elseif st.kind == :if
+            push!(out, merge(st, (then = cgen_fold_accumulates(st.then, root), els = cgen_fold_accumulates(st.els, root))))
+        elseif st.kind == :for || st.kind == :while
+            push!(out, merge(st, (body = cgen_fold_accumulates(st.body, root),)))
+        else
+            push!(out, st)
+        end
+    end
+    return out
+end
+
+# A read-modify-write that no atomic add repairs, through an index that gathers from an array (so two threads can reach one element):
+# `t = A[e]; push t; A[e] = t + x` (the old value is also saved, so the read cannot be folded away), or `A[e] = f(A[e], ..)` with f
+# not a sum. Two threads on one element lose an update or save a value that depends on thread order. ttgc's forward re-execution
+# scatters into mup this way. So does its undo, `A[e] = A_stack[k]`, whose writers carry different saved values. Only a gathered index
+# counts: an index computed with div/mod is the flattened-nest idiom and stays trusted, and any other plain replacement through a
+# gathered index stays trusted too, since a permutation-style scatter is the common case. `gathered` is the set of scalars whose
+# value comes from an array read, directly or through another such scalar.
+function cgen_rmw_hazard_arrays(body::Vector{NamedTuple})
+    acc = Set{Symbol}()
+    other = Set{Symbol}()
+    hazard = cgen_rmw_walk!(body, Dict{Symbol,Any}(), Set{Symbol}(), acc, other)
+    # an array accumulated through a gathered index has said its index is not unique, so a plain write to it through a gathered
+    # index in the same loop races with the other threads' adds: the reverse of `old = m[n]; m[n] = old + x` zeroes mb[n] and re-adds
+    union!(hazard, intersect(acc, other))
+    return hazard
+end
+
+function cgen_rmw_walk!(body::Vector{NamedTuple}, held::Dict{Symbol,Any}, gathered::Set{Symbol}, acc::Set{Symbol}, other::Set{Symbol})
+    hazard = Set{Symbol}()
+    gathers(idx) = cgen_expr_has_ref(Expr(:tuple, idx...)) || any(x -> x in gathered, cgen_expr_symbols(Expr(:tuple, idx...)))
+    for st in body
+        if st.kind == :assign
+            if st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] isa Symbol
+                arr = st.lhs.args[1]
+                idx = st.lhs.args[2:end]
+                gathered_idx = gathers(idx)
+                terms = cgen_flatten_sum(st.rhs)
+                self_idx = findfirst(t -> t == st.lhs, terms)
+                via_scalar = any(t -> get(held, t, nothing) == st.lhs, cgen_expr_symbols(st.rhs))
+                direct = any(r -> r == st.lhs, cgen_collect_ref_exprs(st.rhs))
+                restore = st.rhs isa Expr && st.rhs.head == :ref && cgen_is_stack_name(st.rhs.args[1])
+                if gathered_idx
+                    if self_idx !== nothing
+                        push!(acc, arr)
+                        o = cgen_sum_excluding(terms, self_idx)
+                        (cgen_expr_reads_array(o, arr) || via_scalar) && push!(hazard, arr)
+                    else
+                        push!(other, arr)
+                        (restore || via_scalar || direct) && push!(hazard, arr)
+                    end
+                end
+                for (k, r) in collect(held)
+                    r.args[1] === arr && delete!(held, k)
+                end
+            elseif st.lhs isa Symbol
+                if st.rhs isa Expr && st.rhs.head == :ref && st.rhs.args[1] isa Symbol && !cgen_expr_has_ref(Expr(:tuple, st.rhs.args[2:end]...))
+                    held[st.lhs] = st.rhs
+                else
+                    delete!(held, st.lhs)
+                end
+                if cgen_expr_has_ref(st.rhs) || any(x -> x in gathered, cgen_expr_symbols(st.rhs))
+                    push!(gathered, st.lhs)
+                else
+                    delete!(gathered, st.lhs)
+                end
+            end
+        elseif st.kind == :if
+            union!(hazard, cgen_rmw_walk!(st.then, copy(held), copy(gathered), acc, other))
+            union!(hazard, cgen_rmw_walk!(st.els, copy(held), copy(gathered), acc, other))
+        elseif st.kind == :for
+            union!(hazard, cgen_rmw_walk!(st.body, copy(held), copy(gathered), acc, other))
+        end
+    end
+    return hazard
+end
+
+function cgen_collect_ref_exprs(e, out::Vector{Any} = Any[])
+    if e isa Expr
+        e.head == :ref && push!(out, e)
+        foreach(a -> cgen_collect_ref_exprs(a, out), e.args)
+    end
+    return out
+end
+
 # Gate for the GPU split. The strict predicate runs first, so every loop that cgen_reduction_only_loop accepts is accepted here
 # with the same synth. The idiom predicate only relaxes the array check. A refusal names the smallest failing array.
 # `idiom` is true when an accepted loop needed the idiom predicate for at least one array.
-function cgen_split_loop_gate(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}())
+function cgen_split_loop_gate(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(); root_body = nothing, protect = Set{Symbol}())
+    body = cgen_fold_accumulates(body)
     synth = cgen_loop_scalar_synth(body, known_consts)
-    synth === nothing && return (synth = nothing, reason = :scalar, array = nothing, idiom = false)
+    saveonly = Set{Symbol}()
+    if synth === nothing
+        so = cgen_saveonly_synth(body, known_consts, root_body, protect)
+        so === nothing || ((synth, saveonly) = (so.synth, so.saveonly))
+    end
+    synth === nothing && return (synth = nothing, reason = :scalar, array = nothing, idiom = false, saveonly = saveonly)
     summary = cgen_loop_array_summary(body, outer_defs)
     failing = Symbol[]
     idiom = false
@@ -6012,8 +6471,12 @@ function cgen_split_loop_gate(body::Vector{NamedTuple}, loopvar::Symbol, known_c
         end
         push!(failing, arr isa Symbol ? arr : :unknown)
     end
-    isempty(failing) || return (synth = nothing, reason = :array, array = minimum(failing), idiom = false)
-    return (synth = synth, reason = :ok, array = nothing, idiom = idiom)
+    isempty(failing) || return (synth = nothing, reason = :array, array = minimum(failing), idiom = false, saveonly = saveonly)
+    overlap = cgen_overlap_proven_arrays(body, loopvar)
+    isempty(overlap) || return (synth = nothing, reason = :overlap, array = minimum(overlap), idiom = false, saveonly = saveonly)
+    rmw = cgen_rmw_hazard_arrays(body)
+    isempty(rmw) || return (synth = nothing, reason = :rmw, array = minimum(rmw), idiom = false, saveonly = saveonly)
+    return (synth = synth, reason = :ok, array = nothing, idiom = idiom, saveonly = saveonly)
 end
 
 # Is `var` assigned anywhere within body, at any nesting depth? Used only to bail out of the
@@ -6111,12 +6574,13 @@ cgen_read_vars(e) = (s = Set{Symbol}(); cgen_collect_expr_vars!(e, s); s)
 # referencing on its own lhs, e.g. a stack-restored value consumed by an earlier statement and only refreshed by a later one (a
 # prefetch-for-next-iteration pattern valid only under strict sequential order). This subsumes the self-assign-only check,
 # replacing it as cgen_reduction_only_loop's safety gate.
-function cgen_use_before_def(body::Vector{NamedTuple}, local_names::Set{Symbol}, synth::Dict{Symbol,Any}, defined_in::Set{Symbol} = Set{Symbol}())
+function cgen_use_before_def(body::Vector{NamedTuple}, local_names::Set{Symbol}, synth::Dict{Symbol,Any}, defined_in::Set{Symbol} = Set{Symbol}(); save_ok::Bool = false)
     defined = union(defined_in, Set{Symbol}(keys(synth)))
     flagged(vars) = any(v -> v in local_names && !(v in defined), vars)
     for stmt in body
         if stmt.kind == :assign
-            flagged(cgen_read_vars(stmt.rhs)) && return (false, defined)
+            # save_ok: a bare `X_stack[i] = v` copies v into storage and computes nothing from it
+            (save_ok && cgen_is_save_stmt(stmt)) || flagged(cgen_read_vars(stmt.rhs)) && return (false, defined)
             if stmt.lhs isa Expr && stmt.lhs.head == :ref
                 flagged(cgen_read_vars(stmt.lhs.args[2:end])) && return (false, defined)
             elseif stmt.lhs isa Symbol
@@ -6124,9 +6588,9 @@ function cgen_use_before_def(body::Vector{NamedTuple}, local_names::Set{Symbol},
             end
         elseif stmt.kind == :if
             flagged(cgen_read_vars(stmt.cond)) && return (false, defined)
-            ok_then, defined_then = cgen_use_before_def(stmt.then, local_names, synth, defined)
+            ok_then, defined_then = cgen_use_before_def(stmt.then, local_names, synth, defined; save_ok)
             ok_then || return (false, defined)
-            ok_els, defined_els = cgen_use_before_def(stmt.els, local_names, synth, defined)
+            ok_els, defined_els = cgen_use_before_def(stmt.els, local_names, synth, defined; save_ok)
             ok_els || return (false, defined)
             defined = intersect(defined_then, defined_els)
         elseif stmt.kind == :for
@@ -6136,11 +6600,11 @@ function cgen_use_before_def(body::Vector{NamedTuple}, local_names::Set{Symbol},
             # the loop's own iteration variable is bound by its header,
             # hence always "defined" throughout its body -- not a read-
             # before-def case at all, unlike a genuine local scalar.
-            ok, _ = cgen_use_before_def(stmt.body, local_names, synth, union(defined, Set([stmt.var])))
+            ok, _ = cgen_use_before_def(stmt.body, local_names, synth, union(defined, Set([stmt.var])); save_ok)
             ok || return (false, defined)
         elseif stmt.kind == :while
             # no loop variable to add to the defined set
-            ok, _ = cgen_use_before_def(stmt.body, local_names, synth, defined)
+            ok, _ = cgen_use_before_def(stmt.body, local_names, synth, defined; save_ok)
             ok || return (false, defined)
         end
     end
@@ -6544,8 +7008,13 @@ end
 # exempt, provably: agen_backward_assign ends every consumed shadow with `vb = 0.0`, so device and host copies already agree (28 of 41 live-
 # out sites). The rest are accumulators, stencil taps, and window bounds, where the values genuinely differ. Depends on the block-boundary
 # collapse having already removed redundant outer pushes.
-function cgen_liveout_is_zeroed(stmt, root_body, loop_vars, synth = Dict{Symbol,Any}())
+function cgen_liveout_is_zeroed(stmt, root_body, loop_vars, synth = Dict{Symbol,Any}(), saveonly = Set{Symbol}())
     locals = setdiff(cgen_locally_assigned_scalars(stmt.body), loop_vars)
+    isempty(locals) && return true
+    # a save-only scalar is seeded in `synth` but is not converged to a constant: a later read is a hazard unless it is a stack save
+    so = intersect(locals, saveonly)
+    isempty(so) || isempty(ii_escapes_nested(root_body, stmt.body, so; save_ok = true)) || return false
+    locals = setdiff(locals, so)
     isempty(locals) && return true
     for v in ii_escapes_nested(root_body, stmt.body, locals)
         # A var in `synth` is not a hazard however the escape looks. synth[v] = c means the value coming into
@@ -6628,7 +7097,7 @@ end
 # `via_idiom` marks a loop that was accepted only through the idiom predicate.
 cgen_decision_record(owner::Symbol, stmt, depth::Int, verdict::Symbol, reason::Symbol, array, idiom::Bool) =
     (owner = owner, loop_var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step, depth = depth,
-     verdict = verdict, reason = reason, array = reason === :array ? array : nothing, via_idiom = reason === :ok && idiom)
+     verdict = verdict, reason = reason, array = reason in (:array, :overlap, :rmw) ? array : nothing, via_idiom = reason === :ok && idiom)
 
 function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, depth::Int = 0)
     exprs = Any[]
@@ -6695,7 +7164,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # loop boundary (a reverse-mode reduction shadow reset each iteration but never freshly initialized at the
             # first). Running the check unconditionally costs nothing when no such scalar exists, and otherwise either
             # recovers it via synth or refuses to split -- never silently emitting a kernel reading an undefined value.
-            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs)
+            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs; root_body, protect = Set{Symbol}(fn_args))
             synth = gate.synth
             # A var cgen_scalar_reduction_vars calls reduction-worthy is only safe for cgen_emit's global box-once/unbox-once treatment when it's a
             # whole-function-lifetime entity (a top-level argument like `cb`). An internal scratch scalar can satisfy the same shape by accident when
@@ -6730,7 +7199,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             stage === :ok && !cgen_kernel_def_ok(() -> cgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), backend, loop_reduce_vars, synth)) && (stage = :kernel_def)
             # see cgen_liveout_is_zeroed -- refuses a split whose local scalars a later host
             # statement reads, which would read them stale
-            stage === :ok && !cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth) && (stage = :liveout)
+            stage === :ok && !cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth, gate.saveonly) && (stage = :liveout)
             eligible = stage === :ok
             verdict = :host
             if eligible
@@ -6926,7 +7395,8 @@ function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, b
     for (v, c) in synth
         push!(body, Expr(:(=), v, c))
     end
-    append!(body, cgen_device_body(stmt.body, stmt.var, backend, reduce_vars, cgen_race_write_arrays(stmt.body, stmt.var)))
+    fbody = cgen_fold_accumulates(stmt.body)
+    append!(body, cgen_device_body(fbody, stmt.var, backend, reduce_vars, cgen_race_write_arrays(fbody, stmt.var)))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...), Expr(:block, body...))
 end
@@ -7427,7 +7897,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             end
         elseif stmt.kind == :for
             flush_pending!()
-            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs)
+            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs; root_body, protect = Set{Symbol}(fn_args))
             synth = gate.synth
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
             safe_scope = issubset(loop_reduce_vars, fn_args)
@@ -7447,7 +7917,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # reading one gets the stale host copy instead. ii_kill is the witness: cgen keeps that loop
             # on the host, jgen offloaded it and the host's v stayed 0.0 -- silent wrong gradients,
             # measured at max_rel_err 0.85 (adjoint) and 1.23 (HVP) live while the CUDA path was exact.
-            stage === :ok && !cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth) && (stage = :liveout)
+            stage === :ok && !cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth, gate.saveonly) && (stage = :liveout)
             eligible = stage === :ok
             verdict = :host
             if eligible
@@ -7561,7 +8031,8 @@ function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, r
     for (v, c) in synth
         push!(body, Expr(:(=), v, c))
     end
-    append!(body, jgen_device_body(stmt.body, stmt.var, reduce_vars, cgen_race_write_arrays(stmt.body, stmt.var)))
+    fbody = cgen_fold_accumulates(stmt.body)
+    append!(body, jgen_device_body(fbody, stmt.var, reduce_vars, cgen_race_write_arrays(fbody, stmt.var)))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
 end
@@ -9723,7 +10194,8 @@ function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
     ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
-    return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, push_pop = agen_sites, ii_plan = ii_plan)
+    (agen_sites, remat) = keep_push_pop ? (agen_sites, nothing) : agen_remat_apply(kernel, active_map, agen_sites)
+    return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, push_pop = agen_sites, ii_plan = ii_plan, remat = remat)
 end
 
 function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
@@ -9736,6 +10208,7 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
     lin_plan = lin_build(kernel, active_map)
     ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
+    (agen_sites, remat) = keep_push_pop ? (agen_sites, nothing) : agen_remat_apply(kernel, active_map, agen_sites)
     layout = nothing
     value_needed = exempt = stacks = nothing
     if !keep_push_pop
@@ -9750,7 +10223,7 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
                                       active_map = active_map, value_needed = value_needed, exempt = exempt, stacks = stacks, push_pop = agen_sites)
     tier_b_extra_args = vcat(table_names, tot_names, val_names)
     hvp_expr = hvp_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = agen_sites,
-                         tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan)
+                         tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan, remat = remat)
 # Mirrors agen_emit's own post-hoc cleanup, sharing agen_finalize_stacks so the two passes can't drift out of sync. Required for consistency:
 # stade_adjoint's own initstacks_* already drops a stack once fusion leaves it unused, and validation code sharing initstacks_* across both
 # adjoint and hvp calls needs hvp_expr's signature to match. hvp_expr's fwd/bwd reuse the same agen_forward_body/agen_backward_body calls as
@@ -10483,14 +10956,15 @@ end
 # is removed from `alive` on a fresh (non-self-referencing) assignment; any read (linear or nonlinear) of a still-alive var is
 # an escape. `:if` is conservative: a var survives only if it survives both arms. A write's own lhs index expressions are
 # checked too -- an alive scalar used as an index elsewhere is still a genuine read.
-function ii_kill_and_collect!(body, alive, escaped, value_only = false)
+function ii_kill_and_collect!(body, alive, escaped, value_only = false; save_ok = false)
     for stmt in body
         isempty(alive) && return alive
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             local_reads = Set{Symbol}()
-            value_only ? ii_value_reads(stmt.rhs, alive, local_reads, false) :
-                         ii_expr_reads(stmt.rhs, alive, local_reads)
+            (save_ok && cgen_is_save_stmt(stmt)) ||
+            (value_only ? ii_value_reads(stmt.rhs, alive, local_reads, false) :
+                         ii_expr_reads(stmt.rhs, alive, local_reads))
             if stmt.lhs isa Expr
                 for a in stmt.lhs.args[2:end]
                     ii_expr_reads(a, alive, local_reads)
@@ -10504,8 +10978,8 @@ function ii_kill_and_collect!(body, alive, escaped, value_only = false)
             cond_reads = Set{Symbol}()
             ii_expr_reads(stmt.cond, alive, cond_reads)
             union!(escaped, cond_reads)
-            alive_then = ii_kill_and_collect!(stmt.then, copy(alive), escaped, value_only)
-            alive_els  = ii_kill_and_collect!(stmt.els,  copy(alive), escaped, value_only)
+            alive_then = ii_kill_and_collect!(stmt.then, copy(alive), escaped, value_only; save_ok)
+            alive_els  = ii_kill_and_collect!(stmt.els,  copy(alive), escaped, value_only; save_ok)
             alive = intersect(alive_then, alive_els)
         elseif stmt.kind == :for
             # A kill inside a loop only counts when the loop is GUARANTEED to run -- a runtime bound may execute zero
@@ -10513,7 +10987,7 @@ function ii_kill_and_collect!(body, alive, escaped, value_only = false)
             # conditional. The `:if` arm above is the same rule as an intersection: kill only when both branches kill.
             # Getting this wrong under-reports escapes, fusing a loop whose scalar is still live -- ii_kill is the
             # witness, at 0.39.
-            inner = ii_kill_and_collect!(stmt.body, copy(alive), escaped, value_only)
+            inner = ii_kill_and_collect!(stmt.body, copy(alive), escaped, value_only; save_ok)
             cgen_loop_runs_once(stmt) && (alive = inner)
         elseif stmt.kind == :while
             # A kill inside a loop only counts when the loop is GUARANTEED to run -- a runtime bound may execute zero
@@ -10521,7 +10995,7 @@ function ii_kill_and_collect!(body, alive, escaped, value_only = false)
             # conditional. The `:if` arm above is the same rule as an intersection: kill only when both branches kill.
             # Getting this wrong under-reports escapes, fusing a loop whose scalar is still live -- ii_kill is the
             # witness, at 0.39.
-            inner = ii_kill_and_collect!(stmt.body, copy(alive), escaped, value_only)
+            inner = ii_kill_and_collect!(stmt.body, copy(alive), escaped, value_only; save_ok)
             cgen_loop_runs_once(stmt) && (alive = inner)
         end
     end
@@ -10571,7 +11045,7 @@ end
 # to 'before' siblings) detects every reachable read -- one pass suffices, since `alive` is fixed, not something that needs to
 # converge. What propagates outward uses only the 'after' segment's kill effect: a consumer outside this level only observes what
 # the last repetition's tail left behind. A non-repeating level skips the wraparound pass entirely.
-function ii_escapes_nested(kernel_body, target, vars, value_only = false)
+function ii_escapes_nested(kernel_body, target, vars, value_only = false; save_ok = false)
     path = ii_find_ancestor_path(kernel_body, target, false)
     path === nothing && return copy(vars)
     escaped = Set{Symbol}()
@@ -10582,10 +11056,10 @@ function ii_escapes_nested(kernel_body, target, vars, value_only = false)
         after = body[idx+1:end]
         if repeating
             before = body[1:idx-1]
-            ii_kill_and_collect!(vcat(after, before), copy(alive), escaped, value_only)
-            alive = ii_kill_and_collect!(after, alive, escaped, value_only)
+            ii_kill_and_collect!(vcat(after, before), copy(alive), escaped, value_only; save_ok)
+            alive = ii_kill_and_collect!(after, alive, escaped, value_only; save_ok)
         else
-            alive = ii_kill_and_collect!(after, alive, escaped, value_only)
+            alive = ii_kill_and_collect!(after, alive, escaped, value_only; save_ok)
         end
     end
     return escaped
@@ -11051,6 +11525,55 @@ function ii_body_has_surviving_snapshot(body, kinds, active_map, sites, vn_local
     return false
 end
 
+# A fused or recomputed local reaches the backward position holding the value of its LAST assignment in the body. A local assigned
+# more than once per iteration with a read between two of its assignments (the nine taps of a tiled convolution each reload the same
+# weight scalar) therefore feeds its early reads the wrong version. True when some variable of `vars` is read after its first
+# assignment and before its last one, in program order. An accumulation `v = v + t` does not count as a read of v. A loop that reads it first and then assigns it once is a live-in, a
+# different question, answered by ii_scalar_live_in.
+function ii_versions_read(body::Vector{NamedTuple}, vars::Set{Symbol})
+    first_w = Dict{Symbol,Int}()
+    last_w = Dict{Symbol,Int}()
+    nw = Dict{Symbol,Int}()
+    reads = Dict{Symbol,Vector{Int}}()
+    pos = Ref(0)
+    note_reads!(e) = for v in cgen_expr_symbols(e)
+        v in vars && push!(get!(reads, v, Int[]), pos[])
+    end
+    function walk!(b)
+        for st in b
+            pos[] += 1
+            if st.kind == :assign
+                # `v = v + t` reads v only to add to it: linear, so its adjoint needs no version of v
+                if st.lhs isa Symbol && any(t -> t === st.lhs, cgen_flatten_sum(st.rhs)) &&
+                   cgen_count_sym_uses(st.rhs, st.lhs) == 1
+                    note_reads!(cgen_sum_excluding(cgen_flatten_sum(st.rhs), findfirst(t -> t === st.lhs, cgen_flatten_sum(st.rhs))))
+                else
+                    note_reads!(st.rhs)
+                end
+                st.lhs isa Expr && note_reads!(st.lhs)
+                if st.lhs isa Symbol && st.lhs in vars
+                    pos[] += 1
+                    haskey(first_w, st.lhs) || (first_w[st.lhs] = pos[])
+                    last_w[st.lhs] = pos[]
+                    nw[st.lhs] = get(nw, st.lhs, 0) + 1
+                end
+            elseif st.kind == :if
+                note_reads!(st.cond)
+                walk!(st.then)
+                walk!(st.els)
+            elseif st.kind == :for
+                note_reads!(Expr(:tuple, st.lo, st.hi, st.step))
+                walk!(st.body)
+            elseif st.kind == :while
+                note_reads!(st.cond)
+                walk!(st.body)
+            end
+        end
+    end
+    walk!(body)
+    return Set(v for v in keys(nw) if nw[v] >= 2 && any(p -> first_w[v] < p < last_w[v], get(reads, v, Int[])))
+end
+
 function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, plan = nothing)
     stmt.kind == :for || return :none
     agen_tier_b_walk(stmt.body, Set{Symbol}()) === nothing || return :none
@@ -11076,6 +11599,8 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
     # when no fused var is live across a nested loop boundary.
     ii_fused_var_in_nested_for(stmt.body, vn_local, plan) && return :none
+    # see ii_versions_read -- a local reassigned between its own reads cannot be rebuilt from its last value
+    isempty(ii_versions_read(stmt.body, setdiff(vn_local, redvars))) || return :none
     # see ii_read_reaches_from_before -- a read positioned before this loop is reversed AFTER
     # its backward code, and every fusing kind elides the fused scalars' snapshots, so the
     # value that read needs is gone. The forward-direction dual is the ii_escapes_nested gate
@@ -11156,6 +11681,8 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # see ii_fused_var_in_nested_for -- vcat(fwd, bwd) is only valid
     # when no fused var is live across a nested loop boundary.
     ii_fused_var_in_nested_for(stmt.body, vn_local, plan) && return :none
+    # see ii_versions_read -- a local reassigned between its own reads cannot be rebuilt from its last value
+    isempty(ii_versions_read(stmt.body, setdiff(vn_local, redvars))) || return :none
     # see ii_read_reaches_from_before -- a read positioned before this loop is reversed AFTER
     # its backward code, and every fusing kind elides the fused scalars' snapshots, so the
     # value that read needs is gone. The forward-direction dual is the ii_escapes_nested gate
