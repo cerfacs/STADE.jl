@@ -48,6 +48,8 @@ fmm_args() = [:s => fmm_slowness(), :T => zeros(NX_FMM * NX_FMM), :state => zero
 # the AMR mesh edges are listed as targets: the gradient with respect to x0 and p alone never touches them,
 # which is how a wrong index in the reverse sweep went unseen
 const AMR_TARGETS = [(:x0,), (:xl, 1), (:xl, 2), (:xr, 2), (:xr, 4)]
+const X4 = [(:x, 1), (:x, 2), (:x, 3), (:x, 4)]
+const BC = [(:x, 1), (:x, 2), (:w, 2), (:w, 3), (:w, 4)]
 
 # (label, kernel, args, targets)
 const INT_CASES = [
@@ -59,6 +61,24 @@ const INT_CASES = [
     ("fmm2d",              "fmm2d",              fmm_args,     [(:s, fmm_idx(10, 9)), (:s, fmm_idx(11, 10)), (:s, fmm_idx(12, 10)), (:h,)]),
     ("for_int_rewrite",    "for_int_rewrite",    () -> rewrite_args(3), [(:x, 1), (:x, 2), (:x, 3)]),
     ("while_int_rewrite",  "while_int_rewrite",  rewrite_args, [(:x, 1), (:x, 2), (:x, 3)]),
+    # integer arrays read and then written again, and control flow around integer writes
+    ("two_phase_perm",     "two_phase_perm",     () -> [:x => [1.1, 2.2, 3.3, 4.4], :idx => [3, 1, 4, 2], :n => 4, :out => zeros(1)], X4),
+    ("while_two_phase",    "while_two_phase",    () -> [:x => [1.1, 2.2, 3.3, 4.4], :idx => [3, 1, 4, 2], :n => 4.5, :out => zeros(1)], X4),
+    ("partial_rewrite_m0", "partial_rewrite",    () -> [:x => [1.1, 2.2, 3.3, 4.4], :idx => [3, 1, 4, 2], :n => 4, :m => 0, :out => zeros(1)], X4),
+    ("partial_rewrite_m2", "partial_rewrite",    () -> [:x => [1.1, 2.2, 3.3, 4.4], :idx => [3, 1, 4, 2], :n => 4, :m => 2, :out => zeros(1)], X4),
+    ("rebuild_in_loop",    "rebuild_in_loop",    () -> [:x => [1.1, 2.2, 3.3, 4.4], :idx => [1, 1, 1, 1], :n => 4, :steps => 3, :out => zeros(1)], X4),
+    ("cond_int_write",     "cond_int_write",     () -> [:x => [0.3, 0.7, 0.9, 0.2], :idx => [3, 1, 4, 2], :n => 4, :out => zeros(1)], X4),
+    ("int_bound_array",    "int_bound_array",    () -> [:x => [1.0, 2.0, 3.0, 4.0, 5.0], :cnt => [1], :n => 3, :out => zeros(1)], [(:x, 1), (:x, 2), (:x, 3)]),
+    ("int_bound_direct",   "int_bound_direct",   () -> [:x => [1.0, 2.0, 3.0, 4.0, 5.0], :cnt => [1], :n => 3, :out => zeros(1)], [(:x, 1), (:x, 2), (:x, 3)]),
+    ("int_array_as_number", "int_array_as_number", () -> [:x => [1.1, 2.2, 3.3, 4.4], :cnt => [1, 2, 3, 4], :n => 4, :out => zeros(1)], X4),
+    ("flag_two_phase",     "flag_two_phase",     () -> [:x => [1.1, 2.2, 3.3, 4.4], :flag => [1, 0, 1, 0], :n => 4, :out => zeros(1)], X4),
+    ("branch_counter_for", "branch_counter_for", () -> [:x => [0.5, -0.3, 0.8, 0.9, -0.1], :w => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], :n => 5, :out => zeros(1)], BC),
+    ("branch_counter_while", "branch_counter_while", () -> [:x => [0.5, -0.3, 0.8, 0.9, -0.1], :w => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], :n => 5.5, :out => zeros(1)], BC),
+    # a value read after the loop that set it, with and without a pass; a trip count that jumps, checked on both sides of the jump
+    ("after_loop_read",    "after_loop_read",    () -> [:x => [1.0, 2.0, 3.0, 4.0], :idx => [2, 3, 1], :n => 3.5, :out => zeros(1)], [(:x, 1), (:x, 2), (:x, 3)]),
+    ("after_loop_zero",    "after_loop_read",    () -> [:x => [1.0, 2.0, 3.0, 4.0], :idx => [2, 3, 1], :n => 0.5, :out => zeros(1)], [(:x, 1), (:x, 2), (:x, 3)]),
+    ("float_trip_below",   "float_trip",         () -> [:x => [0.6249], :lim => 10.0, :out => zeros(1)], [(:x, 1)]),
+    ("float_trip_above",   "float_trip",         () -> [:x => [0.6251], :lim => 10.0, :out => zeros(1)], [(:x, 1)]),
     # controls: these passed before the change and must keep passing
     ("for_gather",         "for_gather",         () -> gather_args(3),  [(:x, 1), (:x, 2), (:x, 3)]),
     ("while_inline_index", "while_inline_index", arith_args,   [(:x, 1), (:y, 1)]),
@@ -234,6 +254,9 @@ function validate_int_state(; trials::Int = 3)
     # a restored integer needs a stack of unknown size
     expect_refusal("keep_push_pop = false with a restored integer", "must be restored",
                    () -> STADE.stade_adjoint(entry("for_int_rewrite"); keep_push_pop = false))
+    # an integer array that is read and then written again needs the same stack
+    expect_refusal("keep_push_pop = false with a restored integer array", "must be restored",
+                   () -> STADE.stade_adjoint(entry("two_phase_perm"); keep_push_pop = false))
     expect_refusal("keep_push_pop = false, HVP", "must be restored",
                    () -> STADE.stade_hvp(entry("for_int_rewrite"); keep_push_pop = false))
     # a while kernel that needs a restored integer reports that; one that does not keeps the existing message
