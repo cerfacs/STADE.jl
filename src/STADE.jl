@@ -2920,7 +2920,7 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     # checked from the actual generated code, never predicted ahead of time, since a var's
     # ii_plan coverage does NOT by itself guarantee its stack is fully unused. Runs under both
     # keep_push_pop values; agen_finalize_stacks detects use under either storage mode.
-    (adjoint_expr, initstacks_expr) = agen_finalize_stacks(adjoint_expr, initstacks_expr, snapshot_plan, ii_plan; force = !keep_push_pop && any(s -> agen_asnap_site_array(s, kernel.sig.kinds) !== nothing, snapshot_plan))
+    (adjoint_expr, initstacks_expr) = agen_finalize_stacks(adjoint_expr, initstacks_expr, snapshot_plan, ii_plan; force = !keep_push_pop && (any(s -> agen_asnap_site_array(s, kernel.sig.kinds) !== nothing, snapshot_plan) || !isempty(agen_remat_cross_vars(remat))))
     return (adjoint = adjoint_expr, initstacks = initstacks_expr)
 end
 
@@ -3392,11 +3392,21 @@ end
 # default) excludes a var whenever agen_ii_covered_write_check proves every write-site is covered -- required, since
 # this function's own criterion has no knowledge of ii_plan's stricter proof. A var with only some write-sites
 # covered still correctly stays a candidate.
-function agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = nothing)
+function agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = nothing, cross = nothing)
     cand = agen_nested_write_vars(body, kinds)
     return sort(collect(v for v in cand if v in value_needed && !(v in exempt) && haskey(stacks, (:value, v)) &&
                           !(ii_plan !== nothing && agen_ii_covered_write_check(body, v, ii_plan, false)) &&
+                          !(cross !== nothing && v in cross) &&
                           !agen_boundary_push_redundant(body, v, kinds, value_needed, exempt)); by = string)
+end
+
+# The scalars agen_remat_cross_apply! made loop-local. Every read of one sits in a loop body after that body's own write and the reverse sweep
+# rebuilds the end-of-iteration value at the head of each reverse iteration, so no read observes the value a body boundary push would restore.
+# The emission walks drop their boundary push and pop (`cross` of agen_block_boundary_vars); the layout walks keep sizing them, and
+# agen_finalize_stacks prunes the stack once nothing references it.
+function agen_remat_cross_vars(remat)
+    remat === nothing && return Set{Symbol}()
+    return Set{Symbol}(r.args[1] for r in values(remat) if r isa Expr && r.head == :cross)
 end
 
 # This body's own boundary push is redundant when the body doesn't write `var` at its own top level AND some nested body is guaranteed to push it
@@ -5378,7 +5388,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
     # capturing whatever this ENCLOSING iteration's own nested writes
     # left it at -- restored symmetrically at the start of this same
     # body's own backward processing in agen_backward_body.
-    for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan)
+    for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan, cross = agen_remat_cross_vars(ectx.remat))
         agen_emit_push!(exprs, stacks[(:value, var)], var, ectx, agen_site_key(body, 0, var))
     end
     return exprs
@@ -5399,7 +5409,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
     # the end of this same body. Must run before anything else below, since this is what
     # makes this body's own nested-loop-written value visible again instead of a later
     # sibling iteration's.
-    for var in agen_block_boundary_vars(primal_body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan)
+    for var in agen_block_boundary_vars(primal_body, kinds, value_needed, exempt, stacks; ii_plan = ectx.ii_plan, cross = agen_remat_cross_vars(ectx.remat))
         push!(exprs, Expr(:(=), var, agen_emit_pop(stacks[(:value, var)], ectx, agen_site_key(primal_body, 0, var), exprs)))
     end
     # Int-kinded local assignments never carry gradients, so agen_backward_assign emits nothing for them -- but the array
@@ -10738,7 +10748,7 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
 # adjoint and hvp calls needs hvp_expr's signature to match. hvp_expr's fwd/bwd reuse the same agen_forward_body/agen_backward_body calls as
 # the adjoint path, landing on the same unused set. is_hvp=true additionally drops each dropped stack's orphaned `<stack>_d` shadow alloc.
     (hvp_expr, initstacks_expr) = agen_finalize_stacks(hvp_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp = true,
-                                                         force = !keep_push_pop && any(s -> agen_asnap_site_array(s, kernel.sig.kinds) !== nothing, snapshot_plan))
+                                                         force = !keep_push_pop && (any(s -> agen_asnap_site_array(s, kernel.sig.kinds) !== nothing, snapshot_plan) || !isempty(agen_remat_cross_vars(remat))))
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
 
