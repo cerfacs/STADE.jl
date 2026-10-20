@@ -138,6 +138,11 @@ coverage by a kernel-wide read count (it never fires on a tiled kernel whose
 register names are reused across loops) or by an outer body's write (the first
 iteration would read that write and later ones the previous iteration's value).
 
+A cross scalar needs no block-boundary stack either: the emission walks pass
+`ii_plan` and `cross` to `agen_block_boundary_vars`, the layout walks do not
+(superset sizing), and `agen_finalize_stacks` must run (`force`) so the empty
+stack is pruned.
+
 **Array snapshot** (`agen_asnap_plan`, `keep_push_pop=false` only): a loop that
 scatters into an array `A` and reads `A` after every write pushes the old value
 at each write, and the push is a read-modify-write that keeps the loop on the

@@ -164,6 +164,21 @@ function validate_remat(dir::String = joinpath(@__DIR__, "val-corpus"))
     println(rpad("info", 6), "sabotage \"cross: a write outside a loop body's top level is allowed\": cross_branchlocal ", r == :caught ? "fails its oracle" : "still passes ($(r); branch recompute)")
     r = sabotaged(sab[1][2], "remat_cross")
     check(r == :caught, "sabotage \"array loads always pure\": remat_cross fails its oracle ($(r))")
+    # 4. BOUNDARY: a scalar made loop-local by the cross-iteration rule keeps no block-boundary push and pop; the scalars of the loops that
+    # refuse the rule keep theirs. remat_cross loop 1 is the only cross loop whose scalars (wv, xv) are written in a nested loop of a body.
+    rsrc = Meta.parse(read(joinpath(dir, "remat_cross.jl"), String))
+    stack_names(e) = Set(m.match for m in eachmatch(r"\b[A-Za-z0-9_]+_stack\b", string(e)))
+    for (what, gen) in (("adjoint", STADE.stade_adjoint), ("hvp", STADE.stade_hvp))
+        out = gen(rsrc; keep_push_pop = false, fuse_ii_loops = true)
+        names = stack_names(getproperty(out, Symbol(what)))
+        check(!("wv_stack" in names) && !("xv_stack" in names), "remat_cross $what: no boundary stack for the loop-local scalars wv, xv")
+        check(all(n -> n in names, ("xv5_stack", "xv6_stack", "xv7_stack", "xv8_stack")), "remat_cross $what: the refusing loops keep their stacks")
+        outf = gen(rsrc; keep_push_pop = false, fuse_ii_loops = false)
+        check(!("wv_stack" in stack_names(getproperty(outf, Symbol(what)))), "remat_cross $what, fuse_ii_loops = false: unused stacks pruned too")
+    end
+    bnd_line = "!(cross !== nothing && v in cross) &&"
+    r = sabotaged_text([(bnd_line, "!(cross !== nothing && !isempty(cross)) &&")], "remat_cross")
+    check(r == :caught, "sabotage \"boundary: every boundary push dropped once any scalar is loop-local\": remat_cross $(r == :caught ? "fails its oracle" : String(r))")
     println("\n", bad == 0 ? "all remat checks passed" : "*** $bad remat check(s) failed ***")
     return bad
 end

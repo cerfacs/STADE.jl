@@ -974,6 +974,17 @@ matters for GPU coverage: a per-iteration push inside a loop makes
 `snap_boundary_kill_vars` retires exactly the sites the boundary push
 replaces, so the push and its matching pop stay balanced.
 
+The emission walks (`agen_block_boundary_vars` with `ii_plan` and `cross`)
+drop two more cases, because their stack would have no reader. A scalar
+whose writes the `ii_plan` covers needs no boundary stack, and neither does
+a loop-local scalar of the cross-iteration rule below: the head of each
+reverse iteration rebuilds it. When this empties a stack,
+`agen_finalize_stacks` prunes it. That pass runs when `ii_plan` is set or
+when `force` is set, and `force` is set for a cross scalar. The layout walks
+(`agen_layout_*`, `agen_tier_b_sizing_walk`) call the function without
+those two arguments and so size a superset of the stacks. Never pass them
+there: a layout smaller than an emission would index outside its stack.
+
 ## IV.9 `lin_*` — linearization
 
 **Consumes** `kernel` and `active_map`. **Produces** `lin_plan`.

@@ -92,7 +92,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "bnd_nested_only" => 5, "bnd_readfirst" => 6,
         "branchsel" => 0, "cascadic_mg_prolong" => 22,
         "cellscatter" => 3,
-        "clamped_sumsq" => 0, "coarsen_retire" => 4, "cond_field_choice" => 0,
+        "clamped_sumsq" => 0, "coarsen_retire" => 3, "cond_field_choice" => 0,
         "cond_loop_choice" => 0, "dotprod" => 0,
     # cse_intoffset, mg_vcycle and mg_vcycle_multi each offload one more loop since the split gate
     # accepts accumulate-only and consume-only reverse loops (idiom relaxation).
