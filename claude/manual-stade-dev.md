@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2290,6 +2290,11 @@ generated helper (`__stade_wa_add!`). With all 32 lanes active and one
 shared index it adds the lane values by a shuffle tree and lane 0 issues
 the single atomic; otherwise it issues the plain atomic. The summation
 order changes, so the last bits of a result differ.
+
+**Sync-free reduction** (`sync_free_reduce`)
+CUDA only. The large-trip branch of an array-element reduction is a
+device-side broadcast add on a one-element view, with no scalar copied to
+the host.
 
 **Array privacy**
 The proof that a written array's whole access pattern is confined to a
