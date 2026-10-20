@@ -1,10 +1,8 @@
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
-# kernel => why it is flagged. Both reproduced on unmodified 0.4.4.
-own_known() = Dict{String,String}(
-    "ttgc" => "forward re-execution scatters into mup with plain read-modify-write; cells sharing a node collide",
-    "idm_refuse_cond_read" => "reverse loop restores v[i] and v[i+1] from the stack; neighbouring iterations write the same element",
-)
+# kernel => why it is flagged. Empty: the two kernels that 0.4.4 flagged (ttgc, idm_refuse_cond_read) are now kept on the host by the
+# split gate (cgen_rmw_hazard_arrays, cgen_overlap_proven_arrays). A new entry here is a finding, not a place to park a failure.
+own_known() = Dict{String,String}()
 
 """
     validate_ownership(dir="val-corpus"; only=nothing, int_lo=3, int_hi=6)
@@ -29,9 +27,9 @@ it fails, since a check that cannot see a known fault proves nothing.
 
 No GPU, no CUDA package. Works on a scratch copy of the corpus.
 
-Pre-existing findings are listed in `own_known()`, each with its reason. A kernel there may be flagged without
-failing the run; it is still printed, so the finding stays visible. Both entries were reproduced on the
-unmodified 0.4.4 source. An empty table is the goal.
+Findings are listed in `own_known()`, each with its reason. A kernel there may be flagged without
+failing the run; it is still printed, so the finding stays visible. The table is empty: the two hazards
+reproduced on the unmodified 0.4.4 source (ttgc, idm_refuse_cond_read) are fixed in the gate.
 """
 function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
                             only::Union{Vector{String},Nothing} = nothing,

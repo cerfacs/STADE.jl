@@ -1058,6 +1058,13 @@ This hoisting is why push and pop sites are matched by a **structural
 key** and never by a running counter. Hoisting reorders pops, and a
 counter silently desynchronizes.
 
+The hoist is skipped for a scalar that a later statement of the same block
+writes again. That later write already restores the post-`if` value at its own
+reverse position, and the up-front recompute would overwrite it for the reads
+after the rewrite. Before this guard `if_scalar_rewrite` produced a wrong
+adjoint (relative error 1e-1 and up) under every flag combination, with the
+tangent and its finite differences correct.
+
 ### Unsafe integer variables
 
 `agen_unsafe_int_vars` finds `Int64` variables that are evolving state
@@ -1173,6 +1180,49 @@ A stack that no block can resolve is **tainted**. It falls back to
 growable `push!`/`pop!` regardless of the flag, per stack and never per
 occurrence.
 
+### Rematerialized restores
+
+A register-tiled convolution rewrites each operand scalar once per tap, and the
+adjoint saves the old value before every rewrite. With `keep_push_pop = false`
+those saves are per-thread global stores, and they dominate: on the V100 the
+forward re-execution kernels of the wide-128 U-Net used 255 registers, spilled,
+and took two thirds of the adjoint's time.
+
+`agen_remat_plan` removes a save when the old value is the right-hand side of an
+earlier write in the same block and that right-hand side can be evaluated again
+at the backward position with the same result. The restore then reads
+`v = rhs_d` instead of popping a slot (`agen_backward_assign`, through
+`ectx.remat`), and `agen_remat_apply` takes the site out of the site-level push
+map before layout, stack sizing and emission, so no slot is allocated. Applies
+only under `keep_push_pop = false`; `true` is untouched (byte-identical to
+before on every old corpus kernel).
+
+The right-hand side may use:
+
+- literals and `+ - * / div mod ÷ %`;
+- a scalar the kernel never assigns, or an enclosing loop variable;
+- an int defined by exactly one top-level assignment in this or an enclosing
+  block and by no nested statement of that block, not in `agen_unsafe_int_vars`
+  (the backward sweep recomputes such an int up front, so its value at the
+  restore equals its value at the load). Names reused across inlined calls do
+  not matter: the test is per block, not per kernel;
+- a load from an array with no write that can run after the load: later in
+  program order, or anywhere inside a loop that encloses the load
+  (`agen_remat_index!` numbers statements and records enclosing loops).
+
+The walk does not enter `:if`/`:while` bodies (`agen_branch_pushed` mirrors the
+forward gate there), and any nested write to the scalar clears the earlier
+definition. A float scalar standing in the right-hand side blocks it.
+
+`test/validate_remat.jl` pins the sites chosen for `remat_shapes` (nine loops,
+each breaking one condition) and `so_tile`, checks that a tiled U-Net-shaped
+kernel loses most of its stack references, and sabotages five guards in fresh
+processes; `remat_shapes` must then fail its adjoint and dot-product oracles.
+One guard is not distinguishable by any shape tried: the enclosing-loop rule for
+array writes. Every array this analysis can load from was also snapshotted at
+its overwrite, so dropping the rule changed nothing. It stays as a conservative
+bound and is marked as such in the sabotage list.
+
 ## IV.13 `ii_*` and `fuse_ii_loops` — loop fusion
 
 **Consumes** `kernel`. **Produces**
@@ -1235,6 +1285,14 @@ any of them.
 - `agen_ii_covered_write_check`'s covered-kind tuple must list **every**
   kind. Missing one is the difference between "classified" and "the stack
   actually disappears".
+- A local assigned two or more times with a read between the first and
+  last assignment (`ii_versions_read`) has several live VERSIONS per
+  iteration. Fusing or recomputing such a loop rebuilds the scalar from its
+  last assignment only, so every read sees the final version. Both
+  classifiers refuse it, except a self-accumulation `v = v + t`, which has
+  one version. A register-tiled convolution reloads its weight scalar per
+  tap; with the flag on, the gradient of its input came out wrong (relative
+  error about 2) until this check. `ii_multiversion` is the witness.
 
 ### Escape detection tracks program order
 
@@ -1340,8 +1398,9 @@ The gates:
   and breaks the equality that `stade_ii_plan_check` asserts. `idm_src_consume`
   and the ceiling in `validate_ii_coverage.jl` hold this line.
 - `cgen_split_loop_gate` is the **GPU** gate: part 1, then part 2 or part 3
-  for each written array. `cgen_body` and `jgen_body` call it. It returns
-  `(synth, reason, array, idiom)`; `reason` is `:ok`, `:scalar` or `:array`.
+  for each written array, then the overlap and read-modify-write checks below.
+  `cgen_body` and `jgen_body` call it. It returns `(synth, reason, array, idiom,
+  saveonly)`; `reason` is `:ok`, `:scalar`, `:array`, `:overlap` or `:rmw`.
 
 ### The two idioms, and the contract for plain writes
 
@@ -1373,6 +1432,68 @@ elements for plain writes.** Four controls make the trust explicit.
 `(owner, loop_var, lo, hi, step, depth, verdict, reason, array, via_idiom)`.
 `verdict` is `:kernel`, `:reduction` or `:host`. `reason` also takes
 `:splat_limit` for JACC. `validate_offload.jl` pins the refusals with it.
+
+### Two refusals the trust needs
+
+The contract above is trust, and two shapes break it provably. Both live in
+`cgen_split_loop_gate` and both were found by `validate_ownership.jl` on
+unmodified 0.4.4.
+
+- `cgen_overlap_proven_arrays` (`:overlap`). Two plain writes to one array
+  whose indices differ by a constant (`v[i]` and `v[i+1]`) land on one element
+  from two threads. `cgen_offset_difference` decides this exactly; an index it
+  cannot analyse stays trusted, so mpnn's three slices of one buffer still
+  offload. Two additive writes are exempt, since they become atomic adds.
+  `idm_refuse_cond_read` is the witness.
+- `cgen_rmw_hazard_arrays` (`:rmw`). Reached through an index that is itself
+  read from an array (a gather), a read-modify-write that no atomic add repairs
+  (`m[n] = m[n] * 0.5 + x`), an undo from a stack, and an array that is both
+  accumulated and plainly written. `ttgc`'s scatter and its stack undo are
+  the witnesses; its host loops went from 6 to 18, deliberately.
+
+CSE hides an accumulation behind a scalar (`t = A[e]; A[e] = t + x`).
+`cgen_fold_accumulates` folds that back to `A[e] = A[e] + x` when `t` is used
+once, so the loop offloads as an atomic add instead of being refused as a
+read-modify-write. The kernel emitters fold with the same function.
+
+`test/validate_plain_write_gate.jl` pins the verdicts, checks that the guards do
+not touch mpnn, stencil_loss, transformer and the others, and sabotages each
+guard in a fresh process: the ownership check must then flag the kernel the
+guard protects.
+
+### Save-only scalars (register-tiled loops)
+
+A tile loop reassigns operand scalars once per tap, reading between the
+assignments. The adjoint saves each scalar's old value before every
+reassignment, so the first save of an iteration reads the value the scalar held
+on ENTRY. `cgen_use_before_def` refuses that, and the whole forward
+re-execution of a tiled convolution stayed on the host (reason `:scalar`).
+
+`cgen_saveonly_synth` accepts such a scalar when four things hold, and seeds
+it with `0.0` in `synth`:
+
+1. every other read in the loop follows an assignment
+   (`cgen_use_before_def(...; save_ok = true)`, where `save_ok` skips a bare
+   `X_stack[i] = v`);
+2. the loop body ends by pushing `v` after its last write
+   (`cgen_ends_with_push`), so the reverse iteration starts from its own slot;
+3. no later statement reads `v` before redefining it
+   (`ii_escapes_nested(...; save_ok = true)`, called from
+   `cgen_liveout_is_zeroed`);
+4. every non-save read of `v` anywhere in the program sits inside a loop that
+   writes `v` and is covered there (`cgen_saveonly_closed`).
+
+Condition 2 is what separates the tile loop (offloaded) from the tap loop
+inside it (never): a tap iteration's entry save carries the previous tap's
+value, which the reverse of that previous tap reads. The seeded value fills only
+slots nothing reads. An HVP keeps its twin scalar's saves in `<var>_stack_d`,
+so `cgen_is_stack_name` accepts both spellings.
+
+Controls: `so_tile` offloads completely in adjoint and HVP; `so_inner`,
+`so_hostread` and `so_liveout` each break one condition and must stay on the
+host. `validate_plain_write_gate.jl` sabotages conditions 2, 3 and 4 and the
+ownership check, which runs the emulated kernels with a fresh scalar per thread
+and compares against the CPU adjoint, must then fail (relative error 0.9 to 1.5).
 
 ### Snapshot elision gates all three relaxations
 

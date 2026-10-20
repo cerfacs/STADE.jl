@@ -117,7 +117,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
         "retire_empty" => 4,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,
-        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 6,
+        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 18,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,
         "windowed_relax_retire" => 7,
     # idm_*: the idiom relaxation of the GPU split gate (cgen_split_loop_gate). The four
@@ -126,14 +126,26 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # is refused and why, since an improvement there would mean an unsafe loop reached the device.
         "idm_slots" => 0, "idm_zerotrip" => 0, "idm_acc_two" => 0, "idm_tile" => 0,
         "idm_dup_write" => 0,
-        "idm_refuse_cond_read" => 2, "idm_refuse_scalar_read" => 3, "idm_refuse_consume_gap" => 3,
+        "idm_cse_acc" => 2, "ii_multiversion" => 0, "idm_src_consume" => 2, "idm_gather_rmw" => 6, "idm_overlap_plain" => 3,
+        "idm_refuse_cond_read" => 3, "idm_refuse_scalar_read" => 3, "idm_refuse_consume_gap" => 3,
+        "so_tile" => 0, "so_hostread" => 4, "so_liveout" => 9, "so_carry" => 6, "so_inner" => 5,
+        # correctness kernels for the rematerialized-restore guards and the branch-scalar rewrite; not offload targets
+        "if_scalar_rewrite" => 0, "remat_shapes" => 20,
     )
     # kernel => decisions that MUST appear in the offload report of its adjoint: (verdict, reason, array).
     # A listed loop that reaches a kernel instead is a failure, not an improvement.
     REFUSALS = Dict{String,Vector{Tuple{Symbol,Symbol,Any}}}(
-        "idm_refuse_cond_read" => [(:host, :array, :v)],
+        "idm_refuse_cond_read" => [(:host, :array, :v), (:host, :overlap, :v)],
+        "idm_gather_rmw" => [(:host, :rmw, :m)],
+        "idm_cse_acc" => [(:host, :rmw, :mb)],
+        "idm_overlap_plain" => [(:host, :overlap, :a)],
         "idm_refuse_scalar_read" => [(:host, :scalar, nothing), (:host, :array, :vb)],
         "idm_refuse_consume_gap" => [(:host, :scalar, nothing), (:host, :array, :u)],
+        # so_*: the save-only scalar relaxation (cgen_saveonly_synth). so_tile offloads; each control breaks one of its four conditions
+        "so_hostread" => [(:host, :scalar, nothing)],
+        "so_liveout" => [(:host, :liveout, nothing)],
+        "so_carry" => [(:host, :scalar, nothing)],
+        "so_inner" => [(:host, :scalar, nothing)],
     )
     # idiom acceptance MUST appear for these (the loop is offloaded only because of the idiom)
     IDIOM_ACCEPTED = Dict{String,Int}("idm_slots" => 1, "idm_tile" => 1)

@@ -113,6 +113,17 @@ resolves it into per-ancestor-iteration prefix/value tables, keeping the
 site indexed and mutation-free; a narrow per-*stack* (never
 per-occurrence) `push!`/`pop!` fallback remains for what can't resolve.
 
+**Rematerialized restores** (`agen_remat_plan`, `keep_push_pop=false` only): a
+pre-write save whose old value is an earlier same-block write of a pure
+expression (read-only-after-load arrays, ints defined once per block, literals)
+is replaced by recomputing that expression in the backward sweep, and its slot
+disappears. Without it a tiled convolution's per-tap saves force 255 registers
+and spills. A new snapshot-exclusion mechanism still has to leave the site-level
+push map consistent for layout and emission: `agen_remat_apply` does that. Never
+let a float local into the recomputed expression, and never skip the array-write
+rule: the sabotage of purity, nested-write clearing and block-local int rules
+all fail `remat_shapes`.
+
 Tier B index expressions must stay **pure** — an embedded mutation
 double-evaluates under `hvp_double_stmt`. Any block-local scalar a
 formula depends on must be in `value_vars` and substituted through its
@@ -170,6 +181,14 @@ Constraints, each of which is load-bearing for correctness:
 - `agen_ii_covered_write_check`'s covered-kind tuple must list **every**
   kind. Missing one is the difference between "classified" and "the
   stack actually disappears".
+- A local assigned two or more times with a read between the first and
+  last assignment (`ii_versions_read`) has several live VERSIONS per
+  iteration. Fusing or recomputing such a loop rebuilds the scalar from its
+  last assignment only, so every read sees the final version. Both
+  classifiers refuse it, except a self-accumulation `v = v + t`, which has
+  one version. A register-tiled convolution reloads its weight scalar per
+  tap; with the flag on, the gradient of its input came out wrong (relative
+  error about 2) until this check. `ii_multiversion` is the witness.
 
 Measured effect (peak stack slots, `false` → `true`): `ttgc` 504 → 240,
 `transformer` 2406 → 1095, `unet` 432 → 324. Every other kernel is
@@ -222,6 +241,23 @@ twin sits between them. mpnn is the witness: adjoint fully offloaded,
 HVP launching one kernel per graph edge and per graph node. `cgen_`/
 `jgen_` are the only stages that ingest already-doubled code, so they are
 the only place this class can appear.
+
+**Split-gate hazards.** Plain writes through unknown indices are trusted;
+only provable overlap is refused. `cgen_split_loop_gate` therefore ends
+with `cgen_overlap_proven_arrays` (`:overlap`) and
+`cgen_rmw_hazard_arrays` (`:rmw`, gathered indices only, a wider rule lost
+cellscatter, mpnn and entry_dead). It starts by folding a CSE'd
+accumulation back to `A[e] += x` (`cgen_fold_accumulates`), without which
+`idm_cse_acc` is refused. `validate_ownership.jl` is the oracle, and its
+known-flag table stays empty; `idm_dup_write` is the designated flag.
+
+**Save-only scalars.** `cgen_saveonly_synth` lets a register-tiled loop
+offload although its stack saves read a scalar before assignment. It needs
+the four conditions in the manual (end-of-body push, no later read, no read
+outside loops that write it, every other read covered). Never relax
+`cgen_use_before_def` for a read that computes something: only the bare
+`X_stack[i] = v` save is exempt. Sabotage each guard: the ownership check
+fails with relative error 0.9 to 1.5 when one is removed.
 
 `jgen_` gets no free zero-trip guard. `cgen_launch_expr` survives a
 zero-trip loop by launching one block whose threads all fail the device

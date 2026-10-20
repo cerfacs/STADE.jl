@@ -31,11 +31,14 @@ function validate_ii_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
     # CEILINGS pin loops that fuse_ii_loops must NOT classify. idm_src_consume is independent in fact, but only the
     # idiom rule of the GPU split gate can see that; the strict rule that fuse_ii_loops uses must keep refusing it.
     # If the strict rule starts accepting idioms, this number rises above 0 and the AD output changes.
-    CEILINGS = Dict{String,Int}("idm_src_consume" => 0)
+    # ii_multiversion: 0.4.4 classified two of its loops and produced a wrong adjoint (the weight scalar is reassigned per tap).
+    CEILINGS = Dict{String,Int}("idm_src_consume" => 0, "ii_multiversion" => 0)
     EXPECTED = Dict{String,Int}(
         "idm_slots" => 0, "idm_zerotrip" => 0, "idm_acc_two" => 0, "idm_tile" => 2, "idm_dup_write" => 0,
         "idm_refuse_cond_read" => 0, "idm_refuse_scalar_read" => 0, "idm_refuse_consume_gap" => 0,
-        "idm_src_consume" => 0,
+        "idm_src_consume" => 0, "idm_cse_acc" => 0, "idm_gather_rmw" => 0, "idm_overlap_plain" => 0, "ii_multiversion" => 0,
+        "so_carry" => 0, "so_hostread" => 0, "so_inner" => 0, "so_liveout" => 0, "so_tile" => 0,
+        "if_scalar_rewrite" => 0, "remat_shapes" => 0,
         "advection" => 0, "advection_multi" => 0, "affine_loss" => 0,
         "bilinear" => 0, "bnd_branch" => 2, "bnd_carried" => 1,
         "bnd_nested_only" => 0, "bnd_readfirst" => 1, "branchsel" => 0,
@@ -87,7 +90,7 @@ function validate_ii_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
         println(rpad(name, 26), got >= want ? " ok" : " FAIL", "  classified=", got, " (min ", want, ")")
         got < want && (bad += 1)
         if haskey(CEILINGS, name) && got > CEILINGS[name]
-            println(rpad(name, 26), " FAIL  classified ", got, " > ceiling ", CEILINGS[name], " (the strict gate must not accept idioms)")
+            println(rpad(name, 26), " FAIL  classified ", got, " > ceiling ", CEILINGS[name], " (the strict gate must not accept idioms, and a loop with several live scalar versions must not be classified)")
             bad += 1
         end
         got > want && push!(improved, "$(name): $(want) -> $(got)")
