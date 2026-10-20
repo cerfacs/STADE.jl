@@ -2136,9 +2136,10 @@ end
 #
 # Only an integer READ by an active float statement (rhs or lhs index) needs it. Conditions are replayed from
 # the branch and count stacks, and a bound already on a :tripcount stack is restored from there.
+# Integer arrays that are read and then written again get the same treatment: see snap_itbr_arrays.
 
 # the reads one statement makes by itself, children excluded
-function snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, acc)
+function snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, acc, iarr = Set{Symbol}())
     if st.kind == :assign
         var = st.lhs isa Symbol ? st.lhs : st.lhs.args[1]
         if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false)
@@ -2147,6 +2148,11 @@ function snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, acc)
                 for a in st.lhs.args[2:end]
                     agen_collect_expr_vars!(a, acc)
                 end
+            end
+        elseif st.lhs isa Expr && var in iarr
+            # the reverse sweep pops the old element back into a[idx], so the index is evaluated there
+            for a in st.lhs.args[2:end]
+                agen_collect_expr_vars!(a, acc)
             end
         end
     elseif st.kind == :for
@@ -2159,14 +2165,14 @@ function snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, acc)
     return nothing
 end
 
-function snap_itbr_collect_reads!(body, kinds, active_map, reassigned, acc)
+function snap_itbr_collect_reads!(body, kinds, active_map, reassigned, acc, iarr = Set{Symbol}())
     for st in body
-        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, acc)
+        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, acc, iarr)
         if st.kind == :for || st.kind == :while
-            snap_itbr_collect_reads!(st.body, kinds, active_map, reassigned, acc)
+            snap_itbr_collect_reads!(st.body, kinds, active_map, reassigned, acc, iarr)
         elseif st.kind == :if
-            snap_itbr_collect_reads!(st.then, kinds, active_map, reassigned, acc)
-            snap_itbr_collect_reads!(st.els, kinds, active_map, reassigned, acc)
+            snap_itbr_collect_reads!(st.then, kinds, active_map, reassigned, acc, iarr)
+            snap_itbr_collect_reads!(st.els, kinds, active_map, reassigned, acc, iarr)
         end
     end
     return nothing
@@ -2187,7 +2193,7 @@ end
 # it? The replay starts each iteration from the value `v` held when the iteration began, so that holds exactly
 # when `v` is carried, every write to it is a direct statement of the body, and no active read follows the first
 # write. A counter bumped last (`k = k + 1`) is the usual case.
-function snap_itbr_start_covered(body, kinds, active_map, reassigned, v)
+function snap_itbr_start_covered(body, kinds, active_map, reassigned, v, iarr = Set{Symbol}())
     v in snap_while_carried_ints(body, kinds) || return false
     first_write = 0
     for (i, st) in enumerate(body)
@@ -2200,42 +2206,42 @@ function snap_itbr_start_covered(body, kinds, active_map, reassigned, v)
     first_write == 0 && return false
     for st in body[first_write + 1:end]
         reads = Set{Symbol}()
-        snap_itbr_collect_reads!([st], kinds, active_map, reassigned, reads)
+        snap_itbr_collect_reads!([st], kinds, active_map, reassigned, reads, iarr)
         v in reads && return false
     end
     return true
 end
 
 # true when every active read of `v` lies inside a `while` that covers it (`cov` is the enclosing state)
-function snap_itbr_reads_covered(body, kinds, active_map, reassigned, v, cov)
+function snap_itbr_reads_covered(body, kinds, active_map, reassigned, v, cov, iarr = Set{Symbol}())
     for st in body
         reads = Set{Symbol}()
-        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, reads)
+        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, reads, iarr)
         v in reads && !cov && return false
         if st.kind == :while
-            inner = cov || snap_itbr_start_covered(st.body, kinds, active_map, reassigned, v)
-            snap_itbr_reads_covered(st.body, kinds, active_map, reassigned, v, inner) || return false
+            inner = cov || snap_itbr_start_covered(st.body, kinds, active_map, reassigned, v, iarr)
+            snap_itbr_reads_covered(st.body, kinds, active_map, reassigned, v, inner, iarr) || return false
         elseif st.kind == :for
-            snap_itbr_reads_covered(st.body, kinds, active_map, reassigned, v, cov) || return false
+            snap_itbr_reads_covered(st.body, kinds, active_map, reassigned, v, cov, iarr) || return false
         elseif st.kind == :if
-            snap_itbr_reads_covered(st.then, kinds, active_map, reassigned, v, cov) || return false
-            snap_itbr_reads_covered(st.els, kinds, active_map, reassigned, v, cov) || return false
+            snap_itbr_reads_covered(st.then, kinds, active_map, reassigned, v, cov, iarr) || return false
+            snap_itbr_reads_covered(st.els, kinds, active_map, reassigned, v, cov, iarr) || return false
         end
     end
     return true
 end
 
-function snap_itbr_count_reads(body, kinds, active_map, reassigned, v)
+function snap_itbr_count_reads(body, kinds, active_map, reassigned, v, iarr = Set{Symbol}())
     n = 0
     for st in body
         reads = Set{Symbol}()
-        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, reads)
+        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, reads, iarr)
         v in reads && (n = n + 1)
         if st.kind == :for || st.kind == :while
-            n = n + snap_itbr_count_reads(st.body, kinds, active_map, reassigned, v)
+            n = n + snap_itbr_count_reads(st.body, kinds, active_map, reassigned, v, iarr)
         elseif st.kind == :if
-            n = n + snap_itbr_count_reads(st.then, kinds, active_map, reassigned, v)
-            n = n + snap_itbr_count_reads(st.els, kinds, active_map, reassigned, v)
+            n = n + snap_itbr_count_reads(st.then, kinds, active_map, reassigned, v, iarr)
+            n = n + snap_itbr_count_reads(st.els, kinds, active_map, reassigned, v, iarr)
         end
     end
     return n
@@ -2245,7 +2251,7 @@ end
 # restores `v` for every read positioned before the loop in the same body -- and inside it -- provided nothing
 # writes `v` first. richardson_substep reads `nsub` in `h = dt / nsub` and then loops to `nsub`: covered. `total`
 # is the number of statements anywhere in the kernel that read `v`; the loop must account for all of them.
-function snap_itbr_tripcount_covered(body, kinds, active_map, reassigned, v, total)
+function snap_itbr_tripcount_covered(body, kinds, active_map, reassigned, v, total, iarr = Set{Symbol}())
     for (i, st) in enumerate(body)
         if st.kind == :for
             bounds = Set{Symbol}()
@@ -2254,15 +2260,15 @@ function snap_itbr_tripcount_covered(body, kinds, active_map, reassigned, v, tot
             end
             if v in bounds && v in reassigned &&
                !any(t -> snap_itbr_writes_in(t, v), body[1:i - 1]) && !any(t -> snap_itbr_writes_in(t, v), st.body) &&
-               snap_itbr_count_reads(body[1:i], kinds, active_map, reassigned, v) == total
+               snap_itbr_count_reads(body[1:i], kinds, active_map, reassigned, v, iarr) == total
                 return true
             end
-            snap_itbr_tripcount_covered(st.body, kinds, active_map, reassigned, v, total) && return true
+            snap_itbr_tripcount_covered(st.body, kinds, active_map, reassigned, v, total, iarr) && return true
         elseif st.kind == :while
-            snap_itbr_tripcount_covered(st.body, kinds, active_map, reassigned, v, total) && return true
+            snap_itbr_tripcount_covered(st.body, kinds, active_map, reassigned, v, total, iarr) && return true
         elseif st.kind == :if
-            snap_itbr_tripcount_covered(st.then, kinds, active_map, reassigned, v, total) && return true
-            snap_itbr_tripcount_covered(st.els, kinds, active_map, reassigned, v, total) && return true
+            snap_itbr_tripcount_covered(st.then, kinds, active_map, reassigned, v, total, iarr) && return true
+            snap_itbr_tripcount_covered(st.els, kinds, active_map, reassigned, v, total, iarr) && return true
         end
     end
     return false
@@ -2272,22 +2278,99 @@ end
 # statement, and written either inside a loop or at more than one site -- anything else holds one value for the
 # whole run, which the last-value read already sees. Two cases keep their existing mechanism: a loop bound on a
 # :tripcount stack (snap_itbr_tripcount_covered), and a counter a `while` already restores per iteration (snap_itbr_start_covered).
-# An integer ARRAY needs no entry: the parser already refuses `x[idx[k]]`, so an active statement reads an
-# integer array only through a scalar copy, and that scalar is what is restored.
-function snap_itbr_vars(kernel, active_map)
+function snap_itbr_scalars(kernel, active_map, unsafe, iarr = Set{Symbol}())
     kinds = kernel.sig.kinds
-    unsafe = agen_unsafe_int_vars(kernel)
     isempty(unsafe) && return Set{Symbol}()
     reassigned = agen_collect_reassigned(kernel.body)
     counts = agen_count_assign_sites(kernel.body)
     reads = Set{Symbol}()
-    snap_itbr_collect_reads!(kernel.body, kinds, active_map, reassigned, reads)
+    snap_itbr_collect_reads!(kernel.body, kinds, active_map, reassigned, reads, iarr)
     return Set{Symbol}(v for v in unsafe
                        if kinds[v] == :scalar_int && v in reads &&
                           (v in reassigned || get(counts, v, 0) >= 2) &&
-                          !snap_itbr_reads_covered(kernel.body, kinds, active_map, reassigned, v, false) &&
+                          !snap_itbr_reads_covered(kernel.body, kinds, active_map, reassigned, v, false, iarr) &&
                           !snap_itbr_tripcount_covered(kernel.body, kinds, active_map, reassigned, v,
-                                                       snap_itbr_count_reads(kernel.body, kinds, active_map, reassigned, v)))
+                                                       snap_itbr_count_reads(kernel.body, kinds, active_map, reassigned, v, iarr), iarr))
+end
+
+# ---- integer arrays ----
+# An integer array that is read and then written again holds, at the reverse sweep, the value of its LAST write.
+# Three readers see the stale value: an integer scalar recomputed from it (`j = idx[i]`), a loop bound that names it
+# (`for m = 1:cnt[1]`), and an active float statement that uses it as a number. The old value of every write to such
+# an array is pushed before the write and popped at the write's reverse position, as for a restored scalar. The parser
+# already refuses `x[idx[k]]`, so these are the only readers.
+#
+# Events are numbered in program order. A write W may follow a read R when W is numbered at or after R, or when the two
+# share a loop (the next pass writes what this pass read). Reads inside a write to the same array are not readers: the
+# statement is never replayed. Reads already covered by a restored scalar copy (`covered`) are left to that scalar.
+function snap_itbr_array_events!(body, kinds, active_map, covered, loops, pos, reads, writes)
+    for st in body
+        pos[] += 1
+        if st.kind == :assign
+            lv = st.lhs isa Symbol ? st.lhs : st.lhs.args[1]
+            lk = get(kinds, lv, :none)
+            replayed = lk in (:scalar_int, :array_int) ||
+                       (lk in (:scalar_float, :array_float) && get(active_map, lv, false))
+            if replayed && !(st.lhs isa Symbol && lv in covered)
+                vs = Set{Symbol}()
+                agen_collect_expr_vars!(st.rhs, vs)
+                if st.lhs isa Expr
+                    for a in st.lhs.args[2:end]
+                        agen_collect_expr_vars!(a, vs)
+                    end
+                end
+                for v in vs
+                    get(kinds, v, :none) == :array_int && v != lv &&
+                        push!(get!(reads, v, Any[]), (pos[], copy(loops)))
+                end
+            end
+            st.lhs isa Expr && lk == :array_int && push!(get!(writes, lv, Any[]), (pos[], copy(loops)))
+        elseif st.kind == :for
+            bounds = Set{Symbol}()
+            for e in (st.lo, st.hi, st.step)
+                agen_collect_expr_vars!(e, bounds)
+            end
+            for v in bounds
+                get(kinds, v, :none) == :array_int && push!(get!(reads, v, Any[]), (pos[], copy(loops)))
+            end
+            push!(loops, pos[])
+            snap_itbr_array_events!(st.body, kinds, active_map, covered, loops, pos, reads, writes)
+            pop!(loops)
+        elseif st.kind == :while
+            push!(loops, pos[])
+            snap_itbr_array_events!(st.body, kinds, active_map, covered, loops, pos, reads, writes)
+            pop!(loops)
+        elseif st.kind == :if
+            snap_itbr_array_events!(st.then, kinds, active_map, covered, loops, pos, reads, writes)
+            snap_itbr_array_events!(st.els, kinds, active_map, covered, loops, pos, reads, writes)
+        end
+    end
+    return nothing
+end
+
+function snap_itbr_arrays(kernel, active_map, covered)
+    reads = Dict{Symbol,Any}()
+    writes = Dict{Symbol,Any}()
+    snap_itbr_array_events!(kernel.body, kernel.sig.kinds, active_map, covered, Int[], Ref(0), reads, writes)
+    out = Set{Symbol}()
+    for (a, ws) in writes
+        for (rp, rl) in get(reads, a, Any[]), (wp, wl) in ws
+            if wp >= rp || !isempty(intersect(rl, wl))
+                push!(out, a)
+            end
+        end
+    end
+    return out
+end
+
+# The integers to restore: the scalars (snap_itbr_scalars), plus the arrays whose later writes would be seen by an
+# earlier read. The arrays seed `unsafe` again, since a scalar copy of one can no longer be recomputed at the head
+# of the reverse body, and that can add scalars.
+function snap_itbr_vars(kernel, active_map)
+    base = snap_itbr_scalars(kernel, active_map, agen_unsafe_int_vars(kernel))
+    arrays = snap_itbr_arrays(kernel, active_map, base)
+    isempty(arrays) && return base
+    return union(arrays, snap_itbr_scalars(kernel, active_map, agen_unsafe_int_vars(kernel, arrays), arrays))
 end
 
 function snap_plan(kernel, active_map; site_needed = nothing)
@@ -3155,7 +3238,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
 
     value_needed = agen_value_needed_vars(kernel)
     reassigned = agen_collect_reassigned(kernel.body)
-    unsafe = agen_unsafe_int_vars(kernel)
+    unsafe = agen_unsafe_int_vars(kernel, agen_itbr_vars(stacks))
     exempt = agen_exempt_vars(kernel, value_needed)
 
     ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan, remat = remat)
@@ -3177,9 +3260,9 @@ end
 # from a fixed start is wrong. Anything depending on such a variable is excluded too. The fix: never
 # hoist/recompute this set; loop bounds are already restored via :tripcount. The set is seeded by
 # self-reference, not mere multiplicity, so a fresh per-loop variable stays hoistable.
-function agen_unsafe_int_vars(kernel)
+function agen_unsafe_int_vars(kernel, itbr_arrays = Set{Symbol}())
     kinds = kernel.sig.kinds
-    unsafe = Set{Symbol}()
+    unsafe = Set{Symbol}(a for a in itbr_arrays if get(kinds, a, :none) == :array_int)
     agen_seed_unsafe_self_ref!(kernel.body, kinds, unsafe)
     changed = true
     while changed
@@ -4990,7 +5073,7 @@ function agen_remat_plan(kernel, active_map, sites)
     writes = Dict{Symbol,Any}()
     assigned_syms = Set{Symbol}()
     agen_remat_index!(kernel.body, Int[], Ref(0), pos, loops, writes, assigned_syms)
-    unsafe = agen_unsafe_int_vars(kernel)
+    unsafe = agen_unsafe_int_vars(kernel, snap_itbr_vars(kernel, active_map))
     exempt = agen_exempt_vars(kernel, agen_value_needed_vars(kernel))
     plan = Dict{Any,Any}()
     cross = Dict{Symbol,Vector{Any}}()
@@ -5447,8 +5530,8 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
                 agen_emit_push!(exprs, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs, ectx, agen_site_key(body, idx))
             end
             # a restored integer: the old value goes onto its stack before every write, as a float's does
-            haskey(stacks, (:ivalue, var)) && stmt.lhs isa Symbol &&
-                agen_emit_push!(exprs, stacks[(:ivalue, var)], var, ectx, agen_site_key(body, idx))
+            haskey(stacks, (:ivalue, var)) &&
+                agen_emit_push!(exprs, stacks[(:ivalue, var)], stmt.lhs, ectx, agen_site_key(body, idx))
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
         elseif stmt.kind == :for
             # ii_plan-covered site: `:independent` is built as one fused, un-reversed loop
@@ -5620,9 +5703,9 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
         stmt = plan[idx]
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
-            if haskey(stacks, (:ivalue, var)) && stmt.lhs isa Symbol
+            if haskey(stacks, (:ivalue, var))
                 # reverse position of a restored integer's write: the value it held before the write
-                push!(exprs, Expr(:(=), var, agen_emit_pop(stacks[(:ivalue, var)], ectx, agen_site_key(primal_body, idx), exprs)))
+                push!(exprs, Expr(:(=), stmt.lhs, agen_emit_pop(stacks[(:ivalue, var)], ectx, agen_site_key(primal_body, idx), exprs)))
                 continue
             end
             kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
@@ -5842,7 +5925,7 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     stacks = agen_stack_map(sites)
     value_needed = agen_value_needed_vars(kernel)
     reassigned = agen_collect_reassigned(kernel.body)
-    unsafe = agen_unsafe_int_vars(kernel)
+    unsafe = agen_unsafe_int_vars(kernel, agen_itbr_vars(stacks))
     exempt = agen_exempt_vars(kernel, value_needed)
 
     ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan, remat = remat)
