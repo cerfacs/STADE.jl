@@ -12,6 +12,35 @@ function aga_thread_var(kernel_body)
     return nothing
 end
 
+# Affine form `a * tv + b` of an index with literal integer arithmetic only, or nothing for anything else.
+function aga_affine(e, tv)
+    e isa Integer && return (0, Int(e))
+    e === tv && return (1, 0)
+    e isa Expr && e.head == :call || return nothing
+    f = e.args[1]; xs = [aga_affine(a, tv) for a in e.args[2:end]]
+    any(x -> x === nothing, xs) && return nothing
+    f == :+ && return (sum(x[1] for x in xs), sum(x[2] for x in xs))
+    f == :- && length(xs) == 1 && return (-xs[1][1], -xs[1][2])
+    f == :- && length(xs) == 2 && return (xs[1][1] - xs[2][1], xs[1][2] - xs[2][2])
+    if f == :* && length(xs) == 2
+        xs[1][1] == 0 && return (xs[1][2] * xs[2][1], xs[1][2] * xs[2][2])
+        xs[2][1] == 0 && return (xs[2][2] * xs[1][1], xs[2][2] * xs[1][2])
+    end
+    return nothing
+end
+
+# One-dimensional sites `a * tv + b_s` with one stride a and offsets in distinct residue classes mod a: no two (thread, site) pairs meet.
+function aga_strided_disjoint(accs, tv)
+    tv === nothing && return false
+    all(s -> length(s.index) == 1, accs) || return false
+    forms = [aga_affine(s.index[1], tv) for s in accs]
+    any(f -> f === nothing, forms) && return false
+    a = forms[1][1]
+    (a != 0 && all(f -> f[1] == a, forms)) || return false
+    offs = unique(f[2] for f in forms)
+    return length(unique(mod(b, abs(a)) for b in offs)) == length(offs)
+end
+
 function aga_sites!(sites::Dict{Symbol,Vector{NamedTuple}}, e, am)
     if e isa Expr
         if e.head == :macrocall && length(e.args) >= 3 && e.args[1] == am &&
@@ -89,6 +118,8 @@ function validate_atomic_guarantee(dir::String = joinpath(@__DIR__, "val-corpus"
                     # slice of the array (a column, say) and the sites cannot meet across threads
                     minlen = minimum(length(s.index) for s in accs)
                     tv !== nothing && any(p -> all(s -> s.index[p] == tv, accs), 1:minlen) && continue
+                    # one literal stride, offsets in distinct residue classes (a conv's `(ci - 1) * 3 + k`): the sites tile the array
+                    aga_strided_disjoint(accs, tv) && continue
                     arrays_checked += 1
                     plain = filter(s -> s.kind == :plain_acc, accs)
                     if !isempty(plain)
@@ -109,7 +140,19 @@ function validate_atomic_guarantee(dir::String = joinpath(@__DIR__, "val-corpus"
     return (kernels = kernels_seen, checked = arrays_checked, bad = bad, errors = errors)
 end
 
+# The strided exemption must reject colliding offsets and non-literal strides.
+function aga_selftest()
+    mk(ix...) = [(kind = :plain_acc, index = Any[Meta.parse(i)]) for i in ix]
+    ok1 = aga_strided_disjoint(mk("(ci - 1) * 3 + 1", "(ci - 1) * 3 + 2", "(ci - 1) * 3 + 3"), :ci)
+    ok2 = !aga_strided_disjoint(mk("(ci - 1) * 3 + 1", "(ci - 1) * 3 + 4"), :ci)
+    ok3 = !aga_strided_disjoint(mk("(ci - 1) * hw + 1", "(ci - 1) * hw + 2"), :ci)
+    ok4 = !aga_strided_disjoint(mk("ci + 1", "ci + 2"), :ci)
+    ok5 = !aga_strided_disjoint(mk("2 * ci", "2 * ci + 2"), :ci)
+    return ok1 && ok2 && ok3 && ok4 && ok5
+end
+
 if abspath(PROGRAM_FILE) == @__FILE__
+    aga_selftest() || (println("strided exemption self-test FAILED"); exit(1))
     r = validate_atomic_guarantee(; only = length(ARGS) > 0 ? ARGS : nothing)
     exit(r.bad == 0 && r.errors == 0 && r.checked > 0 ? 0 : 1)
 end

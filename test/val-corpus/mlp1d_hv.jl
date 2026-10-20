@@ -120,8 +120,12 @@ function mlp1d_hv(loss, lossb, x, xb, y, yb, w1, w1b, b1, b1b, w2, w2b, b2, b2b,
         __cse_3 = w1[i_j]
         __cse_4d = xd[1]
         __cse_4 = x[1]
-        s1d = (__cse_4 * __cse_3d + __cse_3 * __cse_4d) + b1d[i_j]
-        s1 = __cse_3 * __cse_4 + b1[i_j]
+        __cse_5d = (__cse_4 * __cse_3d + __cse_3 * __cse_4d) + b1d[i_j]
+        __cse_5 = __cse_3 * __cse_4 + b1[i_j]
+        s1d = __cse_5d
+        s1 = __cse_5
+        s1d = __cse_5d
+        s1 = __cse_5
         __oldb_0d = h1bd[i_j]
         __oldb_0 = h1b[i_j]
         h1bd[i_j] = 0.0

@@ -1,4 +1,5 @@
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
+using Random
 
 # kernel => why it is flagged. Empty: the two kernels that 0.4.4 flagged (ttgc, idm_refuse_cond_read) are now kept on the host by the
 # split gate (cgen_rmw_hazard_arrays, cgen_overlap_proven_arrays). A new entry here is a finding, not a place to park a failure.
@@ -64,6 +65,7 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
     # One draw of inputs, then one emulated run per thread order. Violations come from the first order:
     # they describe the access pattern, which does not depend on order.
     function one_draw(name, mode, path)
+        Random.seed!(hash(name))   # reproducible draws per kernel: the global RNG otherwise differs from run to run
         yp = STADE.io_gpu_yaml_path(path)
         isfile(yp) || STADE.stade_generate_baseline_file(path; yaml_path = yp, int_lo = int_lo, int_hi = int_hi, grow_max = 512)
         primal = STADE.io_read_corpus_entry(path)

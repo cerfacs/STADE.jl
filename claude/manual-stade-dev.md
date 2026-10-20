@@ -1223,6 +1223,54 @@ array writes. Every array this analysis can load from was also snapshotted at
 its overwrite, so dropping the rule changed nothing. It stays as a conservative
 bound and is marked as such in the sabotage list.
 
+### Cross-iteration restores (`agen_remat_cross_*`)
+
+The block-local rule needs an earlier write in the same block. The **first**
+write of an operand scalar in a loop body has none: its save holds the value
+the previous iteration (or the code before the loop) left behind. On the
+U-Net tiles those first-tap saves and the cross-iteration `x` saves were what
+was left, 264 of 904 sites on tile A.
+
+For a **loop-local** scalar nobody reads that old value. The first write then
+saves nothing, and each reverse iteration starts by rebuilding the
+*end-of-iteration* value from the pure right-hand side of the body's last
+top-level write (`last_def` of the walk, the same purity rule as above). Inside
+the iteration the earlier values come from the block-local restores. The
+`ectx.remat` map carries two new entry kinds: `Expr(:cross, v)` at the dropped
+site (`agen_backward_assign` emits nothing there), and an `Expr(:block)` of
+`v = rhs` assignments under `agen_site_key(body, 0)` that `agen_backward_body`
+appends right after its up-front int recompute. `agen_remat_apply` leaves the
+head keys out of the push map.
+
+A scalar is loop-local when `agen_remat_cross_scan!` finds all of:
+
+1. every write of it is a top-level statement of a loop body (a branch-local
+   or root-level write would lean on restores the transformed loops no longer
+   perform);
+2. no statement nested in a body that writes it at its top level writes it
+   again (a nested loop's own first save brings back the enclosing body's
+   first value for the read between them);
+3. every read of it follows a write in the **same** body: an enclosing body's
+   earlier write does not cover it, since the first iteration would read that
+   write and later ones the previous iteration's value.
+
+And it is all-or-nothing per scalar: if one loop that needs the first save
+cannot rebuild its end value (its right-hand side goes through a float local),
+no loop transforms. A loop that kept its save relies on the value the reverse
+sweep leaves in the scalar after its neighbours, and a transformed neighbour
+would leave it altered. Measured on the U-Net: stack references 1732 to 1212
+(tile A), 832 to 512 (C), 502 to 282 (D); atomics and offload counts unchanged.
+
+Sabotage coverage (`validate_remat.jl`): the nested-write rule (`cross_nested`),
+the coverage rule (`cross_argread`), both together for `cross_readbefore` and
+`cross_entry` (either guard alone catches those two), the all-or-nothing rule
+(`cross_mixed`, whose loops sit at the top level because inside an enclosing
+loop a block-boundary restore supplies the live value anyway) and the head
+restore itself (`remat_cross`). Two guards are not distinguishable: the
+placement rule (a write inside an `if` is recovered by the branch machinery's
+own recompute) and the after-the-loop half of the coverage rule (served by the
+block-boundary restore). Both stay as conservative bounds and print as `info`.
+
 ## IV.13 `ii_*` and `fuse_ii_loops` — loop fusion
 
 **Consumes** `kernel`. **Produces**
@@ -1294,6 +1342,23 @@ any of them.
   tap; with the flag on, the gradient of its input came out wrong (relative
   error about 2) until this check. `ii_multiversion` is the witness.
 
+- **Live-out scalars.** `:independent` fuses a loop's adjoint into the FORWARD
+  position, so every adjoint it consumes must already exist there. The adjoint
+  of an active scalar the loop assigns and later code reads is seeded only by
+  that code's backward sweep, which runs after the forward position. Such a
+  loop previously produced a wrong adjoint (about 1.5 relative error) in every
+  version up to and including 0.4.5: a reduction loop whose accumulator is read
+  after it, with a nonlinear local in its body (`a = a + xv * xv * w[ci]`
+  followed by `z[t] = a`). `snap_ii_classify` and `agen_ii_classify` now
+  compute the live-out set with `ii_escapes_nested` over every active local and
+  accumulator. An accumulator that is live out is deferred to the backward
+  position (`:mixed`, with the surviving-snapshot and own-array-write gates
+  that every deferred kind carries). Any other live-out local keeps only its
+  last iteration's value, so every fusing kind would hand its adjoint to the
+  FIRST iteration of an un-reversed loop, and the loop is refused.
+  `test/validate_liveout.jl` pins the four shapes (`liveout_*`) and sabotages
+  both halves. No corpus kernel and none of the U-Net tiles changed class.
+
 ### Escape detection tracks program order
 
 A flat "read anywhere else" test is unsound. A variable name can be reused
@@ -1361,6 +1426,20 @@ stacks are host-only by construction.
   accumulation. It becomes an atomic add.
 - The index is thread-invariant and the write is a plain replacement. This
   is refused with an error. No atomic fixes a replacement race.
+
+- The index is injective in the thread variable for each fixed inner-loop
+  value but the SITE collides with itself across threads: `xb[t + ci - 1]`
+  under an inner serial loop over `ci` (the adjoint of a convolution).
+  `cgen_race_write_arrays` only paired different sites, so a single site kept a
+  plain read-modify-write and lost updates on a V100 (relative error about
+  1.5 in the adjoint and 2 in the HVP). `cgen_write_self_overlaps` now pairs a
+  site with itself. It counts only positive evidence: every dimension must be
+  affine in the thread variable with a nonzero integer coefficient and an
+  offset that moves with the loop through integer-scaled sums. A symbolic
+  stride (`(ci - 1) * hw + t`, a channel-major layout whose threads cover one
+  slice each), a gather, or an invariant offset leaves the verdict to
+  `cgen_expr_injective_ok` as before. `test/validate_selfrace.jl` pins both
+  directions and sabotages the check.
 
 `cgen_expr_injective_ok` refuses `div`, `mod`, `rem`, `fld`, `cld`, `÷`,
 and `%` outright. These collapse several thread indices onto one result by

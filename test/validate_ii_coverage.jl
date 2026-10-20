@@ -39,6 +39,15 @@ function validate_ii_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
         "idm_src_consume" => 0, "idm_cse_acc" => 0, "idm_gather_rmw" => 0, "idm_overlap_plain" => 0, "ii_multiversion" => 0,
         "so_carry" => 0, "so_hostread" => 0, "so_inner" => 0, "so_liveout" => 0, "so_tile" => 0,
         "if_scalar_rewrite" => 0, "remat_shapes" => 0,
+        # liveout_*: an accumulator read after its loop is deferred to the backward position (:mixed), a live-out plain local is not covered
+        "liveout_red_nest" => 2, "liveout_red_fused" => 2, "liveout_red_top" => 1, "liveout_local_last" => 0,
+        "remat_cross" => 5, "cross_readbefore" => 0, "cross_entry" => 0, "cross_after" => 0, "cross_ifwrite" => 0, "cross_nested" => 0,
+        "cross_branchlocal" => 0, "cross_mixed" => 2, "cross_argread" => 0, "selfrace_conv" => 0, "selfrace_layout" => 0,
+        # baselines added for kernels that had none (measured at the revision that added them)
+        "ddp_affine" => 0, "ddp_ambiguous_reduce" => 0, "ddp_batch_hist" => 0, "ddp_branch" => 0, "ddp_ragged" => 0, "ddp_tangent_input" => 0,
+        "ddp_twoparam" => 0, "ddp_written_per_sample" => 0, "inl_argexpr" => 0, "inl_arglit" => 0, "mlp1d" => 3, "partialdot" => 0,
+        "red_nested_inner" => 2, "red_refuse_barevar" => 0, "red_refuse_invariant" => 0, "red_reverse" => 0, "red_single_cube" => 0,
+        "red_strided" => 0, "red_subtract" => 0, "red_three_arrays" => 0, "red_two_locals" => 2,
         "advection" => 0, "advection_multi" => 0, "affine_loss" => 0,
         "bilinear" => 0, "bnd_branch" => 2, "bnd_carried" => 1,
         "bnd_nested_only" => 0, "bnd_readfirst" => 1, "branchsel" => 0,

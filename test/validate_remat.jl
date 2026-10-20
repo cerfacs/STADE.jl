@@ -37,13 +37,23 @@ function validate_remat(dir::String = joinpath(@__DIR__, "val-corpus"))
         kernel = STADE.norm_insert_dead_entry_resets(STADE.parse_kernel(src))
         am = STADE.act_analyze(kernel)
         (_, sites) = STADE.stade_site_level_tbr_check(kernel)
-        return sort([string(v) for v in values(STADE.agen_remat_plan(kernel, am, sites))])
+        render(v) = v isa Expr && v.head == :block ? "head{" * join([string(a) for a in v.args], "; ") * "}" :
+                    v isa Expr && v.head == :cross ? "cross(" * string(v.args[1]) * ")" : string(v)
+        return sort([render(v) for v in values(STADE.agen_remat_plan(kernel, am, sites))])
     end
 
     # 1. PLAN
     expected = Dict(
-        "remat_shapes" => ["w[base + 1]", "w[ci]", "w[ci] * s", "y[t]"],
-        "so_tile" => sort(["w[(ci - 1) * 2 + 1]", "w[(ci - 1) * 2 + 2]", "x[(t + ci) - 1]", "y[(t + ci) - 1]"]),
+        "remat_shapes" => ["cross(sc)", "head{sc = x[ci] * 2.0}", "w[base + 1]", "w[ci]", "w[ci] * s", "y[t]"],
+        "remat_cross" => ["cross(wv)", "cross(wv2)", "cross(xv)", "cross(xv2)", "cross(xv3)", "cross(xv4)",
+                          "head{wv = w[2ci]; xv = x[(t + ci) - 1]}", "head{wv2 = w[b2]; xv2 = x[(t + ci) - 1] * 2.0}",
+                          "head{xv3 = x[(t + ci) - 1]}", "head{xv4 = x[t + cj]}", "w[2ci - 1]"],
+        "cross_readbefore" => String[], "cross_entry" => String[], "cross_after" => String[],
+        "cross_ifwrite" => String[], "cross_nested" => String[], "cross_branchlocal" => String[], "cross_argread" => String[],
+        "cross_mixed" => ["cross(tmp)", "head{tmp = x[ci] * w[ci]}"],
+        "so_tile" => sort(["cross(wv)", "cross(wv)", "cross(xv)", "cross(xv)",
+                           "head{wv = w[(ci - 1) * 2 + 1]; xv = y[t + ci]}", "head{wv = w[(ci - 1) * 2 + 2]; xv = x[t + ci]}",
+                           "w[(ci - 1) * 2 + 1]", "w[(ci - 1) * 2 + 2]", "x[(t + ci) - 1]", "y[(t + ci) - 1]"]),
         "if_scalar_rewrite" => String[],
     )
     for (name, want) in sort(collect(expected))
@@ -93,6 +103,69 @@ function validate_remat(dir::String = joinpath(@__DIR__, "val-corpus"))
         r = sabotaged(def, kernel)
         check(r == :caught, "sabotage \"$nm\": $kernel $(r == :caught ? "fails its oracle" : String(r))")
     end
+
+    # the cross-iteration rule's three conditions, removed by patching the source text of the one line that enforces each
+    stade_src = read(joinpath(@__DIR__, "..", "src", "STADE.jl"), String)
+    # `patches`: (old, new) pairs, each `old` occurring once in the source. A run whose generated adjoint cannot run at all counts as caught;
+    # a generator that fails before producing anything does not.
+    function sabotaged_text(patches, kernel)
+        text = stade_src
+        for (old, new) in patches
+            count(old, text) == 1 || return :error
+            text = replace(text, old => new)
+        end
+        tmp = tempname() * ".jl"
+        write(tmp, text)
+        script = """
+            include($(repr(tmp)))
+            path = $(repr(joinpath(dir, kernel * ".jl")))
+            gen_ok = try STADE.stade_adjoint(Meta.parse(read(path, String)); keep_push_pop = false, fuse_ii_loops = true); true catch; false end
+            gen_ok || (println("GENFAIL"); exit())
+            function both(path)
+                ok1 = ok2 = true
+                for fuse in (true, false)
+                    try
+                        a = STADE.stade_validate_adjoint_file(path; trials = 4, keep_push_pop = false, fuse_ii_loops = fuse)
+                        d = STADE.stade_validate_dotprod_file(path; trials = 4, keep_push_pop = false, fuse_ii_loops = fuse)
+                        ok1 &= a.ok; ok2 &= d.ok
+                    catch
+                        ok1 = ok2 = false
+                    end
+                end
+                return (ok1, ok2)
+            end
+            res = both(path)
+            println("RESULT ", res[1], " ", res[2])
+        """
+        out = try read(`$(Base.julia_cmd()) --startup-file=no -e $script`, String) catch e; "ERR" end
+        rm(tmp; force = true)
+        m = match(r"RESULT (true|false) (true|false)", out)
+        m === nothing && return :error
+        return (m.captures[1] == "false" || m.captures[2] == "false") ? :caught : :missed
+    end
+    nested_line = "isfloat(v) && haskey(first_write, v) && push!(bad, v)"
+    place_line = "in_loop ? get!(first_write, st.lhs, idx) : push!(bad, st.lhs)"
+    cover_line = "isfloat(v) && !(v in now) && push!(bad, v)"
+    head_line = "head === nothing || append!(exprs, head.args)"
+    rec_line = "rec = haskey(last_def, v) ? (agen_site_key(body, 0), key1, last_def[v]) : (nothing, key1, nothing)"
+    sab_text = [
+        ("cross: a nested write in a writing body is ignored", [(nested_line, "")], "cross_nested"),
+        ("cross: neither a nested write nor an uncovered read is checked", [(nested_line, ""), (cover_line, "")], "cross_readbefore"),
+        ("cross: neither a nested write nor an uncovered read is checked", [(nested_line, ""), (cover_line, "")], "cross_entry"),
+        ("cross: a read with no covering write is allowed", [(cover_line, "")], "cross_argread"),
+        ("cross: a loop that cannot rebuild its value no longer vetoes the others", [(rec_line, "haskey(last_def, v) || continue\n        rec = (agen_site_key(body, 0), key1, last_def[v])")], "cross_mixed"),
+        ("cross: the head-of-iteration restore is not emitted", [(head_line, "")], "remat_cross"),
+    ]
+    for (nm, patches, kernel) in sab_text
+        r = sabotaged_text(patches, kernel)
+        check(r == :caught, "sabotage \"$nm\": $kernel $(r == :caught ? "fails its oracle" : String(r))")
+    end
+    # Reported, not required: a write inside an `if` is recovered by the branch machinery's own recompute, so the placement rule has no
+    # kernel that depends on it; it stays as defence in depth
+    r = sabotaged_text([(place_line, "get!(first_write, st.lhs, idx)")], "cross_branchlocal")
+    println(rpad("info", 6), "sabotage \"cross: a write outside a loop body's top level is allowed\": cross_branchlocal ", r == :caught ? "fails its oracle" : "still passes ($(r); branch recompute)")
+    r = sabotaged(sab[1][2], "remat_cross")
+    check(r == :caught, "sabotage \"array loads always pure\": remat_cross fails its oracle ($(r))")
     println("\n", bad == 0 ? "all remat checks passed" : "*** $bad remat check(s) failed ***")
     return bad
 end

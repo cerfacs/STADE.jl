@@ -124,6 +124,28 @@ let a float local into the recomputed expression, and never skip the array-write
 rule: the sabotage of purity, nested-write clearing and block-local int rules
 all fail `remat_shapes`.
 
+**Cross-iteration restores** extend the same pass to a loop-local scalar's first
+write (`agen_remat_cross_*`): its save is dropped and each reverse iteration
+rebuilds the end-of-iteration value from the last write's pure rhs. The scalar
+must be written only at the top level of loop bodies, never rewritten in a
+statement nested in a body that writes it, read only after a write in its own
+body, and the decision is all-or-nothing per scalar. Never replace the per-body
+coverage by a kernel-wide read count (it never fires on a tiled kernel whose
+register names are reused across loops) or by an outer body's write (the first
+iteration would read that write and later ones the previous iteration's value).
+
+**Live-out rule of the ii classifier.** An `:independent` loop is fused at the
+forward position and must not consume an adjoint that code after the loop seeds.
+An active accumulator read after its loop defers to the backward position
+(`:mixed`); any other live-out local refuses the loop. Change both classifier
+copies identically.
+
+**A site collides with itself.** A plain accumulation `a[t + k]` under an inner
+serial loop is a cross-thread race even with a single write site; the pairwise
+overlap analysis never sees it. `cgen_write_self_overlaps` counts only positive
+evidence (integer coefficient on the thread variable, an offset that moves with
+the loop through integer-scaled sums); a symbolic stride stays trusted.
+
 Tier B index expressions must stay **pure** — an embedded mutation
 double-evaluates under `hvp_double_stmt`. Any block-local scalar a
 formula depends on must be in `value_vars` and substituted through its

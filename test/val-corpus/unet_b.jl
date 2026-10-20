@@ -1019,6 +1019,10 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         oj = mod(rem, w4) + 1
         i0 = 2oi - 1
         j0 = 2oj - 1
+        a11 = skip2[(ci - 1) * hw2 + (i0 - 1) * w2 + j0]
+        a12 = skip2[(ci - 1) * hw2 + (i0 - 1) * w2 + j0 + 1]
+        a21 = skip2[(ci - 1) * hw2 + i0 * w2 + j0]
+        a22 = skip2[(ci - 1) * hw2 + i0 * w2 + j0 + 1]
         __oldb_0 = p2b[idx]
         p2b[idx] = 0.0
         m1b = m1b + (0.5 * (1.0 + sign(m1 - m2))) * __oldb_0
@@ -1160,6 +1164,10 @@ function unet_b(x, xb, h, w, c_in, c1, c2, c3, c_out, w_e1a, w_e1ab, b_e1a, b_e1
         oj = mod(rem, w2) + 1
         i0 = 2oi - 1
         j0 = 2oj - 1
+        a11 = skip1[(ci - 1) * hw + (i0 - 1) * w + j0]
+        a12 = skip1[(ci - 1) * hw + (i0 - 1) * w + j0 + 1]
+        a21 = skip1[(ci - 1) * hw + i0 * w + j0]
+        a22 = skip1[(ci - 1) * hw + i0 * w + j0 + 1]
         __oldb_0 = p1b[idx]
         p1b[idx] = 0.0
         m1b = m1b + (0.5 * (1.0 + sign(m1 - m2))) * __oldb_0

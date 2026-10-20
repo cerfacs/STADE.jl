@@ -4532,7 +4532,7 @@ function agen_remat_pure(e, kinds, assigned_syms, writes, avail, d_seq, d_chain)
     return false
 end
 
-function agen_remat_walk!(body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, avail0, plan)
+function agen_remat_walk!(body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, avail0, plan, cross, is_loop)
     avail = copy(avail0)
     last_def = Dict{Symbol,Any}()   # float scalar -> rhs of its last top-level write when that rhs is rematerializable
     for (idx, stmt) in enumerate(body)
@@ -4559,13 +4559,91 @@ function agen_remat_walk!(body, kinds, sites, assigned_syms, writes, pos, loops,
             for w in agen_stmt_assigned(stmt)
                 delete!(last_def, w)
             end
-            agen_remat_walk!(stmt.body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, union(avail, Set([stmt.var])), plan)
+            agen_remat_walk!(stmt.body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, union(avail, Set([stmt.var])), plan, cross, true)
         elseif stmt.kind == :if || stmt.kind == :while
             for w in agen_stmt_assigned(stmt)
                 delete!(last_def, w)
             end
         end
     end
+    is_loop && agen_remat_cross_record!(body, kinds, sites, active_map, exempt, last_def, cross)
+    return nothing
+end
+
+# Cross-iteration restores. The first write W1 of a float scalar in a loop body saves the value the previous iteration (or the code before
+# the loop) left behind, so that whoever read that value gets it back in the reverse sweep. For a LOOP-LOCAL scalar nobody did: every read
+# of it sits in a loop body after that body's own first write, so no read observes a value from another iteration, another loop or the
+# entry. Its only observable values live inside one iteration, and those come from the end-of-iteration value -- the pure rhs of the body's
+# last top-level write (`last_def`), rebuilt at the head of each reverse iteration -- and the block-local restores above. W1 saves nothing.
+# All-or-nothing per scalar: a loop that kept its first save would rely on the value a transformed neighbour no longer restores.
+function agen_remat_cross_record!(body, kinds, sites, active_map, exempt, last_def, cross)
+    seen = Set{Symbol}()
+    for (idx, st) in enumerate(body)
+        (st.kind == :assign && st.lhs isa Symbol && get(kinds, st.lhs, :none) == :scalar_float && !(st.lhs in seen)) || continue
+        v = st.lhs
+        push!(seen, v)
+        key1 = agen_site_key(body, idx)
+        (get(sites, key1, false) === true && get(active_map, v, false) && !(v in exempt)) || continue
+        rec = haskey(last_def, v) ? (agen_site_key(body, 0), key1, last_def[v]) : (nothing, key1, nothing)
+        push!(get!(cross, v, Any[]), rec)
+    end
+    return nothing
+end
+
+function agen_remat_cross_apply!(plan, cross, kernel)
+    isempty(cross) && return nothing
+    bad = Set{Symbol}()
+    defined = Set{Symbol}()
+    agen_remat_cross_scan!(kernel.body, false, Set{Symbol}(), kernel.sig.kinds, bad, defined)
+    for v in sort!(collect(keys(cross)); by = string)
+        (v in defined && !(v in bad) && all(r -> r[1] !== nothing, cross[v])) || continue
+        for (head_key, key1, rhs) in cross[v]
+            plan[key1] = Expr(:cross, v)
+            push!(get!(plan, head_key, Expr(:block)).args, Expr(:(=), v, rhs))
+        end
+    end
+    return nothing
+end
+
+# Is the scalar loop-local? Collects into `bad` every float scalar that is written anywhere but the top level of a loop body (a branch-
+# local value would lean on restores the transformed loops no longer perform), read where no enclosing body has yet written it, or written
+# by a statement nested in a body that also writes it at its top level; `defined` gets every scalar written at the top level of some loop
+# body. A body that writes the scalar itself is the only one that covers its reads: an enclosing body's earlier write does not, since the
+# first iteration would read it and the later ones the previous iteration's value.
+function agen_remat_cross_scan!(body, in_loop, covered, kinds, bad, defined)
+    isfloat(v) = v isa Symbol && get(kinds, v, :none) == :scalar_float
+    first_write = Dict{Symbol,Int}()
+    for (idx, st) in enumerate(body)
+        if st.kind == :assign && isfloat(st.lhs)
+            in_loop ? get!(first_write, st.lhs, idx) : push!(bad, st.lhs)
+        end
+    end
+    now = covered
+    read_here(e) = for v in cgen_expr_symbols(e); isfloat(v) && !(v in now) && push!(bad, v); end
+    for (idx, st) in enumerate(body)
+        now = Set{Symbol}(v for v in covered if !haskey(first_write, v))
+        union!(now, (v for (v, i1) in first_write if i1 < idx))
+        if st.kind == :assign
+            read_here(st.rhs)
+            st.lhs isa Expr && read_here(st.lhs)
+        else
+            for v in agen_stmt_assigned(st)
+                isfloat(v) && haskey(first_write, v) && push!(bad, v)
+            end
+            if st.kind == :for
+                read_here(st.lo); read_here(st.hi); read_here(st.step)
+                agen_remat_cross_scan!(st.body, true, now, kinds, bad, defined)
+            elseif st.kind == :if
+                read_here(st.cond)
+                agen_remat_cross_scan!(st.then, false, now, kinds, bad, defined)
+                agen_remat_cross_scan!(st.els, false, now, kinds, bad, defined)
+            elseif st.kind == :while
+                read_here(st.cond)
+                agen_remat_cross_scan!(st.body, false, now, kinds, bad, defined)
+            end
+        end
+    end
+    union!(defined, keys(first_write))
     return nothing
 end
 
@@ -4579,7 +4657,9 @@ function agen_remat_plan(kernel, active_map, sites)
     unsafe = agen_unsafe_int_vars(kernel)
     exempt = agen_exempt_vars(kernel, agen_value_needed_vars(kernel))
     plan = Dict{Any,Any}()
-    agen_remat_walk!(kernel.body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, Set{Symbol}(), plan)
+    cross = Dict{Symbol,Vector{Any}}()
+    agen_remat_walk!(kernel.body, kinds, sites, assigned_syms, writes, pos, loops, unsafe, active_map, exempt, Set{Symbol}(), plan, cross, false)
+    agen_remat_cross_apply!(plan, cross, kernel)
     return plan
 end
 
@@ -4589,7 +4669,7 @@ function agen_remat_apply(kernel, active_map, sites)
     isempty(plan) && return (sites, nothing)
     out = copy(sites)
     for k in keys(plan)
-        out[k] = false
+        k[2] == 0 || (out[k] = false)
     end
     return (out, plan)
 end
@@ -4882,6 +4962,9 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             end
         end
     end
+    # end-of-iteration values of the scalars whose first-write save was dropped -- see agen_remat_cross!
+    head = ectx.remat === nothing ? nothing : get(ectx.remat, agen_site_key(primal_body, 0), nothing)
+    head === nothing || append!(exprs, head.args)
 # Branch-snapshotted scalars whose own primal value is read by a different, later statement in this block for a nonlinear
 # term's partial. A plain reverse walk restores such a scalar only when it reaches the :if itself, one iteration too late.
 # Recomputed here instead, forward-style, from the freshly popped branch flag: safe since a snapshot site's rhs never depends
@@ -5056,7 +5139,7 @@ function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned,
         remat_rhs = (ectx.remat === nothing || key === nothing) ? nothing : get(ectx.remat, key, nothing)
         if remat_rhs !== nothing
             # rematerialized: the old value is an earlier pure load in this block, recomputed instead of popped
-            push!(exprs, Expr(:(=), stmt.lhs, remat_rhs))
+            (remat_rhs isa Expr && remat_rhs.head == :cross) || push!(exprs, Expr(:(=), stmt.lhs, remat_rhs))
         elseif get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), key) && !(var in exempt) && !(var in skip_restore)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, agen_emit_pop(nm, ectx, key, exprs)))
@@ -7470,8 +7553,43 @@ function cgen_race_write_arrays(body::Vector{NamedTuple}, thread_var::Symbol)
                 break
             end
         end
+        arr in racy || any(site -> cgen_write_self_overlaps(site, thread_var, varying), sites) && push!(racy, arr)
     end
     return racy
+end
+
+# One additive site against ITSELF. cgen_expr_injective_ok trusts an index that is `t + k` with `k` thread-independent, but an inner serial
+# loop makes `k` move: thread `t` at one iteration lands on the element thread `t + 1` writes at the previous one (`xb[t + ci - 1]`, the
+# adjoint of a convolution). Only POSITIVE evidence counts, so every shape the old gate trusted stays trusted: a dimension that is not
+# affine in the thread variable (a symbolic stride, a gather) leaves the verdict to cgen_expr_injective_ok, and a dimension whose offset is
+# invariant proves the threads disjoint. What is left is an integer multiple of the thread variable plus an offset that varies.
+function cgen_write_self_overlaps(site::Vector, thread_var::Symbol, varying::Set{Symbol})
+    moving = false
+    for d in eachindex(site)
+        p = cgen_index_affine(site[d], thread_var)
+        p === nothing && return false
+        p[1] == 0 && continue
+        cgen_affine_invariant(p[2], varying) && return false
+        cgen_varying_scaled_by_integers(p[2], varying) || return false
+        moving = true
+    end
+    return moving
+end
+
+# True iff every varying symbol of `k` enters only through sums and differences, scaled at most by integer literals. A symbolic stride on
+# the loop variable (`(ci - 1) * hw`, a channel-major layout whose threads cover one slice each) says nothing about overlap either way, so
+# it stays with cgen_expr_injective_ok.
+function cgen_varying_scaled_by_integers(k, varying::Set{Symbol})
+    cgen_affine_invariant(k, varying) && return true
+    k isa Symbol && return true
+    k isa Expr && k.head == :call || return false
+    if k.args[1] in (:+, :-)
+        return all(a -> cgen_varying_scaled_by_integers(a, varying), k.args[2:end])
+    elseif k.args[1] === :*
+        moving = [f for f in k.args[2:end] if !cgen_affine_invariant(f, varying)]
+        return length(moving) == 1 && all(f -> f isa Integer || f === moving[1], k.args[2:end]) && cgen_varying_scaled_by_integers(moving[1], varying)
+    end
+    return false
 end
 
 # Can two index vectors address one element from two DIFFERENT threads? Disjointness only has to be proven in ONE
@@ -11633,9 +11751,17 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
         escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
         isempty(escaped) || return :none
     end
+    # :independent is fused at the FORWARD position, so every adjoint it consumes must already exist there. The adjoint of an
+    # active scalar this loop assigns and later code reads is seeded only by that code's backward sweep, which runs after the
+    # forward position -- an accumulator is deferred to the backward position (:mixed) instead. Any other live-out local keeps
+    # only its last iteration's value, so the un-reversed loops of every fusing kind would hand its adjoint to the first one.
+    live_out = Set{Symbol}(v for v in union(local_names, redvars) if get(active_map, v, false))
+    isempty(live_out) || (live_out = ii_escapes_nested(kernel.body, stmt.body, live_out))
+    isempty(setdiff(live_out, redvars)) || return :none
+    defer = !isempty(live_out)
     # only :reduction/:mixed run the body twice -- see
     # ii_body_has_surviving_snapshot.
-    if (!isempty(vn_red) || has_escape) &&
+    if (!isempty(vn_red) || has_escape || defer) &&
        (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, snap_value_needed_sites(kernel),
                                         vn_local, snap_collect_reassigned(kernel.body)) ||
         # the backward-position recompute drops array writes -- see
@@ -11657,7 +11783,7 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     elseif !isempty(vn_red)
         return :reduction
     else
-        return :independent
+        return defer ? :mixed : :independent
     end
 end
 
@@ -11711,7 +11837,15 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
         escaped = ii_escapes_nested(kernel.body, stmt.body, vn_ind)
         isempty(escaped) || return :none
     end
-    if (!isempty(vn_red) || has_escape) &&
+    # :independent is fused at the FORWARD position, so every adjoint it consumes must already exist there. The adjoint of an
+    # active scalar this loop assigns and later code reads is seeded only by that code's backward sweep, which runs after the
+    # forward position -- an accumulator is deferred to the backward position (:mixed) instead. Any other live-out local keeps
+    # only its last iteration's value, so the un-reversed loops of every fusing kind would hand its adjoint to the first one.
+    live_out = Set{Symbol}(v for v in union(local_names, redvars) if get(active_map, v, false))
+    isempty(live_out) || (live_out = ii_escapes_nested(kernel.body, stmt.body, live_out))
+    isempty(setdiff(live_out, redvars)) || return :none
+    defer = !isempty(live_out)
+    if (!isempty(vn_red) || has_escape || defer) &&
        (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, agen_value_needed_sites(kernel),
                                         vn_local, agen_collect_reassigned(kernel.body)) ||
         # the backward-position recompute drops array writes -- see
@@ -11733,7 +11867,7 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     elseif !isempty(vn_red)
         return :reduction
     else
-        return :independent
+        return defer ? :mixed : :independent
     end
 end
 

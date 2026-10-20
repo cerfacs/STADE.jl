@@ -128,9 +128,12 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "idm_dup_write" => 0,
         "idm_cse_acc" => 2, "ii_multiversion" => 0, "idm_src_consume" => 2, "idm_gather_rmw" => 6, "idm_overlap_plain" => 3,
         "idm_refuse_cond_read" => 3, "idm_refuse_scalar_read" => 3, "idm_refuse_consume_gap" => 3,
-        "so_tile" => 0, "so_hostread" => 4, "so_liveout" => 9, "so_carry" => 6, "so_inner" => 5,
+        "so_tile" => 0, "so_hostread" => 4, "so_liveout" => 9, "so_carry" => 5, "so_inner" => 5,
         # correctness kernels for the rematerialized-restore guards and the branch-scalar rewrite; not offload targets
         "if_scalar_rewrite" => 0, "remat_shapes" => 20,
+        "liveout_red_nest" => 0, "liveout_red_fused" => 0, "liveout_red_top" => 3, "liveout_local_last" => 0, "remat_cross" => 6,
+        "cross_readbefore" => 0, "cross_entry" => 0, "cross_after" => 0, "cross_ifwrite" => 0, "cross_nested" => 0, "cross_branchlocal" => 2,
+        "cross_mixed" => 6, "cross_argread" => 3, "selfrace_conv" => 0, "selfrace_layout" => 0,
     )
     # kernel => decisions that MUST appear in the offload report of its adjoint: (verdict, reason, array).
     # A listed loop that reaches a kernel instead is a failure, not an improvement.
@@ -144,7 +147,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         # so_*: the save-only scalar relaxation (cgen_saveonly_synth). so_tile offloads; each control breaks one of its four conditions
         "so_hostread" => [(:host, :scalar, nothing)],
         "so_liveout" => [(:host, :liveout, nothing)],
-        "so_carry" => [(:host, :scalar, nothing)],
+        "so_carry" => [(:host, :scalar, nothing), (:host, :scope, nothing)],
         "so_inner" => [(:host, :scalar, nothing)],
     )
     # idiom acceptance MUST appear for these (the loop is offloaded only because of the idiom)

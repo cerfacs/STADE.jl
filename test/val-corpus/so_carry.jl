@@ -1,9 +1,11 @@
 # so_carry(x, w, y, loss, i_n, i_nc)
 #
 # A tile loop carried by a running scalar (`run = run * 0.5 + a`), so the tile loop can never be split, while the tap loop inside
-# it assigns `wv` three times per tap block like so_tile. Only the tap loop is a candidate. Its first save of each iteration
-# carries the previous tap block's last weight, which the reverse of that block reads, and its body does not end with a push of
-# `wv`: it must stay on the host, whatever else offloads.
+# it assigns `wv` three times per tap block like so_tile. Only the tap loop is a candidate. Every `wv` is a pure load, so the
+# cross-iteration remat drops the first save of each block and rebuilds the block's last weight at the head of each reverse
+# iteration. What is left in the forward tap loop is the end-of-body restore of the tile loop, which reads `wv` after it: the
+# forward tap loop stays on the host (live-out), and the reverse tap loop, which no longer needs the carried value, offloads.
+# so_inner is the control for the save-only push guard, because its second write cannot be rebuilt.
 #
 # x: input, length i_n + 2
 # w: weights, length 3 * i_nc

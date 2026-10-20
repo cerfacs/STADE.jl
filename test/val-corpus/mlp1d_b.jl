@@ -62,7 +62,9 @@ function mlp1d_b(loss, lossb, x, xb, y, yb, w1, w1b, b1, b1b, w2, w2b, b2, b2b, 
     for i_j = 1:n_h
         __cse_4 = w1[i_j]
         __cse_5 = x[1]
-        s1 = __cse_4 * __cse_5 + b1[i_j]
+        __cse_6 = __cse_4 * __cse_5 + b1[i_j]
+        s1 = __cse_6
+        s1 = __cse_6
         __oldb_0 = h1b[i_j]
         h1b[i_j] = 0.0
         s1b = s1b + (1.0 - tanh(s1) ^ 2) * __oldb_0
