@@ -2920,7 +2920,7 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     # checked from the actual generated code, never predicted ahead of time, since a var's
     # ii_plan coverage does NOT by itself guarantee its stack is fully unused. Runs under both
     # keep_push_pop values; agen_finalize_stacks detects use under either storage mode.
-    (adjoint_expr, initstacks_expr) = agen_finalize_stacks(adjoint_expr, initstacks_expr, snapshot_plan, ii_plan)
+    (adjoint_expr, initstacks_expr) = agen_finalize_stacks(adjoint_expr, initstacks_expr, snapshot_plan, ii_plan; force = !keep_push_pop && any(s -> agen_asnap_site_array(s, kernel.sig.kinds) !== nothing, snapshot_plan))
     return (adjoint = adjoint_expr, initstacks = initstacks_expr)
 end
 
@@ -3216,6 +3216,8 @@ function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = noth
                          active_map = nothing, value_needed = nothing, exempt = nothing, stacks = nothing, push_pop = nothing)
     fname = agen_init_fname(kernel.sig.name)
     names = agen_stack_names(sites)
+    # a stack whose every site was removed (an array snapshot took them all) has no layout entry and no size
+    keep_push_pop || (names = [nm for nm in names if haskey(layout.sizes, nm) || haskey(layout.block_totals, nm) || nm in layout.tainted_stacks])
     kind_of = Dict{Symbol,Symbol}()
     for s in sites
         kind_of[agen_site_stack_name(s)] = s.kind
@@ -3281,7 +3283,13 @@ function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = noth
         (derived_stmts, extra) = agen_init_derived_stmts(kernel, layout.derived_vars, already)
         fargs = sort(union(fargs, extra); by = string)
     end
-    body = vcat(derived_stmts, sizing_stmts, table_stmts, alloc_stmts)
+    # array snapshots: the stack size needs length(A), so A joins the parameters and its length is returned after the stacks
+    snap_arrays = sort(unique(Symbol[A for A in (agen_asnap_site_array(s, kernel.sig.kinds) for s in sites) if A !== nothing]); by = string)
+    snap_arrays = [A for A in snap_arrays if agen_site_stack_name(agen_asnap_site(A)) in names]
+    len_stmts = Any[Expr(:(=), agen_asnap_len(A), Expr(:call, :length, A)) for A in snap_arrays]
+    isempty(snap_arrays) || (fargs = sort(union(fargs, snap_arrays); by = string))
+    val_names = vcat(val_names, Symbol[agen_asnap_len(A) for A in snap_arrays])
+    body = vcat(len_stmts, derived_stmts, sizing_stmts, table_stmts, alloc_stmts)
     push!(body, emit_return_scalars(vcat(names, table_names, tot_names, val_names)))
     return (Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...)), table_names, tot_names, val_names)
 end
@@ -4002,6 +4010,12 @@ function agen_layout(kernel, kinds, active_map, value_needed, reassigned, exempt
             sizes[stack] = expr
         end
     end
+    # a snapshot stack counts iterations, and every iteration holds a whole copy of its array
+    for ((kind, arr), stack) in stacks
+        A = agen_asnap_site_array((kind = kind, array = arr), kinds)
+        (A === nothing || !haskey(sizes, stack)) && continue
+        sizes[stack] = agen_mul_exprs(sizes[stack], agen_asnap_len(A))
+    end
     free = Set{Symbol}()
     for (_, sz) in sizes
         agen_collect_expr_vars!(sz, free)
@@ -4079,6 +4093,9 @@ function agen_layout_walk_top!(body, kinds, active_map, value_needed, reassigned
     end
     for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)
         agen_layout_static_record!(offsets, current, stacks[(:value, var)], loop_ctx, agen_site_key(body, 0, var))
+    end
+    for A in agen_asnap_boundary_arrays(body, kinds, push_pop)
+        agen_layout_static_record!(offsets, current, stacks[(:array, agen_asnap_site(A).array)], loop_ctx, agen_site_key(body, 0, A))
     end
     return nothing
 end
@@ -4445,8 +4462,8 @@ end
 # access), then drop whatever agen_stack_names(sites) lists but the scan never found. `is_hvp`
 # additionally drops hvp_emit's own orphaned `<stack>_d` shadow allocs, since hvp_emit builds one for
 # every site regardless of fusion. A single shared function keeps the two call sites from drifting.
-function agen_finalize_stacks(fn_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp::Bool = false)
-    ii_plan === nothing && return (fn_expr, initstacks_expr)
+function agen_finalize_stacks(fn_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp::Bool = false, force::Bool = false)
+    ii_plan === nothing && !force && return (fn_expr, initstacks_expr)
     used = agen_used_stack_names(fn_expr)
     unused_stacks = Set(nm for nm in agen_stack_names(snapshot_plan) if !(nm in used))
     isempty(unused_stacks) && return (fn_expr, initstacks_expr)
@@ -4674,6 +4691,369 @@ function agen_remat_apply(kernel, active_map, sites)
     return (out, plan)
 end
 
+# ---- array snapshot (keep_push_pop=false only) ----
+# A loop `L` whose body `B` writes a float array `A` normally pushes the old value at every write site, one slot per executed write.
+# When every derivative read of `A` inside `B` follows every write to `A` in `B`, those pushes carry nothing the reverse sweep reads:
+# a final read sees the end-of-body value, and the end-of-body value is what memory holds at the start of the reverse of `B`.
+# One copy of the whole of `A` at the start of `B`, restored after the reverse of `B`, replaces them. The copy needs no fact about
+# which elements `B` writes, so an indirect index costs nothing. Refusing is always safe: a refused loop keeps its per-write pushes.
+# Guards (see the plan, section 4): G1 float array argument, G2 :for loop, G3 a removable write site, G4 final-read order,
+# G5 a read in a condition counts, G6 outermost loop only, G7 no write inside an ii-classified loop, G9 Tier A loop nest, G10 B sweeps A at run time, G13 no write index follows the loop variable, G14 a pushed scatter site exists.
+function agen_asnap_written_arrays!(body, out::Set{Symbol}, kinds)
+    for st in body
+        if st.kind == :assign
+            st.lhs isa Expr && st.lhs.head == :ref && get(kinds, st.lhs.args[1], :none) == :array_float && push!(out, st.lhs.args[1])
+        elseif st.kind == :for || st.kind == :while
+            agen_asnap_written_arrays!(st.body, out, kinds)
+        elseif st.kind == :if
+            agen_asnap_written_arrays!(st.then, out, kinds)
+            agen_asnap_written_arrays!(st.els, out, kinds)
+        end
+    end
+    return out
+end
+
+# how many times the array name `A` appears in `expr`, as the array of a ref or as a bare symbol
+function agen_asnap_count_refs(expr, A::Symbol)
+    expr isa Symbol && return expr == A ? 1 : 0
+    expr isa Expr || return 0
+    total = 0
+    for a in expr.args[(expr.head == :call ? 2 : 1):end]
+        total += agen_asnap_count_refs(a, A)
+    end
+    return total
+end
+
+# Does `st` read `A` anywhere except as the self term of a pure accumulation whose other terms do not mention `A`?
+function agen_asnap_has_bad_read(st, A::Symbol)
+    if st.kind == :assign
+        lhs_base = st.lhs isa Symbol ? st.lhs : st.lhs.args[1]
+        n_rhs = agen_asnap_count_refs(st.rhs, A)
+        lhs_idx = st.lhs isa Expr ? sum(agen_asnap_count_refs(a, A) for a in st.lhs.args[2:end]; init = 0) : 0
+        lhs_idx > 0 && return true
+        lhs_base == A || return n_rhs > 0
+        n_rhs == 0 && return false
+        return !(n_rhs == 1 && agen_is_pure_accumulation(st.lhs, st.rhs, A))
+    elseif st.kind == :for
+        any(e -> agen_asnap_count_refs(e, A) > 0, (st.lo, st.hi, st.step)) && return true
+        return any(s -> agen_asnap_has_bad_read(s, A), st.body)
+    elseif st.kind == :if
+        agen_asnap_count_refs(st.cond, A) > 0 && return true
+        return any(s -> agen_asnap_has_bad_read(s, A), st.then) || any(s -> agen_asnap_has_bad_read(s, A), st.els)
+    end
+    return true   # :while and anything unknown
+end
+
+# Does `st` mention `A` at all, as a read or a write?
+function agen_asnap_touches(st, A::Symbol)
+    w = Set{Symbol}()
+    agen_asnap_written_arrays!([st], w, Dict{Symbol,Symbol}(A => :array_float))
+    A in w && return true
+    return agen_asnap_reads_any(st, A)
+end
+
+function agen_asnap_reads_any(st, A::Symbol)
+    if st.kind == :assign
+        return agen_asnap_count_refs(st.rhs, A) > 0 || (st.lhs isa Expr && any(a -> agen_asnap_count_refs(a, A) > 0, st.lhs.args[2:end]))
+    elseif st.kind == :for
+        return any(e -> agen_asnap_count_refs(e, A) > 0, (st.lo, st.hi, st.step)) || any(s -> agen_asnap_reads_any(s, A), st.body)
+    elseif st.kind == :if
+        return agen_asnap_count_refs(st.cond, A) > 0 || any(s -> agen_asnap_reads_any(s, A), st.then) || any(s -> agen_asnap_reads_any(s, A), st.els)
+    end
+    return true
+end
+
+# every write site (assign statement) to `A` inside `body`, at any depth, as agen_site_key keys
+function agen_asnap_write_keys!(body, A::Symbol, out::Vector{Any})
+    for (idx, st) in enumerate(body)
+        if st.kind == :assign
+            st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == A && push!(out, agen_site_key(body, idx))
+        elseif st.kind == :for || st.kind == :while
+            agen_asnap_write_keys!(st.body, A, out)
+        elseif st.kind == :if
+            agen_asnap_write_keys!(st.then, A, out)
+            agen_asnap_write_keys!(st.els, A, out)
+        end
+    end
+    return out
+end
+
+# G14 (benefit): the snapshot exists to let a scatter loop offload. A scatter is a read-modify-write of `A` through an index that an integer array
+# supplies, which two threads may share. Names that carry such an index: every scalar assigned from an integer array or from another such scalar.
+function agen_asnap_indirect_vars(B, kinds)
+    D = Set{Symbol}()
+    changed = true
+    while changed
+        changed = agen_asnap_indirect_walk!(B, D, kinds) 
+    end
+    return D
+end
+
+function agen_asnap_indirect_walk!(body, D, kinds)
+    grew = false
+    for st in body
+        if st.kind == :assign
+            if st.lhs isa Symbol && !(st.lhs in D)
+                vs = Set{Symbol}()
+                agen_collect_expr_vars!(st.rhs, vs)
+                if any(v -> v in D || get(kinds, v, :none) == :array_int, vs)
+                    push!(D, st.lhs)
+                    grew = true
+                end
+            end
+        elseif st.kind == :for || st.kind == :while
+            agen_asnap_indirect_walk!(st.body, D, kinds) && (grew = true)
+        elseif st.kind == :if
+            agen_asnap_indirect_walk!(st.then, D, kinds) && (grew = true)
+            agen_asnap_indirect_walk!(st.els, D, kinds) && (grew = true)
+        end
+    end
+    return grew
+end
+
+# keys of the scatter writes to `A` in `body`
+function agen_asnap_scatter_keys!(body, A::Symbol, D, kinds, out::Vector{Any})
+    for (idx, st) in enumerate(body)
+        if st.kind == :assign
+            if st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == A && agen_asnap_count_refs(st.rhs, A) > 0
+                vs = Set{Symbol}()
+                for a in st.lhs.args[2:end]
+                    agen_collect_expr_vars!(a, vs)
+                end
+                any(v -> v in D || get(kinds, v, :none) == :array_int, vs) && push!(out, agen_site_key(body, idx))
+            end
+        elseif st.kind == :for || st.kind == :while
+            agen_asnap_scatter_keys!(st.body, A, D, kinds, out)
+        elseif st.kind == :if
+            agen_asnap_scatter_keys!(st.then, A, D, kinds, out)
+            agen_asnap_scatter_keys!(st.els, A, D, kinds, out)
+        end
+    end
+    return out
+end
+
+# is a write to `A` anywhere inside a loop that ii_plan classifies? (guard G7)
+function agen_asnap_write_in_ii_loop(body, A::Symbol, ii_plan, kinds)
+    ii_plan === nothing && return false
+    for (idx, st) in enumerate(body)
+        if st.kind == :for
+            w = agen_asnap_written_arrays!(st.body, Set{Symbol}(), kinds)
+            A in w && get(ii_plan, agen_site_key(body, idx), nothing) !== nothing && return true
+            agen_asnap_write_in_ii_loop(st.body, A, ii_plan, kinds) && return true
+        elseif st.kind == :if
+            (agen_asnap_write_in_ii_loop(st.then, A, ii_plan, kinds) || agen_asnap_write_in_ii_loop(st.els, A, ii_plan, kinds)) && return true
+        elseif st.kind == :while
+            return true
+        end
+    end
+    return false
+end
+
+# G10 (cost): the copy costs length(A) per iteration of L, so it pays only when B itself sweeps. Require a write site to A under an inner
+# loop of B whose bounds are not both literals. A loop with literal bounds (the cell-to-node loop of three) writes a few slots per iteration.
+function agen_asnap_swept_write(body, A::Symbol, under_runtime::Bool)
+    for st in body
+        if st.kind == :assign
+            under_runtime && st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == A && return true
+        elseif st.kind == :for
+            rt = under_runtime || !(st.lo isa Number && st.hi isa Number && st.step isa Number)
+            agen_asnap_swept_write(st.body, A, rt) && return true
+        elseif st.kind == :if
+            (agen_asnap_swept_write(st.then, A, under_runtime) || agen_asnap_swept_write(st.els, A, under_runtime)) && return true
+        end
+    end
+    return false
+end
+
+# G13 (cost): a write whose index follows the loop variable touches a different part of A in every iteration (a per-edge scratch slice, a
+# per-step row), so one whole-array copy per iteration costs length(A) where the writes cost one slot each. The names that follow the loop
+# variable are the loop variable, every scalar assigned from them, every inner loop variable whose bounds use them, and every integer array
+# written in the body (conservative).
+function agen_asnap_follow_vars(B, var::Symbol, kinds)
+    T = Set{Symbol}([var])
+    changed = true
+    while changed
+        changed = false
+        agen_asnap_follow_walk!(B, T, kinds) && (changed = true)
+    end
+    return T
+end
+
+function agen_asnap_follow_walk!(body, T, kinds)
+    grew = false
+    add!(v) = v in T ? false : (push!(T, v); true)
+    mentions(e) = (vs = Set{Symbol}(); agen_collect_expr_vars!(e, vs); !isempty(intersect(vs, T)))
+    for st in body
+        if st.kind == :assign
+            if st.lhs isa Symbol
+                mentions(st.rhs) && add!(st.lhs) && (grew = true)
+            elseif get(kinds, st.lhs.args[1], :none) == :array_int
+                add!(st.lhs.args[1]) && (grew = true)
+            end
+        elseif st.kind == :for
+            (mentions(st.lo) || mentions(st.hi) || mentions(st.step)) && add!(st.var) && (grew = true)
+            agen_asnap_follow_walk!(st.body, T, kinds) && (grew = true)
+        elseif st.kind == :if
+            agen_asnap_follow_walk!(st.then, T, kinds) && (grew = true)
+            agen_asnap_follow_walk!(st.els, T, kinds) && (grew = true)
+        elseif st.kind == :while
+            agen_asnap_follow_walk!(st.body, T, kinds) && (grew = true)
+        end
+    end
+    return grew
+end
+
+# true when no write to `A` in `body` indexes with a name in `T`
+function agen_asnap_index_free(body, A::Symbol, T)
+    for st in body
+        if st.kind == :assign
+            if st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == A
+                idx_vars = Set{Symbol}()
+                for a in st.lhs.args[2:end]
+                    agen_collect_expr_vars!(a, idx_vars)
+                end
+                isempty(intersect(idx_vars, T)) || return false
+            end
+        elseif st.kind == :for || st.kind == :while
+            agen_asnap_index_free(st.body, A, T) || return false
+        elseif st.kind == :if
+            (agen_asnap_index_free(st.then, A, T) && agen_asnap_index_free(st.els, A, T)) || return false
+        end
+    end
+    return true
+end
+
+# G4: every top-level statement of `B` that touches `A` after the last top-level statement that writes it may read it freely. Any read at
+# or before that statement must be the self term of a pure accumulation.
+function agen_asnap_final_read_ok(B, A::Symbol, kinds)
+    last_w = 0
+    for (j, st) in enumerate(B)
+        w = Set{Symbol}()
+        agen_asnap_written_arrays!([st], w, kinds)
+        A in w && (last_w = j)
+    end
+    last_w == 0 && return false
+    for j in 1:last_w
+        agen_asnap_has_bad_read(B[j], A) && return false
+    end
+    return true
+end
+
+# Pseudo-site of an array snapshot: stack `<A>_snap_stack`. The name is refused when the kernel already has a variable called `<A>_snap`.
+agen_asnap_site(A::Symbol) = (kind = :array, array = Symbol(string(A) * "_snap"), at = 0)
+agen_asnap_len(A::Symbol) = Symbol("__len_", A)
+
+# The array a pseudo-site snapshots, or `nothing` for any other site. A real variable `<X>_snap` makes the planner refuse X, so a site
+# whose array name is not a kernel variable is never ambiguous.
+function agen_asnap_site_array(site, kinds)
+    site.kind == :array || return nothing
+    str = string(site.array)
+    endswith(str, "_snap") || return nothing
+    haskey(kinds, site.array) && return nothing
+    A = Symbol(chop(str; tail = 5))
+    return get(kinds, A, :none) == :array_float ? A : nothing
+end
+
+# Arrays whose snapshot starts at the head of `body`, sorted by name.
+function agen_asnap_boundary_arrays(body, kinds, push_pop)
+    push_pop === nothing && return Symbol[]
+    return sort([A for (A, k) in kinds if k == :array_float && get(push_pop, agen_site_key(body, 0, A), false) === true]; by = string)
+end
+
+# Returns `(sites, plan)`. `sites` has every write site to a snapshotted array removed, plus one `agen_site_key(B, 0, A) => true` entry
+# per snapshot, which the layout and both sweeps read. `plan` is `nothing` when no loop qualifies, else `(bodies, arrays)`.
+function agen_asnap_apply(kernel, active_map, sites; ii_plan = nothing)
+    (out, plan) = agen_asnap_plan(kernel, active_map, sites; ii_plan = ii_plan)
+    isempty(plan.arrays) && return (sites, nothing)
+    return (out, plan)
+end
+
+function agen_asnap_sites(plan)
+    return [agen_asnap_site(A) for A in plan.arrays]
+end
+
+# Returns `(sites, plan)` as agen_asnap_apply does, but always a plan. `plan.bodies` maps agen_site_key(B, 0) to the arrays snapshotted
+# at the head of B.
+function agen_asnap_plan(kernel, active_map, sites; ii_plan = nothing)
+    kinds = kernel.sig.kinds
+    bodies = Dict{Any,Vector{Symbol}}()
+    out_sites = copy(sites)
+    agen_asnap_walk!(kernel.body, kinds, Set(kernel.sig.args), active_map, sites, out_sites, bodies, ii_plan, Set{Symbol}(), false, false)
+    arrays = sort(unique(vcat(Symbol[], values(bodies)...)); by = string)
+    return (out_sites, (bodies = bodies, arrays = arrays))
+end
+
+# `in_block`: L or an ancestor is a Tier B ragged-block ancestor, whose layout uses block-local offsets (G9).
+# `in_ii`: L or an ancestor is classified by ii_plan, and its body is emitted by a different path (G7).
+function agen_asnap_walk!(body, kinds, args, active_map, sites, out_sites, bodies, ii_plan, handled::Set{Symbol}, in_block::Bool, in_ii::Bool)
+    for (idx, st) in enumerate(body)
+        if st.kind == :for
+            ii_here = in_ii || (ii_plan !== nothing && get(ii_plan, agen_site_key(body, idx), nothing) !== nothing)
+            block_here = in_block || agen_tier_b_walk(st.body, agen_collect_reassigned(st.body, true)) !== nothing
+            newly = Symbol[]
+            if !block_here && !ii_here
+                B = st.body
+                follow = agen_asnap_follow_vars(B, st.var, kinds)
+                indirect = agen_asnap_indirect_vars(B, kinds)
+                for A in sort(collect(agen_asnap_written_arrays!(B, Set{Symbol}(), kinds)); by = string)
+                    (A in args && A ∉ handled && get(active_map, A, false)) || continue
+                    (haskey(kinds, Symbol(string(A) * "_snap")) || haskey(kinds, agen_asnap_len(A))) && continue
+                    wkeys = agen_asnap_write_keys!(B, A, Any[])
+                    any(k -> get(sites, k, false) === true, wkeys) || continue
+                    any(k -> get(sites, k, false) === true, agen_asnap_scatter_keys!(B, A, indirect, kinds, Any[])) || continue
+                    agen_asnap_write_in_ii_loop(B, A, ii_plan, kinds) && continue
+                    agen_asnap_final_read_ok(B, A, kinds) || continue
+                    agen_asnap_swept_write(B, A, false) || continue
+                    agen_asnap_index_free(B, A, follow) || continue
+                    push!(newly, A)
+                    for k in wkeys
+                        out_sites[k] = false
+                    end
+                    out_sites[agen_site_key(B, 0, A)] = true
+                end
+                isempty(newly) || (bodies[agen_site_key(B, 0)] = newly)
+            end
+            agen_asnap_walk!(st.body, kinds, args, active_map, sites, out_sites, bodies, ii_plan, union(handled, Set(newly)), block_here, ii_here)
+        elseif st.kind == :if
+            agen_asnap_walk!(st.then, kinds, args, active_map, sites, out_sites, bodies, ii_plan, handled, in_block, in_ii)
+            agen_asnap_walk!(st.els, kinds, args, active_map, sites, out_sites, bodies, ii_plan, handled, in_block, in_ii)
+        end
+    end
+    return nothing
+end
+
+# Forward head and reverse tail of a snapshot. The copy is a plain loop over the linear index of A, whatever its rank. Slot n of the
+# stack holds iteration n, so the base is (position - 1) * length(A).
+function agen_asnap_save(body, kinds, ectx)
+    exprs = Any[]
+    ectx.keep_push_pop && return exprs
+    for A in agen_asnap_boundary_arrays(body, kinds, ectx.push_pop)
+        stack = agen_site_stack_name(agen_asnap_site(A))
+        len = agen_asnap_len(A)
+        base = Symbol("__sbase_", A)
+        k = Symbol("__sk_", A)
+        idx = agen_site_index(exprs, ectx, agen_site_key(body, 0, A))
+        push!(exprs, Expr(:(=), base, Expr(:call, :*, Expr(:call, :-, idx, 1), len)))
+        push!(exprs, emit_forloop(k, 1, len, 1, Any[Expr(:(=), Expr(:ref, stack, Expr(:call, :+, base, k)), Expr(:ref, A, k))]))
+    end
+    return exprs
+end
+
+function agen_asnap_restore(body, kinds, ectx)
+    exprs = Any[]
+    ectx.keep_push_pop && return exprs
+    for A in agen_asnap_boundary_arrays(body, kinds, ectx.push_pop)
+        stack = agen_site_stack_name(agen_asnap_site(A))
+        len = agen_asnap_len(A)
+        base = Symbol("__sbase_", A)
+        k = Symbol("__sk_", A)
+        idx = agen_site_index(exprs, ectx, agen_site_key(body, 0, A))
+        push!(exprs, Expr(:(=), base, Expr(:call, :*, Expr(:call, :-, idx, 1), len)))
+        push!(exprs, emit_forloop(k, 1, len, 1, Any[Expr(:(=), Expr(:ref, A, k), Expr(:ref, stack, Expr(:call, :+, base, k)))]))
+    end
+    return exprs
+end
+
 function agen_ii_force_no_snapshot!(body, vn_local, override)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
@@ -4735,7 +5115,7 @@ function agen_emit_ii_loop(stmt, lin_stmt, kinds, active_map, value_needed, reas
 end
 
 function agen_forward_body(body, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = agen_ectx_stack(), lin_body = nothing, unsafe = nothing)
-    exprs = Any[]
+    exprs = agen_asnap_save(body, kinds, ectx)
     for (idx, stmt) in enumerate(body)
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
@@ -5122,6 +5502,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             end
         end
     end
+    append!(exprs, agen_asnap_restore(primal_body, kinds, ectx))
     return exprs
 end
 
@@ -5575,7 +5956,7 @@ end
 function cgen_parse_generated_assign(stmt::Expr)
     lhs = parse_lvalue(stmt.args[1])
     rhs = stmt.args[2]
-    if cgen_is_pop_call(rhs) || cgen_is_stack_alloc(rhs)
+    if cgen_is_pop_call(rhs) || cgen_is_stack_alloc(rhs) || cgen_is_length_call(rhs)
         return (kind = :assign, lhs = lhs, rhs = rhs)
     end
     parse_check_expr(rhs, false)
@@ -5583,6 +5964,9 @@ function cgen_parse_generated_assign(stmt::Expr)
 end
 
 cgen_is_pop_call(rhs) = rhs isa Expr && rhs.head == :call && length(rhs.args) == 2 && rhs.args[1] == :pop!
+
+# `__len_A = length(A)`: initstacks_* of an array snapshot reads the length of an array argument once, to size the snapshot stack
+cgen_is_length_call(rhs) = rhs isa Expr && rhs.head == :call && length(rhs.args) == 2 && rhs.args[1] == :length && rhs.args[2] isa Symbol
 
 # Matches agen_stack_alloc_expr's own output: the keep_push_pop=true empty form
 # Vector{Float64}()/Vector{Int64}() (1 arg), and the keep_push_pop=false pre-sized form
@@ -10313,6 +10697,8 @@ function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     lin_plan = lin_build(kernel, active_map)
     ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
     (agen_sites, remat) = keep_push_pop ? (agen_sites, nothing) : agen_remat_apply(kernel, active_map, agen_sites)
+    (agen_sites, asnap) = keep_push_pop ? (agen_sites, nothing) : agen_asnap_apply(kernel, active_map, agen_sites; ii_plan = ii_plan)
+    asnap === nothing || (snapshot_plan = vcat(snapshot_plan, agen_asnap_sites(asnap)))
     return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, push_pop = agen_sites, ii_plan = ii_plan, remat = remat)
 end
 
@@ -10327,6 +10713,8 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     lin_plan = lin_build(kernel, active_map)
     ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
     (agen_sites, remat) = keep_push_pop ? (agen_sites, nothing) : agen_remat_apply(kernel, active_map, agen_sites)
+    (agen_sites, asnap) = keep_push_pop ? (agen_sites, nothing) : agen_asnap_apply(kernel, active_map, agen_sites; ii_plan = ii_plan)
+    asnap === nothing || (snapshot_plan = vcat(snapshot_plan, agen_asnap_sites(asnap)))
     layout = nothing
     value_needed = exempt = stacks = nothing
     if !keep_push_pop
@@ -10346,7 +10734,8 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
 # stade_adjoint's own initstacks_* already drops a stack once fusion leaves it unused, and validation code sharing initstacks_* across both
 # adjoint and hvp calls needs hvp_expr's signature to match. hvp_expr's fwd/bwd reuse the same agen_forward_body/agen_backward_body calls as
 # the adjoint path, landing on the same unused set. is_hvp=true additionally drops each dropped stack's orphaned `<stack>_d` shadow alloc.
-    (hvp_expr, initstacks_expr) = agen_finalize_stacks(hvp_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp = true)
+    (hvp_expr, initstacks_expr) = agen_finalize_stacks(hvp_expr, initstacks_expr, snapshot_plan, ii_plan; is_hvp = true,
+                                                         force = !keep_push_pop && any(s -> agen_asnap_site_array(s, kernel.sig.kinds) !== nothing, snapshot_plan))
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
 

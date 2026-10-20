@@ -1271,6 +1271,87 @@ placement rule (a write inside an `if` is recovered by the branch machinery's
 own recompute) and the after-the-loop half of the coverage rule (served by the
 block-boundary restore). Both stay as conservative bounds and print as `info`.
 
+### Array snapshot (`agen_asnap_*`)
+
+`ttgc` smooths a nodal field `mup` inside a Jacobi loop: zero it, scatter cell
+contributions into it through `i_cell_to_node`, then read it in a nonlinear
+node update. The site-level TBR pushes the old value of `mup` at all four write
+sites, because the read at the bottom of the loop body reaches the writes at the
+top through the back edge. A push at a scatter reads the old value, so the
+scatter is a read-modify-write that the offload gate refuses (`rmw`). The four
+cell loops inside the Jacobi loops stayed on the host.
+
+No derivative reads a partial sum of `mup`. The reverse sweep needs only the
+value the body left. So, for a loop `L` with body `B` and an array `A`:
+
+1. the forward sweep copies the whole of `A` into slot `n` of `<A>_snap_stack`
+   at the head of iteration `n` of `L`;
+2. no write site to `A` in `B` pushes or pops;
+3. the reverse sweep restores `A` from slot `n` at the tail of the reverse of
+   iteration `n`.
+
+At the head of the reverse of iteration `n`, memory holds the value `B` left (the
+live value for the last iteration, or what the restore of iteration `n+1`
+wrote). That is exactly what every final read needs, for every element, so no
+argument about which elements `B` covers is needed. This matters: with an
+indirect index no covering-zero-loop argument can be proved.
+
+`agen_asnap_plan(kernel, active_map, sites; ii_plan)` is pure. `agen_asnap_apply`
+returns the site map without the write sites, plus one
+`agen_site_key(B, 0, A) => true` entry per snapshot, and the plan.
+`agen_asnap_site(A)` is the pseudo-site `(kind=:array, array=<A>_snap)`, appended
+to the snapshot plan so that the stack name, the signature, the allocation, the
+HVP shadow stack (`<A>_snap_stack_d`) and the CSE float names follow without
+extra code. `agen_layout_walk_top!` registers the head of each snapshot body and
+`agen_layout` multiplies that stack's size by `__len_A`. `agen_forward_body`
+emits the copy loop first, `agen_backward_body` emits the restore loop last.
+Both are ordinary `for` loops over the linear index `1:__len_A`, so the code is
+independent of the rank of `A`, and `hvp_double_stmt` doubles them like any
+other loop. `initstacks_*` takes `A`, evaluates `__len_A = length(A)`, and
+returns `__len_A` after the stacks; the adjoint and the HVP take it as a trailing
+argument, the channel Tier B tables use. A stack whose every site was removed has
+no layout entry: `agen_init_emit` leaves it out, and `agen_finalize_stacks` runs
+with `force` so the unused name and its HVP shadow leave the signatures.
+`cgen_is_length_call` lets the generated-code parser take `__len_A = length(A)`
+in `initstacks_*`; the cgen parser still refuses `length` anywhere else.
+
+Guards. Each refuses when it cannot prove its condition.
+
+| Guard | Condition | Kind |
+|---|---|---|
+| G1 | `A` is an active float kernel argument | scope |
+| G3 | at least one write site to `A` in `B` is still pushed | scope |
+| G4 | every top-level statement of `B` that touches `A` at or before the last statement writing `A` only reads `A` as the self term of a pure accumulation | correctness |
+| G5 | a read in an `if` condition counts as a read | cautious (no oracle can fail it: the reverse sweep replays a branch from its saved flag) |
+| G6 | outermost qualifying loop only | cost |
+| G7 | neither `L`, nor an ancestor, nor a loop in `B` that writes `A` is classified by `ii_plan` | correctness |
+| G9 | no ragged-block ancestor (Tier B) | correctness |
+| G10 | `B` writes `A` under an inner loop whose bounds are not both literals | cost |
+| G12 | the kernel has no variable named `<A>_snap` or `__len_<A>` | correctness |
+| G13 | no write index to `A` follows the loop variable (through scalars, inner loop bounds, or written integer arrays) | cost |
+| G14 | a pushed scatter site exists: a read-modify-write of `A` through an index an integer array supplies | cost |
+
+G10, G13 and G14 exist because the copy costs `length(A)` per iteration. Without
+them the first version snapshotted `mpnn` (a per-edge slice of a large scratch
+array: quadratic memory, and the loops over edges and nodes left the GPU),
+`transformer` (stack slots 4900 to 19924) and `advection` (8 to 16). With them
+the corpus outputs differ from v0.4.7 only for the scatter kernels and `ttgc`;
+`keep_push_pop = true` is byte-identical everywhere.
+
+Measured (`validate_offload.jl` ceilings, host loops left, adjoint and HVP
+alike): `ttgc` 18 to 6; the scatter witnesses `asnap_ok`, `_2d`, `_ifwrite`,
+`_twoarrays`, `_zerocover`, `_zerotrip`, `_outside`, `_ii` 7 (or 9) to 3,
+`asnap_nested` 10 to 6. Stack slots: `ttgc` 605 to 475 (`fuse_ii_loops`: 345 to
+215), `asnap_ok` 60 to 24; a snapshot costs more when the body writes few
+elements of a large array (`asnap_zerotrip` 9 to 21, `asnap_2d` 117 to 207). The
+mechanism buys offload, not memory.
+
+`test/validate_array_snapshot.jl` checks the plan of every corpus kernel, the
+effect on `ttgc`, the final state of every array and adjoint against
+`keep_push_pop=true` (exactly equal, with a negative control that removes the
+restore loop), the ii guards with a synthetic plan, and sabotages each guard in
+a fresh process. G5 prints as `info`.
+
 ## IV.13 `ii_*` and `fuse_ii_loops` — loop fusion
 
 **Consumes** `kernel`. **Produces**

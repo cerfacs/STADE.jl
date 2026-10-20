@@ -134,6 +134,28 @@ coverage by a kernel-wide read count (it never fires on a tiled kernel whose
 register names are reused across loops) or by an outer body's write (the first
 iteration would read that write and later ones the previous iteration's value).
 
+**Array snapshot** (`agen_asnap_plan`, `keep_push_pop=false` only): a loop that
+scatters into an array `A` and reads `A` after every write pushes the old value
+at each write, and the push is a read-modify-write that keeps the loop on the
+host. One copy of the whole `A` at the head of each iteration of the enclosing
+loop, restored at the tail of its reverse, replaces those pushes and lets the
+scatter offload (`ttgc`: 18 to 6 host loops). It is right only when every
+derivative read of `A` follows every write to `A` in the body (G4). The
+mechanism leaves the per-write pushes alone for every other array. Wiring: a
+pseudo-site `<A>_snap` (stack `<A>_snap_stack`) joins the snapshot plan, the
+push map gets `agen_site_key(B, 0, A) => true` and loses the write sites, and
+`initstacks_*` takes the array, returns `__len_A` after the stacks and the
+adjoint takes it as a trailing argument (`length` is not a whitelisted
+intrinsic, so no generated kernel calls it; `cgen_is_length_call` admits it in
+`initstacks_*` only). Correctness guards G4, G7, G9, G12 must each fail an
+oracle or the array-state comparison when removed. G6, G10, G13, G14 are cost
+guards: removed, the plan changes and the result stays right, and the stack
+grows (a whole-array copy per iteration costs `length(A)` where a per-slice
+write costs a few slots). Do not widen G14 past scatters: it is what keeps the
+copy off `mpnn`, `transformer` and `advection`. An array-state comparison
+against `keep_push_pop=true` is mandatory, because the gradient can stay right
+while the restore is missing.
+
 **Live-out rule of the ii classifier.** An `:independent` loop is fused at the
 forward position and must not consume an adjoint that code after the loop seeds.
 An active accumulator read after its loop defers to the backward position

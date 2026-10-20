@@ -4,7 +4,7 @@ include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
     validate_plain_write_gate(dir="val-corpus")
 
 Regression gate for the two plain-write hazards that `validate_ownership.jl` found in unmodified STADE 0.4.4 (ttgc and
-idm_refuse_cond_read), and for the three guards in `cgen_split_loop_gate` that close them:
+idm_refuse_cond_read; since the array snapshot, asnap_readbefore witnesses the first), and for the three guards in `cgen_split_loop_gate` that close them:
 
   * `cgen_overlap_proven_arrays` refuses a loop whose plain writes to one array provably land on one element from two threads
     (`v[i]` and `v[i+1]`). An index it cannot analyse stays trusted, so mpnn's three slices of one buffer still offload.
@@ -44,7 +44,9 @@ function validate_plain_write_gate(dir::String = joinpath(@__DIR__, "val-corpus"
     r = report("idm_overlap_plain");  check(has(r, :host, :overlap, :a), "idm_overlap_plain: plain writes a[i], a[i+1] -> host (overlap, a)")
     r = report("idm_refuse_cond_read"); check(has(r, :host, :overlap, :v), "idm_refuse_cond_read: restores v[i], v[i+1] -> host (overlap, v)")
     r = report("idm_gather_rmw");     check(has(r, :host, :rmw, :m), "idm_gather_rmw: m[n] = m[n]*0.5 + x through a gather -> host (rmw, m)")
-    r = report("ttgc");               check(any(x -> x.verdict == :host && x.reason == :rmw, r), "ttgc: scatter with saved old value, and its undo -> host (rmw)")
+    # the array snapshot takes the saved old values off ttgc's scatters; asnap_readbefore reads the array before its writes, keeps them, and stays on the host
+    r = report("asnap_readbefore");   check(any(x -> x.verdict == :host && x.reason == :rmw, r), "asnap_readbefore: scatter with saved old value, and its undo -> host (rmw)")
+    r = report("ttgc");               check(!any(x -> x.reason == :rmw, r), "ttgc: no saved old value left on the scatters (array snapshot) -> no rmw refusal")
     r = report("idm_cse_acc")
     check(any(x -> x.verdict == :kernel && x.reason == :ok, r), "idm_cse_acc: CSE'd accumulation -> offloads")
     check(has(r, :host, :rmw, :mb), "idm_cse_acc: its reverse zeroes and re-adds mb through a gather -> host (rmw, mb)")
@@ -70,7 +72,7 @@ function validate_plain_write_gate(dir::String = joinpath(@__DIR__, "val-corpus"
     src = joinpath(@__DIR__, "validate_ownership.jl")
     guards = (
         ("overlap", "cgen_overlap_proven_arrays(body::Vector{NamedTuple}, thread_var::Symbol) = Set{Symbol}()", ["idm_overlap_plain", "idm_refuse_cond_read"]),
-        ("rmw", "cgen_rmw_hazard_arrays(body::Vector{NamedTuple}) = Set{Symbol}()", ["idm_gather_rmw", "ttgc"]),
+        ("rmw", "cgen_rmw_hazard_arrays(body::Vector{NamedTuple}) = Set{Symbol}()", ["idm_gather_rmw", "asnap_readbefore"]),
         # the three guards of the save-only scalar relaxation; each control breaks exactly one of its conditions
         ("saveonly push", "cgen_ends_with_push(body::Vector{NamedTuple}, v::Symbol) = true", ["so_inner"]),
         ("saveonly closed", "cgen_saveonly_closed(body::Vector{NamedTuple}, v::Symbol, in_writer::Bool = false) = true", ["so_hostread"]),

@@ -78,6 +78,15 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "ddp_tangent_input" => 0,
         "ddp_twoparam" => 0,
         "ddp_written_per_sample" => 0,
+        # Array-snapshot witnesses. Each of these scatters into an array that the loop reads after every write, so the array snapshot
+        # replaces the per-write saves and the scatter loops leave the host. The v0.4.7 ceilings were 7 (10 for nested, 9 for ii).
+        "asnap_ok" => 3, "asnap_2d" => 3, "asnap_ifwrite" => 3, "asnap_twoarrays" => 3, "asnap_zerocover" => 3, "asnap_zerotrip" => 3,
+        "asnap_outside" => 3, "asnap_nested" => 6, "asnap_nestedboth" => 6, "asnap_ii" => 3,
+        # Kernels the snapshot must refuse. These keep their host loops. asnap_nameclash keeps the scatter into m on the host,
+        # because the name of its snapshot stack would collide with the array m_snap.
+        "asnap_readbefore" => 7, "asnap_selfnl" => 9, "asnap_readbetween" => 11, "asnap_nameclash" => 7, "asnap_ragged" => 11,
+        # Cost refusals: the snapshot would be correct and would not pay (guards G5, G10, G13).
+        "asnap_condread" => 11, "asnap_direct" => 2, "asnap_slice" => 2,
         "advection" => 3, "advection_multi" => 3, "affine_loss" => 0,
         "bilinear" => 0, "bnd_branch" => 3, "bnd_carried" => 1,
         "bnd_nested_only" => 5, "bnd_readfirst" => 6,
@@ -117,7 +126,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
         "retire_empty" => 4,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,
-        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 18,
+        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 6,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,
         "windowed_relax_retire" => 7,
     # idm_*: the idiom relaxation of the GPU split gate (cgen_split_loop_gate). The four

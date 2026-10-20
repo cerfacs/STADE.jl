@@ -9,10 +9,13 @@ function so_inner_d(x, xd, w, wd, q, qd, y, yd, loss, lossd, i_n, i_nc)
             wv = w[ci]
             qd[(t - 1) * i_nc + ci] = wv * xvd + xv * wvd
             q[(t - 1) * i_nc + ci] = xv * wv
-            xvd = xd[ci + 1]
-            xv = x[ci + 1]
-            wvd = wd[ci + 1]
-            wv = w[ci + 1]
+            __cse_0 = 1.0 + run
+            __cse_1 = x[ci + 1]
+            xvd = __cse_0 * xd[ci + 1] + __cse_1 * rund
+            xv = __cse_1 * __cse_0
+            __cse_2 = w[ci + 1]
+            wvd = __cse_0 * wd[ci + 1] + __cse_2 * rund
+            wv = __cse_2 * __cse_0
             qd[(t - 1) * i_nc + ci] = qd[(t - 1) * i_nc + ci] + (((wv * run) * xvd + (xv * run) * wvd) + (xv * wv) * rund)
             q[(t - 1) * i_nc + ci] = q[(t - 1) * i_nc + ci] + xv * wv * run
         end
@@ -22,10 +25,10 @@ function so_inner_d(x, xd, w, wd, q, qd, y, yd, loss, lossd, i_n, i_nc)
         y[t] = run
     end
     for k = 1:i_n
-        __cse_0 = y[k]
-        __cse_1 = __cse_0 * yd[k]
-        lossd[1] = lossd[1] + (__cse_1 + __cse_1)
-        loss[1] = loss[1] + __cse_0 * __cse_0
+        __cse_3 = y[k]
+        __cse_4 = __cse_3 * yd[k]
+        lossd[1] = lossd[1] + (__cse_4 + __cse_4)
+        loss[1] = loss[1] + __cse_3 * __cse_3
     end
     return nothing
 end
@@ -37,8 +40,8 @@ function so_inner(x, w, q, y, loss, i_n, i_nc)
             xv = x[ci]
             wv = w[ci]
             q[(t - 1) * i_nc + ci] = xv * wv
-            xv = x[ci + 1]
-            wv = w[ci + 1]
+            xv = x[ci + 1] * (1.0 + run)
+            wv = w[ci + 1] * (1.0 + run)
             q[(t - 1) * i_nc + ci] = q[(t - 1) * i_nc + ci] + xv * wv * run
         end
         run = run * 0.5 + q[(t - 1) * i_nc + 1]

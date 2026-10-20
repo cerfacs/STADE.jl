@@ -1,0 +1,113 @@
+function initstacks_cross_readbefore_b(i_n, i_nc)
+    xv_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) * max(0, div(i_nc - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1))
+    return xv_stack
+end
+
+function cross_readbefore_hv(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xd, xbd, wd, wbd, zd, zbd, lossd, lossbd, xv_stack)
+    xv_stack_d = Vector{Float64}(undef, length(xv_stack))
+    a = 0.0
+    xv = 0.0
+    ab = 0.0
+    xvb = 0.0
+    ad = 0.0
+    abd = 0.0
+    xvd = 0.0
+    xvbd = 0.0
+    for t = 1:i_n
+        ad = 0.0
+        a = 0.0
+        xvd = 0.5 * xd[t]
+        xv = x[t] * 0.5
+        for ci = 1:i_nc
+            __hcse_0 = w[ci]
+            __hcse_1 = (xv * __hcse_0) * xvd
+            ad = ad + ((__hcse_1 + __hcse_1) + (xv * xv) * wd[ci])
+            a = a + xv * xv * __hcse_0
+            __idx_xv_stack_1 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            xv_stack_d[__idx_xv_stack_1] = xvd
+            xv_stack[__idx_xv_stack_1] = xv
+            xvd = xd[(t + ci) - 1]
+            xv = x[(t + ci) - 1]
+        end
+        zd[t] = ad
+        z[t] = a
+        __idx_xv_stack_4 = max(0, div(i_n - 1, 1) + 1) * max(0, div(i_nc - 1, 1) + 1) + ((t - 1) + 1)
+        xv_stack_d[__idx_xv_stack_4] = xvd
+        xv_stack[__idx_xv_stack_4] = xv
+    end
+    for m = 1:i_n
+        __cse_0d = zd[m]
+        __cse_0 = z[m]
+        __hcse_2 = __cse_0 * __cse_0d
+        lossd[1] = lossd[1] + (__hcse_2 + __hcse_2)
+        loss[1] = loss[1] + __cse_0 * __cse_0
+    end
+    for m = i_n:-1:1
+        __hcse_3 = lossb[1]
+        __hcse_4 = z[m]
+        __cse_1d = __hcse_3 * zd[m] + __hcse_4 * lossbd[1]
+        __cse_1 = __hcse_4 * __hcse_3
+        zbd[m] = zbd[m] + __cse_1d
+        zb[m] = zb[m] + __cse_1
+        zbd[m] = zbd[m] + __cse_1d
+        zb[m] = zb[m] + __cse_1
+    end
+    for t = i_n:-1:1
+        __idx_xv_stack_0 = max(0, div(i_n - 1, 1) + 1) * max(0, div(i_nc - 1, 1) + 1) + ((t - 1) + 1)
+        xvd = xv_stack_d[__idx_xv_stack_0]
+        xv = xv_stack[__idx_xv_stack_0]
+        __oldb_0d = zbd[t]
+        __oldb_0 = zb[t]
+        zbd[t] = 0.0
+        zb[t] = 0.0
+        abd = abd + __oldb_0d
+        ab = ab + __oldb_0
+        for ci = i_nc:-1:1
+            __idx_xv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            xvd = xv_stack_d[__idx_xv_stack_0]
+            xv = xv_stack[__idx_xv_stack_0]
+            __oldb_2d = xvbd
+            __oldb_2 = xvb
+            xvbd = 0.0
+            xvb = 0.0
+            xbd[(t + ci) - 1] = xbd[(t + ci) - 1] + __oldb_2d
+            xb[(t + ci) - 1] = xb[(t + ci) - 1] + __oldb_2
+            __hcse_5 = w[ci]
+            __hcse_6 = xv * __hcse_5
+            __cse_2d = ab * (__hcse_5 * xvd + xv * wd[ci]) + __hcse_6 * abd
+            __cse_2 = __hcse_6 * ab
+            xvbd = xvbd + __cse_2d
+            xvb = xvb + __cse_2
+            xvbd = xvbd + __cse_2d
+            xvb = xvb + __cse_2
+            __hcse_7 = xv * xvd
+            __hcse_8 = xv * xv
+            wbd[ci] = wbd[ci] + (ab * (__hcse_7 + __hcse_7) + __hcse_8 * abd)
+            wb[ci] = wb[ci] + __hcse_8 * ab
+        end
+        __oldb_0d = xvbd
+        __oldb_0 = xvb
+        xvbd = 0.0
+        xvb = 0.0
+        xbd[t] = xbd[t] + 0.5__oldb_0d
+        xb[t] = xb[t] + 0.5__oldb_0
+        abd = 0.0
+        ab = 0.0
+    end
+    return nothing
+end
+
+function cross_readbefore(x, w, z, loss, i_n, i_nc)
+    for t = 1:i_n
+        a = 0.0
+        xv = x[t] * 0.5
+        for ci = 1:i_nc
+            a = a + xv * xv * w[ci]
+            xv = x[(t + ci) - 1]
+        end
+        z[t] = a
+    end
+    for m = 1:i_n
+        loss[1] = loss[1] + z[m] * z[m]
+    end
+end
