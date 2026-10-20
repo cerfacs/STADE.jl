@@ -289,3 +289,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
             bad == 0 ? "" : "   *** $bad NOT OK ***")
     return bad
 end
+
+if abspath(PROGRAM_FILE) == @__FILE__
+    exit(validate_offload() == 0 ? 0 : 1)
+end

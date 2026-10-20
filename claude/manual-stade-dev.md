@@ -2295,6 +2295,9 @@ order changes, so the last bits of a result differ.
 CUDA only. The large-trip branch of an array-element reduction is a
 device-side broadcast add on a one-element view, with no scalar copied to
 the host.
+This branch is not capturable in a CUDA graph (the dims reduction of
+CUDA.jl fails during capture). A captured call needs
+`reduction_threshold = typemax(Int)`, which always takes the atomic kernel.
 
 **Array privacy**
 The proof that a written array's whole access pattern is confined to a
