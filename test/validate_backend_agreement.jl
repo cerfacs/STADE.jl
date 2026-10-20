@@ -43,12 +43,6 @@ written -- so each gets its own property check below:
   * every host `if` whose condition reads an array must have that condition
     wrapped in `@allowscalar`, in both backends.
 
-One pair, `ttgc [hvp]`, is exempt from the structural comparison entirely: JACC
-cannot take a kernel wider than the splat ceiling, `jgen_body` therefore holds
-that loop on the host, and the resulting restructuring is not predictable enough
-to assert a relation against. That pair is covered only by the ceiling check and
-by numeric parity. It is the one blind spot here.
-
 Both were verified to fail when the corresponding guard is removed from
 `jgen_`, so all three defect shapes are now covered here.
 
@@ -64,11 +58,12 @@ HVP generates a 45-parameter kernel and dies with
 while the identical CUDA kernel, which takes its arguments positionally rather
 than through a splat, compiles fine. The limit was bracketed on hardware, not
 derived: a 25-argument kernel compiles, a 44-argument one does not. 32 is
-Julia's documented MAX_TUPLE_SPLAT and the most likely exact threshold, so it is
-used as the ceiling here -- treat it as a well-placed estimate rather than a
-measured boundary. This is a JACC/Julia limitation that STADE triggers by
-emitting wide kernels, not a STADE codegen bug, but catching it here beats
-discovering it on a device.
+Julia's documented MAX_TUPLE_SPLAT and the most likely exact threshold. A JACC
+kernel with more free variables than that therefore takes them packed in ONE tuple
+parameter (`__jargs`) and unpacks them first, so the loop is offloaded exactly as
+on CUDA. This script checks that no JACC kernel keeps more than the ceiling of
+positional parameters, and that a packed kernel unpacks as many variables as the
+CUDA twin takes arguments.
 
 One class of divergence is BY DESIGN and is excluded from the kernel count, after
 being mistaken for a defect. The idiomatic scalar reduction lowers differently on
@@ -114,6 +109,11 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
         return acc
     end
     kernel_arity(k) = length(k.args[1].args) - 1
+    # positional parameters after the leading index of a JACC kernel
+    jacc_params(k) = k.args[1].args[3:end]
+    # variables a JACC kernel really takes: its positional parameters, or the unpacked tuple entries of a packed one
+    is_unpack(st) = st isa Expr && st.head === :(=) && st.args[2] isa Expr && st.args[2].head === :ref && st.args[2].args[1] === :__jargs
+    jacc_arity(k) = (ps = jacc_params(k); length(ps) == 1 && ps[1] === :__jargs ? count(is_unpack, k.args[2].args) : length(ps))
 
     kernels = sort(filter(readdir(dir)) do f
         endswith(f, ".jl") && !any(endswith(f, s) for s in ("_b.jl", "_d.jl", "_hv.jl", "_cuda.jl", "_jacc.jl"))
@@ -188,14 +188,9 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
             ja = STADE.stade_jacc(expr)
 
             problems = String[]
-            # A CUDA kernel wider than the splat ceiling is one JACC legitimately cannot
-            # take, so the two backends are EXPECTED to diverge by exactly that many
-            # loops -- a real capability gap, not a missing guard. Any divergence beyond
-            # it is unexplained and fails.
-            over = count(k -> kernel_arity(k) > STADE.JGEN_MAX_SPLAT_ARGS, cu.kernels)
             cu_shapes = host_loop_shapes(cu.host)
             ja_shapes = host_loop_shapes(ja.host)
-            if over == 0
+            let
                 cu_shapes == ja_shapes ||
                     push!(problems, "host loops differ: cuda=$(length(cu_shapes)) jacc=$(length(ja_shapes))" *
                                     (length(cu_shapes) == length(ja_shapes) ? " (same count, different loops)" : ""))
@@ -207,8 +202,8 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
                 if length(cu.kernels) == length(ja_cmp)
                     # JACC kernels take a leading index argument; CUDA derives it from the thread id
                     for (i, (kc, kj)) in enumerate(zip(cu.kernels, ja_cmp))
-                        kernel_arity(kc) + 1 == kernel_arity(kj) ||
-                            push!(problems, "kernel $(i) arity: cuda=$(kernel_arity(kc)) jacc=$(kernel_arity(kj))")
+                        kernel_arity(kc) == jacc_arity(kj) ||
+                            push!(problems, "kernel $(i) arity: cuda=$(kernel_arity(kc)) jacc=$(jacc_arity(kj))")
                     end
                 end
                 # The exclusion is bounded, not a blanket one: a write-back exists only to fold a
@@ -217,23 +212,17 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
                 n_red = count_macro(ja.host, Symbol("@parallel_reduce"))
                 n_wb == n_red ||
                     push!(problems, "jacc reduction write-backs=$(n_wb) but @parallel_reduce calls=$(n_red)")
-            else
-                # Structural comparison is abandoned here, not merely relaxed. Holding a
-                # wide outer loop on the host does not subtract one kernel: its inner
-                # loops then become individually splittable, so JACC ends up with MORE
-                # kernels AND more host loops than CUDA (ttgc [hvp]: 23 vs 22 kernels,
-                # 9 vs 4 host loops). The restructuring is not cheaply predictable, so
-                # no arithmetic relation is asserted. This pair is therefore covered
-                # only by the ceiling check above and by numeric parity elsewhere --
-                # a real, and currently the only, blind spot in this script.
             end
 
-            # Every JACC kernel must be under the splat ceiling; if one is not, the
-            # gate in jgen_body failed and the kernel will not compile on a device.
+            # Every JACC kernel keeps at most the ceiling of positional parameters; a wider one is packed. A packed kernel must have
+            # more variables than the ceiling, or it was packed for no reason.
             for (i, kj) in enumerate(ja.kernels)
-                n = kernel_arity(kj) - 1   # minus the leading index argument JACC supplies
+                n = length(jacc_params(kj))
                 n <= STADE.JGEN_MAX_SPLAT_ARGS ||
-                    push!(problems, "jacc kernel $(i) takes $(n) splatted args (ceiling $(STADE.JGEN_MAX_SPLAT_ARGS)) -- the jgen_body gate let it through")
+                    push!(problems, "jacc kernel $(i) takes $(n) splatted args (ceiling $(STADE.JGEN_MAX_SPLAT_ARGS)) -- it must be packed")
+                if n == 1 && jacc_params(kj)[1] === :__jargs && jacc_arity(kj) <= STADE.JGEN_MAX_SPLAT_ARGS
+                    push!(problems, "jacc kernel $(i) is packed but carries only $(jacc_arity(kj)) variables")
+                end
             end
 
             ug = unguarded_entries(ja.host, Symbol("@parallel_for"))
@@ -248,8 +237,8 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
             checks += 1
             label = rpad("$(name) [$(mode)]", 34)
             if isempty(problems)
-                println(label, " ok  host=", length(cu_shapes), " kernels=", length(cu.kernels),
-                        over == 0 ? "" : "   (+$(over) loop(s) held on host by JACC's splat ceiling)")
+                npk = count(k -> length(jacc_params(k)) == 1 && jacc_params(k)[1] === :__jargs, ja.kernels)
+                println(label, " ok  host=", length(cu_shapes), " kernels=", length(cu.kernels), npk == 0 ? "" : "   ($(npk) packed)")
             else
                 println(label, " FAIL")
                 for p in problems

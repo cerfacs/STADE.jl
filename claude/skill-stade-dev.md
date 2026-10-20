@@ -332,6 +332,11 @@ kernel's own `__tid > trip_count` check; JACC's callee is a plain indexed
 function with no such guard, and `range = 0` raises `DivideError` on a
 live device. `jgen_launch_expr` must skip the launch instead.
 
+A JACC kernel with more than `JGEN_MAX_SPLAT_ARGS` free variables takes them as
+one tuple (`__jargs`), because JACC splats its arguments and Julia cannot compile
+a splat that wide. Never hold such a loop on the host instead: a host fallback
+mishandles any scalar adjoint that JACC promoted to a device array.
+
 **The `ii` callers use the strict gate only.** `cgen_reduction_only_loop`
 (`snap_ii_classify`, `agen_ii_classify`) must stay byte-identical in result.
 The GPU split uses `cgen_split_loop_gate`, which adds the accumulate-only and

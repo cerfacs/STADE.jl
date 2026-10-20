@@ -1643,7 +1643,7 @@ elements for plain writes.** Four controls make the trust explicit.
 `stade_gpu_report_file(path, backend)` returns one record per loop:
 `(owner, loop_var, lo, hi, step, depth, verdict, reason, array, via_idiom)`.
 `verdict` is `:kernel`, `:reduction` or `:host`. `reason` also takes
-`:splat_limit` for JACC. `validate_offload.jl` pins the refusals with it.
+`validate_offload.jl` pins the refusals with it.
 
 ### Two refusals the trust needs
 
@@ -1785,6 +1785,18 @@ Two consequences follow from deferring the vendor choice.
   allocator. There is no `undef`-style JACC allocator, so this zero-fills.
   That is harmless in practice, because every element is overwritten by a
   push before its first read.
+
+JACC splats its launch arguments into the kernel. A kernel with more than
+`JGEN_MAX_SPLAT_ARGS` (32, Julia's `MAX_TUPLE_SPLAT`) free variables fails to
+compile (`jl_f__apply_iterate`; `ttgc`'s HVP loop takes 42, measured on a
+V100: 25 compile, 42 do not). Until v0.4.16 `jgen_body` kept such a loop on the
+host. That was correct only by accident: a scalar adjoint promoted to a
+one-element device array (`dtbd`) was still updated by host code, which died with
+`+(CuArray, Float64)`. Now `jgen_kernel_def` packs the free variables into one
+tuple parameter (`__jargs`), unpacks them first, and `jgen_launch_expr` builds
+the tuple in its own host statement. A kernel at or below the limit is emitted
+exactly as before. `validate_backend_agreement.jl` compares the unpacked count
+with the CUDA kernel's argument count.
 
 JACC also has no `allowscalar` escape hatch, so a reduction result cannot
 be written back to a device array with a plain host assignment.

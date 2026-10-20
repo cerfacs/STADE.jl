@@ -243,8 +243,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
 
     # Backend agreement used to be checked here too. It now lives in
     # validate_backend_agreement.jl, which compares loop shapes and kernel arities
-    # rather than bare counts and knows that JACC's splat ceiling makes one pair
-    # legitimately diverge. Two implementations of one rule drift apart; this one
+    # rather than bare counts. Two implementations of one rule drift apart; this one
     # was the weaker, so it is gone rather than duplicated.
     # No generated host function may CALL a plain name it also ASSIGNS as a scalar.
     # A shadow name is its primal name plus b/d/bd, so a primal scalar `cl` becomes

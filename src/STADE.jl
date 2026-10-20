@@ -7581,7 +7581,7 @@ function cgen_collect_loop_vars(body, acc)
 end
 
 # One record per `for` loop that cgen_body or jgen_body visits. `verdict`: :kernel, :reduction (a kernel or a mapreduce lowering) or :host.
-# `reason`: :ok, or the first gate that refused (:scalar, :array, :scope, :stackop, :kernel_def, :splat_limit, :liveout).
+# `reason`: :ok, or the first gate that refused (:scalar, :array, :scope, :stackop, :kernel_def, :liveout).
 # `via_idiom` marks a loop that was accepted only through the idiom predicate.
 cgen_decision_record(owner::Symbol, stmt, depth::Int, verdict::Symbol, reason::Symbol, array, idiom::Bool) =
     (owner = owner, loop_var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step, depth = depth,
@@ -8534,12 +8534,6 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
             # codegen rather than a structural approximation of it
             stage === :ok && !cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth)) && (stage = :kernel_def)
-            # JACC's parallel_for SPLATS its varargs into the kernel. Past Julia's inference splat limit the compiler stops unrolling and
-            # emits a dynamic jl_f__apply_iterate with no GPU lowering: ttgc's HVP generated a 42-argument kernel and died with
-            # InvalidIRError live. cgen_ has no such ceiling (a @cuda launch passes arguments positionally), so keeping the loop on the
-            # host is slower but correct. Bracketed on hardware (25 args compile, 42 don't); 32 is Julia's MAX_TUPLE_SPLAT and the likely
-            # exact threshold.
-            stage === :ok && length(cgen_free_vars(stmt, stmt.var)) > JGEN_MAX_SPLAT_ARGS && (stage = :splat_limit)
             # Same live-out refusal cgen_body applies -- jgen_body had no equivalent, and no root_body
             # to apply it against. A split loop's scalars live on the device; a later host statement
             # reading one gets the stale host copy instead. ii_kill is the witness: cgen keeps that loop
@@ -8647,12 +8641,16 @@ end
 # thread-index intrinsic to bind, unlike cgen_kernel_def, since JACC.@parallel_for range=N
 # already guarantees the index range. cgen_loopvar_from_tid still does the affine lo/step
 # remapping, same as for cgen_.
-# Julia's MAX_TUPLE_SPLAT. See the ceiling's use in jgen_body for why it exists.
+# A kernel with more free variables than this takes them packed in one tuple. JACC splats its varargs into the kernel, and past Julia's
+# MAX_TUPLE_SPLAT the compiler emits a dynamic jl_f__apply_iterate that no GPU can run (ttgc's 42-argument HVP kernel, measured on a V100).
 const JGEN_MAX_SPLAT_ARGS = 32
 
 function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, reduce_vars::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}())
     jidx = :__jacc_i
-    body = Any[Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, jidx))]
+    packed = length(fargs) > JGEN_MAX_SPLAT_ARGS
+    # A packed kernel takes its free variables as one tuple and unpacks them first, so JACC's splat sees a single argument.
+    body = Any[Expr(:(=), v, Expr(:ref, :__jargs, k)) for (k, v) in enumerate(fargs) if packed]
+    push!(body, Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, jidx)))
     # see cgen_kernel_def's matching comment: cgen_reduction_only_loop's
     # convergent-constant proof injects each synthesized initializer
     # here, before the loop's own body runs.
@@ -8662,7 +8660,7 @@ function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, r
     fbody = cgen_fold_accumulates(stmt.body)
     append!(body, jgen_device_body(fbody, stmt.var, reduce_vars, cgen_race_write_arrays(fbody, stmt.var)))
     push!(body, emit_return_nothing())
-    return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, fargs...), Expr(:block, body...))
+    return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, (packed ? Any[:__jargs] : fargs)...), Expr(:block, body...))
 end
 
 # JACC.jl v1.x: JACC.@parallel_for range=N f(args...) -- a macro with a `range=` keyword, not a plain call; the kernel
@@ -8672,10 +8670,13 @@ end
 # device kernel's own guard, but JACC's plain-indexed-function model has no such guard, so the launch itself must be skipped.
 function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+    packed = length(fargs) > JGEN_MAX_SPLAT_ARGS
+    tname = Symbol("__jargs_", owner, "_", idx)
     launch = Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_for"))), nothing,
                   Expr(:(=), :range, n_iter),
-                  Expr(:call, jgen_kernel_fname(owner, idx), fargs...))
-    return Expr(:if, Expr(:call, :>, n_iter, 0), Expr(:block, launch))
+                  Expr(:call, jgen_kernel_fname(owner, idx), (packed ? Any[tname] : fargs)...))
+    # The tuple is built in its own host statement, never inside the launch macro's argument list.
+    return Expr(:if, Expr(:call, :>, n_iter, 0), Expr(:block, (packed ? Any[Expr(:(=), tname, Expr(:tuple, fargs...))] : Any[])..., launch))
 end
 
 function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol}, race_arrays::Set{Symbol} = Set{Symbol}(), thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
