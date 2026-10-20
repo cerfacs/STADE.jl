@@ -2126,14 +2126,179 @@ end
 # snap_value_needed_vars); :branch marks every `if`; :tripcount marks a reassignable loop bound. A write with no
 # sequential-loop ancestor, one assign site, and no read-before-write needs no site.
 
+# ---- integer state the reverse sweep must restore (:ivalue sites) ----
+#
+# agen_backward_body re-derives an integer local in the reverse sweep by re-running its assignment, which is only
+# sound for a variable in no `unsafe` chain (see agen_unsafe_int_vars). An `unsafe` integer is skipped there
+# entirely, so a float statement that reads it -- as an array index, say -- would see an undefined variable or
+# the value of the LAST forward iteration. These integers get the treatment a float scalar already gets: the old
+# value is pushed before each write and popped at the write's own reverse position.
+#
+# Only an integer READ by an active float statement (rhs or lhs index) needs it. Conditions are replayed from
+# the branch and count stacks, and a bound already on a :tripcount stack is restored from there.
+
+# the reads one statement makes by itself, children excluded
+function snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, acc)
+    if st.kind == :assign
+        var = st.lhs isa Symbol ? st.lhs : st.lhs.args[1]
+        if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false)
+            agen_collect_expr_vars!(st.rhs, acc)
+            if st.lhs isa Expr
+                for a in st.lhs.args[2:end]
+                    agen_collect_expr_vars!(a, acc)
+                end
+            end
+        end
+    elseif st.kind == :for
+        bounds = Set{Symbol}()
+        for e in (st.lo, st.hi, st.step)
+            agen_collect_expr_vars!(e, bounds)
+        end
+        union!(acc, setdiff(bounds, reassigned))
+    end
+    return nothing
+end
+
+function snap_itbr_collect_reads!(body, kinds, active_map, reassigned, acc)
+    for st in body
+        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, acc)
+        if st.kind == :for || st.kind == :while
+            snap_itbr_collect_reads!(st.body, kinds, active_map, reassigned, acc)
+        elseif st.kind == :if
+            snap_itbr_collect_reads!(st.then, kinds, active_map, reassigned, acc)
+            snap_itbr_collect_reads!(st.els, kinds, active_map, reassigned, acc)
+        end
+    end
+    return nothing
+end
+
+function snap_itbr_writes_in(st, v)
+    if st.kind == :assign
+        return (st.lhs isa Symbol ? st.lhs : st.lhs.args[1]) == v
+    elseif st.kind == :for || st.kind == :while
+        return any(t -> snap_itbr_writes_in(t, v), st.body)
+    elseif st.kind == :if
+        return any(t -> snap_itbr_writes_in(t, v), st.then) || any(t -> snap_itbr_writes_in(t, v), st.els)
+    end
+    return false
+end
+
+# Does the :whilecarry restore of this `while` body already hand `v` the right value at every active read inside
+# it? The replay starts each iteration from the value `v` held when the iteration began, so that holds exactly
+# when `v` is carried, every write to it is a direct statement of the body, and no active read follows the first
+# write. A counter bumped last (`k = k + 1`) is the usual case.
+function snap_itbr_start_covered(body, kinds, active_map, reassigned, v)
+    v in snap_while_carried_ints(body, kinds) || return false
+    first_write = 0
+    for (i, st) in enumerate(body)
+        if st.kind == :assign && (st.lhs isa Symbol ? st.lhs : st.lhs.args[1]) == v
+            first_write == 0 && (first_write = i)
+        elseif snap_itbr_writes_in(st, v)
+            return false
+        end
+    end
+    first_write == 0 && return false
+    for st in body[first_write + 1:end]
+        reads = Set{Symbol}()
+        snap_itbr_collect_reads!([st], kinds, active_map, reassigned, reads)
+        v in reads && return false
+    end
+    return true
+end
+
+# true when every active read of `v` lies inside a `while` that covers it (`cov` is the enclosing state)
+function snap_itbr_reads_covered(body, kinds, active_map, reassigned, v, cov)
+    for st in body
+        reads = Set{Symbol}()
+        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, reads)
+        v in reads && !cov && return false
+        if st.kind == :while
+            inner = cov || snap_itbr_start_covered(st.body, kinds, active_map, reassigned, v)
+            snap_itbr_reads_covered(st.body, kinds, active_map, reassigned, v, inner) || return false
+        elseif st.kind == :for
+            snap_itbr_reads_covered(st.body, kinds, active_map, reassigned, v, cov) || return false
+        elseif st.kind == :if
+            snap_itbr_reads_covered(st.then, kinds, active_map, reassigned, v, cov) || return false
+            snap_itbr_reads_covered(st.els, kinds, active_map, reassigned, v, cov) || return false
+        end
+    end
+    return true
+end
+
+function snap_itbr_count_reads(body, kinds, active_map, reassigned, v)
+    n = 0
+    for st in body
+        reads = Set{Symbol}()
+        snap_itbr_stmt_reads!(st, kinds, active_map, reassigned, reads)
+        v in reads && (n = n + 1)
+        if st.kind == :for || st.kind == :while
+            n = n + snap_itbr_count_reads(st.body, kinds, active_map, reassigned, v)
+        elseif st.kind == :if
+            n = n + snap_itbr_count_reads(st.then, kinds, active_map, reassigned, v)
+            n = n + snap_itbr_count_reads(st.els, kinds, active_map, reassigned, v)
+        end
+    end
+    return n
+end
+
+# A reassigned loop bound sits on a :tripcount stack and is popped just before the loop is reversed. That
+# restores `v` for every read positioned before the loop in the same body -- and inside it -- provided nothing
+# writes `v` first. richardson_substep reads `nsub` in `h = dt / nsub` and then loops to `nsub`: covered. `total`
+# is the number of statements anywhere in the kernel that read `v`; the loop must account for all of them.
+function snap_itbr_tripcount_covered(body, kinds, active_map, reassigned, v, total)
+    for (i, st) in enumerate(body)
+        if st.kind == :for
+            bounds = Set{Symbol}()
+            for e in (st.lo, st.hi, st.step)
+                agen_collect_expr_vars!(e, bounds)
+            end
+            if v in bounds && v in reassigned &&
+               !any(t -> snap_itbr_writes_in(t, v), body[1:i - 1]) && !any(t -> snap_itbr_writes_in(t, v), st.body) &&
+               snap_itbr_count_reads(body[1:i], kinds, active_map, reassigned, v) == total
+                return true
+            end
+            snap_itbr_tripcount_covered(st.body, kinds, active_map, reassigned, v, total) && return true
+        elseif st.kind == :while
+            snap_itbr_tripcount_covered(st.body, kinds, active_map, reassigned, v, total) && return true
+        elseif st.kind == :if
+            snap_itbr_tripcount_covered(st.then, kinds, active_map, reassigned, v, total) && return true
+            snap_itbr_tripcount_covered(st.els, kinds, active_map, reassigned, v, total) && return true
+        end
+    end
+    return false
+end
+
+# The integer scalars to restore. A scalar needs the restore when it is `unsafe`, read by an active float
+# statement, and written either inside a loop or at more than one site -- anything else holds one value for the
+# whole run, which the last-value read already sees. Two cases keep their existing mechanism: a loop bound on a
+# :tripcount stack (snap_itbr_tripcount_covered), and a counter a `while` already restores per iteration (snap_itbr_start_covered).
+# An integer ARRAY needs no entry: the parser already refuses `x[idx[k]]`, so an active statement reads an
+# integer array only through a scalar copy, and that scalar is what is restored.
+function snap_itbr_vars(kernel, active_map)
+    kinds = kernel.sig.kinds
+    unsafe = agen_unsafe_int_vars(kernel)
+    isempty(unsafe) && return Set{Symbol}()
+    reassigned = agen_collect_reassigned(kernel.body)
+    counts = agen_count_assign_sites(kernel.body)
+    reads = Set{Symbol}()
+    snap_itbr_collect_reads!(kernel.body, kinds, active_map, reassigned, reads)
+    return Set{Symbol}(v for v in unsafe
+                       if kinds[v] == :scalar_int && v in reads &&
+                          (v in reassigned || get(counts, v, 0) >= 2) &&
+                          !snap_itbr_reads_covered(kernel.body, kinds, active_map, reassigned, v, false) &&
+                          !snap_itbr_tripcount_covered(kernel.body, kinds, active_map, reassigned, v,
+                                                       snap_itbr_count_reads(kernel.body, kinds, active_map, reassigned, v)))
+end
+
 function snap_plan(kernel, active_map; site_needed = nothing)
     reassigned = snap_collect_reassigned(kernel.body)
     value_needed = snap_value_needed_vars(kernel)
     assign_counts = snap_count_assign_sites(kernel.body)
     sites = NamedTuple[]
     counter = Ref(0)
+    itbr = snap_itbr_vars(kernel, active_map)
     snap_walk!(kernel.body, active_map, kernel.sig.kinds, reassigned, value_needed, sites, counter,
-               false, assign_counts, kernel.body, site_needed)
+               false, assign_counts, kernel.body, site_needed, itbr)
 # A block-boundary push owns its stack outright instead of borrowing one an :assign site happened to
 # create. The boundary kill in snap_fwd_walk! retires exactly those sites, and
 # agen_block_boundary_vars skips a var with no (:value, var) stack -- so without this the push and its
@@ -2143,6 +2308,11 @@ function snap_plan(kernel, active_map; site_needed = nothing)
         any(s -> s.kind == :value && s.array == var, sites) && continue
         counter[] = counter[] + 1
         push!(sites, (kind = :value, array = var, at = counter[]))
+    end
+    # one Int64 stack per restored integer, after every other site: see snap_itbr_vars
+    for var in sort(collect(itbr); by = string)
+        counter[] = counter[] + 1
+        push!(sites, (kind = :ivalue, array = var, at = counter[]))
     end
     return sites
 end
@@ -2234,10 +2404,13 @@ function carry_walk!(body::Vector{NamedTuple}, out::Set{Symbol}, defined::Set{Sy
     return nothing
 end
 
-function snap_while_carried_ints(body, kinds)
+function snap_while_carried_ints(body, kinds, itbr = Set{Symbol}())
     return Set(v for v in carry_carried_vars(body)
-               if get(kinds, v, :none) == :scalar_int)
+               if get(kinds, v, :none) == :scalar_int && !(v in itbr))
 end
+
+# the integers that own an :ivalue stack, read back from the stack map so that agen_ never recomputes the decision
+agen_itbr_vars(stacks) = Set{Symbol}(v for (k, v) in keys(stacks) if k == :ivalue)
 
 # A scalar is CARRIED only if the body reads it before assigning it. One the
 # body defines first is fresh each iteration, so its earlier value is not
@@ -2367,7 +2540,7 @@ end
 # some other read could see a different value once forward and backward walk it in opposite
 # orders. Over-snapshotting costs a harmless extra push/pop pair, never a correctness bug --
 # push and pop always occupy the mirrored position, so nesting stays self-consistent.
-function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed = nothing)
+function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed = nothing, itbr = Set{Symbol}())
     for idx in eachindex(body)
         stmt = body[idx]
         if stmt.kind == :assign
@@ -2375,7 +2548,7 @@ function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, co
         elseif stmt.kind == :for
             snap_check_tripcount!(stmt, reassigned, sites, counter)
             snap_walk!(stmt.body, active_map, kinds, reassigned, value_needed, sites, counter,
-                       true, assign_counts, full_body, site_needed)
+                       true, assign_counts, full_body, site_needed, itbr)
         elseif stmt.kind == :while
             counter[] = counter[] + 1
             push!(sites, (kind = :whilecount, array = :count, at = counter[]))
@@ -2388,19 +2561,19 @@ function snap_walk!(body, active_map, kinds, reassigned, value_needed, sites, co
             # the body and popped inside the replay. Without this the replay
             # reads the value the counter held when the loop ENDED,
             # identically on every iteration.
-            for cv in sort(collect(snap_while_carried_ints(stmt.body, kinds)))
+            for cv in sort(collect(snap_while_carried_ints(stmt.body, kinds, itbr)))
                 counter[] = counter[] + 1
                 push!(sites, (kind = :whilecarry, array = cv, at = counter[]))
             end
             # in_loop = true: a while body re-executes, so a write inside it
             # needs its site exactly as one inside a `for` does.
             snap_walk!(stmt.body, active_map, kinds, reassigned, value_needed, sites, counter,
-                       true, assign_counts, full_body, site_needed)
+                       true, assign_counts, full_body, site_needed, itbr)
         elseif stmt.kind == :if
             counter[] = counter[] + 1
             push!(sites, (kind = :branch, array = :cond, at = counter[]))
-            snap_walk!(stmt.then, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed)
-            snap_walk!(stmt.els, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed)
+            snap_walk!(stmt.then, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed, itbr)
+            snap_walk!(stmt.els, active_map, kinds, reassigned, value_needed, sites, counter, in_loop, assign_counts, full_body, site_needed, itbr)
         end
     end
     return nothing
@@ -2778,7 +2951,7 @@ end
 function tgen_emit(kernel, lin_plan)
     fname = tgen_fname(kernel.sig.name)
     fargs = tgen_signature_args(kernel.sig)
-    body_exprs = tgen_body(lin_plan)
+    body_exprs = tgen_body(lin_plan, kernel.sig.kinds)
     reassigned = tgen_reassigned_scalar_args(kernel)
     push!(body_exprs, emit_return_scalars([tgen_shadow(v) for v in reassigned]))
     return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, emit_cse_stmts(body_exprs, Ref(0), tgen_cse_float_names(kernel.sig))...))
@@ -2821,23 +2994,25 @@ function tgen_signature_args(sig)
     return fargs
 end
 
-function tgen_body(plan)
+function tgen_body(plan, kinds)
     exprs = Any[]
     for stmt in plan
         if stmt.kind == :assign
-            push!(exprs, Expr(:(=), tgen_shadow(stmt.lhs), tgen_tangent_expr(stmt.tree)))
+            # an integer array has no shadow to reset: its name is not even a parameter of the tangent function
+            int_array = stmt.lhs isa Expr && get(kinds, stmt.lhs.args[1], :none) == :array_int
+            int_array || push!(exprs, Expr(:(=), tgen_shadow(stmt.lhs), tgen_tangent_expr(stmt.tree)))
             push!(exprs, Expr(:(=), stmt.lhs, stmt.tree.expr))
         elseif stmt.kind == :for
-            inner = tgen_body(stmt.body)
+            inner = tgen_body(stmt.body, kinds)
             push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
         elseif stmt.kind == :while
             # Forward mode runs alongside the primal, so the tangent needs no
             # trip count: the same condition over the same values selects the
             # same iterations. Only the reverse mode has to record anything.
-            push!(exprs, emit_while(stmt.cond, tgen_body(stmt.body)))
+            push!(exprs, emit_while(stmt.cond, tgen_body(stmt.body, kinds)))
         elseif stmt.kind == :if
-            then_exprs = tgen_body(stmt.then)
-            els_exprs = tgen_body(stmt.els)
+            then_exprs = tgen_body(stmt.then, kinds)
+            els_exprs = tgen_body(stmt.els, kinds)
             push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
         end
     end
@@ -2898,6 +3073,7 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     value_needed = exempt = stacks = nothing
     if !keep_push_pop
         agen_refuse_while_sized(kernel.body)
+        agen_refuse_itbr_sized(snapshot_plan)
         # Tier B kernels (a ragged/data-dependent loop bound) are no longer refused: agen_layout resolves as
         # much as possible into closed-form ragged-block tables, using plain :stack semantics only for what a
         # block can't resolve. ii_plan/fuse_ii_loops is exercised with keep_push_pop=false against the full
@@ -2985,7 +3161,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
     ectx = (keep_push_pop = keep_push_pop, loop_ctx = Any[], layout = layout, push_pop = push_pop, ii_plan = ii_plan, remat = remat)
 
     body = Any[]
-    append!(body, agen_local_primal_inits(kernel, active_map))
+    append!(body, agen_local_primal_inits(kernel, active_map, agen_itbr_vars(stacks)))
     append!(body, agen_local_shadow_inits(kernel, active_map))
     append!(body, agen_forward_body(kernel.body, kernel.sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, lin_body = lin_plan, unsafe = unsafe))
     append!(body, agen_backward_body(lin_plan, kernel.body, kernel.sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx))
@@ -3088,6 +3264,7 @@ function agen_site_stack_name(site)
     # one stack per carried variable, not one shared: the first version of
     # this will get a value wrong, and a shared stack makes that unattributable
     site.kind == :whilecarry && return Symbol("__wcarry_", site.array, "_stack")
+    site.kind == :ivalue && return Symbol("__ival_", site.array, "_stack")
     return :tripcount_stack
 end
 
@@ -3124,6 +3301,16 @@ function agen_refuse_while_sized(body)
         end
     end
     return nothing
+end
+
+# An :ivalue stack has no closed-form size: how often a restored integer is written depends on the run. Refused with
+# the alternative named, as a `while` is.
+function agen_refuse_itbr_sized(sites)
+    names = sort(collect(string(s.array) for s in sites if s.kind == :ivalue))
+    isempty(names) && return nothing
+    error("stade_adjoint: `keep_push_pop = false` needs a closed-form size for every stack, and the integer " *
+          join(("`" * n * "`" for n in names), ", ") * " must be restored in the reverse sweep: " *
+          "an active statement reads it after an iteration-dependent update. Use keep_push_pop = true")
 end
 
 function agen_refuse_while(body)
@@ -5259,6 +5446,9 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
             if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.rhs, var, agen_push_pop_source(value_needed, ectx), agen_site_key(body, idx)) && !(var in exempt)
                 agen_emit_push!(exprs, stacks[(agen_snapshot_kind(stmt.lhs), var)], stmt.lhs, ectx, agen_site_key(body, idx))
             end
+            # a restored integer: the old value goes onto its stack before every write, as a float's does
+            haskey(stacks, (:ivalue, var)) && stmt.lhs isa Symbol &&
+                agen_emit_push!(exprs, stacks[(:ivalue, var)], var, ectx, agen_site_key(body, idx))
             push!(exprs, Expr(:(=), stmt.lhs, stmt.rhs))
         elseif stmt.kind == :for
             # ii_plan-covered site: `:independent` is built as one fused, un-reversed loop
@@ -5330,7 +5520,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
             # the value recorded for an iteration is the one that iteration
             # actually used. Pushing after the update would record the NEXT
             # iteration's value.
-            carried = sort(collect(snap_while_carried_ints(stmt.body, kinds)))
+            carried = sort(collect(snap_while_carried_ints(stmt.body, kinds, agen_itbr_vars(stacks))))
             for cv in carried
                 agen_emit_push!(inner, stacks[(:whilecarry, cv)], cv, ectx, agen_site_key(body, idx, cv))
             end
@@ -5430,6 +5620,11 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
         stmt = plan[idx]
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
+            if haskey(stacks, (:ivalue, var)) && stmt.lhs isa Symbol
+                # reverse position of a restored integer's write: the value it held before the write
+                push!(exprs, Expr(:(=), var, agen_emit_pop(stacks[(:ivalue, var)], ectx, agen_site_key(primal_body, idx), exprs)))
+                continue
+            end
             kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
             append!(exprs, agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, key = agen_site_key(primal_body, idx)))
         elseif stmt.kind == :for
@@ -5497,7 +5692,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
             # the body's adjoint, which reads them as indices.
             # primal_body, not stmt.body: stmt comes from the lin plan, whose
             # assign nodes carry .tree rather than .rhs
-            for cv in sort(collect(snap_while_carried_ints(primal_body[idx].body, kinds)))
+            for cv in sort(collect(snap_while_carried_ints(primal_body[idx].body, kinds, agen_itbr_vars(stacks))))
                 push!(inner, Expr(:(=), cv,
                                   agen_emit_pop(stacks[(:whilecarry, cv)], ectx,
                                                 agen_site_key(primal_body, idx, cv), inner)))
@@ -5603,12 +5798,16 @@ end
 # snapshotting can get pushed (reading its pre-overwrite value) as early as the first loop
 # iteration, before any primal assignment. Without this, that first push would be an
 # UndefVarError. Harmless for locals that don't need it.
-function agen_local_primal_inits(kernel, active_map)
+function agen_local_primal_inits(kernel, active_map, itbr = Set{Symbol}())
     arg_set = Set(kernel.sig.args)
     exprs = Any[]
     for v in sort(collect(keys(kernel.sig.kinds)))
         if !(v in arg_set) && kernel.sig.kinds[v] == :scalar_float && active_map[v]
             push!(exprs, Expr(:(=), v, 0.0))
+        end
+        # a restored integer is pushed before its first write too, so it must exist by then
+        if !(v in arg_set) && v in itbr
+            push!(exprs, Expr(:(=), v, 0))
         end
     end
     return exprs
@@ -5674,7 +5873,7 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     end
     append!(body, sizing_stmts)
     append!(body, hvp_shadow_stack_inits(sites, shadow_of, keep_push_pop, layout, total_of))
-    append!(body, agen_local_primal_inits(kernel, active_map))
+    append!(body, agen_local_primal_inits(kernel, active_map, agen_itbr_vars(stacks)))
     append!(body, agen_local_shadow_inits(kernel, active_map))
     append!(body, hvp_local_second_inits(kernel, shadow_of))
     append!(body, hvp_double_body(fwd, shadow_of))
@@ -10508,6 +10707,7 @@ function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     active_map = act_analyze(kernel)
     snap_sites, agen_sites = stade_site_level_tbr_check(kernel)
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
+    keep_push_pop || agen_refuse_itbr_sized(snapshot_plan)
     lin_plan = lin_build(kernel, active_map)
     ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
     (agen_sites, remat) = keep_push_pop ? (agen_sites, nothing) : agen_remat_apply(kernel, active_map, agen_sites)
@@ -10524,6 +10724,11 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     active_map = act_analyze(kernel)
     snap_sites, agen_sites = stade_site_level_tbr_check(kernel)
     snapshot_plan = snap_plan(kernel, active_map; site_needed = snap_sites)
+    if !keep_push_pop
+        # the refusals stade_adjoint reaches inside agen_emit, made here before the layout pass can fail on a stack with no size
+        agen_refuse_while_sized(kernel.body)
+        agen_refuse_itbr_sized(snapshot_plan)
+    end
     lin_plan = lin_build(kernel, active_map)
     ii_plan = fuse_ii_loops ? stade_ii_plan_check(kernel) : nothing
     (agen_sites, remat) = keep_push_pop ? (agen_sites, nothing) : agen_remat_apply(kernel, active_map, agen_sites)
@@ -11969,6 +12174,8 @@ end
 
 function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, plan = nothing)
     stmt.kind == :for || return :none
+    # a loop that writes a restored integer (see snap_itbr_vars) pushes it on every iteration, which no fusing kind replays
+    any(v -> snap_itbr_writes_in(stmt, v), snap_itbr_vars(kernel, active_map)) && return :none
     agen_tier_b_walk(stmt.body, Set{Symbol}()) === nothing || return :none
     # An escaping array write rules out the three FUSING kinds, whose
     # codegen would move the array's adjoint to the forward position.
@@ -12064,6 +12271,8 @@ end
 
 function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, plan = nothing)
     stmt.kind == :for || return :none
+    # see snap_ii_classify
+    any(v -> snap_itbr_writes_in(stmt, v), snap_itbr_vars(kernel, active_map)) && return :none
     agen_tier_b_walk(stmt.body, Set{Symbol}()) === nothing || return :none
     # An escaping array write rules out the three FUSING kinds, whose
     # codegen would move the array's adjoint to the forward position.
