@@ -103,8 +103,8 @@ is no substitute either, since a launch guarantees no visit order.
 **Tier A**: index computable in closed form from kernel arguments and
 the site's own loop nest. Push/pop sites are matched by a *structural*
 key, `agen_site_key(body, idx[, bv])`, never a running counter —
-branch-scalar hoisting already reorders pops, which silently breaks
-counters.
+the two sweeps visit sites in different orders, and a launch guarantees
+no visit order.
 
 **Tier B**: a loop whose bound is reassigned inside *any* ancestor loop
 has no closed-form trip count. The ancestor does not have to carry a
@@ -112,6 +112,10 @@ value between its own iterations. `agen_ragged_block`
 resolves it into per-ancestor-iteration prefix/value tables, keeping the
 site indexed and mutation-free; a narrow per-*stack* (never
 per-occurrence) `push!`/`pop!` fallback remains for what can't resolve.
+
+A Tier A size term that reads a scalar *assigned again later* must never be read live: the sweeps would
+disagree on the offset of every later block. In a kernel with ragged blocks `agen_layout` replaces such
+a term by `__mult_<k>`, set by the `initstacks_*` replay where the site stands and passed like `__tot_*`.
 
 **Rematerialized restores** (`agen_remat_plan`, `keep_push_pop=false` only): a
 pre-write save whose old value is an earlier same-block write of a pure
@@ -175,8 +179,10 @@ own value table, never read as a bare in-scope reference.
 
 The sizing loop writes a block's value tables and totals **before the first
 retiring assignment**: a write to a size-relevant scalar that some loop, at any
-depth, has already read as a bound. Look at nested loop headers too, not only
-top-level ones (`retire_nested`, `retire_if`).
+depth, has already read as a bound. Look at nested loop headers **and** at
+nested assignments, not only top-level statements (`retire_nested`, `retire_if`,
+`retire_in_if`). A bound read again after its reassignment inside the same
+iteration is refused with a message, not sized.
 
 `initstacks_*`'s signature grows to accept the free variables its size
 expressions reference — including scalars **derived in the kernel body**

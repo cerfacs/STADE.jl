@@ -433,50 +433,29 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 __idx_right_stack_2_2 = (__tot_right_stack_1 + prefix_right_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + __icse_23
                 rightd = right_stack_d[__idx_right_stack_2_2]
                 right = right_stack[__idx_right_stack_2_2]
-                __icse_24 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
-                __idx_branch_stack_2_4 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((__icse_24 + __icse_24) + max(0, div(nu2 - 1, 1) + 1) * max(0, __icse_22))) + __icse_23
-                __branch_pre_4 = branch_stack[__idx_branch_stack_2_4]
-                rightd = 0.0
-                right = 0.0
-                if __branch_pre_4 == 1
-                    rightd = ud[i_j + 1, i_level]
-                    right = u[i_j + 1, i_level]
-                else
-                    rightd = 0.0
-                    right = 0.0
-                end
-                __icse_25 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
-                __idx_branch_stack_2_8 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (__icse_25 + __icse_25)) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
-                __branch_pre_2 = branch_stack[__idx_branch_stack_2_8]
-                leftd = 0.0
-                left = 0.0
-                if __branch_pre_2 == 1
-                    leftd = ud[i_j - 1, i_level]
-                    left = u[i_j - 1, i_level]
-                else
-                    leftd = 0.0
-                    left = 0.0
-                end
-                __icse_26 = val_nc_2[div(i_level - (num_levels - 1), -1) + 1]
-                __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div(__icse_26 - 1, 1) + 1) + max(0, div((__icse_26 + 1) - 1, 1) + 1))) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __icse_24 = val_nc_2[div(i_level - (num_levels - 1), -1) + 1]
+                __icse_25 = max(0, div((__icse_24 + 1) - 1, 1) + 1)
+                __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (max(0, div(__icse_24 - 1, 1) + 1) + __icse_25)) + __icse_23
                 ud[i_j, i_level] = u_stack_d[__idx_u_stack_2_0]
                 u[i_j, i_level] = u_stack[__idx_u_stack_2_0]
                 __oldb_2d = ubd[i_j, i_level]
                 __oldb_2 = ub[i_j, i_level]
                 ubd[i_j, i_level] = 0.0
                 ub[i_j, i_level] = 0.0
-                __cse_27d = 0.5__oldb_2d
-                __cse_27 = 0.5__oldb_2
+                __cse_26d = 0.5__oldb_2d
+                __cse_26 = 0.5__oldb_2
                 __hcse_9 = f[i_j, i_level]
-                hl2bd = hl2bd + (__cse_27 * fd[i_j, i_level] + __hcse_9 * __cse_27d)
-                hl2b = hl2b + __hcse_9 * __cse_27
-                fbd[i_j, i_level] = fbd[i_j, i_level] + (__cse_27 * hl2d + hl2 * __cse_27d)
-                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_27
-                leftbd = leftbd + __cse_27d
-                leftb = leftb + __cse_27
-                rightbd = rightbd + __cse_27d
-                rightb = rightb + __cse_27
-                if __branch_pre_4 == 1
+                hl2bd = hl2bd + (__cse_26 * fd[i_j, i_level] + __hcse_9 * __cse_26d)
+                hl2b = hl2b + __hcse_9 * __cse_26
+                fbd[i_j, i_level] = fbd[i_j, i_level] + (__cse_26 * hl2d + hl2 * __cse_26d)
+                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_26
+                leftbd = leftbd + __cse_26d
+                leftb = leftb + __cse_26
+                rightbd = rightbd + __cse_26d
+                rightb = rightb + __cse_26
+                __idx_branch_stack_2_12 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((__icse_25 + __icse_25) + max(0, div(nu2 - 1, 1) + 1) * max(0, __icse_22))) + __icse_23
+                __branch = branch_stack[__idx_branch_stack_2_12]
+                if __branch == 1
                     __oldb_0d = rightbd
                     __oldb_0 = rightb
                     rightbd = 0.0
@@ -486,7 +465,10 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 end
                 rightbd = 0.0
                 rightb = 0.0
-                if __branch_pre_2 == 1
+                __icse_27 = max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)
+                __idx_branch_stack_2_16 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + (__icse_27 + __icse_27)) + (((i_k - 1) * (div(val_n_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __branch = branch_stack[__idx_branch_stack_2_16]
+                if __branch == 1
                     __oldb_0d = leftbd
                     __oldb_0 = leftb
                     leftbd = 0.0
@@ -509,38 +491,19 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             crd = cr_stack_d[__idx_cr_stack_2_2]
             cr = cr_stack[__idx_cr_stack_2_2]
             jf = j * 2 - 1
-            __idx_branch_stack_2_5 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div((val_nc_2[div(i_level - (num_levels - 1), -1) + 1] + 1) - 1, 1) + 1)) + __icse_28
-            __branch_pre_5 = branch_stack[__idx_branch_stack_2_5]
-            crd = 0.0
-            cr = 0.0
-            if __branch_pre_5 == 1
-                crd = ud[j, i_level + 1]
-                cr = u[j, i_level + 1]
-            else
-                crd = 0.0
-                cr = 0.0
-            end
-            __idx_branch_stack_2_9 = (__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
-            __branch_pre_3 = branch_stack[__idx_branch_stack_2_9]
-            cld = 0.0
-            cl = 0.0
-            if __branch_pre_3 == 1
-                cld = ud[j - 1, i_level + 1]
-                cl = u[j - 1, i_level + 1]
-            else
-                cld = 0.0
-                cl = 0.0
-            end
-            __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div(val_nc_2[div(i_level - (num_levels - 1), -1) + 1] - 1, 1) + 1)) + ((j - 1) + 1)
+            __icse_29 = val_nc_2[div(i_level - (num_levels - 1), -1) + 1]
+            __idx_u_stack_2_0 = (((__tot_u_stack_1 + 1) + prefix_u_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div(__icse_29 - 1, 1) + 1)) + __icse_28
             ud[jf, i_level] = u_stack_d[__idx_u_stack_2_0]
             u[jf, i_level] = u_stack[__idx_u_stack_2_0]
-            __cse_29d = 0.5 * ubd[jf, i_level]
-            __cse_29 = 0.5 * ub[jf, i_level]
-            clbd = clbd + __cse_29d
-            clb = clb + __cse_29
-            crbd = crbd + __cse_29d
-            crb = crb + __cse_29
-            if __branch_pre_5 == 1
+            __cse_30d = 0.5 * ubd[jf, i_level]
+            __cse_30 = 0.5 * ub[jf, i_level]
+            clbd = clbd + __cse_30d
+            clb = clb + __cse_30
+            crbd = crbd + __cse_30d
+            crb = crb + __cse_30
+            __idx_branch_stack_2_9 = ((__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + max(0, div((__icse_29 + 1) - 1, 1) + 1)) + __icse_28
+            __branch = branch_stack[__idx_branch_stack_2_9]
+            if __branch == 1
                 __oldb_0d = crbd
                 __oldb_0 = crb
                 crbd = 0.0
@@ -550,7 +513,9 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             end
             crbd = 0.0
             crb = 0.0
-            if __branch_pre_3 == 1
+            __idx_branch_stack_2_13 = (__tot_branch_stack_1 + prefix_branch_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + ((j - 1) + 1)
+            __branch = branch_stack[__idx_branch_stack_2_13]
+            if __branch == 1
                 __oldb_0d = clbd
                 __oldb_0 = clb
                 clbd = 0.0
@@ -578,12 +543,12 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
         __oldb_2 = hl2b
         hl2bd = 0.0
         hl2b = 0.0
-        __cse_30d = __oldb_2 * hld + hl * __oldb_2d
-        __cse_30 = hl * __oldb_2
-        hlbd = hlbd + __cse_30d
-        hlb = hlb + __cse_30
-        hlbd = hlbd + __cse_30d
-        hlb = hlb + __cse_30
+        __cse_31d = __oldb_2 * hld + hl * __oldb_2d
+        __cse_31 = hl * __oldb_2
+        hlbd = hlbd + __cse_31d
+        hlb = hlb + __cse_31
+        hlbd = hlbd + __cse_31d
+        hlb = hlb + __cse_31
         __idx_hl_stack_2_0 = (__tot_hl_stack_1 + prefix_hl_stack_2[div(i_level - (num_levels - 1), -1) + 1]) + 1
         hld = hl_stack_d[__idx_hl_stack_2_0]
         hl = hl_stack[__idx_hl_stack_2_0]
@@ -614,12 +579,12 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
     __oldb_2 = hl2b
     hl2bd = 0.0
     hl2b = 0.0
-    __cse_31d = __oldb_2 * hld + hl * __oldb_2d
-    __cse_31 = hl * __oldb_2
-    hlbd = hlbd + __cse_31d
-    hlb = hlb + __cse_31
-    hlbd = hlbd + __cse_31d
-    hlb = hlb + __cse_31
+    __cse_32d = __oldb_2 * hld + hl * __oldb_2d
+    __cse_32 = hl * __oldb_2
+    hlbd = hlbd + __cse_32d
+    hlb = hlb + __cse_32
+    hlbd = hlbd + __cse_32d
+    hlb = hlb + __cse_32
     for i_level = num_levels - 1:-1:1
         __idx_hl_stack_1_0 = prefix_hl_stack_1[(i_level - 1) + 1] + 1
         hld = hl_stack_d[__idx_hl_stack_1_0]
@@ -650,51 +615,28 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             __oldb_2 = fb[j, i_level + 1]
             fbd[j, i_level + 1] = 0.0
             fb[j, i_level + 1] = 0.0
-            __cse_32d = 0.25__oldb_2d
-            __cse_32 = 0.25__oldb_2
-            rbd[jf - 1, i_level] = rbd[jf - 1, i_level] + __cse_32d
-            rb[jf - 1, i_level] = rb[jf - 1, i_level] + __cse_32
+            __cse_33d = 0.25__oldb_2d
+            __cse_33 = 0.25__oldb_2
+            rbd[jf - 1, i_level] = rbd[jf - 1, i_level] + __cse_33d
+            rb[jf - 1, i_level] = rb[jf - 1, i_level] + __cse_33
             rbd[jf, i_level] = rbd[jf, i_level] + 0.5__oldb_2d
             rb[jf, i_level] = rb[jf, i_level] + 0.5__oldb_2
-            rbd[jf + 1, i_level] = rbd[jf + 1, i_level] + __cse_32d
-            rb[jf + 1, i_level] = rb[jf + 1, i_level] + __cse_32
+            rbd[jf + 1, i_level] = rbd[jf + 1, i_level] + __cse_33d
+            rb[jf + 1, i_level] = rb[jf + 1, i_level] + __cse_33
         end
         __idx_tripcount_stack_1_11 = (prefix_tripcount_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1)) + 1
         n = tripcount_stack[__idx_tripcount_stack_1_11]
         for j = n:-1:1
-            __icse_33 = max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
-            __icse_34 = max(0, div(nu1 - 1, 1) + 1) * __icse_33
-            __icse_35 = (j - 1) + 1
-            __idx_left_stack_1_0 = (prefix_left_stack_1[(i_level - 1) + 1] + __icse_34) + __icse_35
+            __icse_34 = max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+            __icse_35 = max(0, div(nu1 - 1, 1) + 1) * __icse_34
+            __icse_36 = (j - 1) + 1
+            __idx_left_stack_1_0 = (prefix_left_stack_1[(i_level - 1) + 1] + __icse_35) + __icse_36
             leftd = left_stack_d[__idx_left_stack_1_0]
             left = left_stack[__idx_left_stack_1_0]
-            __idx_right_stack_1_2 = (prefix_right_stack_1[(i_level - 1) + 1] + __icse_34) + __icse_35
+            __idx_right_stack_1_2 = (prefix_right_stack_1[(i_level - 1) + 1] + __icse_35) + __icse_36
             rightd = right_stack_d[__idx_right_stack_1_2]
             right = right_stack[__idx_right_stack_1_2]
-            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_level - 1) + 1] + ((__icse_34 + __icse_34) + __icse_33)) + __icse_35
-            __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
-            rightd = 0.0
-            right = 0.0
-            if __branch_pre_4 == 1
-                rightd = ud[j + 1, i_level]
-                right = u[j + 1, i_level]
-            else
-                rightd = 0.0
-                right = 0.0
-            end
-            __icse_36 = max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
-            __idx_branch_stack_1_8 = (prefix_branch_stack_1[(i_level - 1) + 1] + (__icse_36 + __icse_36)) + ((j - 1) + 1)
-            __branch_pre_2 = branch_stack[__idx_branch_stack_1_8]
-            leftd = 0.0
-            left = 0.0
-            if __branch_pre_2 == 1
-                leftd = ud[j - 1, i_level]
-                left = u[j - 1, i_level]
-            else
-                leftd = 0.0
-                left = 0.0
-            end
-            __idx_r_stack_1_0 = prefix_r_stack_1[(i_level - 1) + 1] + ((j - 1) + 1)
+            __idx_r_stack_1_0 = prefix_r_stack_1[(i_level - 1) + 1] + __icse_36
             rd[j, i_level] = r_stack_d[__idx_r_stack_1_0]
             r[j, i_level] = r_stack[__idx_r_stack_1_0]
             __oldb_2d = rbd[j, i_level]
@@ -722,7 +664,9 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             __hcse_16 = -(__hcse_15 / __hcse_12)
             hl2bd = hl2bd + (__cse_37 * -((__hcse_13 * ((2.0 * ud[j, i_level] + -leftd) + -rightd) + -(__hcse_15 / __hcse_12 ^ 2) * ((2hl2) * hl2d))) + __hcse_16 * __cse_37d)
             hl2b = hl2b + __hcse_16 * __cse_37
-            if __branch_pre_4 == 1
+            __idx_branch_stack_1_13 = (prefix_branch_stack_1[(i_level - 1) + 1] + ((__icse_35 + __icse_35) + __icse_34)) + __icse_36
+            __branch = branch_stack[__idx_branch_stack_1_13]
+            if __branch == 1
                 __oldb_0d = rightbd
                 __oldb_0 = rightb
                 rightbd = 0.0
@@ -732,7 +676,10 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             end
             rightbd = 0.0
             rightb = 0.0
-            if __branch_pre_2 == 1
+            __icse_40 = max(0, div(nu1 - 1, 1) + 1) * max(0, div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1)
+            __idx_branch_stack_1_17 = (prefix_branch_stack_1[(i_level - 1) + 1] + (__icse_40 + __icse_40)) + ((j - 1) + 1)
+            __branch = branch_stack[__idx_branch_stack_1_17]
+            if __branch == 1
                 __oldb_0d = leftbd
                 __oldb_0 = leftb
                 leftbd = 0.0
@@ -747,55 +694,35 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
             __idx_tripcount_stack_1_0 = prefix_tripcount_stack_1[(i_level - 1) + 1] + ((i_k - 1) + 1)
             n = tripcount_stack[__idx_tripcount_stack_1_0]
             for i_j = n:-1:1
-                __icse_40 = div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1
-                __icse_41 = ((i_k - 1) * __icse_40 + (i_j - 1)) + 1
-                __idx_left_stack_1_0 = prefix_left_stack_1[(i_level - 1) + 1] + __icse_41
+                __icse_41 = div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1
+                __icse_42 = ((i_k - 1) * __icse_41 + (i_j - 1)) + 1
+                __idx_left_stack_1_0 = prefix_left_stack_1[(i_level - 1) + 1] + __icse_42
                 leftd = left_stack_d[__idx_left_stack_1_0]
                 left = left_stack[__idx_left_stack_1_0]
-                __idx_right_stack_1_2 = prefix_right_stack_1[(i_level - 1) + 1] + __icse_41
+                __idx_right_stack_1_2 = prefix_right_stack_1[(i_level - 1) + 1] + __icse_42
                 rightd = right_stack_d[__idx_right_stack_1_2]
                 right = right_stack[__idx_right_stack_1_2]
-                __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, __icse_40)) + __icse_41
-                __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
-                rightd = 0.0
-                right = 0.0
-                if __branch_pre_4 == 1
-                    rightd = ud[i_j + 1, i_level]
-                    right = u[i_j + 1, i_level]
-                else
-                    rightd = 0.0
-                    right = 0.0
-                end
-                __idx_branch_stack_1_8 = prefix_branch_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
-                __branch_pre_2 = branch_stack[__idx_branch_stack_1_8]
-                leftd = 0.0
-                left = 0.0
-                if __branch_pre_2 == 1
-                    leftd = ud[i_j - 1, i_level]
-                    left = u[i_j - 1, i_level]
-                else
-                    leftd = 0.0
-                    left = 0.0
-                end
-                __idx_u_stack_1_0 = prefix_u_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_u_stack_1_0 = prefix_u_stack_1[(i_level - 1) + 1] + __icse_42
                 ud[i_j, i_level] = u_stack_d[__idx_u_stack_1_0]
                 u[i_j, i_level] = u_stack[__idx_u_stack_1_0]
                 __oldb_2d = ubd[i_j, i_level]
                 __oldb_2 = ub[i_j, i_level]
                 ubd[i_j, i_level] = 0.0
                 ub[i_j, i_level] = 0.0
-                __cse_42d = 0.5__oldb_2d
-                __cse_42 = 0.5__oldb_2
+                __cse_43d = 0.5__oldb_2d
+                __cse_43 = 0.5__oldb_2
                 __hcse_17 = f[i_j, i_level]
-                hl2bd = hl2bd + (__cse_42 * fd[i_j, i_level] + __hcse_17 * __cse_42d)
-                hl2b = hl2b + __hcse_17 * __cse_42
-                fbd[i_j, i_level] = fbd[i_j, i_level] + (__cse_42 * hl2d + hl2 * __cse_42d)
-                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_42
-                leftbd = leftbd + __cse_42d
-                leftb = leftb + __cse_42
-                rightbd = rightbd + __cse_42d
-                rightb = rightb + __cse_42
-                if __branch_pre_4 == 1
+                hl2bd = hl2bd + (__cse_43 * fd[i_j, i_level] + __hcse_17 * __cse_43d)
+                hl2b = hl2b + __hcse_17 * __cse_43
+                fbd[i_j, i_level] = fbd[i_j, i_level] + (__cse_43 * hl2d + hl2 * __cse_43d)
+                fb[i_j, i_level] = fb[i_j, i_level] + hl2 * __cse_43
+                leftbd = leftbd + __cse_43d
+                leftb = leftb + __cse_43
+                rightbd = rightbd + __cse_43d
+                rightb = rightb + __cse_43
+                __idx_branch_stack_1_12 = (prefix_branch_stack_1[(i_level - 1) + 1] + max(0, div(nu1 - 1, 1) + 1) * max(0, __icse_41)) + __icse_42
+                __branch = branch_stack[__idx_branch_stack_1_12]
+                if __branch == 1
                     __oldb_0d = rightbd
                     __oldb_0 = rightb
                     rightbd = 0.0
@@ -805,7 +732,9 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
                 end
                 rightbd = 0.0
                 rightb = 0.0
-                if __branch_pre_2 == 1
+                __idx_branch_stack_1_16 = prefix_branch_stack_1[(i_level - 1) + 1] + (((i_k - 1) * (div(val_n_1[(i_level - 1) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __branch = branch_stack[__idx_branch_stack_1_16]
+                if __branch == 1
                     __oldb_0d = leftbd
                     __oldb_0 = leftb
                     leftbd = 0.0
@@ -824,12 +753,12 @@ function mg_vcycle_hv(u, ub, f, fb, r, rb, nfine, num_levels, h1, h1b, nu1, nu2,
         __oldb_2 = hl2b
         hl2bd = 0.0
         hl2b = 0.0
-        __cse_43d = __oldb_2 * hld + hl * __oldb_2d
-        __cse_43 = hl * __oldb_2
-        hlbd = hlbd + __cse_43d
-        hlb = hlb + __cse_43
-        hlbd = hlbd + __cse_43d
-        hlb = hlb + __cse_43
+        __cse_44d = __oldb_2 * hld + hl * __oldb_2d
+        __cse_44 = hl * __oldb_2
+        hlbd = hlbd + __cse_44d
+        hlb = hlb + __cse_44
+        hlbd = hlbd + __cse_44d
+        hlb = hlb + __cse_44
     end
     __oldb_0d = hlbd
     __oldb_0 = hlb

@@ -125,6 +125,10 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
         "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
         "retire_empty" => 4, "retire_nested" => 11, "retire_if" => 6,
+    # Witnesses for the nested-`if` and branch-scalar shapes. The two in-place stencils (inplace_stencil_if, nest_if_scalar) read the array
+    # they overwrite, so every loop stays on the host. Each HVP matches its adjoint.
+        "nest_if" => 0, "nest_if_scalar" => 6, "if_scalar_then_if" => 3, "if_scalar_then_loop_if" => 3, "retire_in_if" => 5,
+        "inplace_stencil_if" => 6, "if_top_scalar" => 1, "if_top_two" => 1, "if_in_outer_loop" => 2, "early_stage_offset" => 13,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,
         "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 6,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,

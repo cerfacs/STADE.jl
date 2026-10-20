@@ -3,8 +3,7 @@ include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 """
     validate_remat(dir="val-corpus")
 
-Regression gate for the rematerialized restores of `keep_push_pop = false` (`agen_remat_plan`) and for the branch-scalar hoist guard
-that `if_scalar_rewrite` exposed. No GPU needed.
+Regression gate for the rematerialized restores of `keep_push_pop = false` (`agen_remat_plan`). No GPU needed.
 
 A pre-write snapshot of a scalar is replaced by recomputing the earlier same-block load that produced its old value. That is only
 right when the load can be repeated at the backward position with the same result, so each loop of `remat_shapes` breaks one condition:
@@ -24,8 +23,8 @@ Three groups of checks:
   1. PLAN: the sites chosen for `remat_shapes` and `so_tile` are exactly the expected right-hand sides.
   2. EFFECT: on `so_tile` the adjoint loses stack references, the restore text appears in the backward sweep, and
      `keep_push_pop = true` still uses push!/pop! stacks (the pass never runs there).
-  3. SABOTAGE: in a fresh process each guard is replaced by a version that finds nothing wrong; its kernel (`remat_shapes`, or `if_scalar_rewrite` for the branch hoist
-     guard) must then fail its adjoint or dot-product oracle. The enclosing-loop rule for array writes is reported but not required to fail: every array a
+  3. SABOTAGE: in a fresh process each guard is replaced by a version that finds nothing wrong; its kernel must then fail its adjoint or
+     dot-product oracle. The enclosing-loop rule for array writes is reported but not required to fail: every array a
      load can come from was also snapshotted at its overwrite, so no shape tried distinguishes it.
 """
 function validate_remat(dir::String = joinpath(@__DIR__, "val-corpus"))
@@ -97,7 +96,6 @@ function validate_remat(dir::String = joinpath(@__DIR__, "val-corpus"))
         ("any symbol pure", purity_head * "e isa Number && return true\ne isa Symbol && return true\ne isa Expr || return false\n(e.head == :call || e.head == :ref) && return $rec\nreturn false\nend", "remat_shapes"),
         ("nested writes never clear the earlier definition", "agen_stmt_assigned!(stmt, acc) = nothing", "remat_shapes"),
         ("nested int writes never void block-local ints", "agen_stmt_assigned(stmt) = Set{Symbol}()", "remat_shapes"),
-        ("branch hoist ignores a later write", "agen_stmt_assigned!(stmt, acc) = nothing", "if_scalar_rewrite"),
     ]
     for (nm, def, kernel) in sab
         r = sabotaged(def, kernel)

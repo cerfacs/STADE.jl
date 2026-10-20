@@ -7,10 +7,26 @@ List kernels whose adjoint or HVP v0.4.5 and earlier generated wrongly because o
 `if` arm that a later statement of the same block writes again. `agen_backward_body` used to recompute such a scalar from the branch
 flag at the top of the block, which overwrote the later write's value for the reads after it. The tangent was never affected.
 
-Exact with respect to the fix: a kernel is reported when `agen_if_branch_scalar_vars` selects a variable that a later statement of
-the same block assigns, which is the set the guard now removes from the hoist. Each argument is a kernel file or a directory of them.
+Exact with respect to the old guard: a kernel is reported when a variable that an `if` arm assigns purely because it is read elsewhere
+(the set the hoist selected) is assigned again by a later statement of the same block. 0.4.10 removed the hoist, so the selection logic
+now lives in this file. Each argument is a kernel file or a directory of them.
 A reported kernel must have its adjoint and HVP regenerated with 0.4.6 or later.
 """
+# The hoist's candidate set, copied from the 0.4.9 source: float scalars an `if` arm assigns without reading them in the same statement,
+# for which a snapshot is needed.
+function branch_scalar_vars(stmt, kinds, value_needed)
+    vars = Symbol[]
+    for sub in vcat(stmt.then, stmt.els)
+        sub.kind == :assign || continue
+        var = sub.lhs isa Symbol ? sub.lhs : sub.lhs.args[1]
+        (sub.lhs isa Symbol && kinds[var] == :scalar_float) || continue
+        STADE.agen_count_var_refs(sub.tree.expr, var) == 0 || continue
+        STADE.agen_needs_snapshot(sub.lhs, sub.tree.expr, var, value_needed) || continue
+        var in vars || push!(vars, var)
+    end
+    return vars
+end
+
 function scan_if_rewrite(paths::String...)
     files = String[]
     for p in paths
@@ -21,7 +37,7 @@ function scan_if_rewrite(paths::String...)
     function walk(plan, body, kinds, vn, acc)
         for (idx, st) in enumerate(plan)
             if st.kind == :if
-                vars = STADE.agen_if_branch_scalar_vars(st, kinds, vn)
+                vars = branch_scalar_vars(st, kinds, vn)
                 later = Set{Symbol}()
                 foreach(j -> STADE.agen_stmt_assigned!(body[j], later), idx + 1:length(body))
                 for v in vars

@@ -3251,6 +3251,11 @@ function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = noth
     table_names = Symbol[]; tot_names = Symbol[]; val_names = Symbol[]
     if !keep_push_pop && !isempty(layout.blocks)
         table_stmts = agen_tier_b_kernel_skeleton(kernel.body, kernel.sig.kinds, layout)
+        # a captured size term is declared first, so the replay can set it from inside a loop or an `if`
+        for c in layout.captures
+            pushfirst!(table_stmts, Expr(:(=), c.sym, 0))
+            push!(tot_names, c.sym)
+        end
         for bid in sort(collect(keys(layout.blocks)))
             blk = layout.blocks[bid]
             for s in sort(collect(keys(blk.local_sizes)); by = string)
@@ -3773,9 +3778,8 @@ end
 
 # ---- keep_push_pop=false: Tier A/B sizing + :indexed emission ----
 # Every snapshot site gets a runtime index (`base_offset + local_position`) into its stack, computed by agen_indexed_layout
-# with the same traversal agen_forward_body's pushes use, keyed structurally since branch-scalar hoisting reorders backward
-# emission. Tier A: closed-form trip counts, single offset/size formulas. Tier B: a loop whose bound is reassigned in an
-# ancestor sequential loop taints its stack, falling back to growable push!/pop! regardless of keep_push_pop.
+# with the same traversal agen_forward_body's pushes use, keyed structurally, never by a running count. Tier A: closed-form
+# trip counts, single offset/size formulas. Tier B: a loop whose bound is reassigned in an ancestor sequential loop taints its stack, falling back to growable push!/pop! regardless of keep_push_pop.
 
 # a snapshot site's unique identity for :indexed offset lookup -- see
 # the section comment above for why this is a key, not a count
@@ -3975,6 +3979,13 @@ function agen_layout(kernel, kinds, active_map, value_needed, reassigned, exempt
     ineligible = Set{Symbol}()
     block_counter = Ref(0)
     agen_layout_walk_top!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, Any[], offsets, current, blocks, block_of, block_touched, ineligible, Set{Symbol}(), block_counter, push_pop)
+    # Only a kernel with ragged blocks has a replay of its scalars (agen_tier_b_kernel_skeleton) to capture a size term in.
+    captures = Any[]
+    if !isempty(blocks)
+        offsets = Dict{Any,Any}(); current = Dict{Symbol,Any}(); blocks = Dict{Any,Any}(); block_of = Dict{Any,Int}()
+        block_touched = Set{Symbol}(); ineligible = Set{Symbol}(); block_counter = Ref(0)
+        agen_layout_walk_top!(kernel.body, kinds, active_map, value_needed, reassigned, exempt, stacks, Any[], offsets, current, blocks, block_of, block_touched, ineligible, Set{Symbol}(), block_counter, push_pop, captures)
+    end
     # A block-local scalar in a local_offset/local_size formula isn't safe to read bare at an arbitrary push/pop site:
     # agen_backward_body reverses per-statement order too, so a block-boundary occurrence's forward-last statement can
     # run first in reverse, before its scalar recompute. Fix (agen_tier_b_value_tables_stmts): give each such scalar a
@@ -4042,28 +4053,37 @@ function agen_layout(kernel, kinds, active_map, value_needed, reassigned, exempt
     free = intersect(free, Set(kernel.sig.args))
     return (offsets = offsets, sizes = sizes, blocks = blocks, block_of = block_of, block_totals = block_totals,
             tainted_stacks = ineligible, free_vars = sort(collect(free); by = string),
-            derived_vars = derived)
+            derived_vars = derived, captures = captures)
 end
 
-function agen_layout_walk_top!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop)
+function agen_layout_walk_top!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop, cap = nothing, later = Set{Symbol}())
+    # with `cap` on, `later_at[idx]` holds every scalar assigned from statement idx on (at any depth) plus whatever the ancestors assign after this body
+    later_at = fill(later, length(body) + 1)
+    if cap !== nothing
+        for i in length(body):-1:1
+            later_at[i] = union(later_at[i + 1], agen_collect_reassigned(body[i:i], true))
+        end
+    end
     for (idx, stmt) in enumerate(body)
+        lat = later_at[idx]
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             site_source = push_pop === nothing ? value_needed : push_pop
             if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) &&
                agen_needs_snapshot(stmt.lhs, stmt.rhs, var, site_source, agen_site_key(body, idx)) && !(var in exempt)
                 nm = agen_site_stack_name((kind = agen_snapshot_kind(stmt.lhs), array = var, at = 0))
-                agen_layout_static_record!(offsets, current, nm, loop_ctx, agen_site_key(body, idx))
+                agen_layout_static_record!(offsets, current, nm, loop_ctx, agen_site_key(body, idx), cap, lat)
             end
         elseif stmt.kind == :for
             for bv in agen_tripcount_bound_vars(stmt, reassigned)
-                agen_layout_static_record!(offsets, current, :tripcount_stack, loop_ctx, agen_site_key(body, idx, bv))
+                agen_layout_static_record!(offsets, current, :tripcount_stack, loop_ctx, agen_site_key(body, idx, bv), cap, lat)
             end
             blk = agen_ragged_block(stmt, kinds, active_map, value_needed, reassigned, exempt, stacks, seq_reassigned; push_pop = push_pop)
             if blk === nothing
                 inner_seq = union(seq_reassigned, agen_collect_reassigned(stmt.body, true))
                 push!(loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
-                agen_layout_walk_top!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, inner_seq, block_counter, push_pop)
+                agen_layout_walk_top!(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, inner_seq, block_counter, push_pop, cap,
+                                      cap === nothing ? later : union(later_at[idx + 1], agen_collect_reassigned(stmt.body, true)))
                 pop!(loop_ctx)
             else
                 union!(ineligible, blk.ineligible_stacks)
@@ -4086,16 +4106,16 @@ function agen_layout_walk_top!(body, kinds, active_map, value_needed, reassigned
                 blocks[block_id] = (header = blk.header, body = blk.body, base = base, local_sizes = blk.local_sizes, total_sym = total_sym, depth = length(loop_ctx))
             end
         elseif stmt.kind == :if
-            agen_layout_static_record!(offsets, current, :branch_stack, loop_ctx, agen_site_key(body, idx))
-            agen_layout_walk_top!(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop)
-            agen_layout_walk_top!(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop)
+            agen_layout_static_record!(offsets, current, :branch_stack, loop_ctx, agen_site_key(body, idx), cap, lat)
+            agen_layout_walk_top!(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop, cap, later_at[idx + 1])
+            agen_layout_walk_top!(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop, cap, later_at[idx + 1])
         end
     end
     for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)
-        agen_layout_static_record!(offsets, current, stacks[(:value, var)], loop_ctx, agen_site_key(body, 0, var))
+        agen_layout_static_record!(offsets, current, stacks[(:value, var)], loop_ctx, agen_site_key(body, 0, var), cap, later)
     end
     for A in agen_asnap_boundary_arrays(body, kinds, push_pop)
-        agen_layout_static_record!(offsets, current, stacks[(:array, agen_asnap_site(A).array)], loop_ctx, agen_site_key(body, 0, A))
+        agen_layout_static_record!(offsets, current, stacks[(:array, agen_asnap_site(A).array)], loop_ctx, agen_site_key(body, 0, A), cap, later)
     end
     return nothing
 end
@@ -4105,10 +4125,22 @@ end
 # running sum, updated in place as we go, so a ragged block's own
 # entry (agen_layout in the caller above) can read the right "so far"
 # value out of it directly instead of needing a second folding pass.
-function agen_layout_static_record!(offsets, current, stack_name, loop_ctx, key)
+function agen_layout_static_record!(offsets, current, stack_name, loop_ctx, key, cap = nothing, later = nothing)
     base = get(current, stack_name, 0)
     offsets[key] = (stack_name, base)
-    current[stack_name] = agen_add_exprs(base, agen_local_multiplicity(loop_ctx))
+    mult = agen_local_multiplicity(loop_ctx)
+    if cap !== nothing
+        # A size term reading a scalar that is assigned again later would be read stale by every later offset and by the
+        # allocation. The sizing pass of initstacks_* replays the scalars, so it captures the term where the site stands.
+        vs = Set{Symbol}()
+        agen_collect_expr_vars!(mult, vs)
+        if !isempty(intersect(vs, later))
+            sym = Symbol("__mult_", length(cap) + 1)
+            push!(cap, (sym = sym, expr = mult, key = key))
+            mult = sym
+        end
+    end
+    current[stack_name] = agen_add_exprs(base, mult)
     return nothing
 end
 
@@ -4182,23 +4214,68 @@ function agen_tier_b_block_skeleton(body, kinds)
     return out
 end
 
-# Adds every variable that a loop header at any depth inside `stmt` reads (`stmt` itself included when it is a loop).
-# A bound that only a nested loop reads is still consumed once that loop has run.
-function agen_collect_nested_bound_vars!(stmt, out::Set{Symbol})
-    if stmt.kind == :for
-        agen_collect_expr_vars!(stmt.lo, out)
-        agen_collect_expr_vars!(stmt.hi, out)
-        agen_collect_expr_vars!(stmt.step, out)
-        for t in stmt.body
-            agen_collect_nested_bound_vars!(t, out)
+# Program-order events of one statement, as `(:consume, vars)` for a loop header and `(:assign, var)` for a scalar assignment, descending into
+# loops and both branches of an `if`. One pass over each body: the repeat of a loop body is not unrolled.
+function agen_tier_b_events!(st, out)
+    if st.kind == :assign
+        st.lhs isa Symbol && push!(out, (:assign, st.lhs))
+    elseif st.kind == :for
+        vs = Set{Symbol}()
+        agen_collect_expr_vars!(st.lo, vs); agen_collect_expr_vars!(st.hi, vs); agen_collect_expr_vars!(st.step, vs)
+        push!(out, (:consume, vs))
+        for t in st.body
+            agen_tier_b_events!(t, out)
         end
-    elseif stmt.kind == :if
-        for t in stmt.then
-            agen_collect_nested_bound_vars!(t, out)
+    elseif st.kind == :while
+        vs = Set{Symbol}()
+        agen_collect_expr_vars!(st.cond, vs)
+        push!(out, (:consume, vs))
+        for t in st.body
+            agen_tier_b_events!(t, out)
         end
-        for t in stmt.els
-            agen_collect_nested_bound_vars!(t, out)
+    elseif st.kind == :if
+        for t in st.then
+            agen_tier_b_events!(t, out)
         end
+        for t in st.els
+            agen_tier_b_events!(t, out)
+        end
+    end
+    return out
+end
+
+# Index of the top-level statement of a ragged block's body before which the value tables and totals must be written, or `nothing`
+# when they belong after the whole body. That statement is the first one holding a RETIRING assignment: a write, at any depth, to a
+# size-relevant scalar that a loop header (in an earlier statement, or earlier inside the same one) has already read. The assignment
+# belongs to the next iteration, so the tables must see the value as it stood before it.
+# The tables hold one value per iteration, so the shape is refused when a relevant scalar is read by a loop header AFTER an assignment
+# to it in the stream that starts at the split statement: that read would need the new value and the table holds the old one.
+function agen_tier_b_split_point(body, relevant::Set{Symbol})
+    consumed = Set{Symbol}()
+    for (i, st) in enumerate(body)
+        local_c = copy(consumed)
+        retire = false
+        for e in agen_tier_b_events!(st, Any[])
+            if e[1] == :consume
+                union!(local_c, e[2])
+            elseif e[2] in relevant && e[2] in local_c
+                retire = true
+            end
+        end
+        if retire
+            assigned = Set{Symbol}()
+            for t in body[i:end], e in agen_tier_b_events!(t, Any[])
+                if e[1] == :assign
+                    e[2] in relevant && push!(assigned, e[2])
+                elseif !isempty(intersect(e[2], assigned))
+                    error("agen: a ragged block reads the bound `", first(sort(collect(intersect(e[2], assigned)); by = string)),
+                          "` in a loop header after it is reassigned within the same iteration; keep_push_pop = false cannot size its stacks. ",
+                          "Use keep_push_pop = true, or give the second use its own variable.")
+                end
+            end
+            return i
+        end
+        consumed = local_c
     end
     return nothing
 end
@@ -4236,16 +4313,7 @@ function agen_tier_b_block_stmts(block_id, blk, kinds)
     for s_ in stack_names
         agen_collect_expr_vars!(blk.local_sizes[s_], relevant)
     end
-    consumed = Set{Symbol}()
-    split_at = nothing
-    for (i, st) in enumerate(blk.body)
-        if st.kind == :assign && st.lhs isa Symbol && st.lhs in relevant && st.lhs in consumed
-            split_at = i
-            break
-        elseif st.kind == :for || st.kind == :if
-            agen_collect_nested_bound_vars!(st, consumed)
-        end
-    end
+    split_at = agen_tier_b_split_point(blk.body, relevant)
     pre_body = split_at === nothing ? blk.body : blk.body[1:split_at - 1]
     post_body = split_at === nothing ? blk.body[1:0] : blk.body[split_at:end]
     loop_body = Any[Expr(:(=), Expr(:ref, table_name(s), idx_expr), blk.total_sym[s]) for s in stack_names]
@@ -4266,9 +4334,14 @@ end
 # what agen_layout used to build `blocks`/`offsets`. Where agen_layout_walk_top! delegated a `:for` to agen_ragged_block, this
 # emits that block's table-construction statements instead; elsewhere it keeps scalars/drops arrays like
 # agen_tier_b_block_skeleton, except a non-AL `:for` is kept and recursed into.
-function agen_tier_b_kernel_skeleton(body, kinds, layout)
+function agen_tier_b_kernel_skeleton(body, kinds, layout, done = Set{Symbol}())
     out = Any[]
+    caps_here(i) = [c for c in layout.captures if c.key[1] == objectid(body) && c.key[2] == i && !(c.sym in done)]
     for (idx, stmt) in enumerate(body)
+        for c in caps_here(idx)
+            push!(out, Expr(:(=), c.sym, c.expr))
+            push!(done, c.sym)
+        end
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             if kinds[var] in (:scalar_float, :scalar_int) && !agen_expr_reads_array(stmt.rhs, kinds)
@@ -4280,16 +4353,48 @@ function agen_tier_b_kernel_skeleton(body, kinds, layout)
                 block_id = layout.block_of[key]
                 append!(out, agen_tier_b_block_stmts(block_id, layout.blocks[block_id], kinds))
             else
-                inner = agen_tier_b_kernel_skeleton(stmt.body, kinds, layout)
+                # A captured term inside this loop nest goes in front of the outermost loop when nothing in the nest changes
+                # what it reads: the replay loop then holds no live-out scalar and still offloads.
+                ids = Set{UInt}(); lvars = Set{Symbol}([stmt.var])
+                agen_subtree_info!(stmt.body, ids, lvars)
+                moved = agen_collect_reassigned(stmt.body, true)
+                for c in layout.captures
+                    (c.sym in done || !(c.key[1] in ids)) && continue
+                    vs = Set{Symbol}()
+                    agen_collect_expr_vars!(c.expr, vs)
+                    isempty(intersect(vs, moved)) && isempty(intersect(vs, lvars)) || continue
+                    push!(out, Expr(:(=), c.sym, c.expr))
+                    push!(done, c.sym)
+                end
+                inner = agen_tier_b_kernel_skeleton(stmt.body, kinds, layout, done)
                 push!(out, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
             end
         elseif stmt.kind == :if
-            then_inner = agen_tier_b_kernel_skeleton(stmt.then, kinds, layout)
-            els_inner = agen_tier_b_kernel_skeleton(stmt.els, kinds, layout)
+            then_inner = agen_tier_b_kernel_skeleton(stmt.then, kinds, layout, done)
+            els_inner = agen_tier_b_kernel_skeleton(stmt.els, kinds, layout, done)
             push!(out, emit_if(stmt.cond, then_inner, els_inner))
         end
     end
+    for c in caps_here(0)
+        push!(out, Expr(:(=), c.sym, c.expr))
+        push!(done, c.sym)
+    end
     return out
+end
+
+# identity of every statement list below `body`, and every loop variable declared there
+function agen_subtree_info!(body, ids, lvars)
+    push!(ids, objectid(body))
+    for st in body
+        if st.kind == :for || st.kind == :while
+            st.kind == :for && push!(lvars, st.var)
+            agen_subtree_info!(st.body, ids, lvars)
+        elseif st.kind == :if
+            agen_subtree_info!(st.then, ids, lvars)
+            agen_subtree_info!(st.els, ids, lvars)
+        end
+    end
+    return nothing
 end
 
 # The correct, complete way to get initstacks_*'s eventual Tier B argument list (Phase D):
@@ -4315,7 +4420,7 @@ agen_ectx_stack() = (keep_push_pop = true, loop_ctx = Any[], layout = nothing, p
 # Resolves which value_needed-like info the per-statement push/pop gate should consult: the
 # site-level Dict (ectx.push_pop) when one was computed, else the ordinary whole-variable
 # Set (`value_needed`) -- exactly today's behavior when the flag is off. Never affects
-# agen_block_boundary_vars/agen_exempt_vars/agen_if_branch_scalar_vars, which stay on the
+# agen_block_boundary_vars/agen_exempt_vars, which stay on the
 # plain Set always.
 agen_push_pop_source(value_needed, ectx) = ectx.push_pop === nothing ? value_needed : ectx.push_pop
 
@@ -5236,18 +5341,35 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
             # ragged index assignment into, ahead of the branch-flag push --
             # hoisting into the outer `exprs` would be wrong, since it isn't
             # guarded by `stmt.cond`.
+            # Under keep_push_pop = true the flag goes AFTER the arm's body. The backward sweep pops this flag first, then
+            # replays the arm, so a flag pushed by a nested `if` has to sit below the outer one on the shared stack. A
+            # flag pushed at the top of the arm came out in the wrong order for every `if` inside an `if`. Indexed mode
+            # addresses each flag by its own key, so its emission stays as it was.
             then_exprs = Any[]
-            agen_emit_push!(then_exprs, nm, 1, ectx, key)
-            append!(then_exprs, agen_forward_body(stmt.then, kinds, active_map, value_needed, reassigned, stacks, exempt;
-                                                    ectx = ectx,
-                                                    lin_body = lin_body === nothing ? nothing : lin_body[idx].then,
-                                                    unsafe = unsafe))
             els_exprs = Any[]
-            agen_emit_push!(els_exprs, nm, 0, ectx, key)
-            append!(els_exprs, agen_forward_body(stmt.els, kinds, active_map, value_needed, reassigned, stacks, exempt;
-                                                   ectx = ectx,
-                                                   lin_body = lin_body === nothing ? nothing : lin_body[idx].els,
-                                                   unsafe = unsafe))
+            if ectx.keep_push_pop
+                append!(then_exprs, agen_forward_body(stmt.then, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                                        ectx = ectx,
+                                                        lin_body = lin_body === nothing ? nothing : lin_body[idx].then,
+                                                        unsafe = unsafe))
+                agen_emit_push!(then_exprs, nm, 1, ectx, key)
+                append!(els_exprs, agen_forward_body(stmt.els, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                                       ectx = ectx,
+                                                       lin_body = lin_body === nothing ? nothing : lin_body[idx].els,
+                                                       unsafe = unsafe))
+                agen_emit_push!(els_exprs, nm, 0, ectx, key)
+            else
+                agen_emit_push!(then_exprs, nm, 1, ectx, key)
+                append!(then_exprs, agen_forward_body(stmt.then, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                                        ectx = ectx,
+                                                        lin_body = lin_body === nothing ? nothing : lin_body[idx].then,
+                                                        unsafe = unsafe))
+                agen_emit_push!(els_exprs, nm, 0, ectx, key)
+                append!(els_exprs, agen_forward_body(stmt.els, kinds, active_map, value_needed, reassigned, stacks, exempt;
+                                                       ectx = ectx,
+                                                       lin_body = lin_body === nothing ? nothing : lin_body[idx].els,
+                                                       unsafe = unsafe))
+            end
             push!(exprs, emit_if(stmt.cond, then_exprs, els_exprs))
         end
     end
@@ -5267,78 +5389,10 @@ end
 # (:value), matching how snap_plan classified the same write
 agen_snapshot_kind(lhs) = lhs isa Symbol ? :value : :array
 
-# find the top-level :assign to `var` in a lin_plan body, if any --
-# only looks at direct children, matching how the :if handling below
-# only ever needs a branch's OWN immediate write, not one buried
-# inside a further-nested :for/:if
-function agen_find_assign(body, var)
-    for s in body
-        s.kind == :assign || continue
-        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
-        v == var && return s
-    end
-    return nothing
-end
-
-# The constant a branch-snapshotted scalar falls back to on whichever side of the :if
-# doesn't assign it: the nearest preceding sibling assign to the same var in this block.
-# Only a literal-Number rhs is trusted, since recompute must not depend on any other
-# variable's current value, which the reverse sweep could already have disturbed.
-function agen_branch_scalar_fallback(plan, idx, var)
-    for k in (idx - 1):-1:1
-        s = plan[k]
-        s.kind == :assign || continue
-        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
-        v == var || continue
-        return s.tree.expr isa Number ? s.tree.expr : nothing
-    end
-    return nothing
-end
-
-# scalar_float vars this :if assigns (on either branch) purely
-# because they're read elsewhere -- NOT because the write is a
-# self-recurrence, which the normal pre-write restore already handles
-# correctly (it needs the OLD value at exactly this write's own
-# reverse position, unlike the read-elsewhere case below).
-function agen_if_branch_scalar_vars(stmt, kinds, value_needed)
-    vars = Symbol[]
-    for sub in vcat(stmt.then, stmt.els)
-        sub.kind == :assign || continue
-        var = sub.lhs isa Symbol ? sub.lhs : sub.lhs.args[1]
-        (sub.lhs isa Symbol && kinds[var] == :scalar_float) || continue
-        agen_count_var_refs(sub.tree.expr, var) == 0 || continue
-        agen_needs_snapshot(sub.lhs, sub.tree.expr, var, value_needed) || continue
-        var in vars || push!(vars, var)
-    end
-    return vars
-end
-
-# Did agen_forward_body actually push this branch's write to `var` onto its value stack? The forward gate is
-# reproduced here in full, including the site-level TBR decision -- lin_plan activity alone is not it. Keyed on the
-# primal branch body, the same object agen_forward_body recursed into, so agen_site_key matches. Getting this wrong
-# desyncs push!/pop!'s shared stack pointer under keep_push_pop=true: the discard-pop below would consume an entry
-# nothing ever pushed.
-function agen_branch_pushed(primal_branch, var, kinds, active_map, exempt, site_source)
-    for i in eachindex(primal_branch)
-        s = primal_branch[i]
-        s.kind == :assign || continue
-        v = s.lhs isa Symbol ? s.lhs : s.lhs.args[1]
-        v == var || continue
-        return kinds[v] in (:scalar_float, :array_float) && get(active_map, v, false) &&
-               agen_needs_snapshot(s.lhs, s.rhs, v, site_source, agen_site_key(primal_branch, i)) &&
-               !(v in exempt)
-    end
-    return false
-end
-
 # ---- backward sweep (walks lin_plan, whose :for/:if fields mirror
 #      the primal's own exactly -- only :assign carries a built tree) -
 
-# `skip_restore`: vars whose pre-write restore has already been done
-# by an enclosing :if's hoist (see below) -- popping again here would
-# consume the wrong stack entry. Only ever non-empty for the direct
-# then/els body of a hoisted :if; every other call uses the default.
-function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt, skip_restore = Set{Symbol}(); ectx = agen_ectx_stack())
+function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = agen_ectx_stack())
     exprs = Any[]
     # Block-boundary restoration: restore each such var here, at the very start of this
     # body's own backward processing, from the matching push agen_forward_body emitted at
@@ -5364,77 +5418,12 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
     # end-of-iteration values of the scalars whose first-write save was dropped -- see agen_remat_cross!
     head = ectx.remat === nothing ? nothing : get(ectx.remat, agen_site_key(primal_body, 0), nothing)
     head === nothing || append!(exprs, head.args)
-# Branch-snapshotted scalars whose own primal value is read by a different, later statement in this block for a nonlinear
-# term's partial. A plain reverse walk restores such a scalar only when it reaches the :if itself, one iteration too late.
-# Recomputed here instead, forward-style, from the freshly popped branch flag: safe since a snapshot site's rhs never depends
-# on anything the reverse sweep has touched yet. Walked in reverse-plan order so multiple qualifying :if's pop branch_stack in
-# LIFO order.
-    branch_flags = Dict{Int,Symbol}()
-    hoisted_vars = Dict{Int,Set{Symbol}}()
-    for idx in length(plan):-1:1
-        stmt = plan[idx]
-        stmt.kind == :if || continue
-        vars = agen_if_branch_scalar_vars(stmt, kinds, value_needed)
-        # A later write to `var` in this block already restores the post-:if value at its own reverse position, and the up-front
-        # recompute below would clobber the later write's value for the reads that follow it.
-        later = Set{Symbol}()
-        foreach(j -> agen_stmt_assigned!(primal_body[j], later), idx + 1:length(primal_body))
-        filter!(v -> !(v in later), vars)
-        isempty(vars) && continue
-        resolved = Any[]
-        for var in vars
-            then_stmt = agen_find_assign(stmt.then, var)
-            els_stmt = agen_find_assign(stmt.els, var)
-            then_expr = then_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : then_stmt.tree.expr
-            els_expr = els_stmt === nothing ? agen_branch_scalar_fallback(plan, idx, var) : els_stmt.tree.expr
-            (then_expr === nothing || els_expr === nothing) && continue   # can't safely recompute -- leave to the normal (imperfectly-timed) restore
-            # a branch only pushed onto the value stack (forward sweep) if its own rhs was
-            # active AND its site-level TBR decision said so -- a literal-constant branch
-            # (like the `then_expr`/`els_expr` fallback case) never does. agen_branch_pushed
-            # reproduces agen_forward_body's push gate; `.active` alone is not that gate.
-            src = agen_push_pop_source(value_needed, ectx)
-            then_pushed = then_stmt !== nothing && then_stmt.active &&
-                          agen_branch_pushed(primal_body[idx].then, var, kinds, active_map, exempt, src)
-            els_pushed = els_stmt !== nothing && els_stmt.active &&
-                         agen_branch_pushed(primal_body[idx].els, var, kinds, active_map, exempt, src)
-            push!(resolved, (var, then_expr, els_expr, then_pushed, els_pushed))
-        end
-        isempty(resolved) && continue
-        flag = Symbol("__branch_pre_", idx)
-        push!(exprs, Expr(:(=), flag, agen_emit_pop(stacks[(:branch, :cond)], ectx, agen_site_key(primal_body, idx), exprs)))
-        branch_flags[idx] = flag
-        hoisted_vars[idx] = Set(v for (v, _, _, _, _) in resolved)
-        for (var, then_expr, els_expr, then_pushed, els_pushed) in resolved
-            snm = stacks[(:value, var)]
-            # the discard-pop below exists ONLY to keep push!/pop!'s
-            # single shared stack pointer in sync -- :indexed mode has
-            # no such pointer, so it's simply omitted there; the
-            # pushed slot goes unread, a harmless over-snapshot (see
-            # skill-stade-dev.md's keep_push_pop entry)
-            if ectx.keep_push_pop
-                if then_pushed && els_pushed
-                    push!(exprs, Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing, exprs)))
-                elseif then_pushed
-                    push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing, exprs))], Any[]))
-                elseif els_pushed
-                    push!(exprs, emit_if(Expr(:call, :(==), flag, 0), Any[Expr(:(=), :__snap_discard, agen_emit_pop(snm, ectx, nothing, exprs))], Any[]))
-                end
-            end
-            # declared with a dummy numeric value first, then assigned
-            # in each branch, rather than `var = if cond; a; else; b;
-            # end` -- both forms are equivalent here (both branches of
-            # a plain if/else always assign var exactly once), this
-            # form is just easier to scan in the generated file
-            push!(exprs, Expr(:(=), var, 0.0))
-            push!(exprs, emit_if(Expr(:call, :(==), flag, 1), Any[Expr(:(=), var, then_expr)], Any[Expr(:(=), var, els_expr)]))
-        end
-    end
     for idx in length(plan):-1:1
         stmt = plan[idx]
         if stmt.kind == :assign
             var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
             kinds[var] in (:scalar_int, :array_int) && continue   # hoisted above, or unsafe (skipped entirely)
-            append!(exprs, agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, skip_restore; ectx = ectx, key = agen_site_key(primal_body, idx)))
+            append!(exprs, agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, key = agen_site_key(primal_body, idx)))
         elseif stmt.kind == :for
             key = agen_site_key(primal_body, idx)
             ii_kind = ectx.ii_plan === nothing ? nothing : get(ectx.ii_plan, key, nothing)
@@ -5509,23 +5498,18 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                                         value_needed, reassigned, stacks, exempt; ectx = ectx))
             push!(exprs, emit_forloop(agen_whilecount_iter_var(primal_body, idx), 1, cnt, 1, inner))
         elseif stmt.kind == :if
-            skip = get(hoisted_vars, idx, Set{Symbol}())
-            then_exprs = agen_backward_body(stmt.then, primal_body[idx].then, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt, skip; ectx = ectx)
-            els_exprs = agen_backward_body(stmt.els, primal_body[idx].els, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt, skip; ectx = ectx)
-            if haskey(branch_flags, idx)
-                push!(exprs, emit_if(Expr(:call, :(==), branch_flags[idx], 1), then_exprs, els_exprs))
-            else
-                nm = stacks[(:branch, :cond)]
-                push!(exprs, Expr(:(=), :__branch, agen_emit_pop(nm, ectx, agen_site_key(primal_body, idx), exprs)))
-                push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
-            end
+            then_exprs = agen_backward_body(stmt.then, primal_body[idx].then, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
+            els_exprs = agen_backward_body(stmt.els, primal_body[idx].els, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
+            nm = stacks[(:branch, :cond)]
+            push!(exprs, Expr(:(=), :__branch, agen_emit_pop(nm, ectx, agen_site_key(primal_body, idx), exprs)))
+            push!(exprs, emit_if(Expr(:call, :(==), :__branch, 1), then_exprs, els_exprs))
         end
     end
     append!(exprs, agen_asnap_restore(primal_body, kinds, ectx))
     return exprs
 end
 
-function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, skip_restore = Set{Symbol}(); ectx = agen_ectx_stack(), key = nothing)
+function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = agen_ectx_stack(), key = nothing)
     var = stmt.lhs isa Symbol ? stmt.lhs : stmt.lhs.args[1]
     is_accum = agen_is_pure_accumulation(stmt.lhs, stmt.tree.expr, var)
     exprs = Any[]
@@ -5534,13 +5518,13 @@ function agen_backward_assign(stmt, kinds, active_map, value_needed, reassigned,
         # Restore this write's overwritten old value whenever active_map[var] does, matching
         # agen_forward_body's push gate -- not stmt.active, since a write can destroy a value
         # another statement's nonlinear derivative still needs even when this write's own rhs is a
-        # plain inactive literal. `exempt`/`skip_restore` mirror the forward sweep's own skips -- no
+        # plain inactive literal. `exempt` mirrors the forward sweep's own skips -- no
         # push happened for those, so there's nothing to pop.
         remat_rhs = (ectx.remat === nothing || key === nothing) ? nothing : get(ectx.remat, key, nothing)
         if remat_rhs !== nothing
             # rematerialized: the old value is an earlier pure load in this block, recomputed instead of popped
             (remat_rhs isa Expr && remat_rhs.head == :cross) || push!(exprs, Expr(:(=), stmt.lhs, remat_rhs))
-        elseif get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), key) && !(var in exempt) && !(var in skip_restore)
+        elseif get(active_map, var, false) && agen_needs_snapshot(stmt.lhs, stmt.tree.expr, var, agen_push_pop_source(value_needed, ectx), key) && !(var in exempt)
             nm = stacks[(agen_snapshot_kind(stmt.lhs), var)]
             push!(exprs, Expr(:(=), stmt.lhs, agen_emit_pop(nm, ectx, key, exprs)))
         end

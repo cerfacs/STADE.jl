@@ -107,28 +107,6 @@ function windowed_relax_retire_hv(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, 
             __idx_right_stack_1_2 = prefix_right_stack_1[(i_pass - 1) + 1] + __icse_1
             rightd = right_stack_d[__idx_right_stack_1_2]
             right = right_stack[__idx_right_stack_1_2]
-            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_pass - 1) + 1] + (1 + max(0, div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + __icse_1
-            __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
-            rightd = 0.0
-            right = 0.0
-            if __branch_pre_4 == 1
-                rightd = ud[i_j + 1]
-                right = u[i_j + 1]
-            else
-                rightd = 0.0
-                right = 0.0
-            end
-            __idx_branch_stack_1_8 = (prefix_branch_stack_1[(i_pass - 1) + 1] + 1) + ((i_j - 1) + 1)
-            __branch_pre_2 = branch_stack[__idx_branch_stack_1_8]
-            leftd = 0.0
-            left = 0.0
-            if __branch_pre_2 == 1
-                leftd = ud[i_j - 1]
-                left = u[i_j - 1]
-            else
-                leftd = 0.0
-                left = 0.0
-            end
             __oldb_0d = ubd[i_j]
             __oldb_0 = ub[i_j]
             ubd[i_j] = 0.0
@@ -144,7 +122,9 @@ function windowed_relax_retire_hv(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, 
             leftb = leftb + __cse_2
             rightbd = rightbd + __cse_2d
             rightb = rightb + __cse_2
-            if __branch_pre_4 == 1
+            __idx_branch_stack_1_10 = (prefix_branch_stack_1[(i_pass - 1) + 1] + (1 + max(0, div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + __icse_1
+            __branch = branch_stack[__idx_branch_stack_1_10]
+            if __branch == 1
                 __oldb_0d = rightbd
                 __oldb_0 = rightb
                 rightbd = 0.0
@@ -154,7 +134,9 @@ function windowed_relax_retire_hv(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, 
             end
             rightbd = 0.0
             rightb = 0.0
-            if __branch_pre_2 == 1
+            __idx_branch_stack_1_14 = (prefix_branch_stack_1[(i_pass - 1) + 1] + 1) + ((i_j - 1) + 1)
+            __branch = branch_stack[__idx_branch_stack_1_14]
+            if __branch == 1
                 __oldb_0d = leftbd
                 __oldb_0 = leftb
                 leftbd = 0.0

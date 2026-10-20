@@ -1045,25 +1045,37 @@ shape, and `agen_distribute!`'s `skip_expr` argument suppresses the
 self-contribution. Everything else resets the shadow to `0.0` after
 distributing.
 
-### Branch-scalar hoisting
+### Branch scalars and branch flags
 
-A scalar assigned in only one arm of an `if` needs its restore hoisted
-above the whole `if`, not placed inside an arm. `agen_if_branch_scalar_vars`
-finds them and `skip_restore` stops the arm from popping a second time.
-`agen_branch_scalar_fallback` supplies the constant for the arm that does
-not assign it, and trusts only a literal number, because a recompute must
-not depend on a variable the reverse sweep may already have disturbed.
+A scalar assigned in an `if` arm and read elsewhere gets back its value in one of two places. The ordinary pre-write restore runs at the
+`if`'s own reverse position. When the scalar is a **block-boundary** scalar (assigned in a nested `if` or loop of the body), the pop at the
+head of the reverse body already gives it the value it had at the end of the body. That is the post-`if` value whenever no later statement
+of the block writes it again.
 
-This hoisting is why push and pop sites are matched by a **structural
-key** and never by a running counter. Hoisting reorders pops, and a
-counter silently desynchronizes.
+Through 0.4.9 a third mechanism, the **branch-scalar hoist**, popped the branch flag at the head of the reverse body and recomputed the
+scalar from its right-hand side in the arm that the flag chose. It had three defects, and it was removed in 0.4.10:
 
-The hoist is skipped for a scalar that a later statement of the same block
-writes again. That later write already restores the post-`if` value at its own
-reverse position, and the up-front recompute would overwrite it for the reads
-after the rewrite. Before this guard `if_scalar_rewrite` produced a wrong
-adjoint (relative error 1e-1 and up) under every flag combination, with the
-tangent and its finite differences correct.
+1. The recompute ran after the head-of-body restore and overwrote the restored value. When the right-hand side read an array that the
+   sweep rewrites (`left = u[i_j - 1]` in an in-place stencil) it read the array in a later state, and the adjoint was wrong in both
+   `keep_push_pop` settings (`inplace_stencil_if`; the tangent and HVP checks did not see it).
+2. Under `keep_push_pop = true` it popped a flag that was not on top of the shared stack whenever another `if` or a loop holding an `if`
+   followed in the block (`if_scalar_then_if`, `if_scalar_then_loop_if`).
+3. A later write to the scalar in the same block made the recompute overwrite that write's value (`if_scalar_rewrite`, fixed in 0.4.6 by a guard).
+
+After the head-of-body restore was given priority, no corpus kernel, no mutated corpus (each loop body wrapped one level deeper, in a
+one-trip loop or an always-true `if`) and none of the reduced kernels reached the hoist, so the code was deleted and generated output was
+byte-identical on all of them. `if_top_scalar`, `if_top_two` and `if_in_outer_loop` keep the shapes that used to reach it in the corpus.
+
+**Flag order under `keep_push_pop = true`.** The forward sweep pushes an `if`'s flag after the body of the arm, and the backward sweep
+pops it before replaying the arm. A flag pushed at the start of the arm sat above the flags of any `if` nested in it, so every `if` inside
+an `if` popped the inner flag first (through 0.4.9; `nest_if`, `nest_if_scalar`). Indexed mode addresses every flag by its own site key and
+is unaffected.
+
+Push and pop sites are matched by a **structural key** and never by a running counter: the two sweeps visit sites in different orders, and a
+device launch guarantees no visit order at all.
+
+`validate_if_nesting.jl` holds all of the above and the captured size terms of Tier A (witnesses in the four flag combinations, the refusal
+described under Tier B, four sabotage runs).
 
 ### Unsafe integer variables
 
@@ -1181,15 +1193,29 @@ tables and adds to the totals at one point in the ancestor's body: after every
 statement that comes before the first **retiring** assignment. A retiring
 assignment writes a scalar that a size formula uses, after some loop has already
 read that scalar as a bound. It belongs to the next ancestor iteration, so the
-tables must be written before it. `agen_tier_b_block_stmts` finds the split by
-walking the loop headers in program order. The walk must reach loops at **every**
-depth (`agen_collect_nested_bound_vars!`). Through 0.4.8 it read only the headers
-of top-level statements. A body such as `for i_ ... for i_cell = 1:nc ... end end;
-nc = nc - 1` then recorded each level from the value after the `nc = nc - 1`.
-Every block was one cell short and overran its successor. With the consuming loop
-inside an `if` the result was silently wrong gradients (0.59 relative error),
-not an index error. `retire_nested` and `retire_if` are the corpus witnesses,
-next to `coarsen_retire`, which has the consumer at the top level.
+tables must be written before it. `agen_tier_b_split_point` finds the split from the **program-order events** of the whole body: each
+loop header (a `:consume` of the scalars it reads) and each assignment, at every depth, including inside `if`s and nested loops. A
+statement retires when it holds a write to a size-relevant scalar that a header already consumed, earlier in the body or earlier inside the
+same statement. Through 0.4.8 the pass read only the headers of top-level statements (fixed in 0.4.9). A body such as `for i_ ... for i_cell = 1:nc ... end
+end; nc = nc - 1` then recorded each level from the value after the `nc = nc - 1`. Every block was one cell short and overran its successor.
+With the consuming loop inside an `if` the result was silently wrong gradients (0.59 relative error), not an index error. Through 0.4.9 the
+same pass still asked only whether a top-level assignment retires, so a retiring write nested in an `if` was missed (`retire_in_if`).
+
+The tables hold one value per ancestor iteration. When a loop header reads a size-relevant scalar **after** an assignment to it in the
+stream that starts at the split statement, the second read would need the new value and the table holds the old one. The sizing pass stops
+with an error that says so (`keep_push_pop = true` is unaffected). `validate_if_nesting.jl` checks the message and sabotages it.
+`retire_nested`, `retire_if` and `retire_in_if` are the corpus witnesses, next to `coarsen_retire`, which has the consumer at the top level.
+
+**Size terms of the stages before a block (`__mult_<k>`).** The slots of a ragged block start after the slots of every earlier stage, and
+the offset of each later site holds the size of those stages. A stage size is a product of trip counts, and a trip count can read a scalar
+that a later statement reassigns (`nc = nl - 1` in the level loop, after a smoother that ran over `1:nc`). The forward sweep read the live
+`nc`. The backward sweep did not recompute it, so it read a stale one: the two sweeps used different indexes, giving a silent wrong gradient
+or a `BoundsError` (through 0.4.10 before this fix; `early_stage_offset`). `agen_layout` now walks twice for a kernel with ragged blocks. The
+second walk, with a set of the scalars assigned later in program order, replaces such a size term by `__mult_<k>`. The replay of
+`initstacks_*` (`agen_tier_b_kernel_skeleton`) sets `__mult_<k>` at the position of the site, and `initstacks_*` returns it with the
+`__tot_*` values, so the adjoint and the HVP take it as an argument. A kernel without a ragged block has no replay, and its output is
+unchanged. The position of the site in its own loop (`(i_k - 1) * nc + (i_j - 1)`) still reads the live bound: the sweep restores that bound
+from the tripcount stack, so both sweeps agree.
 
 A stack that no block can resolve is **tainted**. It falls back to
 growable `push!`/`pop!` regardless of the flag, per stack and never per
@@ -2024,7 +2050,7 @@ subset of the whole-variable set.
 `agen_site_key(body, idx[, bv])`, a structural identity for one snapshot
 site, built from the body object's identity and the statement index. Push
 and pop sites are matched by this key and **never** by a running counter,
-because branch-scalar hoisting reorders pops.
+because the two sweeps visit sites in different orders.
 
 **Exempt variable**
 A value-needed variable that still needs no stack, because it is written
@@ -2045,15 +2071,7 @@ or push and pop counts desynchronize.
 **Branch flag**
 The integer 1 or 0 a `:branch` snapshot stores, recording which arm of an
 `if` the forward sweep took. The backward sweep replays the record instead
-of re-evaluating the condition.
-
-**Branch-scalar hoisting**
-Moving a scalar's restore above an entire `if`, because only one arm
-assigns it. It is the reason site keys must be structural.
-
-**`skip_restore`**
-The argument that stops an `if` arm from popping a value an enclosing
-hoist already popped.
+of re-evaluating the condition. Under `keep_push_pop = true` it is pushed after the arm's body.
 
 **Unsafe integer variable**
 An `Int64` variable that is evolving state rather than a recomputable
@@ -2375,6 +2393,7 @@ julia validate_offload.jl                # GPU coverage ceiling, no GPU needed
 julia validate_zerotrip.jl               # integer draws that include zero
 julia validate_gpu_arglayout.jl          # adjoint/HVP call layout, no GPU needed
 julia validate_gpu_stack_compare.jl      # stack comparison in the parity script, no GPU needed
+julia validate_if_nesting.jl             # nested ifs, branch scalars, nested retiring writes, early-stage size terms, with sabotage
 julia validate_elision_coverage.jl       # snapshot-elision branches, no GPU needed
 julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```

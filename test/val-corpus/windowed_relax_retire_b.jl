@@ -87,22 +87,6 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
             left = left_stack[__idx_left_stack_1_0]
             __idx_right_stack_1_2 = prefix_right_stack_1[(i_pass - 1) + 1] + __icse_1
             right = right_stack[__idx_right_stack_1_2]
-            __idx_branch_stack_1_4 = (prefix_branch_stack_1[(i_pass - 1) + 1] + (1 + max(0, div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + __icse_1
-            __branch_pre_4 = branch_stack[__idx_branch_stack_1_4]
-            right = 0.0
-            if __branch_pre_4 == 1
-                right = u[i_j + 1]
-            else
-                right = 0.0
-            end
-            __idx_branch_stack_1_8 = (prefix_branch_stack_1[(i_pass - 1) + 1] + 1) + ((i_j - 1) + 1)
-            __branch_pre_2 = branch_stack[__idx_branch_stack_1_8]
-            left = 0.0
-            if __branch_pre_2 == 1
-                left = u[i_j - 1]
-            else
-                left = 0.0
-            end
             __oldb_0 = ub[i_j]
             ub[i_j] = 0.0
             __cse_2 = 0.5__oldb_0
@@ -110,13 +94,17 @@ function windowed_relax_retire_b(u, ub, f, fb, w0, num_passes, dx, dxb, n, nb, b
             fb[i_j] = fb[i_j] + dx2 * __cse_2
             leftb = leftb + __cse_2
             rightb = rightb + __cse_2
-            if __branch_pre_4 == 1
+            __idx_branch_stack_1_10 = (prefix_branch_stack_1[(i_pass - 1) + 1] + (1 + max(0, div(val_w_1[(i_pass - 1) + 1] - 1, 1) + 1))) + __icse_1
+            __branch = branch_stack[__idx_branch_stack_1_10]
+            if __branch == 1
                 __oldb_0 = rightb
                 rightb = 0.0
                 ub[i_j + 1] = ub[i_j + 1] + __oldb_0
             end
             rightb = 0.0
-            if __branch_pre_2 == 1
+            __idx_branch_stack_1_14 = (prefix_branch_stack_1[(i_pass - 1) + 1] + 1) + ((i_j - 1) + 1)
+            __branch = branch_stack[__idx_branch_stack_1_14]
+            if __branch == 1
                 __oldb_0 = leftb
                 leftb = 0.0
                 ub[i_j - 1] = ub[i_j - 1] + __oldb_0
