@@ -1843,14 +1843,25 @@ to the Float64 CPU result. The Float64 CPU code is itself off the exact value
 (3e-12 on the U-Net HVP, up to 1e-10 on the transformer HVP, measured with
 192-bit BigFloat), so a device-vs-CPU difference adds two roundings and used to
 pass or fail by draw, on stock v0.4.10 as well. The script runs the same CPU
-code in BigFloat on the same inputs. A trial passes when the device error
-against that truth is at most 20 times the CPU's own error, and never below the
-atomic-count `rtol`. If the BigFloat run throws, that trial falls back to the
-device-vs-CPU comparison with `rtol`. The JSON line carries `truth_trials`
+code in BigFloat on the same inputs. The run gets one verdict. It passes when
+the worst device error against that truth, over the trials, is at most 20 times
+the worst CPU error over the same trials, or at most an absolute ceiling of 1e-10,
+and never below the atomic-count `rtol`. The device does not round like the host
+(its libm, fused operations, the order of an atomic sum), so its error is not a
+multiple of the host's. Over 64 V100 runs (8 draws of four large kernels, adjoint
+and HVP, 192 trials) the per-trial ratio ran from 0.01 to 87. Judging each trial
+against its own CPU error failed one transformer HVP draw deterministically
+(3.7e-12 against a worst CPU error of 7.7e-13). With the verdict above, 63 of the
+64 runs pass on the 20x bound and the other passes on the ceiling. The ceiling is
+a single constant, `truth_ceiling`, in `val_gpu_parity_script`. A gap above it
+is no longer rounding. If the BigFloat run throws, that trial falls back to the
+device-vs-CPU comparison with `rtol`. The stack comparison stays exact. The JSON line carries `truth_trials`
 (trials that had a truth), `tr_cpu` and `tr_gpu` (worst errors against it).
 `validate_gpu_truth.jl` pins the criterion without a GPU: it makes the device
 side a copy of the host side, so the script must pass, and then changes one
-element, so the script must fail.
+element, so the script must fail. It also pins the verdict itself with seven checks: a lucky CPU draw,
+a heavy draw below the ceiling, a gap of 1e-8, one catastrophic trial, the sharp edge of
+the ceiling, a kernel whose own CPU error is 1e-10, and empty trial data.
 
 The parity script also reports `stack_max_rel_err`, the worst difference between
 the host stacks and the device stacks. It is informational and is not part of `ok`.

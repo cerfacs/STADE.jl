@@ -5,7 +5,7 @@ include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
 Structural gate for the BigFloat truth in the GPU parity script. No GPU needed. `validate_corpus_gpu.jl` runs the script on a device.
 
-The parity script runs the CPU generated code a second time in BigFloat on the same inputs, and passes a trial when the GPU error against that truth is at most 20 times the CPU's own error (never below the atomic-count `rtol`). Here the script is generated for each kernel and mode, its device side is replaced by a copy of the CPU side (names without `_cuda`, `deepcopy` for `CuArray`), and the result is run on the host:
+The parity script runs the CPU generated code a second time in BigFloat on the same inputs, and passes when the worst GPU error against that truth, over all trials, is at most 20 times the worst CPU error over the same trials, or at most 1e-10 (never below the atomic-count `rtol`). Here the script is generated for each kernel and mode, its device side is replaced by a copy of the CPU side (names without `_cuda`, `deepcopy` for `CuArray`), and the result is run on the host:
 
   1. TRUTH: the BigFloat run succeeded in every trial (`truth_trials` equals the number of trials), so no kernel silently falls back to the GPU-vs-CPU comparison.
   2. IDENTITY: with a device identical to the host, the script passes and the GPU error equals the CPU error.
@@ -42,6 +42,32 @@ function validate_gpu_truth(dir::String = joinpath(@__DIR__, "val-corpus"); only
         m === nothing && return nothing
         return (ok = m.captures[1] == "true", trials = parse(Int, m.captures[2]), tr_cpu = parse(Float64, m.captures[3]), tr_gpu = parse(Float64, m.captures[4]), changed = parse(Int, m.captures[5]))
     end
+    # VERDICT: one verdict for the whole run, with two ways to pass (see val_truth_verdict_lines). Each case is a list of per-trial
+    # (CPU error, GPU error) pairs. `per_trial` is the rule this replaced, judging every trial against 20 times its own CPU error.
+    rtol = 2.5e-14; factor = 20.0; ceiling = 1.0e-10
+    function verdict(pairs)
+        m = Module(:VerdictCase)
+        Core.eval(m, :(__all_ok = true))
+        Core.eval(m, :(truth_trials = $(length(pairs))))
+        Core.eval(m, :(tr_cpu_worst = $(maximum([p[1] for p in pairs]; init = 0.0))))
+        Core.eval(m, :(tr_gpu_worst = $(maximum([p[2] for p in pairs]; init = 0.0))))
+        include_string(m, join(STADE.val_truth_verdict_lines(rtol, factor, ceiling), "\n"))
+        return Core.eval(m, :__all_ok)
+    end
+    per_trial(pairs) = all(p -> p[2] <= max(rtol, factor * p[1]), pairs)
+    pooled(pairs) = maximum(p[2] for p in pairs) <= max(rtol, factor * maximum(p[1] for p in pairs))
+    # the transformer HVP draw that failed on a V100: one accurate CPU trial beside two ordinary ones
+    lucky = [(1.0e-13, 3.6e-12), (7.7e-13, 3.0e-12), (6.0e-13, 2.0e-12)]
+    check(!per_trial(lucky) && verdict(lucky), "verdict: a trial with a very accurate CPU no longer fails ordinary GPU noise")
+    # a transformer adjoint draw measured on a V100: the CPU error stays near 9e-14 while one GPU trial reaches 6.3e-12, 70 times larger
+    heavy = [(8.9e-14, 1.07e-12), (8.8e-14, 3.6e-13), (7.3e-14, 6.3e-12)]
+    check(!pooled(heavy) && verdict(heavy), "verdict: a GPU error 70 times the CPU's passes below the ceiling")
+    check(!verdict([(1.0e-12, 1.0e-8), (1.2e-12, 9.0e-9), (9.0e-13, 1.1e-8)]), "verdict: a GPU error of 1e-8 fails")
+    check(!verdict([(1.0e-12, 1.0e-12), (1.0e-12, 1.0e-12), (1.0e-12, 1.0e-3)]), "verdict: one catastrophic trial among good ones fails")
+    check(verdict([(1.0e-14, 9.9e-11)]) && !verdict([(1.0e-14, 1.1e-10)]), "verdict: the ceiling is sharp, 9.9e-11 passes and 1.1e-10 fails")
+    check(verdict([(1.0e-10, 1.9e-9)]) && !verdict([(1.0e-10, 2.1e-9)]), "verdict: a kernel with a large CPU error keeps the relative bound beyond the ceiling")
+    check(verdict(Tuple{Float64,Float64}[]), "verdict: no truth trial leaves the earlier fallback verdict alone")
+
     for name in names
         tmp = mktempdir(); path = joinpath(tmp, name * ".jl"); cp(joinpath(dir, name * ".jl"), path)
         for mode in (:adjoint, :hvp)
