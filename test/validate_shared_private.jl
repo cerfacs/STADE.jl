@@ -114,7 +114,7 @@ function private_unit_checks(S)
             A[mod(i, 4) + 1] += 1.0
         end
         return nothing
-    end), cuda; shared_private = 7)
+    end), cuda; shared_private = 7, inbounds = false, dead_scalars = false)
     check(occursin("7 * length(A)", src(plan7.host)), "shared_private = 7 reaches the launch test")
     check(!occursin("shmem", src(S.cgen_launch_stmts(stmt, :kern, 3, Symbol[:A, :n], cuda)[end])) && length(S.cgen_launch_stmts(stmt, :kern, 3, Symbol[:A, :n], cuda)) == 1, "no private arrays: the plain launch alone")
     return bad
@@ -157,7 +157,7 @@ function validate_shared_private(dir::String = joinpath(@__DIR__, "val-corpus");
         for (mode, gen) in (("adjoint", STADE.stade_adjoint), ("hvp", STADE.stade_hvp)), fuse in (false, true)
             out = try gen(pe; keep_push_pop = false, fuse_ii_loops = fuse) catch; continue end
             e = mode == "hvp" ? out.hvp : out.adjoint
-            on = STADE.stade_gpu(e, cuda); off = STADE.stade_gpu(e, cuda; shared_private = false)
+            on = STADE.stade_gpu(e, cuda; inbounds = false, dead_scalars = false); off = STADE.stade_gpu(e, cuda; shared_private = false, inbounds = false, dead_scalars = false)
             plans += 1
             variants = [k for k in on.kernels if private_is_variant(k)]
             plain = [k for k in on.kernels if !private_is_variant(k)]
@@ -167,7 +167,7 @@ function validate_shared_private(dir::String = joinpath(@__DIR__, "val-corpus");
             check(same, "$name [$mode f=$(Int(fuse))]: $n private array(s) in $(length(variants)) variant(s), dropping the variants and keeping the plain launches gives the output of shared_private = false")
             host_text = src(on.host)
             check(all(k -> occursin(string(k.args[1].args[1]), host_text), variants), "$name [$mode f=$(Int(fuse))]: every private variant is launched")
-            amd = STADE.stade_gpu(e, STADE.cgen_backend_amdgpu())
+            amd = STADE.stade_gpu(e, STADE.cgen_backend_amdgpu(); inbounds = false, dead_scalars = false)
             check(!any(k -> occursin("CuDynamicSharedArray", src(k)), amd.kernels), "$name [$mode f=$(Int(fuse))]: AMDGPU output has no shared memory")
         end
     end

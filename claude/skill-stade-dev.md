@@ -309,7 +309,7 @@ cancels, so it complements rather than replaces.
 `stade_gpu` ingests **already-generated** code; its only keywords are
 `precision`, `reduction_threshold`, `hoist_atomics`, `gather_stencil` (all backends) and the CUDA-only `warp_atomics`,
 `sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly), plus the CUDA-only opt-in
-`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). **Only `keep_push_pop=false` output is
+`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). Every backend also takes `inbounds` and `dead_scalars` (default on; both `false` is the exact v0.4.31 text). **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
@@ -422,6 +422,14 @@ unchanged. `test/validate_gather_stencil.jl` sabotage-tests each of these. A gat
 kernel has no atomic, so `validate_write_overlap` checks the property instead (one plain
 write at the thread's own index, no other access of that array); its atomic-repair checks
 run with `gather_stencil = false`, which is the exact rollback.
+
+`dead_scalars` deletes a scalar assignment that nothing reads later in the thread (backward liveness, least fixpoint in
+loops, opaque statements keep all they mention live, an array read counts as pure only when `inbounds` is on); `inbounds` wraps
+the whole kernel body, thread guard inside, in `@inbounds`. Both run last, on the kernels. An `@inbounds` kernel turns a wrong index into
+a silent wrong access, so debug with `inbounds = false`, and a validator that inspects generated text must pass both `false`. A
+mutant that cannot change any output (the first guess of the loop fixpoint) cannot be sabotage-tested; say so, do not hide it.
+A sabotage harness must keep the modified source: guard the include in the test file with `isdefined(Main, :STADE) ||`, or every
+mutant runs against the original and "NOT CAUGHT" means nothing.
 
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,

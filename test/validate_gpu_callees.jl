@@ -49,7 +49,7 @@ function validate_gpu_callees(dir::String = joinpath(@__DIR__, "val-corpus"))
             # extremes of reduction_threshold span exactly what it did.
             for kaa in (true, false)
                 th = kaa ? 1_000_000_000 : 0
-                out = try STADE.stade_gpu(e, STADE.cgen_backend_cuda(); reduction_threshold = th) catch er; continue end
+                out = try STADE.stade_gpu(e, STADE.cgen_backend_cuda(); reduction_threshold = th, inbounds = false, dead_scalars = false) catch er; continue end
                 s = join(vcat([STADE.io_expr_to_source(k) for k in out.kernels],
                               [STADE.io_expr_to_source(out.host)]), "\n")
                 src[kaa] = s
@@ -92,7 +92,7 @@ function validate_gpu_callees(dir::String = joinpath(@__DIR__, "val-corpus"))
                 continue
             end
             ex = mode == :hvp ? gen.hvp : gen.adjoint
-            out = try STADE.stade_gpu(ex, STADE.cgen_backend_cuda(); reduction_threshold = 0) catch er; continue end
+            out = try STADE.stade_gpu(ex, STADE.cgen_backend_cuda(); reduction_threshold = 0, inbounds = false, dead_scalars = false) catch er; continue end
             walk2(x) = begin
                 if x isa Expr
                     if x.head == :call && x.args[1] in (:mapreduce, :sum)

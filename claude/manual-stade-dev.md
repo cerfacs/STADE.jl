@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6, inbounds=true, dead_scalars=true)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2481,6 +2481,27 @@ assigns and is not the loop variable; every use of its array in the loop is such
 a site; it is not inside a nested `for`; and the loop has at most 16 sites. A
 flag set in the loop guards the flush, so a loop that runs zero times flushes
 nothing (an index can be 0 exactly then). The order of the float sum changes.
+
+**Kernel finishing passes** (`inbounds`, `dead_scalars`)
+All GPU backends (CUDA, AMDGPU, Metal, JACC), `stade_gpu`, `stade_cuda`, `stade_jacc`, the `_file` and the `validate` forms; both default `true`.
+`inbounds = false, dead_scalars = false` gives exactly the v0.4.31 text (hash-identical on the 700 plans of the corpus and the kit).
+The passes run last, on the kernels only: first `dead_scalars`, then (CUDA) any variant that is built from the kernel, then `inbounds`.
+`cgen_finish_kernels(kernels; inbounds, dead_scalars)` applies them to a list (JACC uses it); `cgen_dead_scalars(kernel, refs_ok)` and
+`cgen_inbounds_wrap(kernel)` are the two passes.
+
+`dead_scalars`: a backward liveness walk per kernel. `cgen_dead_walk` keeps the set of scalars read later in the thread. A plain
+assignment `v = rhs` whose `v` is not live and whose `rhs` is pure is dropped and adds no reads. A `for` loop is iterated to its least
+fixpoint, so a carried `s = s + x` that nothing reads is dead (the dead accumulation in the adjoint of `mlp3`); a branch unions its arms,
+and a branch without `else` also keeps what is live after it. A statement of any other form is opaque: it keeps every symbol it mentions live
+and kills nothing. A call is pure only if it is in `CGEN_DEAD_PURE_CALLS`; an array read is pure only when `refs_ok` is true, which is
+`inbounds`, because with bounds checks on a deleted read would delete the error it can raise.
+
+`inbounds`: wraps the whole body in `@inbounds begin ... end`, the thread guard (`if __tid > n_iter; return nothing; end`) inside the block.
+Cost: a wrong index is a silent wrong read or write instead of an exception. Pass `inbounds = false` to debug a kernel.
+Measured on a V100: geometric mean 1.18 (primal) and 1.06 (adjoint) over 39 cases; `dead_scalars` alone 1.00. Three cases are slower
+(`ufv_scatter_step` 4e6 adjoint 0.83, 1e6 adjoint 0.94; `transformer_block` d512 primal 0.94); the cause is not known.
+`test/validate_inbounds.jl` (19 sources, corpus pass, 11 sabotage cases) tests both passes. The text-inspecting validators pass
+`inbounds = false, dead_scalars = false`; `validate_ownership` runs with `OWN_FINISH=checked` (default: dead on, `@inbounds` off), `full` or `off`.
 
 **Gather form of affine stencil adjoints** (`gather_stencil`)
 All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The
