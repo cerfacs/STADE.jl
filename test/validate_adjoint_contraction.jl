@@ -198,6 +198,9 @@ const ADJ_CASES = [
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + w2[(c - 1) * n + o] * gs)
             end"""), :con_adj, sd -> (a = adj_args(sd); Any[a..., randn(MersenneTwister(51), length(a[3]))]), 1),
     ("tangent pair, a recomputed forward value of one product", adj_src(params = TANG_PARAMS, pre = "s = 0.5\n for c = 1:k\n s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]\n end\n gs = tanh(s) * g[idx]\n gd = gg[idx] * 3.0", loop = TANG_LOOP), :con_adj, tang_args, 4),
+    ("tangent pair, a recomputed forward value with two sums (the HVP shape)", adj_src(params = TANG_PARAMS, pre = "sd = 0.1\n s = 0.5\n for c = 1:k\n a1 = w[(c - 1) * n + o]\n a2 = x[(t - 1) * k + c]\n sd = sd + (a1 * xd[(t - 1) * k + c] + a2 * wd[(c - 1) * n + o])\n s = s + a2 * a1\n end\ngs = tanh(s) * g[idx]\n gd = sd * gg[idx]", loop = TANG_LOOP), :con_adj, tang_args, 4),
+    ("tangent pair, a temporary of the forward loop is read after it", adj_src(params = TANG_PARAMS, pre = "a1 = 0.0\n sd = 0.1\n s = 0.5\n for c = 1:k\n a1 = w[(c - 1) * n + o]\n a2 = x[(t - 1) * k + c]\n sd = sd + (a1 * xd[(t - 1) * k + c] + a2 * wd[(c - 1) * n + o])\n s = s + a2 * a1\n end\ngs = tanh(s) * g[idx] + a1\n gd = sd * gg[idx]", loop = TANG_LOOP), :con_adj, tang_args, 4),
+    ("tangent pair, a forward loop with three sums", adj_src(params = TANG_PARAMS, pre = "sd = 0.1\n s = 0.5\n s3 = 0.2\n for c = 1:k\n a1 = w[(c - 1) * n + o]\n a2 = x[(t - 1) * k + c]\n sd = sd + (a1 * xd[(t - 1) * k + c] + a2 * wd[(c - 1) * n + o])\n s = s + a2 * a1\n s3 = s3 + xd[(t - 1) * k + c] * wd[(c - 1) * n + o]\n end\n gs = tanh(s) * g[idx]\n gd = (sd + s3) * gg[idx]", loop = TANG_LOOP), :con_adj, tang_args, 4),
     ("batched, a sum of two products", adj_src(params = ", nb, gg, wd, xbd", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, pre = TANG_PRE, loop = """for c = 1:k
                 xbd[((h - 1) * m + t - 1) * k + c] = xbd[((h - 1) * m + t - 1) * k + c] + (gs * wd[((h - 1) * n + o - 1) * k + c] + w[((h - 1) * n + o - 1) * k + c] * gd)
             end"""), :con_adj, sd -> (a = adj_bargs(sd); r = MersenneTwister(sd + 60); L = length(a[2]); Any[a[1:10]..., randn(r, length(a[1])), randn(r, L), randn(r, L)]), 1),
@@ -339,7 +342,7 @@ end
 adj_is_twin(n) = occursin(r"_t\d+!$", n)
 adj_is_stage(n) = endswith(n, "_f_t!")
 # the cases whose forward loop becomes a tiled kernel of its own
-const ADJ_STAGE = Set(["a recomputed forward value, a repeated decode and temporaries", "tangent pair, a recomputed forward value of one product", "a recomputed forward value, subtracted, factors swapped", "two recomputed forward loops, the first is staged", "batched, a recomputed forward value and a repeated decode", "head in the column, a recomputed forward value and a repeated decode"])
+const ADJ_STAGE = Set(["tangent pair, a recomputed forward value with two sums (the HVP shape)", "a recomputed forward value, a repeated decode and temporaries", "tangent pair, a recomputed forward value of one product", "a recomputed forward value, subtracted, factors swapped", "two recomputed forward loops, the first is staged", "batched, a recomputed forward value and a repeated decode", "head in the column, a recomputed forward value and a repeated decode"])
 function adj_unit_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
@@ -479,8 +482,9 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the loop variable may be a parameter", "(cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing", "(cv in (ov, tv, idxv) || cv === hv) && return nothing"),
             ("the loop variable may be the column or the row", "(cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing", "(cv in params || cv === hv) && return nothing"),
             ("the loop variable may be the batch", "(cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing", "(cv in params || cv in (ov, tv, idxv)) && return nothing"),
-            ("a temporary may have a parameter's name", "            tn in params && return nothing\n", ""),
-            ("a temporary may be read outside the loop", "            cgen_count_symbol(outside, tn) == 0 || return nothing\n", ""),
+            ("a temporary may have a parameter's name", "            tn in params && return nothing\n            cgen_count_symbol(outside, tn) == 0 || return nothing\n            rhs = subst(", "            cgen_count_symbol(outside, tn) == 0 || return nothing\n            rhs = subst("),
+            ("a temporary may be read outside the loop", "            cgen_count_symbol(outside, tn) == 0 || return nothing\n            rhs = subst(", "            rhs = subst("),
+            ("a temporary of the forward loop may be read outside it", "            cgen_count_symbol(outside, tn) == 0 || return nothing\n            tmps[tn] = subst(st.args[2], tmps)", "            tmps[tn] = subst(st.args[2], tmps)"),
             ("a value that is not a product is accepted", "        (v isa Expr && v.head === :call && v.args[1] === :* && length(v.args) == 3) || return nothing\n        a, b = v.args[2], v.args[3]", "        (v isa Expr && v.head === :call && length(v.args) == 3) || return nothing\n        a, b = v.args[2], v.args[3]"),
             ("a sum of three seeds is accepted", "    length(gs_list) <= 2 || return nothing\n", ""),
             ("a sum of more than two products is accepted", "v.args[1] === :+ && length(v.args) == 3 && product(v.args[2]) !== nothing && product(v.args[3]) !== nothing ?", "v.args[1] === :+ && product(v.args[2]) !== nothing ?"),
@@ -516,15 +520,16 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the second scratch array is not allocated", "body = Any[Expr(:(=), sc, zeros_expr) for sc in A.a.scratch]", "body = Any[Expr(:(=), sc, zeros_expr) for sc in A.a.scratch[1:1]]"),
             ("the first kernel does not take the second scratch array", "Symbol[scratch_of(gg) for gg in gs_list]..., (fstage === nothing", "Symbol[:__ct_g]..., (fstage === nothing"),
             ("a twin does not take the second scratch array", "fargs = Symbol[fargs..., unique(Symbol[scratch_of(tm.gs) for tm in s.terms])...],", "fargs = Symbol[fargs..., :__ct_g],"),
-            ("the second term is not loaded", "    for (q0, tm) in enumerate(tlist)\n", "    for (q0, tm) in enumerate(tlist[1:1])\n"),
+            ("the second left tile is not loaded", "    for (q0, opd) in enumerate(alist)\n", "    for (q0, opd) in enumerate(alist[1:1])\n"),
+            ("the second right tile is not loaded", "    for (q0, opd) in enumerate(blist)\n", "    for (q0, opd) in enumerate(blist[1:1])\n"),
             ("the products of the second term are not added", "foldl(cadd, prods)", "prods[1]"),
             ("the second term shares the tile of the first", "offq(e, q0) = q0 == 0 ? e : cadd(q0 * TS, e)", "offq(e, q0) = e"),
             ("the tile memory is sized for one term", "call(:CuDynamicSharedArray, :Float64, nt * TS)", "call(:CuDynamicSharedArray, :Float64, TS)"),
             ("the launch asks for the memory of one term", "shmem = 8 * nt * TS)", "shmem = 8 * TS)"),
             ("the probe of the register limit is not built", "probe = Expr(:call, t.name, plain.args[2:end]..., (d.target for _ in d.scratch)...)", "probe = Expr(:call, t.name, plain.args[2:end]..., (:__ct_g for _ in d.scratch)...)"),
-            ("the stage store goes to the wrong element", "Expr(:(=), Expr(:ref, :__cf_s, idxv), acf[1])", "Expr(:(=), Expr(:ref, :__cf_s, 1), acf[1])"),
-            ("the stage is read from the wrong element", "pre_a[fstage.at] = Expr(:(=), fstage.acc, Expr(:ref, :__cf_s, idxv))", "pre_a[fstage.at] = Expr(:(=), fstage.acc, Expr(:ref, :__cf_s, 1))"),
-            ("the stage replaces the wrong statement", "(desc = d0, acc = acf[1], at = fi + 1)", "(desc = d0, acc = acf[1], at = fi)"),
+            ("the stage store goes to the wrong element", "Expr(:(=), Expr(:ref, fnames[k], idxv), sf[k][1])", "Expr(:(=), Expr(:ref, fnames[k], 1), sf[k][1])"),
+            ("the stage is read from the wrong element", "Expr(:(=), fstage.accs[k], Expr(:ref, fstage.scratch[k], idxv))", "Expr(:(=), fstage.accs[k], Expr(:ref, fstage.scratch[k], 1))"),
+            ("the stage replaces the wrong statement", "(desc = d0, accs = Symbol[x[1] for x in sf], at = fi + 1, scratch = fnames)", "(desc = d0, accs = Symbol[x[1] for x in sf], at = fi, scratch = fnames)"),
             ("the register test of the stage is not in the condition", "push!(fitl, fits(A.fs, fprobe))", "nothing"),
             ("the sizes of the stage are not in the condition", "push!(cans, A.fs.can); ", ""),
             ("the sizes of the twins are not in the condition", "push!(cans, t.can); ", ""),
@@ -534,6 +539,9 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("a twin does not need a quarter of the tiles", "t.okt === nothing || push!(oks, t.okt); ", ""),
             ("the twin needs all the tiles, not a quarter", "cld(cgen_contraction_tiles(d, cmin), 4)", "cld(cgen_contraction_tiles(d, cmin), 1)"),
             ("the twin needs a sixteenth of the tiles", "cld(cgen_contraction_tiles(d, cmin), 4)", "cld(cgen_contraction_tiles(d, cmin), 16)"),
+            ("the two sums of the stage share a scratch array", "fnames = Symbol[k == 1 ? :__cf_s : Symbol(\"__cf_s\", k) for k in 1:length(sf)]", "fnames = Symbol[:__cf_s for k in 1:length(sf)]"),
+            ("the first kernel reads only the first sum from the stage", "for k in eachindex(fstage.accs)]", "for k in 1:1]"),
+            ("the second scratch array of the stage is not allocated", "                        for sc in fsc\n", "                        for sc in fsc[1:1]\n"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]
@@ -542,6 +550,8 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
                     check(false, "sabotage \"$label\": anchor found $n times")
                     continue
                 end
+                # SAB_ANCHORS_ONLY=1 checks that every anchor is found exactly once and runs no case
+                get(ENV, "SAB_ANCHORS_ONLY", "") == "1" && (check(true, "anchor \"$label\": found once"); continue)
                 path = joinpath(tmp, "STADE_sab.jl")
                 write(path, replace(text, old => new; count = 1))
                 script = """

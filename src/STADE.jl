@@ -11239,7 +11239,8 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     asg(a, b) = Expr(:(=), a, b)
     call(f, args...) = Expr(:call, f, args...)
     cadd(a, b) = call(:+, a, b); cmul(a, b) = call(:*, a, b)
-    acc_ij(i, j) = Symbol("__ct_a", i, "_", j)
+    # accumulator `a` (0 for the first) at register position (i, j); the first keeps the names of the single-sum kernel
+    acc_ij(a, i, j) = a == 0 ? Symbol("__ct_a", i, "_", j) : Symbol("__ct_c", a, "_", i, "_", j)
     body = Any[]
     push!(body, asg(:__ct_tx, call(:-, ex(:., call(:threadIdx), QuoteNode(:x)), 1)))
     push!(body, asg(:__ct_ty, call(:-, ex(:., call(:threadIdx), QuoteNode(:y)), 1)))
@@ -11248,8 +11249,17 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     bv = get(d, :batchvar, nothing)
     bv === nothing || push!(body, asg(:__ct_bz, call(:-, ex(:., call(:blockIdx), QuoteNode(:z)), 1)))
     append!(body, d.prelude)
-    tlist = get(d, :terms, nothing) === nothing ? Any[(A = d.A, B = d.B)] : Any[d.terms...]
-    nt = length(tlist); TS = (TM + 1) * TK + TM * TK
+    # The sums: `accs` is a list with one entry per accumulator, each a list of (i, j) pairs: the sum of the products of the i-th left tile and the j-th right tile.
+    # Without it the descriptor has one sum of the products `terms` (or of the one product A * B), each with tiles of its own.
+    if get(d, :accs, nothing) === nothing
+        tlist = get(d, :terms, nothing) === nothing ? Any[(A = d.A, B = d.B)] : Any[d.terms...]
+        alist = Any[t.A for t in tlist]; blist = Any[t.B for t in tlist]
+        accs = Any[Any[(q, q) for q in 1:length(tlist)]]
+    else
+        alist = Any[d.alist...]; blist = Any[d.blist...]; accs = d.accs
+    end
+    # a slot holds one tile of each side; the number of slots is the larger of the two counts of distinct operands
+    nt = max(length(alist), length(blist)); TS = (TM + 1) * TK + TM * TK
     offq(e, q0) = q0 == 0 ? e : cadd(q0 * TS, e)
     push!(body, asg(sh, call(:CuDynamicSharedArray, :Float64, nt * TS)))
     push!(body, asg(:__ct_tl, cadd(cmul(:__ct_ty, 16), :__ct_tx)))
@@ -11257,13 +11267,13 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
         push!(body, asg(sym, 0))
     end
     bv === nothing || push!(body, asg(bv, cadd(:__ct_bz, 1)))
-    for i in 0:RT-1, j in 0:RT-1
-        push!(body, asg(acc_ij(i, j), 0.0))
+    for a in 0:length(accs)-1, i in 0:RT-1, j in 0:RT-1
+        push!(body, asg(acc_ij(a, i, j), 0.0))
     end
     # loads of the two pieces
     zfill = asg(:__ct_v, 0.0)
     loadA = Any[]; loadB = Any[]
-    for (q0, tm) in enumerate(tlist)
+    for (q0, opd) in enumerate(alist)
         q0 -= 1
         for q in 0:3
             push!(loadA, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
@@ -11273,9 +11283,12 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
             push!(loadA, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))
             push!(loadA, zfill)
             push!(loadA, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
-                              Expr(:block, asg(:__ct_v, Expr(:ref, tm.A.arr, tm.A.idx)))))
+                              Expr(:block, asg(:__ct_v, Expr(:ref, opd.arr, opd.idx)))))
             push!(loadA, asg(Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), :__ct_rr), 1), q0)), :__ct_v))
         end
+    end
+    for (q0, opd) in enumerate(blist)
+        q0 -= 1
         for q in 0:3
             push!(loadB, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
             push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TM)))
@@ -11284,20 +11297,21 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
             push!(loadB, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))
             push!(loadB, zfill)
             push!(loadB, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
-                              Expr(:block, asg(:__ct_v, Expr(:ref, tm.B.arr, tm.B.idx)))))
+                              Expr(:block, asg(:__ct_v, Expr(:ref, opd.arr, opd.idx)))))
             push!(loadB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), :__ct_cc), 1), q0)), :__ct_v))
         end
     end
+    sname(q0) = q0 == 0 ? "" : string(q0, "_")
     mac = Any[]
-    for q0 in 0:nt-1, i in 0:RT-1
-        push!(mac, asg(Symbol("__ct_av", q0 == 0 ? "" : string(q0, "_"), i), Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), cadd(:__ct_ty, 16 * i)), 1), q0))))
+    for q0 in 0:length(alist)-1, i in 0:RT-1
+        push!(mac, asg(Symbol("__ct_av", sname(q0), i), Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), cadd(:__ct_ty, 16 * i)), 1), q0))))
     end
-    for q0 in 0:nt-1, j in 0:RT-1
-        push!(mac, asg(Symbol("__ct_bv", q0 == 0 ? "" : string(q0, "_"), j), Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), cadd(:__ct_tx, 16 * j)), 1), q0))))
+    for q0 in 0:length(blist)-1, j in 0:RT-1
+        push!(mac, asg(Symbol("__ct_bv", sname(q0), j), Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), cadd(:__ct_tx, 16 * j)), 1), q0))))
     end
-    for i in 0:RT-1, j in 0:RT-1
-        prods = [cmul(Symbol("__ct_av", q0 == 0 ? "" : string(q0, "_"), i), Symbol("__ct_bv", q0 == 0 ? "" : string(q0, "_"), j)) for q0 in 0:nt-1]
-        push!(mac, asg(acc_ij(i, j), cadd(acc_ij(i, j), foldl(cadd, prods))))
+    for (a, pairs) in enumerate(accs), i in 0:RT-1, j in 0:RT-1
+        prods = [cmul(Symbol("__ct_av", sname(ia - 1), i), Symbol("__ct_bv", sname(ib - 1), j)) for (ia, ib) in pairs]
+        push!(mac, asg(acc_ij(a - 1, i, j), cadd(acc_ij(a - 1, i, j), foldl(cadd, prods))))
     end
     kloop = Expr(:for, asg(:__ct_k0, call(:(:), 0, TK, call(:-, :__ct_K, 1))),
                  Expr(:block, loadA..., loadB..., call(:sync_threads),
@@ -11306,7 +11320,7 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     push!(body, kloop)
     for i in 0:RT-1, j in 0:RT-1
         stmts = Any[asg(:__ct_row, cadd(:__ct_r0, cadd(:__ct_ty, 16 * i))), asg(:__ct_col, cadd(:__ct_c0, cadd(:__ct_tx, 16 * j)))]
-        inner = d.epilogue(:__ct_row, :__ct_col, acc_ij(i, j))
+        inner = get(d, :accs, nothing) === nothing ? d.epilogue(:__ct_row, :__ct_col, acc_ij(0, i, j)) : d.epilogue(:__ct_row, :__ct_col, Symbol[acc_ij(a, i, j) for a in 0:length(accs)-1])
         push!(stmts, Expr(:if, Expr(:&&, call(:<, :__ct_row, :__ct_M), call(:<, :__ct_col, :__ct_N)), Expr(:block, inner...)))
         append!(body, stmts)
     end
@@ -11316,6 +11330,9 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
         # a side or the inner length of at least min(cmin, 16), and enough tiles for the layout of the operands (see cgen_contraction_tiles)
         tiles = call(:*, call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM))
         cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, min(cmin, 16)), call(:>=, d.Mh, min(cmin, 16))), call(:>=, d.Kh, min(cmin, 16))), call(:>, d.Nh, 0))
+        # a loop of two sums or of a sum of two products needs a full tile of columns: with 16 columns (the node projection of mpnn_gather, V100) three quarters of the products of a
+        # tile are wasted and the twin ran 21 to 27% slower than the plain kernel
+        get(d, :accs, nothing) === nothing || (cond = Expr(:&&, cond, call(:>=, d.Nh, min(cmin, 64))))
         want = call(:>=, tiles, cgen_contraction_tiles(d, cmin))
         # a kernel that runs with the group without wanting the tiles needs a quarter of that count: with fewer tiles a long inner sum (the weight gradient over many rows) runs on a few blocks and is several times slower
         okt = call(:>=, tiles, cld(cgen_contraction_tiles(d, cmin), 4))
@@ -11391,6 +11408,47 @@ end
 # the names a kernel may not use: the twin's own variables all start with __ct_, and with `scratch` the scratch array of a recomputed forward product starts with __cf_
 cgen_contraction_reserved(rest; scratch::Bool = false) = any(s -> startswith(string(s), "__ct_") || (scratch && startswith(string(s), "__cf_")), cgen_expr_symbols(Expr(:block, rest...)))
 
+# The accumulations of a forward loop. The scalar temporaries of the body (operand reads that several statements share) are inlined, in order, into the later statements.
+# A temporary is no parameter, is neither read nor assigned outside the loop, and is no accumulator. What is left is one statement `s = s + P` (or `s - P`)
+# per accumulator, with P the product of two array elements or the sum of two such products. Returns a list of (acc, op, terms), each term a pair (arr, idx) of two operands, or nothing.
+function cgen_contraction_accums(lp, outside, params::Set{Symbol})
+    subst(e, d) = e isa Symbol ? get(d, e, e) : (e isa Expr ? Expr(e.head, Any[subst(x, d) for x in e.args]...) : e)
+    tmps = Dict{Symbol,Any}()
+    accs = Any[]
+    for st in lp.body
+        cgen_split_is_scalar(st) || return nothing
+        ac = cgen_split_accum(st)
+        if ac === nothing
+            tn = st.args[1]
+            tn in params && return nothing
+            cgen_count_symbol(outside, tn) == 0 || return nothing
+            tmps[tn] = subst(st.args[2], tmps)
+        else
+            push!(accs, (ac[1], ac[2], subst(ac[3], tmps)))
+        end
+    end
+    isempty(accs) && return nothing
+    names = Symbol[a[1] for a in accs]
+    length(unique(names)) == length(names) || return nothing
+    # a temporary that is also a sum would be reassigned in each iteration (a temporary that reads a sum cannot reach a product: the index of every factor reads only
+    # parameters, the row, the column and the loop variable, which classify checks)
+    any(in(names), keys(tmps)) && return nothing
+    out = Any[]
+    for (acc, op, term) in accs
+        fac = cgen_contraction_factors(term)
+        if fac === nothing
+            (term isa Expr && term.head === :call && term.args[1] === :+ && length(term.args) == 3) || return nothing
+            f1 = cgen_contraction_factors(term.args[2]); f2 = cgen_contraction_factors(term.args[3])
+            (f1 === nothing || f2 === nothing) && return nothing
+            terms = Any[f1, f2]
+        else
+            terms = Any[fac]
+        end
+        push!(out, (acc, op, terms))
+    end
+    return out
+end
+
 # The contraction twin of a plain kernel whose inner loop sums a product, as a description for cgen_contraction_emit, or nothing
 function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     parts = cgen_kernel_parts(kdef)
@@ -11430,18 +11488,19 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     end
     # the loop
     lp = cgen_split_loop(lpst)
-    (lp !== nothing && lp.step == 1 && length(lp.body) == 1) || return nothing
+    (lp !== nothing && lp.step == 1 && !isempty(lp.body)) || return nothing
     issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing
-    ac = cgen_split_accum(lp.body[1])
-    ac === nothing && return nothing
-    acc, op, term = ac
-    fac = cgen_contraction_factors(term)
-    fac === nothing && return nothing
+    sums = cgen_contraction_accums(lp, Expr(:block, pre..., post...), params)
+    sums === nothing && return nothing
+    # two accumulators at most: each is a set of registers of the tile kernel
+    length(sums) <= 2 || return nothing
     cv = lp.var
-    # the sum's start value is a scalar assigned before the loop, and the loop is its only accumulation
-    count(st -> st.args[1] === acc, pre_rest) == 1 || return nothing
-    inits = findfirst(st -> st.args[1] === acc, pre_rest)
-    any(st -> acc in cgen_split_vars(st.args[2]), pre_rest[1:inits]) && return nothing
+    # each sum's start value is a scalar assigned before the loop, and the loop is its only accumulation
+    for (acc, _, _) in sums
+        count(st -> st.args[1] === acc, pre_rest) == 1 || return nothing
+        inits = findfirst(st -> st.args[1] === acc, pre_rest)
+        any(st -> acc in cgen_split_vars(st.args[2]), pre_rest[1:inits]) && return nothing
+    end
     # operands: A depends on (t, c) only, B on (o, c) only
     function classify(fa, fb)
         va = cgen_split_vars(fa.idx); vb = cgen_split_vars(fb.idx)
@@ -11450,12 +11509,28 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
         (tv in va && ov in vb) || return nothing
         return (fa, fb)
     end
-    ab = classify(fac[1], fac[2])
-    ab === nothing && (ab = classify(fac[2], fac[1]))
-    ab === nothing && return nothing
-    fa, fb = ab
+    # every product, its operands in the order (A, B); the distinct left and right operands get one tile each
+    alist = Any[]; blist = Any[]
+    slot(l, x) = (i = findfirst(==(x), l); i === nothing ? (push!(l, x); length(l)) : i)
+    sumpairs = Any[]
+    for (_, _, terms) in sums
+        pairs = Any[]
+        for fac in terms
+            ab = classify(fac[1], fac[2])
+            ab === nothing && (ab = classify(fac[2], fac[1]))
+            ab === nothing && return nothing
+            push!(pairs, (slot(alist, ab[1]), slot(blist, ab[2])))
+        end
+        push!(sumpairs, pairs)
+    end
+    # a slot is 16.5 KB of the 48 KB of static shared memory: two slots at most
+    max(length(alist), length(blist)) <= 2 || return nothing
+    fa, fb = alist[sumpairs[1][1][1]], blist[sumpairs[1][1][2]]
+    single = length(sums) == 1 && length(sums[1][3]) == 1
+    # the operand arrays of every product
+    opsyms = Set{Symbol}(x.arr for x in alist); union!(opsyms, Set{Symbol}(x.arr for x in blist))
     # a head derived from the column that an operand index reads: the tiles are batched over the heads, `dh` columns each
-    derived = dbat !== nothing && hv === nothing && dbat.var in union(cgen_split_vars(fa.idx), cgen_split_vars(fb.idx))
+    derived = dbat !== nothing && hv === nothing && any(x -> dbat.var in cgen_split_vars(x.idx), vcat(alist, blist))
     if derived
         count(st -> st isa Expr && st.head === :(=) && st.args[1] === dbat.var, Any[pre_rest..., post...]) == 1 || return nothing
         # the head is not the loop variable and no other kernel parameter shares its name
@@ -11466,7 +11541,7 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     for st in post
         cgen_split_is_store(st) && push!(stored, st.args[1].args[1])
     end
-    (fa.arr in stored || fb.arr in stored) && return nothing
+    any(in(stored), opsyms) && return nothing
     for st in post
         cv in cgen_split_vars(st) && return nothing
     end
@@ -11481,26 +11556,30 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
         Bh = Expr(:call, :div, N, dbat.dh)
         flat = (row, col) -> Expr(:call, :+, Expr(:call, :+, Expr(:call, :+, Expr(:call, :*, row, :__ct_D), Expr(:call, :*, :__ct_bz, :__ct_dh)), col), 1)
     end
-    epilogue(row, col, a) = begin
+    epilogue(row, col, as) = begin
         out = Any[Expr(:(=), idxv, flat(row, col))]
         append!(out, pre_rest)
-        push!(out, Expr(:(=), acc, Expr(:call, op, acc, a)))
+        for (k, (acc, op, _)) in enumerate(sums)
+            push!(out, Expr(:(=), acc, Expr(:call, op, acc, as isa Symbol ? as : as[k])))
+        end
         append!(out, post)
         out
     end
+    # a loop of one sum of one product keeps the single-sum descriptor; any other shape names its sums and its tiles
+    multi = single ? (;) : (accs = sumpairs, alist = alist, blist = blist)
     # the rows are whole: a loop of 7 elements over rows of 3 has a partial last row that the tiles would not compute
     if derived
-        return (name = cgen_contraction_name(parts.sig.args[1]), fargs = fargs,
+        return merge((name = cgen_contraction_name(parts.sig.args[1]), fargs = fargs,
                 prelude = Any[Expr(:(=), :__ct_D, N), Expr(:(=), :__ct_dh, dbat.dh), Expr(:(=), :__ct_N, :__ct_dh), Expr(:(=), :__ct_M, Expr(:call, :div, n_iter, :__ct_D)), Expr(:(=), :__ct_K, K), Expr(:(=), :__ct_lo, lp.lo)],
                 rowvar = tv, colvar = ov, kvar = cv, rowbase = 1, colbase = Expr(:call, :+, 1, Expr(:call, :*, :__ct_bz, :__ct_dh)), kbase = :__ct_lo, decls = (ov, tv, cv, dbat.var), A = fa, B = fb, epilogue = epilogue,
                 Mh = Mh, Nh = dbat.dh, Kh = K, batchvar = dbat.var, Bh = Bh, headcol = true, dhexpr = dbat.dh,
-                extra = Expr(:&&, Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0), Expr(:call, :(==), Expr(:call, :mod, N, dbat.dh), 0)))
+                extra = Expr(:&&, Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0), Expr(:call, :(==), Expr(:call, :mod, N, dbat.dh), 0))), multi)
     end
-    return (name = cgen_contraction_name(parts.sig.args[1]), fargs = fargs,
+    return merge((name = cgen_contraction_name(parts.sig.args[1]), fargs = fargs,
             prelude = Any[Expr(:(=), :__ct_N, N), Expr(:(=), :__ct_M, hv === nothing ? Expr(:call, :div, n_iter, :__ct_N) : M), Expr(:(=), :__ct_K, K), Expr(:(=), :__ct_lo, lp.lo)],
             rowvar = tv, colvar = ov, kvar = cv, rowbase = 1, colbase = 1, kbase = :__ct_lo, decls = hv === nothing ? (ov, tv, cv) : (ov, tv, cv, hv), A = fa, B = fb, epilogue = epilogue,
             Mh = Mh, Nh = N, Kh = K, batchvar = hv, Bh = Bh,
-            extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, hv === nothing ? N : Expr(:call, :*, N, M)), 0))
+            extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, hv === nothing ? N : Expr(:call, :*, N, M)), 0)), multi)
 end
 
 # ---- the adjoint of a product ----------------------------------------------------------------------------------------------------------------------
@@ -11683,22 +11762,28 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
     fi = findfirst(st -> st isa Expr && st.head === :for, pre_rest)
     if fi !== nothing
         lpf = cgen_split_loop(pre_rest[fi])
-        acf = (lpf !== nothing && length(lpf.body) == 1) ? cgen_split_accum(lpf.body[1]) : nothing
-        if acf !== nothing
+        sf = lpf === nothing ? nothing : cgen_contraction_accums(lpf, Expr(:block, Any[x for x in rest if x !== pre_rest[fi]]...), params)
+        # one scratch array per accumulator of the loop (the recognizer of the stage refuses a loop of more than two)
+        if sf !== nothing
+            fnames = Symbol[k == 1 ? :__cf_s : Symbol("__cf_s", k) for k in 1:length(sf)]
             fname = Symbol(base, "_f!")
-            sub = Expr(:function, Expr(:call, fname, fargs..., :__cf_s),
-                       Expr(:block, parts.head, parts.guard, pre[1:fi+1]..., Expr(:(=), Expr(:ref, :__cf_s, idxv), acf[1]), emit_return_nothing()))
+            fstores = Any[Expr(:(=), Expr(:ref, fnames[k], idxv), sf[k][1]) for k in 1:length(sf)]
+            sub = Expr(:function, Expr(:call, fname, fargs..., fnames...),
+                       Expr(:block, parts.head, parts.guard, pre[1:fi+1]..., fstores..., emit_return_nothing()))
             d0 = cgen_contraction_kernel(sub; cmin)
-            d0 === nothing || (fstage = (desc = d0, acc = acf[1], at = fi + 1))
+            d0 === nothing || (fstage = (desc = d0, accs = Symbol[x[1] for x in sf], at = fi + 1, scratch = fnames))
         end
     end
     pre_a = Any[pre...]
-    fstage === nothing || (pre_a[fstage.at] = Expr(:(=), fstage.acc, Expr(:ref, :__cf_s, idxv)))
+    if fstage !== nothing
+        repl = Any[Expr(:(=), fstage.accs[k], Expr(:ref, fstage.scratch[k], idxv)) for k in eachindex(fstage.accs)]
+        pre_a = Any[pre[1:fstage.at-1]..., repl..., pre[fstage.at+1:end]...]
+    end
     # the first kernel: the plain kernel with the loop replaced by the store of g
     stores = Any[Expr(:(=), Expr(:ref, scratch_of(gg), idxv), gg) for gg in gs_list]
     body = Any[parts.head, parts.guard, pre_a..., stores..., post..., emit_return_nothing()]
     ka_name = Symbol(base, "_a", endswith(nms, "!") ? "!" : "")
-    ka = Expr(:function, Expr(:call, ka_name, fargs..., Symbol[scratch_of(gg) for gg in gs_list]..., (fstage === nothing ? Symbol[] : Symbol[:__cf_s])...), Expr(:block, body...))
+    ka = Expr(:function, Expr(:call, ka_name, fargs..., Symbol[scratch_of(gg) for gg in gs_list]..., (fstage === nothing ? Symbol[] : fstage.scratch)...), Expr(:block, body...))
     return (ka = ka, ka_name = ka_name, descs = descs, count = X, fstage = fstage, scratch = Symbol[scratch_of(gg) for gg in gs_list])
 end
 
@@ -11762,11 +11847,14 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
                     body = Any[Expr(:(=), sc, zeros_expr) for sc in A.a.scratch]
                     kargs = Any[A.a.scratch...]
                     if A.fs !== nothing
-                        push!(body, Expr(:(=), :__cf_s, zeros_expr))
-                        push!(kargs, :__cf_s)
-                        fcall = Expr(:call, A.fs.name, plain.args[2:end]..., :__cf_s)
-                        # the probe stands in an operand array for the scratch array: the same element type and rank
-                        fprobe = Expr(:call, A.fs.name, plain.args[2:end]..., A.a.fstage.desc.A.arr)
+                        fsc = A.a.fstage.scratch
+                        for sc in fsc
+                            push!(body, Expr(:(=), sc, zeros_expr))
+                            push!(kargs, sc)
+                        end
+                        fcall = Expr(:call, A.fs.name, plain.args[2:end]..., fsc...)
+                        # the probe stands in an operand array for each scratch array: the same element type and rank
+                        fprobe = Expr(:call, A.fs.name, plain.args[2:end]..., (A.a.fstage.desc.A.arr for _ in fsc)...)
                         push!(cans, A.fs.can); push!(fitl, fits(A.fs, fprobe))
                         push!(body, tiled(A.fs, fcall))
                     end

@@ -570,6 +570,303 @@ const CON_CASES = [
         end
         return nothing
     end""", :con_hc7, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, nh, tt]), true),
+    # ---- v0.4.41: a loop with two sums or a sum of two products (the primal and the tangent of a product in an HVP) ----
+    ("two sums: a value and its tangent, operand reads shared through temporaries", """function con_tan(x, xd, w, wd, bd, b, yd, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            sd = bd[o]
+            s = b[o]
+            for c = 1:k
+                a1 = w[(c - 1) * n + o]
+                a2 = x[(t - 1) * k + c]
+                sd = sd + (a1 * xd[(t - 1) * k + c] + a2 * wd[(c - 1) * n + o])
+                s = s + a2 * a1
+            end
+            yd[idx] = sd
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_tan, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), randn(r, n), randn(r, n), zeros(m * n), zeros(m * n), m, n, k]), true),
+    ("two sums, no temporaries, one subtracted, an epilogue that reads both", """function con_tan2(x, xd, w, wd, yd, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            sd = 0.25
+            s = 0.5
+            for c = 1:k
+                sd = sd - (w[(c - 1) * n + o] * xd[(t - 1) * k + c] + x[(t - 1) * k + c] * wd[(c - 1) * n + o])
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+            end
+            yd[idx] = tanh(s) * sd
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_tan2, sd -> (r = MersenneTwister(sd); n = 66; m = 65; k = 33; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), true),
+    ("one sum of two products", """function con_sum2(x, xd, w, wd, yd, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            sd = 0.0
+            for c = 1:k
+                sd = sd + (x[(t - 1) * k + c] * wd[(c - 1) * n + o] + xd[(t - 1) * k + c] * w[(c - 1) * n + o])
+            end
+            yd[idx] = sd
+        end
+        return nothing
+    end""", :con_sum2, sd -> (r = MersenneTwister(sd); n = 71; m = 66; k = 17; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    ("two sums of the same product, one subtracted", """function con_same2(x, w, y, z, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s1 = 1.0
+            s2 = 2.0
+            for c = 1:k
+                s1 = s1 + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+                s2 = s2 - x[(t - 1) * k + c] * w[(c - 1) * n + o]
+            end
+            y[idx] = s1
+            z[idx] = s2
+        end
+        return nothing
+    end""", :con_same2, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), true),
+    ("two sums, batched over heads, one array with strided heads", """function con_bat4(qkv, qkvd, y, yd, nh, tt, dh, scale)
+        d = nh * dh
+        d3 = 3 * d
+        for idx = 1:nh * tt * tt
+            u = mod(idx - 1, tt) + 1
+            t = mod(div(idx - 1, tt), tt) + 1
+            h = div(idx - 1, tt * tt) + 1
+            ssd = 0.0
+            ss = 0.0
+            for c = 1:dh
+                a1 = qkv[(u - 1) * d3 + d + (h - 1) * dh + c]
+                a2 = qkv[(t - 1) * d3 + (h - 1) * dh + c]
+                ssd = ssd + (a1 * qkvd[(t - 1) * d3 + (h - 1) * dh + c] + a2 * qkvd[(u - 1) * d3 + d + (h - 1) * dh + c])
+                ss = ss + a2 * a1
+            end
+            yd[idx] = ssd * scale
+            y[idx] = ss * scale
+        end
+        return nothing
+    end""", :con_bat4, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; Any[randn(r, tt * 3 * nh * dh), randn(r, tt * 3 * nh * dh), zeros(nh * tt * tt), zeros(nh * tt * tt), nh, tt, dh, 0.1]), true),
+    ("two sums, a head in the column", """function con_hc12(sc, scd, v, vd, y, yd, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            sd = 0.0
+            s = 0.0
+            for u = 1:tt
+                a1 = sc[((h - 1) * tt + t - 1) * tt + u]
+                a2 = v[(u - 1) * d + c]
+                sd = sd + (a1 * vd[(u - 1) * d + c] + a2 * scd[((h - 1) * tt + t - 1) * tt + u])
+                s = s + a1 * a2
+            end
+            yd[idx] = sd
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_hc12, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, nh * tt * tt), randn(r, tt * d), randn(r, tt * d), zeros(tt * d), zeros(tt * d), d, dh, tt]), true),
+    ("three sums", """function con_acc3(x, xd, w, wd, y, yd, z, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            sd = 0.0
+            sz = 0.0
+            for c = 1:k
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+                sd = sd + xd[(t - 1) * k + c] * w[(c - 1) * n + o]
+                sz = sz + x[(t - 1) * k + c] * wd[(c - 1) * n + o]
+            end
+            y[idx] = s
+            yd[idx] = sd
+            z[idx] = sz
+        end
+        return nothing
+    end""", :con_acc3, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    ("two statements add to one sum", """function con_acc2s(x, xd, w, wd, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+                s = s + xd[(t - 1) * k + c] * wd[(c - 1) * n + o]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_acc2s, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    ("a sum of three products", """function con_p3(x, xd, w, wd, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + (x[(t - 1) * k + c] * w[(c - 1) * n + o] + xd[(t - 1) * k + c] * wd[(c - 1) * n + o] + x[(t - 1) * k + c] * wd[(c - 1) * n + o])
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_p3, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    ("a sum of a product and an array element", """function con_pe(x, w, bb, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + (x[(t - 1) * k + c] * w[(c - 1) * n + o] + bb[c])
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_pe, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, k), zeros(m * n), m, n, k]), false),
+    ("three distinct left operands", """function con_a3(x, xd, x2, w, wd, y, z, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            sz = 0.0
+            for c = 1:k
+                s = s + (x[(t - 1) * k + c] * w[(c - 1) * n + o] + xd[(t - 1) * k + c] * wd[(c - 1) * n + o])
+                sz = sz + x2[(t - 1) * k + c] * w[(c - 1) * n + o]
+            end
+            y[idx] = s
+            z[idx] = sz
+        end
+        return nothing
+    end""", :con_a3, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    ("a temporary of the loop is read after it", """function con_tmpout(x, xd, w, wd, y, yd, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            sd = 0.0
+            s = 0.0
+            a1 = 0.0
+            for c = 1:k
+                a1 = w[(c - 1) * n + o]
+                sd = sd + (a1 * xd[(t - 1) * k + c] + x[(t - 1) * k + c] * wd[(c - 1) * n + o])
+                s = s + x[(t - 1) * k + c] * a1
+            end
+            yd[idx] = sd + a1
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_tmpout, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    ("a sum is a factor of another sum", """function con_accf(x, xd, w, wd, y, yd, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            sd = 0.0
+            for c = 1:k
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+                sd = sd + s * xd[(t - 1) * k + c]
+            end
+            y[idx] = s
+            yd[idx] = sd
+        end
+        return nothing
+    end""", :con_accf, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    ("two sums, an operand array stored in the kernel", """function con_tst(x, xd, w, wd, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            sd = 0.0
+            s = 0.0
+            for c = 1:k
+                sd = sd + (w[(c - 1) * n + o] * xd[(t - 1) * k + c] + x[(t - 1) * k + c] * wd[(c - 1) * n + o])
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+            end
+            xd[idx] = sd
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_tst, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * n), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    ("a sum is also assigned from an array element in the loop", """function con_accas(x, xd, w, wd, y, yd, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            sd = 0.0
+            s = 0.0
+            for c = 1:k
+                s = w[(c - 1) * n + o]
+                sd = sd + (s * xd[(t - 1) * k + c] + x[(t - 1) * k + c] * wd[(c - 1) * n + o])
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+            end
+            y[idx] = s
+            yd[idx] = sd
+        end
+        return nothing
+    end""", :con_accas, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    ("one sum, one left operand and two right operands", """function con_l1r2(x, w, wd, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + (x[(t - 1) * k + c] * w[(c - 1) * n + o] + x[(t - 1) * k + c] * wd[(c - 1) * n + o])
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_l1r2, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    ("one sum, two left operands and one right operand", """function con_l2r1(x, xd, w, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + (x[(t - 1) * k + c] * w[(c - 1) * n + o] + xd[(t - 1) * k + c] * w[(c - 1) * n + o])
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_l2r1, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    ("two left operands of one array at two offsets", """function con_off(x, w, w2, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + (x[(t - 1) * k + c] * w[(c - 1) * n + o] + x[(t - 1) * k + c + 1] * w2[(c - 1) * n + o])
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_off, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k + 8), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    ("a store in the loop", """function con_stl(x, w, y, z, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+                z[idx] = s
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_stl, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    ("the start of the second sum is assigned twice", """function con_st2(x, xd, w, wd, y, yd, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            sd = 0.0
+            s = 0.0
+            u = s + 2.0
+            s = 1.0
+            for c = 1:k
+                sd = sd + (xd[(t - 1) * k + c] * w[(c - 1) * n + o] + x[(t - 1) * k + c] * wd[(c - 1) * n + o])
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+            end
+            y[idx] = s + u
+            yd[idx] = sd
+        end
+        return nothing
+    end""", :con_st2, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
 ]
 
 # The recognizer on hand-written kernel text, for the guards that STADE's own gates make unreachable from source: a store into an operand array, and a parameter that has the
@@ -625,12 +922,50 @@ const CON_HEAD_DIRECT = [
     ("head in the column, the loop variable has the head's name", con_head_kernel(loopvar = "h"), false),
     ("head in the column, a parameter has the head's name", con_head_kernel(extra = ", h"), false),
 ]
+# The recognizer on hand-written text for a loop with two sums: a temporary that has a parameter's name (STADE renames an assigned parameter, so source cannot reach it).
+con_acc_kernel(; body = "a1 = w[(c - 1) * n + o]\n        sd = sd + (a1 * xd[(t - 1) * k + c] + x[(t - 1) * k + c] * wd[(c - 1) * n + o])\n        s = s + x[(t - 1) * k + c] * a1", extra = "") = Meta.parse("""function cuda_kernel_dira!(x, xd, w, wd, yd, y, m, n, k$extra)
+    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
+    if __tid > div(m * n - 1, 1) + 1
+        return nothing
+    end
+    idx = 1 + (__tid - 1)
+    o = mod(idx - 1, n) + 1
+    t = div(idx - 1, n) + 1
+    sd = 0.0
+    s = 0.0
+    for c = 1:k
+        $body
+    end
+    yd[idx] = sd
+    y[idx] = s
+    return nothing
+end""")
+const CON_ACC_DIRECT = [
+    ("two sums, control", con_acc_kernel(), true),
+    ("a temporary has a parameter's name", con_acc_kernel(extra = ", a1"), false),
+    ("a loop with no sum", con_acc_kernel(body = "a1 = w[(c - 1) * n + o]"), false),
+]
 function con_direct_checks()
     bad = 0
     for (name, kd, must) in CON_HEAD_DIRECT
         t = try STADE.cgen_contraction_kernel(kd) catch e; e end
         ok = must ? (t isa NamedTuple) : t === nothing
         println(rpad(ok ? "ok" : "FAIL", 6), "direct, $name: ", must ? "a twin is built" : "refused")
+        ok || (bad += 1)
+    end
+    for (name, kd, must) in CON_ACC_DIRECT
+        t = try STADE.cgen_contraction_kernel(kd) catch e; e end
+        ok = must ? (t isa NamedTuple) : t === nothing
+        println(rpad(ok ? "ok" : "FAIL", 6), "direct, $name: ", must ? "a twin is built" : "refused")
+        ok || (bad += 1)
+    end
+    # a temporary that has the name of a sum: no source reaches this guard (the start value of a sum is assigned outside the loop, so the outside rule refuses first),
+    # the recognizer is called with an empty outside
+    lpd(tmp) = (var = :c, lo = 1, step = 1, hi = :k, body = Any[:($tmp = a1[c]), :(u2 = b1[c]), :(s = s + u2 * a1[c]), :(sd = sd + (u2 * b1[c] + a1[c] * b1[c]))])
+    for (name, tmp, must) in (("a temporary that is no sum, control", :u, true), ("a temporary has the name of a sum", :s, false))
+        r = try STADE.cgen_contraction_accums(lpd(tmp), Expr(:block), Set{Symbol}([:a1, :b1, :k])) catch e; e end
+        ok = must ? (r isa AbstractVector && length(r) == 2) : r === nothing
+        println(rpad(ok ? "ok" : "FAIL", 6), "direct, $name: ", must ? "two sums are read" : "refused")
         ok || (bad += 1)
     end
     for (name, pre, post, must, dec...) in CON_DIRECT
@@ -736,6 +1071,40 @@ function con_unit_checks()
     catch e
         check(false, "thresholds: error " * first(split(sprint(showerror, e), "\n")))
     end
+    # the tile memory: one slot of tiles is 2064 values (16512 bytes); a sum of two products with two left and two right operands has two slots, one with one operand on a side and two on the other too
+    try
+        function mem(prefix)
+            c = first(c for c in CON_CASES if startswith(c[1], prefix))
+            r = con_run(c[2], c[3], c[4](1), 1)
+            ks = STADE.io_expr_to_source(first(k for k in r.plan.kernels if endswith(string(k.args[1].args[1]), "_t!")))
+            return ks, STADE.io_expr_to_source(r.plan.host)
+        end
+        ks, hs = mem("two sums: a value and its tangent")
+        check(occursin("CuDynamicSharedArray(Float64, 4128)", ks) && occursin("shmem = 33024", hs), "two sums, two left and two right operands: 4128 values in the kernel and 33024 bytes in the launch")
+        ks, hs = mem("two sums of the same product")
+        check(occursin("CuDynamicSharedArray(Float64, 2064)", ks) && occursin("shmem = 16512", hs), "two sums of one product: 2064 values and 16512 bytes")
+        for p in ("one sum, one left operand and two right", "one sum, two left operands and one right")
+            ks, hs = mem(p)
+            check(occursin("CuDynamicSharedArray(Float64, 4128)", ks) && occursin("shmem = 33024", hs), "$p: two slots, 4128 values and 33024 bytes")
+        end
+    catch e
+        check(false, "tile memory of the two-sum twins: error " * first(split(sprint(showerror, e), "\n")))
+    end
+    # a loop of two sums or of a sum of two products needs a full tile of columns: min(contraction, 64). With contraction 32, 260 rows, 19 inner terms and 19 tiles: the tiles
+    # rule asks for cld(32 * 32, 256) = 4, the 260 x 40 product has 5, the one with 24 columns has 5 too (the tile floor of one sum is min(contraction, 16)): 40 columns run the twin and 24 do not.
+    try
+        ran(a) = any(n -> endswith(n, "_t!"), a.launched)
+        name, src, entry, mk, _ = first(c for c in CON_CASES if startswith(c[1], "two sums: a value and its tangent"))
+        mkn(n) = (r = MersenneTwister(3); m = 260; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), randn(r, n), randn(r, n), zeros(m * n), zeros(m * n), m, n, k])
+        check(ran(con_run(src, entry, mkn(40), 32)) && !ran(con_run(src, entry, mkn(24), 32)), "$name: 40 columns run the twin at contraction 32 and 24 do not (the floor of two sums is min(contraction, 64))")
+        bname, bsrc, bentry, _, _ = CON_CASES[1]
+        bargs(n) = (r = MersenneTwister(3); m = 260; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, n), zeros(m * n), m, n, k])
+        check(ran(con_run(bsrc, bentry, bargs(24), 32)), "$bname: one sum with 24 columns runs the twin at contraction 32 (the floor of one sum is min(contraction, 16))")
+        hs = STADE.io_expr_to_source(con_run(src, entry, mkn(40), 256).plan.host)
+        check(occursin(">= 64", hs), "$name: the host test asks for 64 columns at the default")
+    catch e
+        check(false, "the column floor of two sums: error " * first(split(sprint(showerror, e), "\n")))
+    end
     # a product batched over heads: the rows must reach `contraction`, the columns and the inner length only min(contraction, 8); the grid has at most 65535 batches
     try
         name, src, entry, mk, _ = first(c for c in CON_CASES if c[1] == "batched product")
@@ -806,12 +1175,12 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the inner index of a load is not bounded", "Expr(:&&, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K))", "call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M)"),
             ("the outputs are not bounded", "Expr(:if, Expr(:&&, call(:<, :__ct_row, :__ct_M), call(:<, :__ct_col, :__ct_N)), Expr(:block, inner...))", "Expr(:if, true, Expr(:block, inner...))"),
             ("the loop start is ignored", "push!(loadA, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))", "push!(loadA, asg(d.kvar, cadd(cadd(1, :__ct_k0), :__ct_kk)))"),
-            ("a descending loop is accepted", "(lp !== nothing && lp.step == 1 && length(lp.body) == 1) || return nothing", "(lp !== nothing && length(lp.body) == 1) || return nothing"),
+            ("a descending loop is accepted", "(lp !== nothing && lp.step == 1 && !isempty(lp.body)) || return nothing", "(lp !== nothing && !isempty(lp.body)) || return nothing"),
             ("operands that depend on the wrong index are accepted", "issubset(va, union(params, Set([tv, cv]), bat)) && issubset(vb, union(params, Set([ov, cv]), bat)) || return nothing", "true"),
-            ("an operand of the product that is stored is accepted", "(fa.arr in stored || fb.arr in stored) && return nothing", "false && return nothing"),
+            ("an operand of the product that is stored is accepted", "any(in(stored), opsyms) && return nothing", "false && return nothing"),
             ("the loop variable may be read after the loop", "    for st in post\n        cv in cgen_split_vars(st) && return nothing\n    end\n", ""),
             ("the loop variable may be read before the loop", "    any(cv in cgen_split_vars(st) for st in pre_rest) && return nothing\n", ""),
-            ("an inner bound computed in the kernel is accepted", "issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing\n    ac = ", "true\n    ac = "),
+            ("an inner bound computed in the kernel is accepted", "issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing\n    sums = ", "true\n    sums = "),
             ("a loop after the first is allowed in the epilogue", "        (cgen_split_is_scalar(st) || (cgen_split_is_store(st) && cgen_atomic_site(st) === nothing)) || return nothing", "        true"),
             ("a product test is dropped", "(term isa Expr && term.head === :call && term.args[1] === :* && length(term.args) == 3) || return nothing", "true"),
             ("a factor that is not an array element is accepted", "(f isa Expr && f.head === :ref && length(f.args) == 2 && f.args[1] isa Symbol) || return nothing", "true"),
@@ -839,7 +1208,7 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the column of a head starts at the first column", "colbase = Expr(:call, :+, 1, Expr(:call, :*, :__ct_bz, :__ct_dh))", "colbase = 1"),
             ("the flat index of a head ignores the head", "Expr(:call, :*, row, :__ct_D), Expr(:call, :*, :__ct_bz, :__ct_dh)), col), 1)", "Expr(:call, :*, row, :__ct_D), 0), col), 1)"),
             ("the number of heads is the width", "Bh = Expr(:call, :div, N, dbat.dh)\n        flat =", "Bh = N\n        flat ="),
-            ("a head is used when no operand reads it", "derived = dbat !== nothing && hv === nothing && dbat.var in union(cgen_split_vars(fa.idx), cgen_split_vars(fb.idx))", "derived = dbat !== nothing && hv === nothing"),
+            ("a head is used when no operand reads it", "derived = dbat !== nothing && hv === nothing && any(x -> dbat.var in cgen_split_vars(x.idx), vcat(alist, blist))", "derived = dbat !== nothing && hv === nothing"),
             ("the head may be a kernel parameter", "(dbat.var === lp.var || dbat.var in params) && return nothing", "dbat.var === lp.var && return nothing"),
             ("the head is not assigned once", "        count(st -> st isa Expr && st.head === :(=) && st.args[1] === dbat.var, Any[pre_rest..., post...]) == 1 || return nothing\n", ""),
             ("a head of another variable is accepted", "length(r.args[2].args) == 3 && r.args[2].args[2] == Expr(:call, :-, ov, 1)) || continue", "length(r.args[2].args) == 3) || continue"),
@@ -853,6 +1222,27 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the batch divisor is not checked", "all(d -> d[1] === hv && (d[2] == Expr(:call, :*, N, M) || d[2] == Expr(:call, :*, M, N)), divs) || return nothing", "all(d -> d[1] === hv, divs) || return nothing"),
             ("the size of the row decode may differ from the column's", "    N2 == N || return nothing\n    all(m -> m[1] === tv && m[2] == N && m[3] == M, rowmods) || return nothing", "    all(m -> m[1] === tv && m[3] == M, rowmods) || return nothing"),
             ("the batch may be reassigned", "for v in (hv === nothing ? (ov, tv) : (ov, tv, hv))", "for v in (ov, tv)"),
+            ("three sums are accepted", "    length(sums) <= 2 || return nothing\n", ""),
+            ("more than two operand slots are accepted", "    max(length(alist), length(blist)) <= 2 || return nothing\n", ""),
+            ("a sum may be accumulated twice", "    length(unique(names)) == length(names) || return nothing\n", ""),
+            ("a temporary may be a sum", "    any(in(names), keys(tmps)) && return nothing\n", ""),
+            ("a temporary may be a parameter", "            tn in params && return nothing\n            cgen_count_symbol(outside, tn) == 0 || return nothing\n            tmps[tn]", "            cgen_count_symbol(outside, tn) == 0 || return nothing\n            tmps[tn]"),
+            ("a store in the loop is skipped", "        cgen_split_is_scalar(st) || return nothing\n        ac = cgen_split_accum(st)", "        ac = cgen_split_accum(st)"),
+            ("a loop with no sum is accepted", "    isempty(accs) && return nothing\n    names = ", "    names = "),
+            ("a temporary of the loop may be read outside it", "            cgen_count_symbol(outside, tn) == 0 || return nothing\n            tmps[tn] = subst(st.args[2], tmps)", "            tmps[tn] = subst(st.args[2], tmps)"),
+            ("a sum of three products is cut to two", "(term isa Expr && term.head === :call && term.args[1] === :+ && length(term.args) == 3) || return nothing", "(term isa Expr && term.head === :call && term.args[1] === :+) || return nothing"),
+            ("a summand that is no product is accepted", "(f1 === nothing || f2 === nothing) && return nothing", "false && return nothing"),
+            ("only the first sum's start is checked", "    for (acc, _, _) in sums\n", "    for (acc, _, _) in sums[1:1]\n"),
+            ("the second sum is not cleared", "    for a in 0:length(accs)-1, i in 0:RT-1, j in 0:RT-1\n        push!(body, asg(acc_ij(a, i, j), 0.0))", "    for a in 0:0, i in 0:RT-1, j in 0:RT-1\n        push!(body, asg(acc_ij(a, i, j), 0.0))"),
+            ("every sum gets the products of the first", "    for (a, pairs) in enumerate(accs), i in 0:RT-1, j in 0:RT-1\n", "    for (a, pairs) in zip(1:length(accs), fill(accs[1], length(accs))), i in 0:RT-1, j in 0:RT-1\n"),
+            ("every output takes the first accumulator", "Symbol[acc_ij(a, i, j) for a in 0:length(accs)-1]", "Symbol[acc_ij(0, i, j) for a in 0:length(accs)-1]"),
+            ("every sum takes the first accumulator in the epilogue", "as isa Symbol ? as : as[k]", "as isa Symbol ? as : as[1]"),
+            ("the slots are counted by the left operands", "    nt = max(length(alist), length(blist)); TS", "    nt = length(alist); TS"),
+            ("the slots are counted by the right operands", "    nt = max(length(alist), length(blist)); TS", "    nt = length(blist); TS"),
+            ("operands of one array are merged", "slot(l, x) = (i = findfirst(==(x), l);", "slot(l, x) = (i = findfirst(y -> y.arr === x.arr, l);"),
+            ("equal operands get a tile each", "(i = findfirst(==(x), l); i === nothing ? (push!(l, x); length(l)) : i)", "(push!(l, x); length(l))"),
+            ("two sums need no full tile of columns", "        get(d, :accs, nothing) === nothing || (cond = Expr(:&&, cond, call(:>=, d.Nh, min(cmin, 64))))\n", ""),
+            ("the column floor of two sums is that of one sum", "call(:>=, d.Nh, min(cmin, 64))))\n", "call(:>=, d.Nh, min(cmin, 16))))\n"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]
@@ -861,6 +1251,8 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
                     check(false, "sabotage \"$label\": anchor found $n times")
                     continue
                 end
+                # SAB_ANCHORS_ONLY=1 checks that every anchor is found exactly once and runs no case
+                get(ENV, "SAB_ANCHORS_ONLY", "") == "1" && (check(true, "anchor \"$label\": found once"); continue)
                 path = joinpath(tmp, "STADE_sab.jl")
                 write(path, replace(text, old => new; count = 1))
                 script = """
