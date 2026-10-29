@@ -8603,13 +8603,15 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     # local accumulator has no atomic alternative: its loop
                     # would otherwise run on the host, one scalar device
                     # read per element, which mapreduce beats at every size.
-                    idx = length(kernels) + 1
+                    idx = cgen_kernel_count(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
                     kdef = cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
                     push!(kernels, kdef)
                     parr = cgen_private_on(backend) ? cgen_private_arrays(kdef) : Symbol[]
-                    atomic_branch = cgen_launch_stmts(stmt, owner, idx, fargs, backend, parr, Set{Symbol}(a for a in parr if cgen_private_straight(kdef, a)))
+                    cv = cgen_kernel_def_coarse(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
+                    cv === nothing || push!(kernels, cv.kdef)
+                    atomic_branch = cgen_launch_stmts(stmt, owner, idx, fargs, backend, parr, Set{Symbol}(a for a in parr if cgen_private_straight(kdef, a)); coarse = cv)
                     reduce_branch = cgen_reduce_into_element(backend, target, op, value, arrs, term, stmt)
                     flush_pending!()
                     push!(exprs, emit_if(Expr(:call, :<,
@@ -8617,13 +8619,15 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                                               reduction_threshold),
                                          atomic_branch, Any[reduce_branch]))
                 else
-                    idx = length(kernels) + 1
+                    idx = cgen_kernel_count(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
                     kdef = cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
                     push!(kernels, kdef)
                     parr = cgen_private_on(backend) ? cgen_private_arrays(kdef) : Symbol[]
-                    append!(exprs, cgen_launch_stmts(stmt, owner, idx, fargs, backend, parr, Set{Symbol}(a for a in parr if cgen_private_straight(kdef, a))))
+                    cv = cgen_kernel_def_coarse(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
+                    cv === nothing || push!(kernels, cv.kdef)
+                    append!(exprs, cgen_launch_stmts(stmt, owner, idx, fargs, backend, parr, Set{Symbol}(a for a in parr if cgen_private_straight(kdef, a)); coarse = cv))
                 end
             elseif local_red !== nothing
                 verdict = :reduction
@@ -8756,6 +8760,354 @@ cgen_loopvar_from_tid(lo, step, tid) =
     step == 1 ? Expr(:call, :+, lo, Expr(:call, :-, tid, 1)) :
                 Expr(:call, :+, lo, Expr(:call, :*, Expr(:call, :-, tid, 1), step))
 
+# ---- thread coarsening with merged accumulations (CUDA) ----
+# A coarsened variant of a kernel is emitted beside the plain one, and the host launches it only when enough warps would add to one address. In the
+# variant one thread runs `coarsen` iterations of the offloaded loop, 32 apart so the lanes of a warp still read consecutive elements. The copies are
+# jammed: an inner loop or branch whose header does not depend on the iteration becomes one shared loop or branch, and an atomic add whose address is
+# thread-invariant or depends on the thread only through a division is summed over the copies in registers and issued once when the addresses agree at
+# run time (one add per copy when they do not). Only the order of a sum changes. The last warp, where a lane may hold fewer than `coarsen` iterations,
+# runs its iterations one at a time through the original body. The plain kernel is never touched, so a launch that declines the variant runs exactly
+# the code of `coarsen = 1`. The variant pays only where many warps contend for an address: the adds it removes are those a warp's lanes already
+# summed, and the registers it costs hurt every kernel without that contention (measured on a V100: mlp3, transformer and mpnn_gather got slower).
+cgen_coarsen_factor(backend) = clamp(get(backend, :coarsen, 1), 1, 4)
+cgen_coarsen_min_threads(backend) = get(backend, :coarsen_min, 256)
+cgen_coarsen_fill_threads(backend) = get(backend, :coarsen_fill, 65536)
+cgen_jam_max_nodes() = 4000
+cgen_coarsen_kernel_name(name::Symbol) = (s = string(name); endswith(s, "!") ? Symbol(s[1:end-1], "_c!") : Symbol(s, "_c"))
+cgen_is_coarse_variant(k) = k isa Expr && k.head == :function && endswith(string(k.args[1].args[1]), "_c!")
+
+cgen_jam_join(a::Symbol, b::Symbol) = (a === :wide || b === :wide) ? :wide : (a === :key || b === :key) ? :key : :inv
+
+# the smaller of two thread counts per address, as an expression
+function cgen_jam_dmin(a, b)
+    a === nothing && return b
+    b === nothing && return a
+    a == b && return a
+    b isa Expr && b.head == :call && b.args[1] === :min && a in b.args[2:end] && return b
+    a isa Expr && a.head == :call && a.args[1] === :min && b in a.args[2:end] && return a
+    return Expr(:call, :min, a, b)
+end
+
+# (class, threads per address). :inv is the same for every thread, :key a function of a thread-wide quotient (neighbouring threads agree, in groups of
+# the second value), :wide anything else, every array read included. The second value is meaningful for :key only.
+function cgen_jam_class(e, env::Dict{Symbol,Symbol}, denv::Dict{Symbol,Any})
+    e isa Symbol && return (get(env, e, :inv), get(denv, e, nothing))
+    e isa Expr || return (:inv, nothing)
+    e.head == :ref && return (:wide, nothing)
+    if e.head == :call && length(e.args) == 3 && (e.args[1] === :div || e.args[1] === :mod)
+        ca, da = cgen_jam_class(e.args[2], env, denv)
+        cb, _ = cgen_jam_class(e.args[3], env, denv)
+        cb === :inv || return (:wide, nothing)
+        ca === :inv && return (:inv, nothing)
+        if e.args[1] === :div
+            ca === :wide && return (e.args[3] isa Number && e.args[3] <= 32) ? (:wide, nothing) : (:key, e.args[3])
+            return (:key, Expr(:call, :*, da, e.args[3]))
+        end
+        return ca === :key ? (:key, da) : (:wide, nothing)
+    end
+    c = :inv
+    d = nothing
+    for a in (e.head == :call ? e.args[2:end] : e.args)
+        ca, da = cgen_jam_class(a, env, denv)
+        c = cgen_jam_join(c, ca)
+        ca === :key && (d = cgen_jam_dmin(d, da))
+    end
+    return c === :key ? (:key, d) : (c, nothing)
+end
+
+# one flow-insensitive pass: a scalar takes the join of everything assigned to it. A loop variable is thread-invariant inside a loop whose header the
+# copies share and is :wide otherwise, and is bound only inside its own loop, so two loops may reuse a name.
+function cgen_jam_class_walk!(exprs, env::Dict{Symbol,Symbol}, denv::Dict{Symbol,Any}, R::Set{Symbol})
+    changed = false
+    for e in exprs
+        e isa Expr || continue
+        if e.head in (:(=), :(+=), :(-=), :(*=), :(/=)) && e.args[1] isa Symbol
+            v = e.args[1]
+            c, d = cgen_jam_class(e.head == :(=) ? e.args[2] : Expr(:call, :+, v, e.args[2]), env, denv)
+            c0 = get(env, v, :inv)
+            cj = cgen_jam_join(c0, c)
+            dj = cj === :key ? (c0 === :key && c === :key ? cgen_jam_dmin(get(denv, v, nothing), d) : c === :key ? d : get(denv, v, nothing)) : nothing
+            if cj !== c0 || dj != get(denv, v, nothing)
+                env[v] = cj
+                dj === nothing ? delete!(denv, v) : (denv[v] = dj)
+                changed = true
+            end
+        elseif e.head == :for
+            v = e.args[1].args[1]
+            old = get(env, v, nothing)
+            env[v] = isempty(intersect(cgen_expr_symbols(e.args[1].args[2]), R)) ? :inv : :wide
+            changed |= cgen_jam_class_walk!(e.args[2].args, env, denv, R)
+            old === nothing ? delete!(env, v) : (env[v] = old)
+        elseif e.head == :if
+            for arm in e.args[2:end]
+                arm isa Expr && (changed |= cgen_jam_class_walk!(arm.head == :block ? arm.args : Any[arm], env, denv, R))
+            end
+        elseif e.head == :block
+            changed |= cgen_jam_class_walk!(e.args, env, denv, R)
+        end
+    end
+    return changed
+end
+
+# scalars the body assigns (a loop variable is not one) and the loop variables themselves
+function cgen_jam_assigned!(x, out::Set{Symbol}, lv::Set{Symbol})
+    x isa Expr || return out
+    if x.head == :for
+        push!(lv, x.args[1].args[1])
+        cgen_jam_assigned!(x.args[2], out, lv)
+        return out
+    end
+    x.head in (:(=), :(+=), :(-=), :(*=), :(/=)) && x.args[1] isa Symbol && push!(out, x.args[1])
+    for a in x.args
+        cgen_jam_assigned!(a, out, lv)
+    end
+    return out
+end
+
+# every symbol in call position, and the node count, so a renamed scalar can never be a function name and the size cap can be checked
+function cgen_jam_heads!(x, out::Set{Symbol})
+    x isa Expr || return 1
+    n = 1
+    (x.head == :call || x.head == :macrocall) && !isempty(x.args) && x.args[1] isa Symbol && push!(out, x.args[1])
+    for a in x.args
+        n += cgen_jam_heads!(a, out)
+    end
+    return n
+end
+
+cgen_jam_has_head(x, h::Symbol) = x isa Expr && (x.head == h || any(a -> cgen_jam_has_head(a, h), x.args))
+
+# false when a renamed scalar is read before the body has assigned it: its per-copy twin would then be undefined
+function cgen_jam_first_use!(x, R::Set{Symbol}, seen::Set{Symbol})
+    x isa Symbol && return !(x in R) || (x in seen)
+    x isa Expr || return true
+    if x.head == :(=) && x.args[1] isa Symbol
+        cgen_jam_first_use!(x.args[2], R, seen) || return false
+        push!(seen, x.args[1])
+        return true
+    elseif x.head == :for
+        cgen_jam_first_use!(x.args[1].args[2], R, seen) || return false
+        return cgen_jam_first_use!(x.args[2], R, copy(seen))
+    elseif x.head == :if
+        cgen_jam_first_use!(x.args[1], R, seen) || return false
+        sets = Set{Symbol}[]
+        for arm in x.args[2:end]
+            s = copy(seen)
+            cgen_jam_first_use!(arm, R, s) || return false
+            push!(sets, s)
+        end
+        length(sets) == 2 && union!(seen, intersect(sets[1], sets[2]))
+        return true
+    end
+    for a in x.args
+        cgen_jam_first_use!(a, R, seen) || return false
+    end
+    return true
+end
+
+function cgen_jam_rename(x, m::Dict{Symbol,Symbol})
+    x isa Symbol && return get(m, x, x)
+    x isa Expr || return x
+    return Expr(x.head, Any[cgen_jam_rename(a, m) for a in x.args]...)
+end
+
+# the atomic with its index and value replaced
+function cgen_atomic_rebuild2(e, idx, val)
+    e.head == :call && return Expr(:call, e.args[1], e.args[2], idx, val)
+    return Expr(:macrocall, e.args[1], e.args[2], Expr(:(+=), Expr(:ref, e.args[3].args[1].args[1], idx), val))
+end
+
+# Threads per address of every atomic the jam can merge: under a loop, reached only through loops and branches whose header or condition the copies
+# share, with an address that is not :wide. A site whose count cannot be written in terms of the kernel's arguments contributes nothing.
+function cgen_jam_contention!(exprs, env::Dict{Symbol,Symbol}, denv::Dict{Symbol,Any}, R::Set{Symbol}, n_iter, defs::Dict{Symbol,Any}, fargs::Set{Symbol}, out::Vector{Any}, inside::Bool = false)
+    for e in exprs
+        e isa Expr || continue
+        s = cgen_atomic_site(e)
+        if s !== nothing
+            inside || continue
+            c, d = cgen_jam_class(s.idx, env, denv)
+            c === :wide && continue
+            d = c === :inv ? n_iter : cgen_jam_resolve(d, defs, fargs, 0)
+            d === nothing || d in out || push!(out, d)
+        elseif e.head == :for
+            isempty(intersect(cgen_expr_symbols(e.args[1].args[2]), R)) &&
+                cgen_jam_contention!(e.args[2].args, merge(env, Dict(e.args[1].args[1] => :inv)), denv, R, n_iter, defs, fargs, out, true)
+        elseif e.head == :if
+            isempty(intersect(cgen_expr_symbols(e.args[1]), R)) &&
+                cgen_jam_contention!(Any[x for x in e.args[2:end] if x isa Expr], env, denv, R, n_iter, defs, fargs, out, inside)
+        elseif e.head == :block
+            cgen_jam_contention!(Any[x for x in e.args if x isa Expr], env, denv, R, n_iter, defs, fargs, out, inside)
+        end
+    end
+    return out
+end
+
+# `d` with the body's thread-invariant scalars replaced by their definitions; nothing unless only kernel arguments and numbers remain
+function cgen_jam_resolve(d, defs::Dict{Symbol,Any}, fargs::Set{Symbol}, depth::Int)
+    d isa Number && return d
+    depth > 8 && return nothing
+    if d isa Symbol
+        d in fargs && return d
+        haskey(defs, d) || return nothing
+        return cgen_jam_resolve(defs[d], defs, fargs, depth + 1)
+    end
+    d isa Expr || return nothing
+    d.head == :call || return nothing
+    args = Any[d.args[1]]
+    for a in d.args[2:end]
+        r = cgen_jam_resolve(a, defs, fargs, depth)
+        r === nothing && return nothing
+        push!(args, r)
+    end
+    return Expr(:call, args...)
+end
+
+function cgen_jam_site(e, s, K::Int, maps, env::Dict{Symbol,Symbol}, denv::Dict{Symbol,Any}, ctr::Ref{Int})
+    cgen_jam_class(s.idx, env, denv)[1] === :wide && return Any[cgen_jam_rename(e, maps[k]) for k in 1:K]
+    ctr[] += 1
+    n = ctr[]
+    ik = [Symbol("__jmi", n, "_", k) for k in 1:K]
+    vk = [Symbol("__jmv", n, "_", k) for k in 1:K]
+    out = Any[]
+    for k in 1:K
+        push!(out, Expr(:(=), ik[k], cgen_jam_rename(s.idx, maps[k])))
+        push!(out, Expr(:(=), vk[k], cgen_jam_rename(s.val, maps[k])))
+    end
+    same = K == 2 ? Expr(:call, :(==), ik[2], ik[1]) :
+           Expr(:call, :(==), Expr(:call, :max, [Expr(:call, :abs, Expr(:call, :-, ik[k], ik[1])) for k in 2:K]...), 0)
+    total = vk[1]
+    for k in 2:K
+        total = Expr(:call, :+, total, vk[k])
+    end
+    push!(out, emit_if(same, Any[cgen_atomic_rebuild2(e, ik[1], total)], Any[cgen_atomic_rebuild2(e, ik[k], vk[k]) for k in 1:K]))
+    return out
+end
+
+function cgen_jam_list(stmts, K::Int, R::Set{Symbol}, maps, env::Dict{Symbol,Symbol}, denv::Dict{Symbol,Any}, ctr::Ref{Int})
+    out = Any[]
+    for e in stmts
+        e isa LineNumberNode && continue
+        if !(e isa Expr)
+            push!(out, e)
+        elseif e.head == :block
+            append!(out, cgen_jam_list(e.args, K, R, maps, env, denv, ctr))
+        elseif cgen_atomic_site(e) !== nothing
+            append!(out, cgen_jam_site(e, cgen_atomic_site(e), K, maps, env, denv, ctr))
+        elseif e.head == :for && isempty(intersect(cgen_expr_symbols(e.args[1].args[2]), R))
+            push!(out, Expr(:for, e.args[1], Expr(:block, cgen_jam_list(e.args[2].args, K, R, maps, merge(env, Dict(e.args[1].args[1] => :inv)), denv, ctr)...)))
+        elseif e.head == :if && isempty(intersect(cgen_expr_symbols(e.args[1]), R))
+            arms = Any[e.args[1]]
+            for arm in e.args[2:end]
+                push!(arms, Expr(:block, cgen_jam_list(arm isa Expr && arm.head == :block ? arm.args : Any[arm], K, R, maps, env, denv, ctr)...))
+            end
+            push!(out, Expr(:if, arms...))
+        else
+            for k in 1:K
+                push!(out, cgen_jam_rename(e, maps[k]))
+            end
+        end
+    end
+    return out
+end
+
+# The statements after the thread guard of a coarsened kernel and the threads-per-address counts that make it worth launching, or nothing when the
+# body is not one the jam can prove safe to copy or has nothing to merge
+function cgen_coarsen_body(stmt, K::Int, dev::Vector, fargs::Vector{Symbol}, synth::Dict{Symbol,Any}, n_iter)
+    K >= 2 || return nothing
+    whole = Expr(:block, dev...)
+    heads = Set{Symbol}()
+    cgen_jam_heads!(whole, heads) <= cgen_jam_max_nodes() || return nothing
+    cgen_jam_has_head(whole, :return) && return nothing
+    any(s -> startswith(string(s), "__jm"), cgen_expr_symbols(whole)) && return nothing
+    lv = Set{Symbol}()
+    R = cgen_jam_assigned!(whole, Set{Symbol}(), lv)
+    push!(R, stmt.var)
+    union!(R, keys(synth))
+    isempty(intersect(R, lv)) || return nothing
+    isempty(intersect(R, heads)) || return nothing
+    isempty(intersect(R, Set{Symbol}(fargs))) || return nothing
+    seen = Set{Symbol}([stmt.var]); union!(seen, keys(synth))
+    cgen_jam_first_use!(whole, R, seen) || return nothing
+    env = Dict{Symbol,Symbol}(stmt.var => :wide)
+    denv = Dict{Symbol,Any}()
+    for _ in 1:8
+        cgen_jam_class_walk!(dev, env, denv, R) || break
+    end
+    # top-level scalars assigned once from thread-invariant, array-free values, for writing a count in terms of the arguments
+    defs = Dict{Symbol,Any}()
+    nassign = Dict{Symbol,Int}()
+    cgen_count_assigns!(whole, nassign)
+    for e in dev
+        e isa Expr && e.head == :(=) && e.args[1] isa Symbol && get(nassign, e.args[1], 0) == 1 && get(env, e.args[1], :inv) === :inv &&
+            !cgen_jam_has_head(e.args[2], :ref) && (defs[e.args[1]] = e.args[2])
+    end
+    counts = cgen_jam_contention!(dev, env, denv, R, n_iter, defs, Set{Symbol}(fargs), Any[])
+    isempty(counts) && return nothing
+    span = 32 * K
+    maps = [Dict{Symbol,Symbol}(s => Symbol(string(s), "__j", k) for s in R) for k in 1:K]
+    jb = :__jmb
+    setup = Any[]
+    for k in 1:K
+        tk = Symbol("__jmt", k)
+        push!(setup, Expr(:(=), tk, Expr(:call, :+, jb, 32 * (k - 1) + 1)))
+        push!(setup, Expr(:(=), maps[k][stmt.var], cgen_loopvar_from_tid(stmt.lo, stmt.step, tk)))
+        for (v, c) in synth
+            push!(setup, Expr(:(=), maps[k][v], c))
+        end
+    end
+    fused = vcat(setup, cgen_jam_list(dev, K, R, maps, env, denv, Ref(0)))
+    tail = Any[Expr(:(=), :__jmt, Expr(:call, :+, Expr(:call, :+, jb, Expr(:call, :*, 32, :__jmk)), 1)),
+               emit_if(Expr(:call, :<=, :__jmt, n_iter),
+                       Any[Expr(:(=), stmt.var, cgen_loopvar_from_tid(stmt.lo, stmt.step, :__jmt)),
+                           [Expr(:(=), v, c) for (v, c) in synth]..., dev...], Any[])]
+    body = Any[Expr(:(=), jb, Expr(:call, :+, Expr(:call, :*, Expr(:call, :div, Expr(:call, :-, :__tid, 1), 32), span),
+                                   Expr(:call, :mod, Expr(:call, :-, :__tid, 1), 32))),
+               emit_if(Expr(:call, :<=, Expr(:call, :+, jb, 32 * (K - 1) + 1), n_iter),
+                       fused,
+                       Any[emit_forloop(:__jmk, 0, K - 1, 1, tail)])]
+    return (body = body, counts = counts)
+end
+
+function cgen_count_assigns!(x, out::Dict{Symbol,Int})
+    x isa Expr || return out
+    x.head in (:(=), :(+=), :(-=), :(*=), :(/=)) && x.args[1] isa Symbol && (out[x.args[1]] = get(out, x.args[1], 0) + 1)
+    x.head == :for && (out[x.args[1].args[1]] = get(out, x.args[1].args[1], 0) + 2)
+    for a in x.args
+        cgen_count_assigns!(a, out)
+    end
+    return out
+end
+
+# The coarsened twin of a kernel and the host condition that selects it, or nothing: (kdef, cond). `cond` is true when the largest per-address thread
+# count of a mergeable site reaches `coarsen_min` (0 selects the twin always).
+function cgen_kernel_def_coarse(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, reduce_vars::Set{Symbol}, synth::Dict{Symbol,Any})
+    K = cgen_coarsen_factor(backend)
+    K >= 2 || return nothing
+    n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+    fbody = cgen_fold_accumulates(stmt.body)
+    dev = cgen_device_body(fbody, stmt.var, backend, copy(reduce_vars), cgen_race_write_arrays(fbody, stmt.var))
+    jam = cgen_coarsen_body(stmt, K, dev, fargs, synth, n_iter)
+    jam === nothing && return nothing
+    nthreads = Expr(:call, :*, Expr(:call, :div, Expr(:call, :+, n_iter, 32 * K - 1), 32 * K), 32)
+    body = Any[Expr(:(=), :__tid, backend.tid_rhs),
+               Expr(:if, Expr(:call, :>, :__tid, nthreads), Expr(:block, emit_return_nothing())),
+               jam.body..., emit_return_nothing()]
+    name = cgen_coarsen_kernel_name(cgen_kernel_fname(owner, idx, backend))
+    kdef = Expr(:function, Expr(:call, name, fargs...), Expr(:block, body...))
+    best = length(jam.counts) == 1 ? jam.counts[1] : Expr(:call, :max, jam.counts...)
+    return (kdef = kdef, name = name, nthreads = nthreads, cond = Expr(:&&, Expr(:call, :>=, best, cgen_coarsen_min_threads(backend)), Expr(:call, :>=, n_iter, cgen_coarsen_fill_threads(backend))))
+end
+
+# the host statements of a launch with a coarsened twin: the twin when its condition holds, the plain launch statements otherwise. A launch that
+# privatizes its accumulation arrays keeps the private kernel (its shared-memory adds already remove the contention, and measured faster than the twin)
+function cgen_coarse_select(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, cv, plain::Vector)
+    jl = cgen_launch_expr(stmt, owner, idx, fargs, backend; nthreads = cv.nthreads, kname = cv.name)
+    return Any[emit_if(cv.cond, Any[jl], plain)]
+end
+
+# kernels that count toward a launch index: the coarsened twins sit beside them and take no number
+cgen_kernel_count(kernels::Vector{Expr}) = count(k -> !cgen_is_coarse_variant(k), kernels)
+
 function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, reduce_vars::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}())
     tid = :__tid
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
@@ -8778,15 +9130,15 @@ function cgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, b
     return Expr(:function, Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...), Expr(:block, body...))
 end
 
-function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend)
-    n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+function cgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend; nthreads = cgen_trip_count(stmt.lo, stmt.step, stmt.hi), kname = cgen_kernel_fname(owner, idx, backend))
+    n_iter = nthreads
 # A zero-trip loop is a legal no-op on the CPU, but a launch with zero blocks is a hard CUDA error, so the kernel would crash on the device -- a
 # multigrid solver coarsened to zero points reaches exactly this. One block is launched instead, its threads failing the `__tid > trip_count` guard
 # and returning. `Base.cld`, not bare `cld`: a shadow name is its primal name plus b/d/bd, so a primal scalar `cl` becomes `cld`, colliding here
 # (mg_vcycle's HVP died live with 'objects of type Float64 are not callable'). Only the launch expression can be qualified, since re-ingestion
 # allows plain names only; `mo`->`mod` and `fl`->`fld` remain live traps in kernel bodies.
     nblocks = Expr(:call, :max, 1, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), n_iter, :nthread_per_block))
-    call = Expr(:call, cgen_kernel_fname(owner, idx, backend), fargs...)
+    call = Expr(:call, kname, fargs...)
     return Expr(:macrocall, backend.launch_macro, nothing,
                 Expr(:(=), backend.threads_kw, :nthread_per_block),
                 Expr(:(=), backend.blocks_kw, nblocks),
@@ -9446,9 +9798,10 @@ end
 # Host statements of one launch. Every array gets a byte offset, packed in order and rounded to 8. The private variant is launched when the total fits
 # the budget and every array pays off, otherwise the plain kernel. An array pays off when the launch has at least `ratio` threads per element, since
 # each block flushes its whole copy, and, if its accumulations sit under no loop (one add per thread), when a block has at least four threads per element.
-function cgen_launch_stmts(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, arrs::Vector{Symbol} = Symbol[], straight::Set{Symbol} = Set{Symbol}())
+function cgen_launch_stmts(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, arrs::Vector{Symbol} = Symbol[], straight::Set{Symbol} = Set{Symbol}(); coarse = nothing)
     plain = cgen_launch_expr(stmt, owner, idx, fargs, backend)
-    isempty(arrs) && return Any[plain]
+    plain_stmts = coarse === nothing ? Any[plain] : cgen_coarse_select(stmt, owner, idx, fargs, backend, coarse, Any[plain])
+    isempty(arrs) && return plain_stmts
     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
     pn = Symbol("__pn_", idx)
     out = Any[Expr(:(=), pn, 0)]
@@ -9478,7 +9831,7 @@ function cgen_launch_stmts(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol},
                    Expr(:(=), backend.blocks_kw, nblocks),
                    Expr(:(=), :shmem, pn),
                    call)
-    push!(out, emit_if(cond, Any[private], Any[plain]))
+    push!(out, emit_if(cond, Any[private], plain_stmts))
     return out
 end
 
@@ -9687,6 +10040,7 @@ function cgen_emit(gk, backend; reduction_threshold::Int = CGEN_REDUCTION_THRESH
     host = Expr(:function, Expr(:call, cgen_host_fname(gk.name, backend), gk.args...), Expr(:block, host_body...))
     if cgen_private_on(backend)
         for k in copy(kernels)
+            cgen_is_coarse_variant(k) && continue
             arrs = cgen_private_arrays(k)
             isempty(arrs) || push!(kernels, cgen_private_kernel(k, arrs, backend))
         end
@@ -9830,7 +10184,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     # emitting `Atomix.@atomic ... += ...` (never `-=`) --
                     # see jgen_reduction_writeback_kernel's comment.
                     signed_value = op == :+ ? value : Expr(:call, :-, value)
-                    widx = length(kernels) + 1
+                    widx = cgen_kernel_count(kernels) + 1
                     wvars = Set{Symbol}()
                     cgen_collect_expr_vars!(target, wvars)   # arr + any free vars inside target's index expr(s)
                     wfargs = sort(collect(wvars); by = string)
@@ -9871,7 +10225,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                                             Any[Expr(:(=), redvar, signed_value),
                                                 jgen_reduction_writeback_launch(owner, widx, wfargs, redvar)],
                                             Any[])]
-                    aidx = length(kernels) + 1
+                    aidx = cgen_kernel_count(kernels) + 1
                     afargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
                     push!(kernels, jgen_kernel_def(stmt, owner, aidx, afargs, loop_reduce_vars, synth, hoist_atomics))
@@ -9879,7 +10233,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                                          Any[jgen_launch_expr(stmt, owner, aidx, afargs)],
                                          red_exprs))
                 else
-                    idx = length(kernels) + 1
+                    idx = cgen_kernel_count(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
                     push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth, hoist_atomics))
@@ -11898,8 +12252,9 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
+    coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
     hoist_atomics || (backend = merge(backend, (hoist_atomics = false,)))
     warp_atomics || (backend = merge(backend, (warp_atomics = false,)))
@@ -11915,8 +12270,8 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -11928,13 +12283,13 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
@@ -11944,8 +12299,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -12480,7 +12835,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -12494,13 +12849,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the
