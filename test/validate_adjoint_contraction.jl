@@ -42,6 +42,22 @@ const ADJ_BLOOP = """for c = 1:k
                 xb[((h - 1) * m + t - 1) * k + c] = xb[((h - 1) * m + t - 1) * k + c] + w[((h - 1) * n + o - 1) * k + c] * gs
                 wb[((h - 1) * n + o - 1) * k + c] = wb[((h - 1) * n + o - 1) * k + c] + x[((h - 1) * m + t - 1) * k + c] * gs
             end"""
+# kernels whose head is a part of the column index (v0.4.37): nh heads of dh columns, tt rows; the adjoint of a weighted sum of the rows of v over u
+function adj_hsrc(; pre = "gs = g[idx] / den[(h - 1) * tt + t]", loop = nothing, dec = "c = mod(idx - 1, d) + 1\n            t = div(idx - 1, d) + 1\n            h = div(c - 1, dh) + 1", entry = "con_adh", vidx = "(u - 1) * d + c")
+    loop === nothing && (loop = """for u = 1:tt
+                scb[((h - 1) * tt + t - 1) * tt + u] = scb[((h - 1) * tt + t - 1) * tt + u] + v[$vidx] * gs
+                vb[$vidx] = vb[$vidx] + sc[((h - 1) * tt + t - 1) * tt + u] * gs
+            end""")
+    return """function $entry(g, v, sc, vb, scb, den, d, d3, dh, tt)
+        for idx = 1:tt * d
+            $dec
+            $pre
+            $loop
+        end
+        return nothing
+    end"""
+end
+adj_hargs(sd; nh = 3, dh = 17, tt = 70, d = nh * dh) = (r = MersenneTwister(sd); Any[randn(r, tt * d + 8), randn(r, 3 * tt * d + 8), randn(r, nh * tt * tt + 8), randn(r, 3 * tt * d + 8), randn(r, nh * tt * tt + 8), rand(r, nh * tt) .+ 1.0, d, 3 * d, dh, tt])
 const ADJ_CASES = [
     ("two statements", adj_src(), :con_adj, adj_args, 2),
     ("first statement only", adj_src(loop = "for c = 1:k\n xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs\n end"), :con_adj, adj_args, 1),
@@ -108,7 +124,28 @@ const ADJ_CASES = [
             end"""), :con_adj, adj_bargs, 2),
     ("batched, the divisor written the other way", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = "o = mod(idx - 1, n) + 1\n            t = mod(div(idx - 1, n), m) + 1\n            h = div(idx - 1, n * m) + 1", loop = ADJ_BLOOP), :con_adj, adj_bargs, 2),
     ("batched, a partial last batch", adj_src(params = ", nb", head = "for idx = 1:nb * m * n + 7", dec = ADJ_BDEC, loop = ADJ_BLOOP), :con_adj, adj_bargs, :plain),
+    # ---- a head that is a part of the column index (v0.4.37) ----
+    ("head in the column, two statements", adj_hsrc(), :con_adh, adj_hargs, 2),
+    ("head in the column, the first statement only", adj_hsrc(loop = """for u = 1:tt
+                scb[((h - 1) * tt + t - 1) * tt + u] = scb[((h - 1) * tt + t - 1) * tt + u] + v[(u - 1) * d + c] * gs
+            end"""), :con_adh, adj_hargs, 1),
+    ("head in the column, the second statement only", adj_hsrc(loop = """for u = 1:tt
+                vb[(u - 1) * d + c] = vb[(u - 1) * d + c] + sc[((h - 1) * tt + t - 1) * tt + u] * gs
+            end"""), :con_adh, adj_hargs, 1),
+    ("head in the column, a recomputed forward value and a repeated decode", adj_hsrc(
+        pre = "s = 0.0\n for u = 1:tt\n s = s + sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]\n end\n c = mod(idx - 1, d) + 1\n t = div(idx - 1, d) + 1\n h = div(c - 1, dh) + 1\n gs = exp(0.1 * s) * g[idx] / den[(h - 1) * tt + t]"), :con_adh, adj_hargs, 2),
+    ("head in the column, strided columns", adj_hsrc(vidx = "(u - 1) * d3 + 2d + c"), :con_adh, adj_hargs, 2),
+    ("head in the column, a head width computed from parameters", adj_hsrc(dec = "c = mod(idx - 1, d) + 1\n            t = div(idx - 1, d) + 1\n            h = div(c - 1, div(d3, 3 * dh) * dh) + 1"), :con_adh, adj_hargs, 2),
+    ("head in the column, the targets do not read the head", adj_hsrc(loop = """for u = 1:tt
+                scb[(t - 1) * tt + u] = scb[(t - 1) * tt + u] + v[(u - 1) * d + c] * gs
+                vb[(u - 1) * d + c] = vb[(u - 1) * d + c] + sc[(t - 1) * tt + u] * gs
+            end"""), :con_adh, adj_hargs, 2),
+    ("head in the column, the head width does not divide the width", adj_hsrc(), :con_adh, sd -> adj_hargs(sd; nh = 3, dh = 17, tt = 70, d = 50), :plain),
     # ---- refusals ----
+    ("head in the column, the head is changed after its decode", adj_hsrc(pre = "h = h + 0\n gs = g[idx] / den[(h - 1) * tt + t]"), :con_adh, adj_hargs, 0),
+    ("head in the column, the loop variable has the head's name", adj_hsrc(loop = """for h = 1:2
+                vb[(h - 1) * d + c] = vb[(h - 1) * d + c] + sc[(h - 1) * tt + t] * gs
+            end"""), :con_adh, adj_hargs, 0),
     ("batched, the batch size is not rows times columns", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = "o = mod(idx - 1, n) + 1\n            t = mod(div(idx - 1, n), m) + 1\n            h = div(idx - 1, n * n) + 1", loop = ADJ_BLOOP), :con_adj, sd -> adj_bargs(sd; k = 7), 0),
     ("batched, the batch is changed after its decode", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, pre = "h = h + 0\n gs = g[idx] * 2.0", loop = ADJ_BLOOP), :con_adj, adj_bargs, 0),
     ("batched, the loop variable has the batch's name", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, loop = """for h = 1:2
@@ -248,7 +285,7 @@ end
 adj_is_twin(n) = occursin(r"_t\d+!$", n)
 adj_is_stage(n) = endswith(n, "_f_t!")
 # the cases whose forward loop becomes a tiled kernel of its own
-const ADJ_STAGE = Set(["a recomputed forward value, a repeated decode and temporaries", "a recomputed forward value, subtracted, factors swapped", "two recomputed forward loops, the first is staged", "batched, a recomputed forward value and a repeated decode"])
+const ADJ_STAGE = Set(["a recomputed forward value, a repeated decode and temporaries", "a recomputed forward value, subtracted, factors swapped", "two recomputed forward loops, the first is staged", "batched, a recomputed forward value and a repeated decode", "head in the column, a recomputed forward value and a repeated decode"])
 function adj_unit_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
@@ -279,13 +316,19 @@ function adj_unit_checks()
         end
     end
     bad += adj_direct_checks()
-    # thresholds
+    # thresholds. The product of 67 x 70 outputs is 2 tiles for each of the two twins. The input gradient has the layout "nt" (it wants cld(contraction, 32) tiles) and the
+    # weight gradient "tn" (cld(contraction, 4)). The group runs if every twin can, at least one wants, and every twin has a quarter of the tiles it would want.
+    # The weight gradient needs cld(cld(64 * contraction, 256), 4) of its 2 tiles: that holds up to 32 and fails at 33, where the group takes the plain kernel.
     try
         name, src, entry, mk, _ = ADJ_CASES[1]
         args = mk(1)                       # n = 70, m = 67, k = 19
-        above = con_run(src, entry, args, 19)
-        below = con_run(src, entry, args, 20)
-        check(count(adj_is_twin, above.launched) == 2 && count(adj_is_twin, below.launched) == 0, "$name: the twins run at the threshold (19) and not below it (20)")
+        check(all(c -> count(adj_is_twin, con_run(src, entry, args, c).launched) == 2, (8, 9, 32)) && all(c -> count(adj_is_twin, con_run(src, entry, args, c).launched) == 0, (33, 64, 65)), "$name: the twins run at 8, at 9 and at 32 and not at 33 (the weight gradient has a quarter of the tiles it wants up to 32)")
+        # a tall and narrow product (the rows of a graph, 16 columns, inner length 16): the weight gradient has 1 tile and sums over 4000 rows on one block. The group takes the plain kernel at the default and runs once the tile count scales down.
+        targs = adj_args(1; m = 4000, n = 16, k = 16)
+        check(count(adj_is_twin, con_run(src, entry, targs, 256).launched) == 0 && count(adj_is_twin, con_run(src, entry, targs, 16).launched) == 2, "$name: a tall and narrow product takes the plain kernel at 256 and runs at 16")
+        # no twin has the tile count of its layout, and each has at least a quarter of it (contraction 128: the input gradient wants 4 tiles and has 3, the weight gradient wants 32 and has 10): the group takes the plain kernel; at contraction 1 every twin wants its tiles
+        wargs = adj_args(1; m = 130, n = 640, k = 64)
+        check(count(adj_is_twin, con_run(src, entry, wargs, 128).launched) == 0 && count(adj_is_twin, con_run(src, entry, wargs, 1).launched) == 2, "$name: a group in which no twin has the tile count of its layout, each with at least a quarter of it, takes the plain kernel (contraction 128) and runs at 1")
         k0 = Any[args[1:8]..., 0]
         z = con_run(src, entry, k0, 1)
         zb = con_run(src, entry, k0, 0)
@@ -293,25 +336,54 @@ function adj_unit_checks()
         lim = con_run(src, entry, args, 1; maxt = nm -> adj_is_twin(nm) ? 128 : 1024)
         base = con_run(src, entry, args, 0)
         check(count(adj_is_twin, lim.launched) == 0 && con_relerr(lim, base) == 0.0, "$name: a register limit below 256 threads takes the plain kernel")
+        lim2 = con_run(src, entry, args, 1; maxt = nm -> endswith(nm, "_t2!") ? 128 : 1024)
+        check(count(adj_is_twin, lim2.launched) == 0 && con_relerr(lim2, base) == 0.0, "$name: a register limit on one twin alone takes the plain kernel for the whole group")
+        # a side below min(contraction, 16) takes the plain kernel
+        args15 = adj_args(1; k = 15)
+        check(count(adj_is_twin, con_run(src, entry, args15, 8).launched) == 2 && count(adj_is_twin, con_run(src, entry, adj_args(1; k = 7), 8).launched) == 0, "$name: an inner length of 7 is below the floor min(8, 16) of the rows of one twin")
         # the kernel with a forward stage: a limit on the stage alone, and a size below the threshold, send the whole group to the plain kernel
         sname, ssrc, sentry, smk, _ = first(c for c in ADJ_CASES if c[1] == "a recomputed forward value, a repeated decode and temporaries")
         sargs = smk(1)
         sbase = con_run(ssrc, sentry, sargs, 0)
         slim = con_run(ssrc, sentry, sargs, 1; maxt = nm -> adj_is_stage(nm) ? 128 : 1024)
         check(count(adj_is_twin, slim.launched) == 0 && count(adj_is_stage, slim.launched) == 0 && !any(n -> endswith(n, "_a!"), slim.launched) && con_relerr(slim, sbase) == 0.0, "$sname: a register limit on the stage alone takes the plain kernel")
-        # a forward loop shorter than the loop of adds: the stage is below the threshold while the twins are not, so the whole group takes the plain kernel
+        # a forward loop shorter than the loop of adds, on 260 x 260 outputs (5 x 5 tiles): the stage is below the floor of 16 while the twins are not
         fsrc = adj_src(params = ", b0, kf", pre = "s = b0[o]\n for c = 1:kf\n s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]\n end\n o = mod(idx - 1, n) + 1\n t = div(idx - 1, n) + 1\n gs = tanh(s) * g[idx]",
                        loop = "for c = 1:k\n a1 = x[(t - 1) * k + c]\n a2 = w[(c - 1) * n + o]\n xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + a2 * gs\n wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + a1 * gs\n end")
-        fargs = Any[adj_args(1)..., randn(MersenneTwister(99), 70), 10]
+        fargs = Any[adj_args(1; m = 260, n = 260)..., randn(MersenneTwister(99), 260), 10]
         fbase = con_run(fsrc, :con_adj, fargs, 0)
         fall = con_run(fsrc, :con_adj, fargs, 1)
         check(count(adj_is_twin, fall.launched) == 2 && count(adj_is_stage, fall.launched) == 1 && con_relerr(fall, fbase) <= 1e-12, "a shorter forward loop: with the threshold 1 the stage and both twins run")
-        fcut = con_run(fsrc, :con_adj, fargs, 19)
-        check(count(adj_is_twin, fcut.launched) == 0 && count(adj_is_stage, fcut.launched) == 0 && !any(n -> endswith(n, "_a!"), fcut.launched) && con_relerr(fcut, fbase) == 0.0, "a shorter forward loop: the stage is below the threshold (10 < 19), the whole group takes the plain kernel")
-        sbelow = con_run(ssrc, sentry, sargs, 20)
-        check(count(adj_is_twin, sbelow.launched) == 0 && count(adj_is_stage, sbelow.launched) == 0 && con_relerr(sbelow, sbase) == 0.0, "$sname: a size below the threshold takes the plain kernel")
+        f10 = con_run(fsrc, :con_adj, fargs, 10)
+        check(count(adj_is_twin, f10.launched) == 2 && count(adj_is_stage, f10.launched) == 1, "a shorter forward loop: the stage and the twins run at 10 (the forward loop has 10 steps)")
+        fcut = con_run(fsrc, :con_adj, fargs, 16)
+        check(count(adj_is_twin, fcut.launched) == 0 && count(adj_is_stage, fcut.launched) == 0 && !any(n -> endswith(n, "_a!"), fcut.launched) && con_relerr(fcut, fbase) == 0.0, "a shorter forward loop: the stage is below the floor (10 < 16), the whole group takes the plain kernel")
+        sbelow = con_run(ssrc, sentry, sargs, 65)
+        check(count(adj_is_twin, sbelow.launched) == 0 && count(adj_is_stage, sbelow.launched) == 0 && con_relerr(sbelow, sbase) == 0.0, "$sname: a count of tiles below the threshold takes the plain kernel")
     catch e
         check(false, "thresholds: error " * first(split(sprint(showerror, e), "\n")))
+    end
+    # a head that is a part of the column: every product is batched over the heads, dh columns of the thread table each
+    try
+        name, src, entry, mk, _ = first(c for c in ADJ_CASES if c[1] == "head in the column, two statements")
+        args = mk(1)                       # nh = 3 heads of dh = 17 columns, tt = 70 rows
+        r1 = con_run(src, entry, args, 1)
+        hostsrc = STADE.io_expr_to_source(r1.plan.host)
+        t1 = STADE.io_expr_to_source(first(k for k in r1.plan.kernels if endswith(string(k.args[1].args[1]), "_t1!")))
+        t2 = STADE.io_expr_to_source(first(k for k in r1.plan.kernels if endswith(string(k.args[1].args[1]), "_t2!")))
+        check(occursin("div(d, dh)", hostsrc) && occursin("mod(d, dh) == 0", hostsrc) && occursin("dh > 0 &&", hostsrc), "$name: the host test and the grids count heads, and the head width is tested before it divides")
+        check(occursin("__ct_hb = 1 + __ct_bz * dh", t1) && occursin("__ct_K = dh", t1) && occursin("__ct_M = div(tt * d, d)", t1) && occursin("__ct_M = dh", t2) && occursin("__ct_K = div(tt * d, d)", t2) && occursin("c = (__ct_hb + __ct_k0) + __ct_kk", t1) && occursin("c = (__ct_r0 + __ct_rr) + __ct_hb", t2), "$name: the first product contracts over the dh columns of a head and the second has dh rows")
+        check(count(adj_is_twin, con_run(src, entry, args, 70).launched) == 2 && count(adj_is_twin, con_run(src, entry, args, 71).launched) == 0, "$name: the twins run at 70 rows or columns (the rows reach contraction) and not at 71")
+        nname, nsrc, nentry, nmk, _ = first(c for c in ADJ_CASES if c[1] == "head in the column, the targets do not read the head")
+        nhost = STADE.io_expr_to_source(con_run(nsrc, nentry, nmk(1), 1).plan.host)
+        check(!occursin("div(d, dh)", nhost) && !occursin("mod(d, dh)", nhost), "$nname: the tiles are not batched over heads")
+        # 9 rows and 17 columns per head: the second product has 17 rows and 9 columns, so the twins run at contraction 17 through the columns' side only for the first
+        r = MersenneTwister(5)
+        argw = adj_hargs(5; tt = 9)
+        wa = con_run(src, entry, argw, 9); wb = con_run(src, entry, argw, 0)
+        check(count(adj_is_twin, wa.launched) == 2 && con_relerr(wa, wb) <= 1e-12 && isempty(wa.conflicts), "$name: 9 rows run both twins at contraction 9 and agree (error $(round(con_relerr(wa, wb), sigdigits = 3)))")
+    catch e
+        check(false, "head in the column thresholds: error " * first(split(sprint(showerror, e), "\n")))
     end
     return bad
 end
@@ -353,18 +425,36 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("a target that is read elsewhere is accepted", "        cgen_count_symbol(others, s.site.arr) == 0 || return nothing\n", ""),
             ("the index roles are not checked", "if issubset(vi, union(params, Set([cu, cv]), bat)) && issubset(vw, union(params, Set([cvv, cv]), bat)) && cu in vi && cvv in vw && cv in vi && cv in vw", "if true"),
             ("the target index may ignore the loop variable", " && cu in vi && cvv in vw && cv in vi && cv in vw", " && cu in vi && cvv in vw"),
-            ("the whole-rows test is dropped", "extra = Expr(:call, :(==), Expr(:call, :mod, X, hv === nothing ? N : Expr(:call, :*, N, M)), 0)", "extra = true"),
+            ("the whole-rows test is dropped", "                              Expr(:call, :(==), Expr(:call, :mod, X, hv === nothing ? N : Expr(:call, :*, N, M)), 0), target = site.arr))", "                              true, target = site.arr))"),
             ("the seed of a batched product ignores the batch", "Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, hv, 1), M), Expr(:call, :-, tv, 1)), N), ov)", "Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, 0, M), Expr(:call, :-, tv, 1)), N), ov)"),
-            ("a batched twin ignores the batch of the target", "bat = hv === nothing ? Set{Symbol}() : Set{Symbol}([hv])\n    trip = ", "bat = Set{Symbol}()\n    trip = "),
+            ("a batched twin ignores the batch of the target", "bat = hv !== nothing ? Set{Symbol}([hv]) : (derived ? Set{Symbol}([dbat.var]) : Set{Symbol}())\n    trip = ", "bat = Set{Symbol}()\n    trip = "),
+            ("a head is used when no statement reads it", "derived = dbat !== nothing && hv === nothing && any(s -> dbat.var in cgen_split_vars(s.site.idx) || dbat.var in cgen_split_vars(s.F.idx), sts)", "derived = dbat !== nothing && hv === nothing"),
+            ("the head is not assigned once", "        count(st -> st isa Expr && st.head === :(=) && st.args[1] === dbat.var, leaves(Any[pre_rest..., post...])) == dbat.n || return nothing\n", ""),
+            ("the head may be the loop variable", "(dbat.var === cv || dbat.var in params) && return nothing", "false && return nothing"),
+            ("a head product keeps the full width for its rows and inner length", "derived && (u === ov ? (rows = dbat.dh) : (kdim = dbat.dh))", "nothing"),
+            ("the rows of a head start at the first column", "rowoff = derived && u === ov ? :__ct_hb : 1", "rowoff = 1"),
+            ("the row loads of a head start at the first column", "rowbase = derived && u === ov ? :__ct_hb : 1, colbase", "rowbase = 1, colbase"),
+            ("the inner loads of a head start at the first column", ", kbase = derived && u !== ov ? :__ct_hb : 1,", ", kbase = 1,"),
+            ("the first column of a head is the first column", "Expr(:(=), :__ct_hb, Expr(:call, :+, 1, Expr(:call, :*, :__ct_bz, dbat.dh)))", "Expr(:(=), :__ct_hb, 1)"),
+            ("the heads must divide the width", "Expr(:&&, Expr(:call, :(==), Expr(:call, :mod, X, N), 0), Expr(:call, :(==), Expr(:call, :mod, N, dbat.dh), 0)) :", "Expr(:call, :(==), Expr(:call, :mod, X, N), 0) :"),
+            ("the number of heads is the width", "Bh = Expr(:call, :div, N, dbat.dh)\n    end\n    bat =", "Bh = N\n    end\n    bat ="),
+            ("a head-derived product has the thresholds of a plain batch", "headcol = derived, dhexpr = derived ? dbat.dh : nothing,", "headcol = false, dhexpr = nothing,"),
+            ("the head is not set in the tile", "batchvar = derived ? dbat.var : hv,", "batchvar = hv,"),
             ("the scratch array is too small", "Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, A.a.count)", "Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, 1)"),
             ("the seed is stored before it is computed", "body = Any[parts.head, parts.guard, pre_a..., store, post..., emit_return_nothing()]", "body = Any[parts.head, parts.guard, store, pre_a..., post..., emit_return_nothing()]"),
             ("the probe of the register limit is not built", "probe = Expr(:call, t.name, plain.args[2:end]..., d.target)", "probe = Expr(:call, t.name, plain.args[2:end]..., :__ct_g)"),
             ("the stage store goes to the wrong element", "Expr(:(=), Expr(:ref, :__cf_s, idxv), acf[1])", "Expr(:(=), Expr(:ref, :__cf_s, 1), acf[1])"),
             ("the stage is read from the wrong element", "pre_a[fstage.at] = Expr(:(=), fstage.acc, Expr(:ref, :__cf_s, idxv))", "pre_a[fstage.at] = Expr(:(=), fstage.acc, Expr(:ref, :__cf_s, 1))"),
             ("the stage replaces the wrong statement", "(desc = d0, acc = acf[1], at = fi + 1)", "(desc = d0, acc = acf[1], at = fi)"),
-            ("the stage is not in the condition", "                        cond = Expr(:&&, A.fs.cond, fits(A.fs, fprobe))\n", "                        cond = Expr(:&&, A.fs.cond, true)\n"),
-            ("the stage size test is dropped", "                        cond = Expr(:&&, A.fs.cond, fits(A.fs, fprobe))\n", "                        cond = fits(A.fs, fprobe)\n"),
-            ("the descending loop starts from its start value", "colbase = lp.step == 1 ? lp.lo : lp.hi", "colbase = lp.lo"),
+            ("the register test of the stage is not in the condition", "push!(fitl, fits(A.fs, fprobe))", "nothing"),
+            ("the sizes of the stage are not in the condition", "push!(cans, A.fs.can); ", ""),
+            ("the sizes of the twins are not in the condition", "push!(cans, t.can); ", ""),
+            ("the register test of a twin is dropped", "push!(fitl, fits(t, probe))", "nothing"),
+            ("a group needs every twin to want the tiles", "foldl((a, b) -> Expr(:||, a, b), wants)", "foldl((a, b) -> Expr(:&&, a, b), wants)"),
+            ("a group runs when no twin wants the tiles", "isempty(wants) || (cond = ", "true || (cond = "),
+            ("a twin does not need a quarter of the tiles", "t.okt === nothing || push!(oks, t.okt); ", ""),
+            ("the twin needs all the tiles, not a quarter", "cld(cgen_contraction_tiles(d, cmin), 4)", "cld(cgen_contraction_tiles(d, cmin), 1)"),
+            ("the twin needs a sixteenth of the tiles", "cld(cgen_contraction_tiles(d, cmin), 4)", "cld(cgen_contraction_tiles(d, cmin), 16)"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]

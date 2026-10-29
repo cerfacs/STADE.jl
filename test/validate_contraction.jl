@@ -105,6 +105,18 @@ const CON_CASES = [
         end
         return nothing
     end""", :con_gram, sd -> (r = MersenneTwister(sd); m = 69; k = 19; Any[randn(r, m * k), zeros(m * m), m, k]), true),
+    ("left operand read across the inner index", """function con_tn(x, w, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + x[(c - 1) * m + t] * w[(c - 1) * n + o]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_tn, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("the start value is read from an array of the output index", """function con_start(x, w, b, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -410,6 +422,154 @@ const CON_CASES = [
         end
         return nothing
     end""", :con_batx, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k), randn(r, nb * n * k), randn(r, 1), zeros(nb * m * n), nb, m, n, k]), false),
+    # products whose head is a part of the column index (v0.4.37): the flat index decodes into a column and a row, the head is `div(column - 1, dh) + 1`
+    ("head in the column", """function con_hc(sc, v, den, y, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            s = 0.0
+            for u = 1:tt
+                s = s + sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
+    ("head in the column, one array with strided columns", """function con_hc2(sc, qkv, den, y, d, dh, tt)
+        d3 = 3 * d
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            s = 0.0
+            for u = 1:tt
+                s = s + sc[((h - 1) * tt + t - 1) * tt + u] * qkv[(u - 1) * d3 + 2d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc2, sd -> (r = MersenneTwister(sd); nh = 3; tt = 66; dh = 25; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * 3 * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
+    ("head in the column, an epilogue that reads the head and the column", """function con_hc3(sc, v, w2, den, y, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            s = 1.0
+            for u = 1:tt
+                s = s - sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s * w2[c] + den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc3, sd -> (r = MersenneTwister(sd); nh = 4; tt = 33; dh = 20; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), randn(r, d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
+    ("head in the column, the operands do not read the head", """function con_hc4(sc, v, den, y, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            s = 0.0
+            for u = 1:tt
+                s = s + sc[(t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc4, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
+    ("head in the column, the head width does not divide the width", """function con_hc5(sc, v, den, y, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            s = 0.0
+            for u = 1:tt
+                s = s + sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc5, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = 50; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), :plain),
+    ("head in the column, the head is changed after its decode", """function con_hc6(sc, v, den, y, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            s = 0.0
+            h = h + 0
+            for u = 1:tt
+                s = s + sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc6, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
+    ("head in the column, the head is derived from the row", """function con_hc8(sc, v, den, y, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(t - 1, dh) + 1
+            s = 0.0
+            for u = 1:tt
+                s = s + sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc8, sd -> (r = MersenneTwister(sd); nh = 5; tt = 70; dh = 17; d = 51; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
+    ("head in the column, the head width is assigned in the kernel", """function con_hc9(sc, v, den, y, d, nh, tt)
+        for idx = 1:tt * d
+            dw = div(d, nh)
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dw) + 1
+            s = 0.0
+            for u = 1:tt
+                s = s + sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc9, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, nh, tt]), false),
+    ("head in the column, two different head decodes", """function con_hc10(sc, v, den, y, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            g = div(c - 1, tt) + 1
+            s = 0.0
+            for u = 1:tt
+                s = s + sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t] + 0.0 * g
+        end
+        return nothing
+    end""", :con_hc10, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
+    ("head in the column, the loop variable has the head's name", """function con_hc11(sc, v, den, y, d, dh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, dh) + 1
+            s = 0.0 * den[(h - 1) * tt + t]
+            for h = 1:tt
+                s = s + sc[(t - 1) * tt + h] * v[(h - 1) * d + c]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_hc11, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
+    ("head in the column, a head width computed from parameters", """function con_hc7(sc, v, den, y, d, nh, tt)
+        for idx = 1:tt * d
+            c = mod(idx - 1, d) + 1
+            t = div(idx - 1, d) + 1
+            h = div(c - 1, div(d, nh)) + 1
+            s = 0.0
+            for u = 1:tt
+                s = s + sc[((h - 1) * tt + t - 1) * tt + u] * v[(u - 1) * d + c]
+            end
+            y[idx] = s / den[(h - 1) * tt + t]
+        end
+        return nothing
+    end""", :con_hc7, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, nh, tt]), true),
 ]
 
 # The recognizer on hand-written kernel text, for the guards that STADE's own gates make unreachable from source: a store into an operand array, and a parameter that has the
@@ -441,8 +601,38 @@ const CON_DIRECT = [
     ("a decode through a held index", "s = 0.0", "y[idx] = s", true, "h0 = idx - 1\n    o = mod(h0, n) + 1\n    t = div(h0, n) + 1"),
     ("the held index is changed between the decodes", "s = 0.0", "y[idx] = s", false, "h0 = idx - 1\n    o = mod(h0, n) + 1\n    h0 = h0 + 1\n    t = div(h0, n) + 1"),
 ]
+# The same for a head in the column: the head is not the loop variable and no parameter has its name. STADE's own gates leave neither reachable from source
+# (a head that is not read before the loop is dropped as dead, a parameter that is assigned is renamed), so the recognizer gets the kernel text.
+con_head_kernel(; loopvar = "u", head = "h", extra = "") = Meta.parse("""function cuda_kernel_dirh!(sc, v, y, d, dh, tt$extra)
+    __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
+    if __tid > div(tt * d - 1, 1) + 1
+        return nothing
+    end
+    idx = 1 + (__tid - 1)
+    c = mod(idx - 1, d) + 1
+    t = div(idx - 1, d) + 1
+    $head = div(c - 1, dh) + 1
+    s = 0.0
+    for $loopvar = 1:tt
+        s = s + sc[(($head - 1) * tt + t - 1) * tt + $loopvar] * v[($loopvar - 1) * d + c]
+    end
+    y[idx] = s
+    return nothing
+end""")
+const CON_HEAD_DIRECT = [
+    ("head in the column, control", con_head_kernel(), true),
+    # refused by two guards, the head test and the test that the loop variable is not read before the loop (the head's own decode mentions it); only the second can be sabotaged alone, so the head test has no sabotage case
+    ("head in the column, the loop variable has the head's name", con_head_kernel(loopvar = "h"), false),
+    ("head in the column, a parameter has the head's name", con_head_kernel(extra = ", h"), false),
+]
 function con_direct_checks()
     bad = 0
+    for (name, kd, must) in CON_HEAD_DIRECT
+        t = try STADE.cgen_contraction_kernel(kd) catch e; e end
+        ok = must ? (t isa NamedTuple) : t === nothing
+        println(rpad(ok ? "ok" : "FAIL", 6), "direct, $name: ", must ? "a twin is built" : "refused")
+        ok || (bad += 1)
+    end
     for (name, pre, post, must, dec...) in CON_DIRECT
         kd = con_kernel(pre, post; first = startswith(name, "the flat index") ? "idx = 2 + (__tid - 1)" : "idx = 1 + (__tid - 1)", dec = isempty(dec) ? "o = mod(idx - 1, n) + 1\n    t = div(idx - 1, n) + 1" : dec[1])
         t = try STADE.cgen_contraction_kernel(kd) catch e; e end
@@ -506,20 +696,43 @@ function con_unit_checks()
         end
     end
     bad += con_direct_checks()
-    # thresholds: a size below `contraction` runs the plain kernel; an inner length of 0 does too; the answer is the start value
+    # thresholds. A product of 67 x 70 outputs with an inner length of 19 is 4 tiles. The number of tiles that the twin needs depends on the layout of the operands:
+    # cld(contraction, 8) for "nn", cld(contraction, 32) for "nt" and cld(contraction, 4) for "tn" (4 tiles: 32, 128 and 16). A side or the inner length below
+    # min(contraction, 16) takes the plain kernel. An inner length of 0 does too; the answer is the start value.
     try
+        ran(a) = any(n -> endswith(n, "_t!"), a.launched)
         name, src, entry, mk, _ = CON_CASES[1]
         args = mk(1)                       # n = 70, m = 67, k = 19
-        above = con_run(src, entry, args, 19)
-        below = con_run(src, entry, args, 20)
-        check(any(n -> endswith(n, "_t!"), above.launched) && !any(n -> endswith(n, "_t!"), below.launched), "$name: the twin runs at the threshold (19) and not below it (20)")
+        check(ran(con_run(src, entry, args, 32)) && !ran(con_run(src, entry, args, 33)), "$name (nn): 4 tiles run the twin at 32 and not at 33")
+        argk = Any[args[1:end-1]..., 15]
+        check(ran(con_run(src, entry, argk, 15)) && !ran(con_run(src, entry, argk, 16)), "$name: an inner length of 15 runs the twin at 15 and not at 16")
+        argm = Any[args[1:end-3]..., 15, args[end-1:end]...]
+        check(ran(con_run(src, entry, argm, 15)) && !ran(con_run(src, entry, argm, 16)), "$name: 15 rows run the twin at 15 and not at 16")
+        argn = Any[args[1:end-2]..., 15, args[end]]
+        check(ran(con_run(src, entry, argn, 15)) && !ran(con_run(src, entry, argn, 16)), "$name: 15 columns run the twin at 15 and not at 16")
+        gname, gsrc, gentry, gmk, _ = first(c for c in CON_CASES if c[1] == "same array on both sides")
+        gargs = gmk(1)                     # 69 x 69 outputs, k = 19
+        check(ran(con_run(gsrc, gentry, gargs, 128)) && !ran(con_run(gsrc, gentry, gargs, 129)), "$gname (nt): 4 tiles run the twin at 128 and not at 129")
+        tname, tsrc, tentry, tmk, _ = first(c for c in CON_CASES if c[1] == "left operand read across the inner index")
+        targs = tmk(1)
+        check(ran(con_run(tsrc, tentry, targs, 16)) && !ran(con_run(tsrc, tentry, targs, 17)), "$tname (tn): 4 tiles run the twin at 16 and not at 17")
         k0 = Any[args[1:end-1]..., 0]
         z = con_run(src, entry, k0, 1)
         zb = con_run(src, entry, k0, 0)
-        check(!any(n -> endswith(n, "_t!"), z.launched) && con_relerr(z, zb) == 0.0, "$name: an inner length of 0 takes the plain kernel")
+        check(!ran(z) && con_relerr(z, zb) == 0.0, "$name: an inner length of 0 takes the plain kernel")
         lim = con_run(src, entry, args, 1; maxt = nm -> endswith(nm, "_t!") ? 128 : 1024)
         base = con_run(src, entry, args, 0)
-        check(!any(n -> endswith(n, "_t!"), lim.launched) && con_relerr(lim, base) == 0.0, "$name: a register limit below 256 threads takes the plain kernel")
+        check(!ran(lim) && con_relerr(lim, base) == 0.0, "$name: a register limit below 256 threads takes the plain kernel")
+        # the layout of an operand and the count of tiles, on hand-made descriptors
+        u(e, v) = STADE.cgen_contraction_unit(e, v)
+        check(u(:((t - 1) * k + c), :c) && u(:c, :c) && u(:(c - 1 + (t - 1) * k), :c) && u(:(1 + (t - 1) * k + (c - 1)), :c), "the layout test: a summand that is the inner index moves by 1")
+        check(!u(:((c - 1) * n + o), :c) && !u(:(2 * c), :c) && !u(:(c + c), :c) && !u(:(c - c), :c) && !u(:(k - c), :c) && !u(:(-c), :c) && !u(:(t * k + o), :c), "the layout test: anything else does not")
+        dsc(a, b) = (A = (idx = a,), B = (idx = b,), kvar = :c)
+        nn_d = dsc(:((t - 1) * k + c), :((c - 1) * n + o)); nt_d = dsc(:((t - 1) * k + c), :((o - 1) * k + c))
+        tn_d = dsc(:((c - 1) * m + t), :((c - 1) * n + o)); tt_d = dsc(:((c - 1) * m + t), :((o - 1) * k + c))
+        tiles(d, c) = STADE.cgen_contraction_tiles(d, c)
+        check((tiles(nn_d, 256), tiles(nt_d, 256), tiles(tn_d, 256), tiles(tt_d, 256)) == (32, 8, 64, 64), "the tiles at 256: nn 32, nt 8, tn 64, tt 64 ($((tiles(nn_d, 256), tiles(nt_d, 256), tiles(tn_d, 256), tiles(tt_d, 256))))")
+        check((tiles(nn_d, 1), tiles(nt_d, 1), tiles(tn_d, 1), tiles(tt_d, 1)) == (1, 1, 1, 1) && tiles(nn_d, 512) == 64 && tiles(tn_d, 1000) == 250 && tiles(nt_d, 257) == 9, "the tiles scale with contraction, at least 1")
     catch e
         check(false, "thresholds: error " * first(split(sprint(showerror, e), "\n")))
     end
@@ -545,6 +758,31 @@ function con_unit_checks()
         check(!ran(z) && con_relerr(z, zbase) == 0.0, "$name: zero batches take the plain kernel")
     catch e
         check(false, "batched thresholds: error " * first(split(sprint(showerror, e), "\n")))
+    end
+    # a head in the column: the tiles are batched over the heads, `dh` columns each; the rows or the columns of one head must reach `contraction`
+    try
+        name4, src4, entry4, mk4, _ = first(c for c in CON_CASES if c[1] == "head in the column, the operands do not read the head")
+        host4 = STADE.io_expr_to_source(con_run(src4, entry4, mk4(1), 1).plan.host)
+        check(!occursin("div(d, dh)", host4) && !occursin("mod(d, dh)", host4), "$name4: the tiles are not batched over heads")
+    catch e
+        check(false, "head in the column, unread head: error " * first(split(sprint(showerror, e), "\n")))
+    end
+    try
+        name, src, entry, mk, _ = first(c for c in CON_CASES if c[1] == "head in the column")
+        args = mk(1)                       # nh = 3 heads of dh = 17 columns, tt = 70 rows
+        ran(a) = any(n -> endswith(n, "_t!"), a.launched)
+        hostsrc = STADE.io_expr_to_source(con_run(src, entry, args, 1).plan.host)
+        check(occursin("div(d, dh)", hostsrc) && occursin("mod(d, dh) == 0", hostsrc) && occursin("dh > 0 &&", hostsrc), "$name: the host test and the grid count heads, and the head width is tested before it divides")
+        check(ran(con_run(src, entry, args, 70)) && !ran(con_run(src, entry, args, 71)), "$name: the twin runs at 70 rows (the rows reach contraction) and not at 71")
+        r = MersenneTwister(5); tt = 9; nh = 3; dh = 17; d = nh * dh
+        argw = Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]
+        check(ran(con_run(src, entry, argw, 17)) && !ran(con_run(src, entry, argw, 18)), "$name: with 9 rows and 17 columns per head the twin runs at contraction 17 (the columns reach it) and not at 18")
+        argh = Any[randn(r, 5 * 70 * 70), randn(r, 70 * 51), rand(r, 5 * 70) .+ 1.0, zeros(70 * 51), 51, 12, 70]       # 51 columns are not a whole number of heads of 12
+        check(!ran(con_run(src, entry, argh, 1)), "$name: a head width that does not divide the width takes the plain kernel")
+        w = con_run(src, entry, argw, 17); wb = con_run(src, entry, argw, 0)
+        check(con_relerr(w, wb) <= 1e-12 && any(!iszero, w.outs[4]), "$name: the twin agrees with the plain kernel on 9 rows (error $(round(con_relerr(w, wb), sigdigits = 3)))")
+    catch e
+        check(false, "head in the column thresholds: error " * first(split(sprint(showerror, e), "\n")))
     end
     return bad
 end
@@ -582,9 +820,31 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the flat index may be offset", "(first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol && first_st.args[2] == :(1 + (__tid - 1))) || return nothing", "(first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol) || return nothing"),
             ("the register limit is not checked", "    fits(t, call) = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), call)), 256)", "    fits(t, call) = true"),
             ("the whole-rows test is dropped", "extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, hv === nothing ? N : Expr(:call, :*, N, M)), 0))", "extra = nothing)"),
-            ("the size test is dropped", "cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, cmin), call(:>=, d.Mh, cmin)), call(:>=, d.Kh, cmin)), call(:>, d.Nh, 0))", "cond = call(:>, d.Nh, 0)"),
+            ("the columns are not tested against the floor", "call(:>=, d.Nh, min(cmin, 16))", "call(:>, d.Nh, 0)"),
+            ("the rows are not tested against the floor", "call(:>=, d.Mh, min(cmin, 16))", "call(:>, d.Mh, 0)"),
+            ("the inner length is not tested against the floor", "call(:>=, d.Kh, min(cmin, 16))", "call(:>, d.Kh, 0)"),
+            ("the number of tiles is not tested", "want = call(:>=, tiles, cgen_contraction_tiles(d, cmin))", "want = nothing"),
+            ("the tiles are counted by the rows only", "call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM))\n        cond", "call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), 1)\n        cond"),
+            ("every layout needs the count of nn", "    base = au && bu ? 8 : au ? 32 : 64\n", "    base = 32\n"),
+            ("a layout with the right operand along the inner index needs the count of nt", "    base = au && bu ? 8 : au ? 32 : 64\n", "    base = bu ? 8 : au ? 32 : 64\n"),
+            ("the count of tiles does not scale with contraction", "    return cld(base * cmin, 256)", "    return base"),
+            ("two summands that move with the inner index count as one", "        return n == 1 && any(a -> cgen_contraction_unit(a, v), ex.args[2:end])", "        return any(a -> cgen_contraction_unit(a, v), ex.args[2:end])"),
+            ("a difference that subtracts the inner index counts as moving by 1", "        return cgen_contraction_unit(ex.args[2], v) && !has(ex.args[3])", "        return cgen_contraction_unit(ex.args[2], v)"),
             ("the launch asks for too little shared memory", "shmem = 8 * ((TM + 1) * TK + TM * TK))", "shmem = 8 * ((TM + 1) * TK + TM * TK) - 8)"),
-            ("a batched twin ignores the row threshold", "call(:>=, d.Nh, min(cmin, 8)), call(:>=, d.Mh, cmin))", "call(:>=, d.Nh, min(cmin, 8)), call(:>, d.Mh, 0))"),
+            ("a batched twin ignores the row threshold", ": call(:>=, d.Mh, cmin)\n", ": call(:>, d.Mh, 0)\n"),
+            ("a head-derived twin needs the rows to reach the threshold, not the columns", "Expr(:||, call(:>=, d.Mh, cmin), call(:>=, d.Nh, cmin))", "call(:>=, d.Mh, cmin)"),
+            ("a head-derived twin needs both the rows and the columns", "Expr(:||, call(:>=, d.Mh, cmin), call(:>=, d.Nh, cmin))", "Expr(:&&, call(:>=, d.Mh, cmin), call(:>=, d.Nh, cmin))"),
+            ("the head width is not tested before it divides", "get(d, :dhexpr, nothing) === nothing || (cond = Expr(:&&, call(:>, d.dhexpr, 0), cond))", "nothing"),
+            ("the heads must divide the width", "extra = Expr(:&&, Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0), Expr(:call, :(==), Expr(:call, :mod, N, dbat.dh), 0)))", "extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0))"),
+            ("the column of a head starts at the first column", "colbase = Expr(:call, :+, 1, Expr(:call, :*, :__ct_bz, :__ct_dh))", "colbase = 1"),
+            ("the flat index of a head ignores the head", "Expr(:call, :*, row, :__ct_D), Expr(:call, :*, :__ct_bz, :__ct_dh)), col), 1)", "Expr(:call, :*, row, :__ct_D), 0), col), 1)"),
+            ("the number of heads is the width", "Bh = Expr(:call, :div, N, dbat.dh)\n        flat =", "Bh = N\n        flat ="),
+            ("a head is used when no operand reads it", "derived = dbat !== nothing && hv === nothing && dbat.var in union(cgen_split_vars(fa.idx), cgen_split_vars(fb.idx))", "derived = dbat !== nothing && hv === nothing"),
+            ("the head may be a kernel parameter", "(dbat.var === lp.var || dbat.var in params) && return nothing", "dbat.var === lp.var && return nothing"),
+            ("the head is not assigned once", "        count(st -> st isa Expr && st.head === :(=) && st.args[1] === dbat.var, Any[pre_rest..., post...]) == 1 || return nothing\n", ""),
+            ("a head of another variable is accepted", "length(r.args[2].args) == 3 && r.args[2].args[2] == Expr(:call, :-, ov, 1)) || continue", "length(r.args[2].args) == 3) || continue"),
+            ("a head width computed in the kernel is accepted", "            issubset(cgen_split_vars(r.args[2].args[3]), params) || continue\n", ""),
+            ("two different heads are accepted", "if !isempty(heads) && all(x -> x[1] === heads[1][1] && x[2] == heads[1][2], heads)", "if !isempty(heads)"),
             ("a batched twin ignores the column threshold", "call(:>=, d.Nh, min(cmin, 8))", "call(:>, d.Nh, 0)"),
             ("a batched twin ignores the inner length threshold", "call(:>=, d.Kh, min(cmin, 8))", "call(:>, d.Kh, 0)"),
             ("the grid limit of a batched twin is dropped", "call(:<=, d.Bh, 65535))", "true)"),
