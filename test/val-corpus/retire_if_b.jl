@@ -36,7 +36,7 @@ function retire_if_b(x, xb, y, yb, i_n, i_nlev, i_nrep, out, outb, branch_stack,
                 __idx_tripcount_stack_1_0 = prefix_tripcount_stack_1[(i_l - 1) + 1] + __icse_0
                 tripcount_stack[__idx_tripcount_stack_1_0] = cur
                 for i = 1:cur
-                    __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + (((i_r - 1) + (i - 1) * (div(i_nrep - 1, 1) + 1)) + 1)
+                    __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + (((i_r - 1) * (div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1) + (i - 1)) + 1)
                     t_stack[__idx_t_stack_1_0] = t
                     __cse_1 = x[i]
                     t = __cse_1 * __cse_1
@@ -93,7 +93,7 @@ function retire_if_b(x, xb, y, yb, i_n, i_nlev, i_nrep, out, outb, branch_stack,
                     __cse_10 = t * yb[i]
                     tb = tb + __cse_10
                     tb = tb + __cse_10
-                    __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + (((i_r - 1) + (i - 1) * (div(i_nrep - 1, 1) + 1)) + 1)
+                    __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + (((i_r - 1) * (div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1) + (i - 1)) + 1)
                     t = t_stack[__idx_t_stack_1_0]
                     __oldb_2 = tb
                     tb = 0.0

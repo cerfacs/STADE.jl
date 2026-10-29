@@ -12,7 +12,7 @@ function while_reduction_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossbd
     sd = 0.0
     sbd = 0.0
     i_p = 1
-    __wcount_281a92 = 0
+    __wcount_48126a = 0
     while i_p <= 2
         push!(__wcarry_i_p_stack, i_p)
         sd = 0.0
@@ -31,9 +31,9 @@ function while_reduction_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossbd
         i_p = i_p + 1
         push!(s_stack_d, sd)
         push!(s_stack, s)
-        __wcount_281a92 = __wcount_281a92 + 1
+        __wcount_48126a = __wcount_48126a + 1
     end
-    push!(whilecount_stack, __wcount_281a92)
+    push!(whilecount_stack, __wcount_48126a)
     for i_x2 = 1:i_n
         __hcse_3 = v[i_x2]
         lossd[1] = lossd[1] + (2__hcse_3) * vd[i_x2]
@@ -45,8 +45,8 @@ function while_reduction_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossbd
         vbd[i_x2] = vbd[i_x2] + (__hcse_4 * (2 * vd[i_x2]) + __hcse_5 * lossbd[1])
         vb[i_x2] = vb[i_x2] + __hcse_5 * __hcse_4
     end
-    __wcount_281a92 = pop!(whilecount_stack)
-    for __witer_281a92 = 1:__wcount_281a92
+    __wcount_48126a = pop!(whilecount_stack)
+    for __witer_48126a = 1:__wcount_48126a
         i_p = pop!(__wcarry_i_p_stack)
         sd = pop!(s_stack_d)
         s = pop!(s_stack)

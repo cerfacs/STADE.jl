@@ -8,16 +8,16 @@ end
 function while_array_cond_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_stack, __wcarry_i_k_stack, v_stack)
     i_k = 1
     v[1] = 1.0
-    __wcount_2a3210 = 0
+    __wcount_546ac2 = 0
     while v[i_k] > 0.1 && i_k < i_n
         push!(__wcarry_i_k_stack, i_k)
         push!(v_stack, v[i_k + 1])
         __cse_0 = a[i_k]
         v[i_k + 1] = 0.5 * v[i_k] * (1.0 + __cse_0 * __cse_0)
         i_k = i_k + 1
-        __wcount_2a3210 = __wcount_2a3210 + 1
+        __wcount_546ac2 = __wcount_546ac2 + 1
     end
-    push!(whilecount_stack, __wcount_2a3210)
+    push!(whilecount_stack, __wcount_546ac2)
     for i_x = 1:i_n
         loss[1] = loss[1] + (v[i_x] * u[i_x]) ^ 2
     end
@@ -28,8 +28,8 @@ function while_array_cond_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_st
         vb[i_x] = vb[i_x] + __cse_1 * __cse_3
         ub[i_x] = ub[i_x] + __cse_2 * __cse_3
     end
-    __wcount_2a3210 = pop!(whilecount_stack)
-    for __witer_2a3210 = 1:__wcount_2a3210
+    __wcount_546ac2 = pop!(whilecount_stack)
+    for __witer_546ac2 = 1:__wcount_546ac2
         i_k = pop!(__wcarry_i_k_stack)
         v[i_k + 1] = pop!(v_stack)
         __oldb_1 = vb[i_k + 1]

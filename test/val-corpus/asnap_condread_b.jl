@@ -8,28 +8,27 @@ end
 function asnap_condread_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, i_njac, m_stack, branch_stack, x_stack)
     for i_ = 1:i_njac
         for i_node = 1:i_nnode
-            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_m_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             m_stack[__idx_m_stack_0] = m[i_node]
             m[i_node] = 0.0
         end
         for i_cell = 1:i_ncell
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_0 = div(i_njac - 1, 1) + 1
-                __idx_m_stack_1 = max(0, __icse_0) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_0) + 1)
-                __cse_1 = m[i_n]
-                m_stack[__idx_m_stack_1] = __cse_1
-                m[i_n] = __cse_1 + w[i_cell] * x[i_n] * 0.1
+                __idx_m_stack_1 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_cell - 1) + ((i_ - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_ncell - 1, 1) + 1)) + 1)
+                __cse_0 = m[i_n]
+                m_stack[__idx_m_stack_1] = __cse_0
+                m[i_n] = __cse_0 + w[i_cell] * x[i_n] * 0.1
             end
         end
         if m[1] > 0.3
-            __icse_2 = (i_ - 1) + 1
-            __idx_branch_stack_0 = __icse_2
+            __icse_1 = (i_ - 1) + 1
+            __idx_branch_stack_0 = __icse_1
             branch_stack[__idx_branch_stack_0] = 1
-            __idx_x_stack_0 = __icse_2
-            __cse_3 = x[1]
-            x_stack[__idx_x_stack_0] = __cse_3
-            x[1] = __cse_3 * 1.1
+            __idx_x_stack_0 = __icse_1
+            __cse_2 = x[1]
+            x_stack[__idx_x_stack_0] = __cse_2
+            x[1] = __cse_2 * 1.1
         else
             __idx_branch_stack_0 = (i_ - 1) + 1
             branch_stack[__idx_branch_stack_0] = 0
@@ -37,40 +36,38 @@ function asnap_condread_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode,
         for i_cell = 1:i_ncell
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_4 = div(i_njac - 1, 1) + 1
-                __icse_5 = max(0, __icse_4)
-                __icse_6 = div(3 - 1, 1) + 1
-                __idx_m_stack_1 = (__icse_5 * max(0, div(i_nnode - 1, 1) + 1) + __icse_5 * max(0, div(i_ncell - 1, 1) + 1) * max(0, __icse_6)) + (((i_ - 1) + ((i_cell - 1) * __icse_6 + (i_loc - 1)) * __icse_4) + 1)
-                __cse_7 = m[i_n]
-                m_stack[__idx_m_stack_1] = __cse_7
-                m[i_n] = __cse_7 + w[i_cell] * 0.05
+                __icse_3 = max(0, div(i_njac - 1, 1) + 1)
+                __icse_4 = div(i_ncell - 1, 1) + 1
+                __icse_5 = div(3 - 1, 1) + 1
+                __idx_m_stack_1 = (__icse_3 * max(0, div(i_nnode - 1, 1) + 1) + __icse_3 * max(0, __icse_4) * max(0, __icse_5)) + (((i_cell - 1) + ((i_ - 1) * __icse_5 + (i_loc - 1)) * __icse_4) + 1)
+                __cse_6 = m[i_n]
+                m_stack[__idx_m_stack_1] = __cse_6
+                m[i_n] = __cse_6 + w[i_cell] * 0.05
             end
         end
         for i_node = 1:i_nnode
-            __icse_8 = div(i_njac - 1, 1) + 1
-            __idx_x_stack_0 = max(0, __icse_8) + (((i_ - 1) + (i_node - 1) * __icse_8) + 1)
-            __cse_9 = x[i_node]
-            x_stack[__idx_x_stack_0] = __cse_9
-            __cse_10 = m[i_node]
-            x[i_node] = __cse_9 + __cse_10 * __cse_10 * 0.5
+            __idx_x_stack_0 = max(0, div(i_njac - 1, 1) + 1) + (((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1)
+            __cse_7 = x[i_node]
+            x_stack[__idx_x_stack_0] = __cse_7
+            __cse_8 = m[i_node]
+            x[i_node] = __cse_7 + __cse_8 * __cse_8 * 0.5
         end
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __icse_11 = div(i_njac - 1, 1) + 1
-            __idx_x_stack_0 = max(0, __icse_11) + (((i_ - 1) + (i_node - 1) * __icse_11) + 1)
+            __idx_x_stack_0 = max(0, div(i_njac - 1, 1) + 1) + (((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1)
             x[i_node] = x_stack[__idx_x_stack_0]
-            __cse_12 = (m[i_node] * 0.5) * xb[i_node]
-            mb[i_node] = mb[i_node] + __cse_12
-            mb[i_node] = mb[i_node] + __cse_12
+            __cse_9 = (m[i_node] * 0.5) * xb[i_node]
+            mb[i_node] = mb[i_node] + __cse_9
+            mb[i_node] = mb[i_node] + __cse_9
         end
         for i_cell = i_ncell:-1:1
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_13 = div(i_njac - 1, 1) + 1
-                __icse_14 = max(0, __icse_13)
-                __icse_15 = div(3 - 1, 1) + 1
-                __idx_m_stack_0 = (__icse_14 * max(0, div(i_nnode - 1, 1) + 1) + __icse_14 * max(0, div(i_ncell - 1, 1) + 1) * max(0, __icse_15)) + (((i_ - 1) + ((i_cell - 1) * __icse_15 + (i_loc - 1)) * __icse_13) + 1)
+                __icse_10 = max(0, div(i_njac - 1, 1) + 1)
+                __icse_11 = div(i_ncell - 1, 1) + 1
+                __icse_12 = div(3 - 1, 1) + 1
+                __idx_m_stack_0 = (__icse_10 * max(0, div(i_nnode - 1, 1) + 1) + __icse_10 * max(0, __icse_11) * max(0, __icse_12)) + (((i_cell - 1) + ((i_ - 1) * __icse_12 + (i_loc - 1)) * __icse_11) + 1)
                 m[i_n] = m_stack[__idx_m_stack_0]
                 wb[i_cell] = wb[i_cell] + 0.05 * mb[i_n]
             end
@@ -87,16 +84,15 @@ function asnap_condread_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode,
         for i_cell = i_ncell:-1:1
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_16 = div(i_njac - 1, 1) + 1
-                __idx_m_stack_0 = max(0, __icse_16) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_16) + 1)
+                __idx_m_stack_0 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_cell - 1) + ((i_ - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_ncell - 1, 1) + 1)) + 1)
                 m[i_n] = m_stack[__idx_m_stack_0]
-                __cse_17 = mb[i_n]
-                wb[i_cell] = wb[i_cell] + (x[i_n] * 0.1) * __cse_17
-                xb[i_n] = xb[i_n] + (w[i_cell] * 0.1) * __cse_17
+                __cse_13 = mb[i_n]
+                wb[i_cell] = wb[i_cell] + (x[i_n] * 0.1) * __cse_13
+                xb[i_n] = xb[i_n] + (w[i_cell] * 0.1) * __cse_13
             end
         end
         for i_node = i_nnode:-1:1
-            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_m_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             m[i_node] = m_stack[__idx_m_stack_0]
             mb[i_node] = 0.0
         end

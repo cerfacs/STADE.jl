@@ -6,7 +6,7 @@ end
 function advection_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode, du_stack)
     for i_ = 1:i_nstep
         for i_x = 2:i_nnode
-            __idx_du_stack_0 = ((i_ - 1) + (i_x - 2) * (div(i_nstep - 1, 1) + 1)) + 1
+            __idx_du_stack_0 = ((i_x - 2) + (i_ - 1) * (div(i_nnode - 2, 1) + 1)) + 1
             du_stack[__idx_du_stack_0] = du[i_x]
             du[i_x] = u[i_x] - u[i_x - 1]
         end
@@ -25,7 +25,7 @@ function advection_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode, 
             dxb = dxb + -((c * dt * __cse_0) / dx ^ 2) * __cse_1
         end
         for i_x = i_nnode:-1:2
-            __idx_du_stack_0 = ((i_ - 1) + (i_x - 2) * (div(i_nstep - 1, 1) + 1)) + 1
+            __idx_du_stack_0 = ((i_x - 2) + (i_ - 1) * (div(i_nnode - 2, 1) + 1)) + 1
             du[i_x] = du_stack[__idx_du_stack_0]
             __oldb_2 = dub[i_x]
             dub[i_x] = 0.0

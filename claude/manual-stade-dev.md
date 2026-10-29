@@ -1222,19 +1222,30 @@ what makes a two-flag public surface defensible for this much machinery.
 A site's index is `base_offset + local_position`.
 
 - `agen_local_position` gives the 1-based position within the site's own
-  loop nest, with the outermost frame as the fastest-varying digit
-  (element-major, since v0.4.23). Let `p_i` be the 0-based position in
-  frame `i` and `T_1` the trip count of the outermost frame. The position
-  is `p_1 + T_1 * (sum over i >= 2 of p_i * stride_i) + 1`. The mapping
-  is a bijection onto `1:multiplicity`, so sizes and offsets did not change.
-  Before v0.4.23 the order was row-major with the outermost frame slowest.
-  On the GPU the outermost loop is normally the thread, so adjacent
-  threads now touch adjacent slots. **Limit:** if the outermost frame is a
-  sequential loop and the thread is an inner frame, adjacent threads are
-  `T_1` slots apart. A V100 microbenchmark gives stores 2.6 to 47 times and
-  loads 1.3 to 6.7 times slower than v0.4.22 in that case. The fix needs
-  the layout stage to know which frame the GPU stage turns into the
-  thread. It does not know this today.
+  loop nest. Each frame carries `par`, the layout stage's verdict on whether
+  the GPU stage turns that loop into the thread. The first frame with
+  `par` set is the fastest-varying digit. The other frames follow it
+  row-major in nest order. With no such frame the whole order is
+  row-major, innermost fastest (the order up to v0.4.22). With the
+  outermost frame as thread, the position is `p_1 + T_1 * (sum over i >= 2
+  of p_i * stride_i) + 1`, where `p_i` is the 0-based position in frame `i`
+  and `T_1` the trip count of frame 1. Every case is a bijection onto
+  `1:multiplicity`, so sizes and offsets do not depend on the order.
+  On the GPU the thread is the loop that `cgen_body` makes a kernel, so
+  adjacent threads touch adjacent slots.
+- `agen_loop_par_map(kernel)` computes `par` for every loop of the primal
+  kernel. It runs `cgen_body` on the primal (`cgen_from_kernel`) and reads
+  the decision records, which carry `body_id = objectid(loop body)`. A loop
+  with a verdict other than `:host` is parallel. The table is built once
+  in `agen_layout`, stored as `layout.par`, and read by `agen_frame` in the
+  forward and the backward sweep. The backward sweep keys on the primal
+  loop (`primal_body[idx]`), because its own statement is a linearization
+  node with a different body object. A loop with no entry is an error, so
+  a sweep that disagrees with the other fails loudly. Tier B blocks use
+  row-major order for their inner frames.
+- The verdict is a guess about the adjoint. The adjoint's loops can fail a
+  gate that the primal's pass. A wrong guess costs speed only. A throw in
+  the walk makes every loop sequential.
 - `agen_stride(loop_ctx, i)` is the product of trip counts of every frame
   strictly more nested than frame `i`.
 - `agen_local_multiplicity` is the product of all frames' trip counts, so

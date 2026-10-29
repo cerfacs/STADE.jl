@@ -7,7 +7,7 @@ end
 function while_in_for_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, i_m, lossd, lossbd, ud, ubd, ad, abd, vd, vbd, whilecount_stack, __wcarry_i_k_stack)
     for i_j = 1:i_m
         i_k = 1
-        __wcount_a9816a = 0
+        __wcount_a5b553 = 0
         while i_k <= i_n
             push!(__wcarry_i_k_stack, i_k)
             __hcse_0 = u[i_k]
@@ -15,9 +15,9 @@ function while_in_for_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, i_m, lossd, loss
             vd[i_k] = (__hcse_0 * ad[i_k] + __hcse_1 * ud[i_k]) + vd[i_k]
             v[i_k] = __hcse_1 * __hcse_0 + v[i_k]
             i_k = i_k + 1
-            __wcount_a9816a = __wcount_a9816a + 1
+            __wcount_a5b553 = __wcount_a5b553 + 1
         end
-        push!(whilecount_stack, __wcount_a9816a)
+        push!(whilecount_stack, __wcount_a5b553)
     end
     for i_x = 1:i_n
         __hcse_2 = v[i_x]
@@ -31,8 +31,8 @@ function while_in_for_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, i_m, lossd, loss
         vb[i_x] = vb[i_x] + __hcse_4 * __hcse_3
     end
     for i_j = i_m:-1:1
-        __wcount_a9816a = pop!(whilecount_stack)
-        for __witer_a9816a = 1:__wcount_a9816a
+        __wcount_a5b553 = pop!(whilecount_stack)
+        for __witer_a5b553 = 1:__wcount_a5b553
             i_k = pop!(__wcarry_i_k_stack)
             __cse_0d = vbd[i_k]
             __cse_0 = vb[i_k]

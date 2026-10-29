@@ -27,12 +27,12 @@ function cellscatter_hv(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i
                 mupd[i_lnode] = mupd[i_lnode] + (__hcse_0 * (auxud + upd[i_lnode]) + __hcse_1 * cell_vold[i_cell])
                 mup[i_lnode] = mup[i_lnode] + __hcse_1 * __hcse_0
             end
-            __idx_auxu_stack_3 = ((i_ - 1) + (i_cell - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_auxu_stack_3 = ((i_cell - 1) + (i_ - 1) * (div(i_ncell - 1, 1) + 1)) + 1
             auxu_stack_d[__idx_auxu_stack_3] = auxud
             auxu_stack[__idx_auxu_stack_3] = auxu
         end
         for i_node = 1:i_nnode
-            __idx_up_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_up_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             __cse_0d = upd[i_node]
             __cse_0 = up[i_node]
             up_stack_d[__idx_up_stack_0] = __cse_0d
@@ -43,14 +43,14 @@ function cellscatter_hv(i_cell_to_node, cell_vol, cell_volb, i_ncell, i_nnode, i
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_up_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_up_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             upd[i_node] = up_stack_d[__idx_up_stack_0]
             up[i_node] = up_stack[__idx_up_stack_0]
             mupbd[i_node] = mupbd[i_node] + -(upbd[i_node])
             mupb[i_node] = mupb[i_node] + -(upb[i_node])
         end
         for i_cell = i_ncell:-1:1
-            __idx_auxu_stack_0 = ((i_ - 1) + (i_cell - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_auxu_stack_0 = ((i_cell - 1) + (i_ - 1) * (div(i_ncell - 1, 1) + 1)) + 1
             auxud = auxu_stack_d[__idx_auxu_stack_0]
             auxu = auxu_stack[__idx_auxu_stack_0]
             for i_loc = 4:-1:1

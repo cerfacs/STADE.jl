@@ -20,17 +20,17 @@ function asnap_ifwrite_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
                 if w[i_cell] > 0.0
-                    __idx_branch_stack_0 = ((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_njac - 1, 1) + 1)) + 1
+                    __idx_branch_stack_0 = ((i_cell - 1) + ((i_ - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_ncell - 1, 1) + 1)) + 1
                     branch_stack[__idx_branch_stack_0] = 1
                     m[i_n] = m[i_n] + w[i_cell] * x[i_n] * 0.1
                 else
-                    __idx_branch_stack_0 = ((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_njac - 1, 1) + 1)) + 1
+                    __idx_branch_stack_0 = ((i_cell - 1) + ((i_ - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_ncell - 1, 1) + 1)) + 1
                     branch_stack[__idx_branch_stack_0] = 0
                 end
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             __cse_0 = x[i_node]
             x_stack[__idx_x_stack_0] = __cse_0
             __cse_1 = m[i_node]
@@ -39,7 +39,7 @@ function asnap_ifwrite_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             x[i_node] = x_stack[__idx_x_stack_0]
             __cse_2 = (m[i_node] * 0.5) * xb[i_node]
             mb[i_node] = mb[i_node] + __cse_2
@@ -48,7 +48,7 @@ function asnap_ifwrite_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
         for i_cell = i_ncell:-1:1
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __idx_branch_stack_1 = ((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_njac - 1, 1) + 1)) + 1
+                __idx_branch_stack_1 = ((i_cell - 1) + ((i_ - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_ncell - 1, 1) + 1)) + 1
                 __branch = branch_stack[__idx_branch_stack_1]
                 if __branch == 1
                     __cse_3 = mb[i_n]

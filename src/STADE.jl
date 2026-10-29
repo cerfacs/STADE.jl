@@ -4339,21 +4339,74 @@ agen_size_trip_count(lo, step, hi) = Expr(:call, :max, 0, cgen_trip_count(lo, st
 # non-loop site
 agen_local_multiplicity(loop_ctx) = agen_prod_exprs(Any[agen_size_trip_count(f.lo, f.step, f.hi) for f in loop_ctx])
 
+# Which loops of the primal kernel does the GPU stage run as a kernel (one thread per iteration)? Runs the GPU stage's own
+# host-body walk on the primal and reads its decision per loop, keyed by the loop's body object. The forward and the backward sweep
+# walk the same body objects, so both read the same verdict. It is a guess about the adjoint: the adjoint's loops can fail a gate
+# the primal's pass. A wrong guess costs speed only, since the layout stays a bijection. Every loop gets an entry; a loop the walk
+# never decides (inside a kernel, or after a failure of the walk) is sequential.
+function agen_loop_par_map(kernel)
+    par = Dict{UInt,Bool}()
+    agen_loop_par_default!(par, kernel.body)
+    try
+        gk = cgen_from_kernel(kernel)
+        decisions = NamedTuple[]
+        cgen_body(gk.body, Expr[], gk.name, cgen_backend_cuda(), Set{Symbol}(), Set{Symbol}(gk.args);
+                  outer_defs = cgen_scalar_def_map(gk.body), decisions = decisions)
+        for d in decisions
+            haskey(par, d.body_id) && (par[d.body_id] = d.verdict !== :host)
+        end
+    catch
+        agen_loop_par_default!(par, kernel.body)
+    end
+    return par
+end
+
+function agen_loop_par_default!(par::Dict{UInt,Bool}, body)
+    for stmt in body
+        if stmt.kind == :for
+            par[objectid(stmt.body)] = false
+            agen_loop_par_default!(par, stmt.body)
+        elseif stmt.kind == :if
+            agen_loop_par_default!(par, stmt.then)
+            agen_loop_par_default!(par, stmt.els)
+        elseif stmt.kind == :while
+            agen_loop_par_default!(par, stmt.body)
+        end
+    end
+    return par
+end
+
+# A loop_ctx frame, with the layout's verdict on whether the loop is the GPU thread. Stack mode has no layout and no positions.
+# `primal` is the kernel's own loop statement when `stmt` is its linearization node (the backward sweep): the mark is keyed on
+# the primal body object, which the forward and the backward sweep share.
+function agen_frame(stmt, layout, primal = stmt)
+    par = false
+    if layout !== nothing
+        haskey(layout.par, objectid(primal.body)) || error("agen_frame: loop over `$(stmt.var)` has no parallel mark in the layout")
+        par = layout.par[objectid(primal.body)]
+    end
+    return (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step, par = par)
+end
+
 # 1-based flat position within one occurrence's own local block, from the current
 # enclosing loop nest (outermost first) -- degenerates to the literal 1 for a non-loop site.
-# Element-major: the OUTERMOST frame is the fastest-varying digit, the inner frames stay row-major.
+# The first frame that is the GPU thread (`par`) is the fastest-varying digit, so adjacent threads touch adjacent slots.
+# The other frames follow it row-major in nest order. With no such frame the whole order is row-major, innermost fastest.
+# Bijection onto 1:multiplicity either way, so sizes, offsets and the hoisted-index checks do not depend on the order.
 # Verified against a hand-derived nested-loop offset formula (a single global +1, not one per level).
 function agen_local_position(loop_ctx)
     isempty(loop_ctx) && return 1
-    # The GPU thread is normally the outermost loop's iteration, so adjacent threads touch adjacent stack elements
-    # (coalesced). Still a bijection onto 1:multiplicity, so sizes, offsets and the hoisted-index checks are unchanged.
-    # LIMIT: if the outermost frame is a sequential loop (a time or level loop inside the kernel) and the thread is an
-    # inner frame, adjacent threads sit trip(outermost) slots apart. On a V100 that costs 2.6 to 47 times on stores and
-    # 1.3 to 6.7 times on loads against the old order (bench/gpu/microbench/stack_layout_outer_sequential.jl).
-    inner = Any[agen_mul_exprs(agen_pos0(loop_ctx[i]), agen_stride(loop_ctx, i)) for i in 2:length(loop_ctx)]
-    outer_trip = cgen_trip_count(loop_ctx[1].lo, loop_ctx[1].step, loop_ctx[1].hi)
-    terms = Any[agen_pos0(loop_ctx[1])]
-    isempty(inner) || push!(terms, agen_mul_exprs(agen_sum_exprs(inner), outer_trip))
+    s = findfirst(f -> f.par, loop_ctx)
+    if s === nothing
+        terms = Any[agen_mul_exprs(agen_pos0(loop_ctx[i]), agen_stride(loop_ctx, i)) for i in eachindex(loop_ctx)]
+        return agen_add_exprs(agen_sum_exprs(terms), 1)
+    end
+    thread = loop_ctx[s]
+    rest = Any[loop_ctx[i] for i in eachindex(loop_ctx) if i != s]
+    inner = Any[agen_mul_exprs(agen_pos0(rest[i]), agen_stride(rest, i)) for i in eachindex(rest)]
+    thread_trip = cgen_trip_count(thread.lo, thread.step, thread.hi)
+    terms = Any[agen_pos0(thread)]
+    isempty(inner) || push!(terms, agen_mul_exprs(agen_sum_exprs(inner), thread_trip))
     return agen_add_exprs(agen_sum_exprs(terms), 1)
 end
 
@@ -4581,7 +4634,7 @@ function agen_layout(kernel, kinds, active_map, value_needed, reassigned, exempt
     free = intersect(free, Set(kernel.sig.args))
     return (offsets = offsets, sizes = sizes, blocks = blocks, block_of = block_of, block_totals = block_totals,
             tainted_stacks = ineligible, free_vars = sort(collect(free); by = string),
-            derived_vars = derived, captures = captures)
+            derived_vars = derived, captures = captures, par = agen_loop_par_map(kernel))
 end
 
 function agen_layout_walk_top!(body, kinds, active_map, value_needed, reassigned, exempt, stacks, loop_ctx, offsets, current, blocks, block_of, block_touched, ineligible, seq_reassigned, block_counter, push_pop, cap = nothing, later = Set{Symbol}())
@@ -5008,7 +5061,7 @@ function agen_site_index(exprs, ectx, key)
         # literally the loop bound symbol (e.g. n, for `for
         # j = 1:n`) -- so it needs the identical substitution,
         # not just `local_offset` above.
-        local_position = agen_substitute_vars(agen_local_position(inner_ctx), subst)
+        local_position = agen_substitute_vars(agen_local_position(Any[merge(f, (par = false,)) for f in inner_ctx]), subst)
         # `blk.base[stack]` is the offset this whole block starts at (0, or a prior block's
         # total, for a stack touched by more than one block). The prefix table is only relative
         # to within this block alone, so omitting `base` would make later blocks silently
@@ -5807,7 +5860,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
                 for bv in agen_tripcount_bound_vars(stmt, reassigned)
                     agen_emit_push!(exprs, stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv))
                 end
-                push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
+                push!(ectx.loop_ctx, agen_frame(stmt, ectx.layout))
                 inner = agen_forward_body(stmt.body, kinds, active_map, loop_value_needed, reassigned, stacks, exempt;
                                            ectx = loop_ectx,
                                            lin_body = lin_body[idx].body,
@@ -5827,7 +5880,7 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
                 for bv in agen_tripcount_bound_vars(stmt, reassigned)
                     agen_emit_push!(exprs, stacks[(:tripcount, bv)], bv, ectx, agen_site_key(body, idx, bv))
                 end
-                push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
+                push!(ectx.loop_ctx, agen_frame(stmt, ectx.layout))
                 inner = agen_forward_body(stmt.body, kinds, active_map, loop_value_needed, reassigned, stacks, exempt;
                                            ectx = loop_ectx,
                                            lin_body = lin_body === nothing ? nothing : lin_body[idx].body,
@@ -5990,7 +6043,7 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                 # of some of it running at the forward position.
                 push!(exprs, agen_emit_ii_loop(primal_body[idx], stmt, kinds, active_map, value_needed, reassigned, stacks, exempt, unsafe; ectx = ectx, recompute = true))
             else
-                push!(ectx.loop_ctx, (var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step))
+                push!(ectx.loop_ctx, agen_frame(stmt, ectx.layout, primal_body[idx]))
                 inner = agen_backward_body(stmt.body, primal_body[idx].body, kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
                 pop!(ectx.loop_ctx)
                 # Every backward loop reverses. A loop that carries a value from one iteration to
@@ -8116,7 +8169,8 @@ end
 # `via_idiom` marks a loop that was accepted only through the idiom predicate.
 cgen_decision_record(owner::Symbol, stmt, depth::Int, verdict::Symbol, reason::Symbol, array, idiom::Bool) =
     (owner = owner, loop_var = stmt.var, lo = stmt.lo, hi = stmt.hi, step = stmt.step, depth = depth,
-     verdict = verdict, reason = reason, array = reason in (:array, :overlap, :rmw) ? array : nothing, via_idiom = reason === :ok && idiom)
+     verdict = verdict, reason = reason, array = reason in (:array, :overlap, :rmw) ? array : nothing, via_idiom = reason === :ok && idiom,
+     body_id = objectid(stmt.body))
 
 # Large-trip branch of an array-element reduction. A backend with sync_free_reduce adds the device-side reduction into the element with a broadcast on
 # one-element views, which never copies a scalar to the host, so the host does not wait mid-sequence. This branch is still not capturable in a CUDA

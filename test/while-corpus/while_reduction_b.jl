@@ -9,7 +9,7 @@ function while_reduction_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_sta
     s = 0.0
     sb = 0.0
     i_p = 1
-    __wcount_54bc80 = 0
+    __wcount_7d2325 = 0
     while i_p <= 2
         push!(__wcarry_i_p_stack, i_p)
         s = 0.0
@@ -21,17 +21,17 @@ function while_reduction_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_sta
         end
         i_p = i_p + 1
         push!(s_stack, s)
-        __wcount_54bc80 = __wcount_54bc80 + 1
+        __wcount_7d2325 = __wcount_7d2325 + 1
     end
-    push!(whilecount_stack, __wcount_54bc80)
+    push!(whilecount_stack, __wcount_7d2325)
     for i_x2 = 1:i_n
         loss[1] = loss[1] + v[i_x2] ^ 2
     end
     for i_x2 = i_n:-1:1
         vb[i_x2] = vb[i_x2] + (2 * v[i_x2]) * lossb[1]
     end
-    __wcount_54bc80 = pop!(whilecount_stack)
-    for __witer_54bc80 = 1:__wcount_54bc80
+    __wcount_7d2325 = pop!(whilecount_stack)
+    for __witer_7d2325 = 1:__wcount_7d2325
         i_p = pop!(__wcarry_i_p_stack)
         s = pop!(s_stack)
         for i_x = i_n:-1:1

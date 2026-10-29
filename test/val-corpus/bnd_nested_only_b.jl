@@ -10,7 +10,7 @@ function bnd_nested_only_b(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, v_stack
     v = 0.0
     for i_i = 2:i_n
         for i_j = 1:i_m
-            __icse_0 = ((i_i - 2) + (i_j - 1) * (div(i_n - 2, 1) + 1)) + 1
+            __icse_0 = ((i_j - 1) + (i_i - 2) * (div(i_m - 1, 1) + 1)) + 1
             __idx_v_stack_0 = __icse_0
             v_stack[__idx_v_stack_0] = v
             v = x[i_j] * y[i_i]
@@ -58,7 +58,7 @@ function bnd_nested_only_b(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, v_stack
         outb[i_i - 1] = outb[i_i - 1] + y[i_i] * outb[i_i]
         yb[i_i] = yb[i_i] + out[i_i - 1] * outb[i_i]
         for i_j = i_m:-1:1
-            __icse_11 = ((i_i - 2) + (i_j - 1) * (div(i_n - 2, 1) + 1)) + 1
+            __icse_11 = ((i_j - 1) + (i_i - 2) * (div(i_m - 1, 1) + 1)) + 1
             __idx_out_stack_0 = __icse_11
             out[i_i] = out_stack[__idx_out_stack_0]
             __cse_12 = v * outb[i_i]

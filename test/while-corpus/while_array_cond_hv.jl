@@ -10,7 +10,7 @@ function while_array_cond_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossb
     i_k = 1
     vd[1] = 0.0
     v[1] = 1.0
-    __wcount_7c1bc4 = 0
+    __wcount_b98350 = 0
     while v[i_k] > 0.1 && i_k < i_n
         push!(__wcarry_i_k_stack, i_k)
         push!(v_stack_d, vd[i_k + 1])
@@ -23,9 +23,9 @@ function while_array_cond_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossb
         vd[i_k + 1] = (0.5__hcse_0) * vd[i_k] + (0.5__hcse_1) * (__hcse_2 + __hcse_2)
         v[i_k + 1] = 0.5 * __hcse_1 * __hcse_0
         i_k = i_k + 1
-        __wcount_7c1bc4 = __wcount_7c1bc4 + 1
+        __wcount_b98350 = __wcount_b98350 + 1
     end
-    push!(whilecount_stack, __wcount_7c1bc4)
+    push!(whilecount_stack, __wcount_b98350)
     for i_x = 1:i_n
         __hcse_3 = v[i_x]
         __hcse_4 = u[i_x]
@@ -47,8 +47,8 @@ function while_array_cond_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossb
         ubd[i_x] = ubd[i_x] + (__cse_3 * __cse_2d + __cse_2 * __cse_3d)
         ub[i_x] = ub[i_x] + __cse_2 * __cse_3
     end
-    __wcount_7c1bc4 = pop!(whilecount_stack)
-    for __witer_7c1bc4 = 1:__wcount_7c1bc4
+    __wcount_b98350 = pop!(whilecount_stack)
+    for __witer_b98350 = 1:__wcount_b98350
         i_k = pop!(__wcarry_i_k_stack)
         vd[i_k + 1] = pop!(v_stack_d)
         v[i_k + 1] = pop!(v_stack)

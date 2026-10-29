@@ -22,7 +22,7 @@ function asnap_ok_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, i_nja
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             __cse_0 = x[i_node]
             x_stack[__idx_x_stack_0] = __cse_0
             __cse_1 = m[i_node]
@@ -31,7 +31,7 @@ function asnap_ok_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, i_nja
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             x[i_node] = x_stack[__idx_x_stack_0]
             __cse_2 = (m[i_node] * 0.5) * xb[i_node]
             mb[i_node] = mb[i_node] + __cse_2

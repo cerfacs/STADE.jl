@@ -7,7 +7,7 @@ function fixed_sweeps_hv(y, yb, x, xb, i_n, yd, ybd, xd, xbd, y_stack)
     y_stack_d = Vector{Float64}(undef, length(y_stack))
     for i_k = 1:3
         for i_i = 1:i_n
-            __idx_y_stack_0 = ((i_k - 1) + (i_i - 1) * (div(3 - 1, 1) + 1)) + 1
+            __idx_y_stack_0 = ((i_i - 1) + (i_k - 1) * (div(i_n - 1, 1) + 1)) + 1
             __cse_0d = yd[i_i]
             __cse_0 = y[i_i]
             y_stack_d[__idx_y_stack_0] = __cse_0d
@@ -18,7 +18,7 @@ function fixed_sweeps_hv(y, yb, x, xb, i_n, yd, ybd, xd, xbd, y_stack)
     end
     for i_k = 3:-1:1
         for i_i = i_n:-1:1
-            __idx_y_stack_0 = ((i_k - 1) + (i_i - 1) * (div(3 - 1, 1) + 1)) + 1
+            __idx_y_stack_0 = ((i_i - 1) + (i_k - 1) * (div(i_n - 1, 1) + 1)) + 1
             yd[i_i] = y_stack_d[__idx_y_stack_0]
             y[i_i] = y_stack[__idx_y_stack_0]
             __oldb_2d = ybd[i_i]

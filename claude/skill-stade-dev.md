@@ -100,17 +100,31 @@ This is what makes GPU codegen possible at all: a shared stack pointer
 has no meaning once a loop splits across threads, and a running counter
 is no substitute either, since a launch guarantees no visit order.
 
-Slot order within a site is **element-major**: the outermost loop frame is
-the fastest-varying digit (`agen_local_position`), because the GPU thread
-is the outermost iteration and adjacent threads must touch adjacent slots.
-Any new formula must stay a bijection onto `1:multiplicity` and keep that
-order; `test/validate_layout_bijection.jl` measures both. Measured on a V100:
-the U-Net adjoint is 7.7 to 9.8 times faster, and the 11 other benchmark
-kernels did not change. **Known limit:** a site whose outermost frame is a
-sequential loop with the thread inside (time or level loops inside a
-kernel) gets a stride of `trip(outermost)` between adjacent threads, which is
-2.6 to 47 times slower on stores. The layout stage cannot see which frame
-becomes the thread. Do not claim "no regression" for that shape.
+Slot order within a site **follows the thread loop**: the first loop frame
+that the GPU stage turns into a kernel (or a reduction) is the
+fastest-varying digit, and the other frames follow row-major in nest order
+(`agen_local_position`). Adjacent threads then touch adjacent slots. With no
+such frame the order is row-major, as before v0.4.23. Any new formula must
+stay a bijection onto `1:multiplicity`; `test/validate_layout_bijection.jl`
+measures that and the consecutive-thread property.
+
+The mark of each loop comes from `agen_loop_par_map`, which runs `cgen_body`
+on the primal (`cgen_from_kernel`) and reads the decision records
+(`body_id = objectid(loop body)`). It is built once in `agen_layout`, kept in
+`layout.par`, and read by `agen_frame` in the forward and the backward sweep.
+The backward sweep keys on `primal_body[idx]`, not on its own linearization
+node. A loop without a mark is an error, so the two sweeps cannot disagree
+silently. The mark is a guess about the adjoint: a wrong guess costs speed,
+never a result. If the walk throws, every loop counts as sequential.
+`test/validate_thread_frame.jl` pins the verdict of nine small kernels.
+Do not decide the thread from `cgen_split_loop_gate` alone: it called a
+ping-pong time loop parallel while the real stage keeps it on the host.
+**Measured on a V100:** the U-Net adjoint is 7.7 to 9.8 times faster than at
+v0.4.22, and a time loop around two thread loops (`heat1d_multi`) matches
+v0.4.22, where the outermost-fastest order (v0.4.23) was 1.1 to 3.0 times
+slower. A linear kernel cannot show a forward/backward index mismatch (the
+adjoint never uses the restored value), so sabotage-test index consistency
+on a nonlinear corpus kernel.
 
 **Tier A**: index computable in closed form from kernel arguments and
 the site's own loop nest. Push/pop sites are matched by a *structural*

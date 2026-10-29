@@ -9,7 +9,7 @@ function asnap_selfnl_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
     x_stack_d = Vector{Float64}(undef, length(x_stack))
     for i_ = 1:i_njac
         for i_node = 1:i_nnode
-            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_m_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             m_stack_d[__idx_m_stack_0] = md[i_node]
             m_stack[__idx_m_stack_0] = m[i_node]
             md[i_node] = 0.0
@@ -18,8 +18,8 @@ function asnap_selfnl_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
         for i_cell = 1:i_ncell
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_0 = div(i_njac - 1, 1) + 1
-                __idx_m_stack_1 = max(0, __icse_0) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_0) + 1)
+                __icse_0 = div(3 - 1, 1) + 1
+                __idx_m_stack_1 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) * ((div(i_ncell - 1, 1) + 1) * __icse_0) + (i_cell - 1) * __icse_0 + (i_loc - 1)) + 1)
                 __cse_1d = md[i_n]
                 __cse_1 = m[i_n]
                 m_stack_d[__idx_m_stack_1] = __cse_1d
@@ -32,7 +32,7 @@ function asnap_selfnl_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             __cse_2d = xd[i_node]
             __cse_2 = x[i_node]
             x_stack_d[__idx_x_stack_0] = __cse_2d
@@ -46,7 +46,7 @@ function asnap_selfnl_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             xd[i_node] = x_stack_d[__idx_x_stack_0]
             x[i_node] = x_stack[__idx_x_stack_0]
             __hcse_4 = xb[i_node]
@@ -61,8 +61,8 @@ function asnap_selfnl_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
         for i_cell = i_ncell:-1:1
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_5 = div(i_njac - 1, 1) + 1
-                __idx_m_stack_0 = max(0, __icse_5) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_5) + 1)
+                __icse_5 = div(3 - 1, 1) + 1
+                __idx_m_stack_0 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) * ((div(i_ncell - 1, 1) + 1) * __icse_5) + (i_cell - 1) * __icse_5 + (i_loc - 1)) + 1)
                 md[i_n] = m_stack_d[__idx_m_stack_0]
                 m[i_n] = m_stack[__idx_m_stack_0]
                 __oldb_2d = mbd[i_n]
@@ -88,7 +88,7 @@ function asnap_selfnl_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
             end
         end
         for i_node = i_nnode:-1:1
-            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_m_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             md[i_node] = m_stack_d[__idx_m_stack_0]
             m[i_node] = m_stack[__idx_m_stack_0]
             mbd[i_node] = 0.0

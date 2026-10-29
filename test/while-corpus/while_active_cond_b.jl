@@ -10,7 +10,7 @@ function while_active_cond_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_s
     sb = 0.0
     s = 1.0
     i_k = 1
-    __wcount_9a2dbf = 0
+    __wcount_88ba66 = 0
     while s > 0.05 && i_k <= i_n
         push!(__wcarry_i_k_stack, i_k)
         push!(s_stack, s)
@@ -18,9 +18,9 @@ function while_active_cond_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_s
         s = s * (0.5 + 0.25 * __cse_0 * __cse_0)
         v[i_k] = s * u[i_k]
         i_k = i_k + 1
-        __wcount_9a2dbf = __wcount_9a2dbf + 1
+        __wcount_88ba66 = __wcount_88ba66 + 1
     end
-    push!(whilecount_stack, __wcount_9a2dbf)
+    push!(whilecount_stack, __wcount_88ba66)
     for i_x = 1:i_n
         loss[1] = loss[1] + v[i_x] ^ 2
     end
@@ -29,8 +29,8 @@ function while_active_cond_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_s
     for i_x = i_n:-1:1
         vb[i_x] = vb[i_x] + (2 * v[i_x]) * lossb[1]
     end
-    __wcount_9a2dbf = pop!(whilecount_stack)
-    for __witer_9a2dbf = 1:__wcount_9a2dbf
+    __wcount_88ba66 = pop!(whilecount_stack)
+    for __witer_88ba66 = 1:__wcount_88ba66
         i_k = pop!(__wcarry_i_k_stack)
         __oldb_0 = vb[i_k]
         vb[i_k] = 0.0

@@ -39,7 +39,7 @@ function retire_if_hv(x, xb, y, yb, i_n, i_nlev, i_nrep, out, outb, xd, xbd, yd,
                 __idx_tripcount_stack_1_0 = prefix_tripcount_stack_1[(i_l - 1) + 1] + __icse_0
                 tripcount_stack[__idx_tripcount_stack_1_0] = cur
                 for i = 1:cur
-                    __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + (((i_r - 1) + (i - 1) * (div(i_nrep - 1, 1) + 1)) + 1)
+                    __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + (((i_r - 1) * (div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1) + (i - 1)) + 1)
                     t_stack_d[__idx_t_stack_1_0] = td
                     t_stack[__idx_t_stack_1_0] = t
                     __cse_1d = xd[i]
@@ -119,7 +119,7 @@ function retire_if_hv(x, xb, y, yb, i_n, i_nlev, i_nrep, out, outb, xd, xbd, yd,
                     tb = tb + __cse_9
                     tbd = tbd + __cse_9d
                     tb = tb + __cse_9
-                    __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + (((i_r - 1) + (i - 1) * (div(i_nrep - 1, 1) + 1)) + 1)
+                    __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + (((i_r - 1) * (div(val_cur_1[(i_l - 1) + 1] - 1, 1) + 1) + (i - 1)) + 1)
                     td = t_stack_d[__idx_t_stack_1_0]
                     t = t_stack[__idx_t_stack_1_0]
                     __oldb_2d = tbd

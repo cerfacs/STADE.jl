@@ -28,7 +28,7 @@ function retire_nested_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
     for lev = 1:i_nlev
         for i_ = 1:i_njac
             for i_node = 1:i_nnode
-                __idx_m_stack_1_0 = prefix_m_stack_1[(lev - 1) + 1] + (((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1)
+                __idx_m_stack_1_0 = prefix_m_stack_1[(lev - 1) + 1] + (((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)
                 m_stack[__idx_m_stack_1_0] = m[i_node]
                 m[i_node] = 0.0
             end
@@ -37,15 +37,15 @@ function retire_nested_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
             for i_cell = 1:nc
                 for i_loc = 1:3
                     i_n = i_cell_to_node[i_loc, i_cell]
-                    __icse_0 = div(i_njac - 1, 1) + 1
-                    __idx_m_stack_1_1 = (prefix_m_stack_1[(lev - 1) + 1] + max(0, __icse_0) * max(0, div(i_nnode - 1, 1) + 1)) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_0) + 1)
+                    __icse_0 = div(3 - 1, 1) + 1
+                    __idx_m_stack_1_1 = (prefix_m_stack_1[(lev - 1) + 1] + max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1)) + (((i_ - 1) * ((div(val_nc_1[(lev - 1) + 1] - 1, 1) + 1) * __icse_0) + (i_cell - 1) * __icse_0 + (i_loc - 1)) + 1)
                     __cse_1 = m[i_n]
                     m_stack[__idx_m_stack_1_1] = __cse_1
                     m[i_n] = __cse_1 + w[i_cell] * x[i_n] * 0.1
                 end
             end
             for i_node = 1:i_nnode
-                __idx_x_stack_1_0 = prefix_x_stack_1[(lev - 1) + 1] + (((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1)
+                __idx_x_stack_1_0 = prefix_x_stack_1[(lev - 1) + 1] + (((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)
                 __cse_2 = x[i_node]
                 x_stack[__idx_x_stack_1_0] = __cse_2
                 __cse_3 = m[i_node]
@@ -57,7 +57,7 @@ function retire_nested_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
     for lev = i_nlev:-1:1
         for i_ = i_njac:-1:1
             for i_node = i_nnode:-1:1
-                __idx_x_stack_1_0 = prefix_x_stack_1[(lev - 1) + 1] + (((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1)
+                __idx_x_stack_1_0 = prefix_x_stack_1[(lev - 1) + 1] + (((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)
                 x[i_node] = x_stack[__idx_x_stack_1_0]
                 __cse_4 = (m[i_node] * 0.5) * xb[i_node]
                 mb[i_node] = mb[i_node] + __cse_4
@@ -68,8 +68,8 @@ function retire_nested_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
             for i_cell = nc:-1:1
                 for i_loc = 3:-1:1
                     i_n = i_cell_to_node[i_loc, i_cell]
-                    __icse_5 = div(i_njac - 1, 1) + 1
-                    __idx_m_stack_1_0 = (prefix_m_stack_1[(lev - 1) + 1] + max(0, __icse_5) * max(0, div(i_nnode - 1, 1) + 1)) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_5) + 1)
+                    __icse_5 = div(3 - 1, 1) + 1
+                    __idx_m_stack_1_0 = (prefix_m_stack_1[(lev - 1) + 1] + max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1)) + (((i_ - 1) * ((div(val_nc_1[(lev - 1) + 1] - 1, 1) + 1) * __icse_5) + (i_cell - 1) * __icse_5 + (i_loc - 1)) + 1)
                     m[i_n] = m_stack[__idx_m_stack_1_0]
                     __cse_6 = mb[i_n]
                     wb[i_cell] = wb[i_cell] + (x[i_n] * 0.1) * __cse_6
@@ -77,7 +77,7 @@ function retire_nested_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
                 end
             end
             for i_node = i_nnode:-1:1
-                __idx_m_stack_1_0 = prefix_m_stack_1[(lev - 1) + 1] + (((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1)
+                __idx_m_stack_1_0 = prefix_m_stack_1[(lev - 1) + 1] + (((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1)
                 m[i_node] = m_stack[__idx_m_stack_1_0]
                 mb[i_node] = 0.0
             end

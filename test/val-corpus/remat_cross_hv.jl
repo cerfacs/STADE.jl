@@ -200,7 +200,7 @@ function remat_cross_hv(x, xb, w, wb, y, yb, u, ub, z, zb, loss, lossb, i_n, i_n
         ad = 0.0
         a = 0.0
         for ci = 1:i_nc
-            __idx_xv8_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
+            __idx_xv8_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
             xv8_stack_d[__idx_xv8_stack_0] = xv8d
             xv8_stack[__idx_xv8_stack_0] = xv8
             xv8d = ud[ci]
@@ -291,7 +291,7 @@ function remat_cross_hv(x, xb, w, wb, y, yb, u, ub, z, zb, loss, lossb, i_n, i_n
             __hcse_33 = xv8 * xv8
             xbd[(t + ci) - 1] = xbd[(t + ci) - 1] + (ab * (__hcse_32 + __hcse_32) + __hcse_33 * abd)
             xb[(t + ci) - 1] = xb[(t + ci) - 1] + __hcse_33 * ab
-            __idx_xv8_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
+            __idx_xv8_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
             xv8d = xv8_stack_d[__idx_xv8_stack_0]
             xv8 = xv8_stack[__idx_xv8_stack_0]
             __oldb_2d = xv8bd

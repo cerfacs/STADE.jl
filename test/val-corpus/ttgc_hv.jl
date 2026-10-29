@@ -183,12 +183,12 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
                 mupd[i_lnode] = mupd[i_lnode] + 0.05 * (__hcse_20 * (auxud + upd[i_lnode]) + __hcse_21 * cell_vold[i_cell])
                 mup[i_lnode] = mup[i_lnode] + (__hcse_21 * __hcse_20) / 20.0
             end
-            __idx_auxu_stack_3 = ((i_ - 1) + (i_cell - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_auxu_stack_3 = ((i_cell - 1) + (i_ - 1) * (div(i_ncell - 1, 1) + 1)) + 1
             auxu_stack_d[__idx_auxu_stack_3] = auxud
             auxu_stack[__idx_auxu_stack_3] = auxu
         end
         for i_node = 1:i_nnode
-            __idx_up_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_up_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             __cse_0d = upd[i_node]
             __cse_0 = up[i_node]
             up_stack_d[__idx_up_stack_0] = __cse_0d
@@ -268,15 +268,15 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
                 mupd[i_lnode] = mupd[i_lnode] + 0.05 * (__hcse_34 * (auxud + upd[i_lnode]) + __hcse_35 * cell_vold[i_cell])
                 mup[i_lnode] = mup[i_lnode] + (__hcse_35 * __hcse_34) / 20.0
             end
-            __icse_5 = div(i_njac - 1, 1) + 1
-            __idx_auxu_stack_3 = max(0, __icse_5) * max(0, div(i_ncell - 1, 1) + 1) + (((i_ - 1) + (i_cell - 1) * __icse_5) + 1)
+            __icse_5 = div(i_ncell - 1, 1) + 1
+            __idx_auxu_stack_3 = max(0, div(i_njac - 1, 1) + 1) * max(0, __icse_5) + (((i_cell - 1) + (i_ - 1) * __icse_5) + 1)
             auxu_stack_d[__idx_auxu_stack_3] = auxud
             auxu_stack[__idx_auxu_stack_3] = auxu
         end
         for i_node = 1:i_nnode
-            __icse_6 = div(i_njac - 1, 1) + 1
-            __icse_7 = max(0, div(i_nnode - 1, 1) + 1)
-            __idx_up_stack_0 = (max(0, __icse_6) * __icse_7 + __icse_7) + (((i_ - 1) + (i_node - 1) * __icse_6) + 1)
+            __icse_6 = div(i_nnode - 1, 1) + 1
+            __icse_7 = max(0, __icse_6)
+            __idx_up_stack_0 = (max(0, div(i_njac - 1, 1) + 1) * __icse_7 + __icse_7) + (((i_node - 1) + (i_ - 1) * __icse_6) + 1)
             __cse_8d = upd[i_node]
             __cse_8 = up[i_node]
             up_stack_d[__idx_up_stack_0] = __cse_8d
@@ -306,9 +306,9 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __icse_10 = div(i_njac - 1, 1) + 1
-            __icse_11 = max(0, div(i_nnode - 1, 1) + 1)
-            __idx_up_stack_0 = (max(0, __icse_10) * __icse_11 + __icse_11) + (((i_ - 1) + (i_node - 1) * __icse_10) + 1)
+            __icse_10 = div(i_nnode - 1, 1) + 1
+            __icse_11 = max(0, __icse_10)
+            __idx_up_stack_0 = (max(0, div(i_njac - 1, 1) + 1) * __icse_11 + __icse_11) + (((i_node - 1) + (i_ - 1) * __icse_10) + 1)
             upd[i_node] = up_stack_d[__idx_up_stack_0]
             up[i_node] = up_stack[__idx_up_stack_0]
             __cse_12d = node_vold[i_node]
@@ -330,8 +330,8 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             node_volb[i_node] = node_volb[i_node] + __hcse_45 * __cse_13
         end
         for i_cell = i_ncell:-1:1
-            __icse_15 = div(i_njac - 1, 1) + 1
-            __idx_auxu_stack_0 = max(0, __icse_15) * max(0, div(i_ncell - 1, 1) + 1) + (((i_ - 1) + (i_cell - 1) * __icse_15) + 1)
+            __icse_15 = div(i_ncell - 1, 1) + 1
+            __idx_auxu_stack_0 = max(0, div(i_njac - 1, 1) + 1) * max(0, __icse_15) + (((i_cell - 1) + (i_ - 1) * __icse_15) + 1)
             auxud = auxu_stack_d[__idx_auxu_stack_0]
             auxu = auxu_stack[__idx_auxu_stack_0]
             for i_loc = 4:-1:1
@@ -456,7 +456,7 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_up_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_up_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             upd[i_node] = up_stack_d[__idx_up_stack_0]
             up[i_node] = up_stack[__idx_up_stack_0]
             __cse_31d = node_vold[i_node]
@@ -478,7 +478,7 @@ function ttgc_hv(u, ub, uref, urefb, i_cell_to_node, cell_vol, cell_volb, node_v
             node_volb[i_node] = node_volb[i_node] + __hcse_60 * __cse_32
         end
         for i_cell = i_ncell:-1:1
-            __idx_auxu_stack_0 = ((i_ - 1) + (i_cell - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_auxu_stack_0 = ((i_cell - 1) + (i_ - 1) * (div(i_ncell - 1, 1) + 1)) + 1
             auxud = auxu_stack_d[__idx_auxu_stack_0]
             auxu = auxu_stack[__idx_auxu_stack_0]
             for i_loc = 4:-1:1

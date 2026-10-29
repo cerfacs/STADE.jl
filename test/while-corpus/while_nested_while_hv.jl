@@ -7,11 +7,11 @@ end
 
 function while_nested_while_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossbd, ud, ubd, ad, abd, vd, vbd, whilecount_stack, __wcarry_i_p_stack, __wcarry_i_k_stack)
     i_p = 1
-    __wcount_f1afd4 = 0
+    __wcount_79041c = 0
     while i_p <= 2
         push!(__wcarry_i_p_stack, i_p)
         i_k = 1
-        __wcount_7b203a = 0
+        __wcount_ddfd8e = 0
         while i_k <= i_n
             push!(__wcarry_i_k_stack, i_k)
             __hcse_0 = u[i_k]
@@ -19,13 +19,13 @@ function while_nested_while_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, los
             vd[i_k] = vd[i_k] + ((__hcse_0 * i_p) * ad[i_k] + (__hcse_1 * i_p) * ud[i_k])
             v[i_k] = v[i_k] + __hcse_1 * __hcse_0 * i_p
             i_k = i_k + 1
-            __wcount_7b203a = __wcount_7b203a + 1
+            __wcount_ddfd8e = __wcount_ddfd8e + 1
         end
-        push!(whilecount_stack, __wcount_7b203a)
+        push!(whilecount_stack, __wcount_ddfd8e)
         i_p = i_p + 1
-        __wcount_f1afd4 = __wcount_f1afd4 + 1
+        __wcount_79041c = __wcount_79041c + 1
     end
-    push!(whilecount_stack, __wcount_f1afd4)
+    push!(whilecount_stack, __wcount_79041c)
     for i_x = 1:i_n
         __hcse_2 = v[i_x]
         lossd[1] = lossd[1] + (2__hcse_2) * vd[i_x]
@@ -37,11 +37,11 @@ function while_nested_while_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, los
         vbd[i_x] = vbd[i_x] + (__hcse_3 * (2 * vd[i_x]) + __hcse_4 * lossbd[1])
         vb[i_x] = vb[i_x] + __hcse_4 * __hcse_3
     end
-    __wcount_f1afd4 = pop!(whilecount_stack)
-    for __witer_f1afd4 = 1:__wcount_f1afd4
+    __wcount_79041c = pop!(whilecount_stack)
+    for __witer_79041c = 1:__wcount_79041c
         i_p = pop!(__wcarry_i_p_stack)
-        __wcount_7b203a = pop!(whilecount_stack)
-        for __witer_7b203a = 1:__wcount_7b203a
+        __wcount_ddfd8e = pop!(whilecount_stack)
+        for __witer_ddfd8e = 1:__wcount_ddfd8e
             i_k = pop!(__wcarry_i_k_stack)
             __cse_0d = vbd[i_k]
             __cse_0 = vb[i_k]

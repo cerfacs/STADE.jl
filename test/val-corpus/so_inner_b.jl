@@ -15,7 +15,7 @@ function so_inner_b(x, xb, w, wb, q, qb, y, yb, loss, lossb, i_n, i_nc, xv_stack
     run = 0.0
     for t = 1:i_n
         for ci = 1:i_nc
-            __icse_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
+            __icse_0 = ((ci - 1) + (t - 1) * (div(i_nc - 1, 1) + 1)) + 1
             __idx_xv_stack_0 = __icse_0
             xv_stack[__idx_xv_stack_0] = xv
             xv = x[ci]
@@ -99,7 +99,7 @@ function so_inner_b(x, xb, w, wb, q, qb, y, yb, loss, lossb, i_n, i_nc, xv_stack
             qb[(t - 1) * i_nc + ci] = 0.0
             xvb = xvb + wv * __oldb_0
             wvb = wvb + xv * __oldb_0
-            __icse_13 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
+            __icse_13 = ((ci - 1) + (t - 1) * (div(i_nc - 1, 1) + 1)) + 1
             __idx_wv_stack_0 = __icse_13
             wv = wv_stack[__idx_wv_stack_0]
             __oldb_2 = wvb

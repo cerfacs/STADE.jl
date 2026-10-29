@@ -26,7 +26,7 @@ function asnap_zerotrip_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             __cse_0d = xd[i_node]
             __cse_0 = x[i_node]
             x_stack_d[__idx_x_stack_0] = __cse_0d
@@ -41,7 +41,7 @@ function asnap_zerotrip_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode
     i_nc2 = i_ncell - 8
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             xd[i_node] = x_stack_d[__idx_x_stack_0]
             x[i_node] = x_stack[__idx_x_stack_0]
             __hcse_3 = xb[i_node]

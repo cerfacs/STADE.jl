@@ -10,7 +10,7 @@ function asnap_nested_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
     m_snap_stack_d = Vector{Float64}(undef, length(m_snap_stack))
     for i_o = 1:i_nout
         for i_ = 1:i_njac
-            __idx_m_snap_stack_0 = ((i_o - 1) + (i_ - 1) * (div(i_nout - 1, 1) + 1)) + 1
+            __idx_m_snap_stack_0 = ((i_o - 1) * (div(i_njac - 1, 1) + 1) + (i_ - 1)) + 1
             __sbase_m = (__idx_m_snap_stack_0 - 1) * __len_m
             for __sk_m = 1:__len_m
                 m_snap_stack_d[__sbase_m + __sk_m] = md[__sk_m]
@@ -30,7 +30,7 @@ function asnap_nested_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
                 end
             end
             for i_node = 1:i_nnode
-                __idx_x_stack_0 = ((i_o - 1) + ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) * (div(i_nout - 1, 1) + 1)) + 1
+                __idx_x_stack_0 = ((i_node - 1) + ((i_o - 1) * (div(i_njac - 1, 1) + 1) + (i_ - 1)) * (div(i_nnode - 1, 1) + 1)) + 1
                 __cse_0d = xd[i_node]
                 __cse_0 = x[i_node]
                 x_stack_d[__idx_x_stack_0] = __cse_0d
@@ -40,8 +40,8 @@ function asnap_nested_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
             end
         end
         for i_node = 1:i_nnode
-            __icse_1 = div(i_nout - 1, 1) + 1
-            __idx_x_stack_0 = max(0, __icse_1) * max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_o - 1) + (i_node - 1) * __icse_1) + 1)
+            __icse_1 = div(i_nnode - 1, 1) + 1
+            __idx_x_stack_0 = max(0, div(i_nout - 1, 1) + 1) * max(0, div(i_njac - 1, 1) + 1) * max(0, __icse_1) + (((i_node - 1) + (i_o - 1) * __icse_1) + 1)
             __cse_2d = xd[i_node]
             __cse_2 = x[i_node]
             x_stack_d[__idx_x_stack_0] = __cse_2d
@@ -55,8 +55,8 @@ function asnap_nested_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
     end
     for i_o = i_nout:-1:1
         for i_node = i_nnode:-1:1
-            __icse_4 = div(i_nout - 1, 1) + 1
-            __idx_x_stack_0 = max(0, __icse_4) * max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_o - 1) + (i_node - 1) * __icse_4) + 1)
+            __icse_4 = div(i_nnode - 1, 1) + 1
+            __idx_x_stack_0 = max(0, div(i_nout - 1, 1) + 1) * max(0, div(i_njac - 1, 1) + 1) * max(0, __icse_4) + (((i_node - 1) + (i_o - 1) * __icse_4) + 1)
             xd[i_node] = x_stack_d[__idx_x_stack_0]
             x[i_node] = x_stack[__idx_x_stack_0]
             __hcse_3 = xb[i_node]
@@ -70,7 +70,7 @@ function asnap_nested_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
         end
         for i_ = i_njac:-1:1
             for i_node = i_nnode:-1:1
-                __idx_x_stack_0 = ((i_o - 1) + ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) * (div(i_nout - 1, 1) + 1)) + 1
+                __idx_x_stack_0 = ((i_node - 1) + ((i_o - 1) * (div(i_njac - 1, 1) + 1) + (i_ - 1)) * (div(i_nnode - 1, 1) + 1)) + 1
                 xd[i_node] = x_stack_d[__idx_x_stack_0]
                 x[i_node] = x_stack[__idx_x_stack_0]
                 mbd[i_node] = mbd[i_node] + 0.5 * xbd[i_node]
@@ -93,7 +93,7 @@ function asnap_nested_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, 
                 mbd[i_node] = 0.0
                 mb[i_node] = 0.0
             end
-            __idx_m_snap_stack_0 = ((i_o - 1) + (i_ - 1) * (div(i_nout - 1, 1) + 1)) + 1
+            __idx_m_snap_stack_0 = ((i_o - 1) * (div(i_njac - 1, 1) + 1) + (i_ - 1)) + 1
             __sbase_m = (__idx_m_snap_stack_0 - 1) * __len_m
             for __sk_m = 1:__len_m
                 md[__sk_m] = m_snap_stack_d[__sbase_m + __sk_m]

@@ -20,7 +20,8 @@ function so_liveout_hv(x, xb, w, wb, y, yb, z, zb, loss, lossb, i_nb, i_n, i_nc,
             ad = 0.0
             a = 0.0
             for ci = 1:i_nc
-                __idx_wv_stack_0 = ((bb - 1) + ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) * (div(i_nb - 1, 1) + 1)) + 1
+                __icse_0 = div(i_nc - 1, 1) + 1
+                __idx_wv_stack_0 = ((bb - 1) * ((div(i_n - 1, 1) + 1) * __icse_0) + (t - 1) * __icse_0 + (ci - 1)) + 1
                 wv_stack_d[__idx_wv_stack_0] = wvd
                 wv_stack[__idx_wv_stack_0] = wv
                 wvd = wd[(ci - 1) * 3 + 1]
@@ -41,57 +42,57 @@ function so_liveout_hv(x, xb, w, wb, y, yb, z, zb, loss, lossb, i_nb, i_n, i_nc,
             end
             yd[t] = ad
             y[t] = a
-            __icse_0 = div(i_nb - 1, 1) + 1
-            __idx_wv_stack_3 = max(0, __icse_0) * max(0, div(i_n - 1, 1) + 1) * max(0, div(i_nc - 1, 1) + 1) + (((bb - 1) + (t - 1) * __icse_0) + 1)
+            __icse_1 = div(i_n - 1, 1) + 1
+            __idx_wv_stack_3 = max(0, div(i_nb - 1, 1) + 1) * max(0, __icse_1) * max(0, div(i_nc - 1, 1) + 1) + (((bb - 1) * __icse_1 + (t - 1)) + 1)
             wv_stack_d[__idx_wv_stack_3] = wvd
             wv_stack[__idx_wv_stack_3] = wv
         end
         zd[bb] = 3.0wvd
         z[bb] = wv * 3.0
-        __icse_1 = max(0, div(i_nb - 1, 1) + 1)
-        __icse_2 = max(0, div(i_n - 1, 1) + 1)
-        __idx_wv_stack_3 = (__icse_1 * __icse_2 * max(0, div(i_nc - 1, 1) + 1) + __icse_1 * __icse_2) + ((bb - 1) + 1)
+        __icse_2 = max(0, div(i_nb - 1, 1) + 1)
+        __icse_3 = max(0, div(i_n - 1, 1) + 1)
+        __idx_wv_stack_3 = (__icse_2 * __icse_3 * max(0, div(i_nc - 1, 1) + 1) + __icse_2 * __icse_3) + ((bb - 1) + 1)
         wv_stack_d[__idx_wv_stack_3] = wvd
         wv_stack[__idx_wv_stack_3] = wv
     end
     for k = 1:i_n
-        __cse_3d = yd[k]
-        __cse_3 = y[k]
-        __hcse_3 = __cse_3 * __cse_3d
+        __cse_4d = yd[k]
+        __cse_4 = y[k]
+        __hcse_3 = __cse_4 * __cse_4d
         lossd[1] = lossd[1] + (__hcse_3 + __hcse_3)
-        loss[1] = loss[1] + __cse_3 * __cse_3
+        loss[1] = loss[1] + __cse_4 * __cse_4
     end
     for k = 1:i_nb
-        __cse_4d = zd[k]
-        __cse_4 = z[k]
-        __hcse_4 = __cse_4 * __cse_4d
+        __cse_5d = zd[k]
+        __cse_5 = z[k]
+        __hcse_4 = __cse_5 * __cse_5d
         lossd[1] = lossd[1] + (__hcse_4 + __hcse_4)
-        loss[1] = loss[1] + __cse_4 * __cse_4
+        loss[1] = loss[1] + __cse_5 * __cse_5
     end
     for k = i_nb:-1:1
         __hcse_5 = lossb[1]
         __hcse_6 = z[k]
-        __cse_5d = __hcse_5 * zd[k] + __hcse_6 * lossbd[1]
-        __cse_5 = __hcse_6 * __hcse_5
-        zbd[k] = zbd[k] + __cse_5d
-        zb[k] = zb[k] + __cse_5
-        zbd[k] = zbd[k] + __cse_5d
-        zb[k] = zb[k] + __cse_5
+        __cse_6d = __hcse_5 * zd[k] + __hcse_6 * lossbd[1]
+        __cse_6 = __hcse_6 * __hcse_5
+        zbd[k] = zbd[k] + __cse_6d
+        zb[k] = zb[k] + __cse_6
+        zbd[k] = zbd[k] + __cse_6d
+        zb[k] = zb[k] + __cse_6
     end
     for k = i_n:-1:1
         __hcse_7 = lossb[1]
         __hcse_8 = y[k]
-        __cse_6d = __hcse_7 * yd[k] + __hcse_8 * lossbd[1]
-        __cse_6 = __hcse_8 * __hcse_7
-        ybd[k] = ybd[k] + __cse_6d
-        yb[k] = yb[k] + __cse_6
-        ybd[k] = ybd[k] + __cse_6d
-        yb[k] = yb[k] + __cse_6
+        __cse_7d = __hcse_7 * yd[k] + __hcse_8 * lossbd[1]
+        __cse_7 = __hcse_8 * __hcse_7
+        ybd[k] = ybd[k] + __cse_7d
+        yb[k] = yb[k] + __cse_7
+        ybd[k] = ybd[k] + __cse_7d
+        yb[k] = yb[k] + __cse_7
     end
     for bb = i_nb:-1:1
-        __icse_7 = max(0, div(i_nb - 1, 1) + 1)
-        __icse_8 = max(0, div(i_n - 1, 1) + 1)
-        __idx_wv_stack_0 = (__icse_7 * __icse_8 * max(0, div(i_nc - 1, 1) + 1) + __icse_7 * __icse_8) + ((bb - 1) + 1)
+        __icse_8 = max(0, div(i_nb - 1, 1) + 1)
+        __icse_9 = max(0, div(i_n - 1, 1) + 1)
+        __idx_wv_stack_0 = (__icse_8 * __icse_9 * max(0, div(i_nc - 1, 1) + 1) + __icse_8 * __icse_9) + ((bb - 1) + 1)
         wvd = wv_stack_d[__idx_wv_stack_0]
         wv = wv_stack[__idx_wv_stack_0]
         __oldb_0d = zbd[bb]
@@ -101,8 +102,8 @@ function so_liveout_hv(x, xb, w, wb, y, yb, z, zb, loss, lossb, i_nb, i_n, i_nc,
         wvbd = wvbd + 3.0__oldb_0d
         wvb = wvb + 3.0__oldb_0
         for t = i_n:-1:1
-            __icse_9 = div(i_nb - 1, 1) + 1
-            __idx_wv_stack_0 = max(0, __icse_9) * max(0, div(i_n - 1, 1) + 1) * max(0, div(i_nc - 1, 1) + 1) + (((bb - 1) + (t - 1) * __icse_9) + 1)
+            __icse_10 = div(i_n - 1, 1) + 1
+            __idx_wv_stack_0 = max(0, div(i_nb - 1, 1) + 1) * max(0, __icse_10) * max(0, div(i_nc - 1, 1) + 1) + (((bb - 1) * __icse_10 + (t - 1)) + 1)
             wvd = wv_stack_d[__idx_wv_stack_0]
             wv = wv_stack[__idx_wv_stack_0]
             __oldb_0d = ybd[t]
@@ -143,7 +144,8 @@ function so_liveout_hv(x, xb, w, wb, y, yb, z, zb, loss, lossb, i_nb, i_n, i_nc,
                 __hcse_11 = x[t]
                 wvbd = wvbd + (ab * xd[t] + __hcse_11 * abd)
                 wvb = wvb + __hcse_11 * ab
-                __idx_wv_stack_0 = ((bb - 1) + ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) * (div(i_nb - 1, 1) + 1)) + 1
+                __icse_11 = div(i_nc - 1, 1) + 1
+                __idx_wv_stack_0 = ((bb - 1) * ((div(i_n - 1, 1) + 1) * __icse_11) + (t - 1) * __icse_11 + (ci - 1)) + 1
                 wvd = wv_stack_d[__idx_wv_stack_0]
                 wv = wv_stack[__idx_wv_stack_0]
                 __oldb_2d = wvbd

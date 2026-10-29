@@ -24,20 +24,20 @@ function asnap_ifwrite_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode,
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
                 if w[i_cell] > 0.0
-                    __idx_branch_stack_0 = ((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_njac - 1, 1) + 1)) + 1
+                    __idx_branch_stack_0 = ((i_cell - 1) + ((i_ - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_ncell - 1, 1) + 1)) + 1
                     branch_stack[__idx_branch_stack_0] = 1
                     __hcse_0 = x[i_n]
                     __hcse_1 = w[i_cell]
                     md[i_n] = md[i_n] + ((__hcse_0 * 0.1) * wd[i_cell] + (__hcse_1 * 0.1) * xd[i_n])
                     m[i_n] = m[i_n] + __hcse_1 * __hcse_0 * 0.1
                 else
-                    __idx_branch_stack_0 = ((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_njac - 1, 1) + 1)) + 1
+                    __idx_branch_stack_0 = ((i_cell - 1) + ((i_ - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_ncell - 1, 1) + 1)) + 1
                     branch_stack[__idx_branch_stack_0] = 0
                 end
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             __cse_0d = xd[i_node]
             __cse_0 = x[i_node]
             x_stack_d[__idx_x_stack_0] = __cse_0d
@@ -51,7 +51,7 @@ function asnap_ifwrite_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode,
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
+            __idx_x_stack_0 = ((i_node - 1) + (i_ - 1) * (div(i_nnode - 1, 1) + 1)) + 1
             xd[i_node] = x_stack_d[__idx_x_stack_0]
             x[i_node] = x_stack[__idx_x_stack_0]
             __hcse_3 = xb[i_node]
@@ -66,7 +66,7 @@ function asnap_ifwrite_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode,
         for i_cell = i_ncell:-1:1
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __idx_branch_stack_1 = ((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_njac - 1, 1) + 1)) + 1
+                __idx_branch_stack_1 = ((i_cell - 1) + ((i_ - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * (div(i_ncell - 1, 1) + 1)) + 1
                 __branch = branch_stack[__idx_branch_stack_1]
                 if __branch == 1
                     __cse_3d = mbd[i_n]
