@@ -81,6 +81,8 @@ function validate_ii_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
         "hoist_bins" => 0, "hoist_nested" => 0, "hoist_sentinel" => 0, "idm_refuse_scalar_read_nl" => 0,
         "lin_pingpong" => 0, "lin_quotient" => 0, "lin_then_quad" => 0, "lin_quad_inside" => 0, "lin_guard_products" => 0,
         "lin_carried_sum" => 0, "lin_carried_scale" => 0,
+        # gat_* (v0.4.28): affine stencils and their refusals; measured with v0.4.28
+        "gat_accum_out" => 0, "gat_alias" => 0, "gat_const_idx" => 0, "gat_diff1" => 0, "gat_inplace_seq" => 0, "gat_nonlinear" => 0, "gat_pingpong" => 0, "gat_reduce_scalar" => 0, "gat_reverse" => 0, "gat_rows" => 0, "gat_stride" => 0, "gat_sum_scalar" => 0, "gat_two_targets" => 0, "gat_wide" => 0,
         "if_top_two" => 0, "inplace_stencil_if" => 0, "nest_if" => 0, "nest_if_scalar" => 0, "retire_if" => 0, "retire_in_if" => 0, "retire_nested" => 0,
     )
 

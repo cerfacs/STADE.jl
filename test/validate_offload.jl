@@ -148,6 +148,9 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         # lin_*: in-place linear loops (v0.4.27 value-needed rule); the carried and ping-pong loops are order-dependent and must stay on the host
         "lin_pingpong" => 3, "lin_quotient" => 3, "lin_then_quad" => 3, "lin_quad_inside" => 3, "lin_guard_products" => 3,
         "lin_carried_sum" => 3, "lin_carried_scale" => 3,
+        # gat_*: affine stencil adjoints (v0.4.28 gather form). The rewrite leaves the host-loop counts unchanged, with it on or off: the gather loop is offloaded where the scatter loop was. Adjoint and HVP match.
+        "gat_accum_out" => 0, "gat_alias" => 0, "gat_const_idx" => 1, "gat_diff1" => 0, "gat_inplace_seq" => 3, "gat_nonlinear" => 0, "gat_pingpong" => 3,
+        "gat_reduce_scalar" => 3, "gat_reverse" => 0, "gat_rows" => 0, "gat_stride" => 0, "gat_sum_scalar" => 2, "gat_two_targets" => 0, "gat_wide" => 0,
         "so_tile" => 0, "so_hostread" => 4, "so_liveout" => 9, "so_carry" => 5, "so_inner" => 5,
         # correctness kernels for the rematerialized-restore guards and the branch-scalar rewrite; not offload targets
         "if_scalar_rewrite" => 0, "remat_shapes" => 20,

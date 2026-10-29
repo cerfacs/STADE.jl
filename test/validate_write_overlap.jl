@@ -206,12 +206,44 @@ function val_overlap_writes(expr, arr::Symbol, atomic_macros, out = Tuple{Bool,A
     return out
 end
 
-function val_overlap_backends()
+# `gather` = false keeps the scatter loops as they are, which is what the atomic-repair checks are about; `gather` = true is the default of stade_gpu
+function val_overlap_backends(; gather::Bool = false)
     cuda = STADE.cgen_backend_cuda()
-    return [("cuda", e -> STADE.stade_gpu(e, cuda; warp_atomics = false).kernels,
+    return [("cuda", e -> STADE.stade_gpu(e, cuda; warp_atomics = false, gather_stencil = gather).kernels,
              Any[cuda.atomic_macro]),
-            ("jacc", e -> STADE.stade_jacc(e).kernels,
+            ("jacc", e -> STADE.stade_jacc(e; gather_stencil = gather).kernels,
              Any[Expr(:., :Atomix, QuoteNode(Symbol("@atomic")))])]
+end
+
+# every access (read or write) of `arr` in `expr`, as the index expression; an atomic `+=` counts as an access too
+function val_overlap_accesses(expr, arr::Symbol, out = Any[])
+    if expr isa Expr
+        expr.head == :ref && length(expr.args) >= 2 && expr.args[1] === arr && push!(out, expr.args[2])
+        for a in expr.args
+            val_overlap_accesses(a, arr, out)
+        end
+    end
+    return out
+end
+
+# The property a gathered kernel must have instead of "every write is atomic": exactly one write to `arr`, plain, at the thread's own index (a
+# symbol `__gj_*`), and every other access of `arr` in the kernel at that same index (the read half of the update). Threads then own distinct
+# elements of `arr`, so no update is lost. Returns "" when it holds, otherwise the reason.
+function val_overlap_gathered_problem(kernels, arr::Symbol, atomic_macros)
+    nk = 0
+    for k in kernels
+        writes = val_overlap_writes(k, arr, atomic_macros)
+        isempty(writes) && continue
+        nk += 1
+        any(first, writes) && return "an atomic write: the loop was not gathered"
+        length(writes) == 1 || return "$(length(writes)) writes to `$arr` in one kernel"
+        w = writes[1]
+        idx = w[2].args[2]
+        (idx isa Symbol && startswith(string(idx), "__gj_")) || return "write at $(w[2]), not at the thread's own index"
+        all(i -> i === idx, val_overlap_accesses(k, arr)) || return "`$arr` is also accessed at another index in the kernel"
+    end
+    nk == 0 && return "no kernel writes `$arr`"
+    return ""
 end
 
 function validate_write_overlap()
@@ -294,6 +326,52 @@ function validate_write_overlap()
             else
                 println(rpad("$(name) [corpus/$(label)]", 38), " ok  ", length(writes), " atomic write(s)")
             end
+        end
+    end
+
+    # The same racy shapes and the two corpus witnesses with the gather rewrite on: no atomic is needed, and the property above must hold instead.
+    for (name, src, arr) in val_overlap_racy_cases()
+        expr = Meta.parse(src)
+        for (label, convert, _) in val_overlap_backends(gather = true)
+            checks += 1
+            problem = try val_overlap_gathered_problem(convert(expr), arr, atomic_macros) catch e; "conversion threw: $(e)" end
+            if problem == ""
+                println(rpad("$(name) [gathered/$(label)]", 38), " ok  one plain write at the thread's own index")
+            elseif startswith(problem, "an atomic write") || startswith(problem, "no kernel")
+                # a shape the rewrite does not take stays a scatter; it is covered by the atomic checks above
+                println(rpad("$(name) [gathered/$(label)]", 38), " ok  not gathered (", problem, ")")
+            else
+                println(rpad("$(name) [gathered/$(label)]", 38), " FAIL  ", problem)
+                bad += 1
+            end
+        end
+    end
+    for (name, arr) in (("stencil_loss", :ub), ("advection", :ub))
+        kernel = STADE.inl_inline_calls(STADE.io_read_kernel_corpus(joinpath(dir, name * ".jl")))[Symbol(name)]
+        gen = STADE.stade_adjoint(kernel; keep_push_pop = false, fuse_ii_loops = true)
+        for (label, convert, _) in val_overlap_backends(gather = true)
+            checks += 1
+            problem = val_overlap_gathered_problem(convert(gen.adjoint), arr, atomic_macros)
+            if problem == ""
+                println(rpad("$(name) [corpus-gathered/$(label)]", 38), " ok  one plain write at the thread's own index")
+            else
+                println(rpad("$(name) [corpus-gathered/$(label)]", 38), " FAIL  ", problem)
+                bad += 1
+            end
+        end
+    end
+
+    # Sabotage of the gathered check: three hand-written kernels that each break one clause must be reported.
+    for (label, body) in (("write off the thread index", :(a[i_x] = a[i_x] + s)),
+                          ("read at another index", :(begin; a[__gj_1] = a[__gj_1 + 1] + s; end)),
+                          ("two plain writes", :(begin; a[__gj_1] = a[__gj_1] + s; a[__gj_1] = a[__gj_1] + s; end)))
+        checks += 1
+        problem = val_overlap_gathered_problem(Any[Expr(:function, :(k(a, s)), Expr(:block, body))], :a, atomic_macros)
+        if problem == ""
+            println(rpad("sabotage [gathered: $(label)]", 38), " FAIL  not reported")
+            bad += 1
+        else
+            println(rpad("sabotage [gathered: $(label)]", 38), " ok  ", problem)
         end
     end
 

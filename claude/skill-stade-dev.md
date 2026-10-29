@@ -307,7 +307,7 @@ cancels, so it complements rather than replaces.
 ## GPU (`cgen_`/`jgen_`)
 
 `stade_gpu` ingests **already-generated** code; its only keywords are
-`precision`, `reduction_threshold`, `hoist_atomics` (all backends) and the CUDA-only `warp_atomics`,
+`precision`, `reduction_threshold`, `hoist_atomics`, `gather_stencil` (all backends) and the CUDA-only `warp_atomics`,
 `sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly). **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
@@ -405,6 +405,22 @@ measure two sizes. A site that used the warp helper keeps it on the shared
 copy: dropping it made a 3M-parameter MLP adjoint 2.6 times slower.
 `test/validate_shared_private.jl` sabotage-tests each qualification and each
 launch test; GPU parity uses `shared_private = 0` so the variant actually runs.
+
+The adjoint of an affine stencil scatters (`xb[i-1] += ..; xb[i+1] += ..`),
+which costs one atomic per term. `cgen_gather_stencil` rewrites such a loop into
+a **gather loop** (thread `j` owns `xb[j]` and sums the terms of iterations
+`j - c`, recomputed at the shifted index) plus a residual loop, so no atomic is
+left. It runs on the ingested adjoint before the other GPU passes and changes
+only loops it can prove: step ±1, assignments only, receiving arrays touched
+only by accumulations at `var + constant`, every other written array owned and
+replayed as a scalar, at most 8 offsets and 24 replayed statements. Read the
+mechanism before changing it: the receiving array must never be read in the
+loop (a replay would read a partial sum), a scalar read before it is defined
+carries a value between iterations, and a loop that is refused must come back
+unchanged. `test/validate_gather_stencil.jl` sabotage-tests each of these. A gathered
+kernel has no atomic, so `validate_write_overlap` checks the property instead (one plain
+write at the thread's own index, no other access of that array); its atomic-repair checks
+run with `gather_stencil = false`, which is the exact rollback.
 
 ## Self-check before returning STADE code
 

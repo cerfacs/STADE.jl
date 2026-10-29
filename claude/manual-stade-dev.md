@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, shared_private=true)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=true, shared_private=true)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2481,6 +2481,33 @@ assigns and is not the loop variable; every use of its array in the loop is such
 a site; it is not inside a nested `for`; and the loop has at most 16 sites. A
 flag set in the loop guards the flush, so a loop that runs zero times flushes
 nothing (an index can be 0 exactly then). The order of the float sum changes.
+
+**Gather form of affine stencil adjoints** (`gather_stencil`)
+All GPU backends (default on; `false` restores the v0.4.27 output exactly). The
+adjoint of `y[i] = f(x[i-1], x[i], x[i+1])` scatters: iteration `i` adds to
+`xb[i-1]`, `xb[i]` and `xb[i+1]`, so threads collide and every add is atomic.
+The rewrite, run on the ingested adjoint before any other GPU pass, turns such a
+`for` loop into two: a *gather* loop in which thread `j` owns `xb[j]` and sums the
+terms of the iterations `j - c` (one block per offset `c`, each guarded to the
+iteration range, each replaying the scalars its term needs at the shifted
+index), writing `xb[j]` once; and the *residual* loop with everything else,
+dropped when it only holds generated temporaries. A loop qualifies when
+its step is +1 or -1; its body is plain assignments (no branch, nested loop or
+stack operation); every index of a receiving array is the loop variable plus a
+constant; no scalar is read before it is defined in the iteration; the
+receiving arrays are only accumulated into and never read; every other array
+written is owned (touched only at the loop variable) and is kept in a scalar in
+the replay; there are at most 8 offsets and at most 24 replayed statements per
+offset. Loops that carry a value (a running scalar adjoint, an in-place sweep),
+stride-2 or mirrored indices, and loops that read the receiving array stay as
+they were. The sum is formed in another order, so the last bits differ.
+`test/validate_gather_stencil.jl` runs the rewritten code on the host against
+the original for n from 0 to 20, runs the adjoint and the HVP of the whole
+corpus through the finite-difference oracles with the rewrite applied, and
+sabotage-tests each guard and refusal. `test/validate_write_overlap.jl` checks the
+property a gathered kernel has in place of atomics: exactly one plain write to the
+receiving array, at the thread's own index, and no access at any other index; its
+checks of the atomic repair of a scatter run with `gather_stencil = false`.
 
 **Block-private accumulators** (`shared_private`)
 CUDA only (default on; `false` restores the old output exactly, an integer sets
