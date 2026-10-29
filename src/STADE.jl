@@ -2441,16 +2441,30 @@ function snap_plan(kernel, active_map; site_needed = nothing)
     return sites
 end
 
+# A numeric literal, or a +,-,*,/ tree of literals: a value with no variable in it.
+snap_const_expr(e) = e isa Number ||
+    (e isa Expr && e.head == :call && e.args[1] in (:+, :-, :*, :/) && all(snap_const_expr, e.args[2:end]))
+
+# Is this call linear in each of its operands with a partial that holds no variable? +,- always; a product with exactly one operand
+# that is not a literal (`0.25 * x`); a quotient with a literal denominator (`x / 4.0`). A partial that holds a variable, as in
+# `a * x` or `x * x`, needs that variable's value, so those calls are nonlinear here.
+function snap_linear_call(op, args)
+    (op == :+ || op == :-) && return true
+    op == :* && return count(a -> !snap_const_expr(a), args) == 1
+    op == :/ && return length(args) == 2 && snap_const_expr(args[2])
+    return false
+end
+
 # Does `var`'s VALUE (not just its syntactic presence) feed some local partial derivative reachable
 # from `expr`'s root? Top-down, mirroring ADTBRAnalyzer.collectZonesUsedByDiffRhs: `needed` starts
-# false and stays false through nested +/- (a constant partial never needs an operand's value), so a
-# copy or sum/difference chain marks nothing needed. Any other call is nonlinear: `needed` flips true
+# false and stays false through nested linear calls (snap_linear_call: a partial with no variable never needs an operand's value), so a
+# copy, a sum/difference chain or a literal scaling marks nothing needed. Any other call is nonlinear: `needed` flips true
 # and stays true for everything inside it.
 function snap_var_value_needed!(expr, acc, needed)
     if expr isa Expr && expr.head == :call
         op = expr.args[1]
         args = expr.args[2:end]
-        child_needed = (op == :+ || op == :-) ? needed : true
+        child_needed = snap_linear_call(op, args) ? needed : true
         for a in args
             snap_var_value_needed!(a, acc, child_needed)
         end
@@ -4021,11 +4035,21 @@ end
 # see snap_var_value_needed!'s comment -- identical logic, duplicated
 # here for the same purity-rule reason as every other agen_-prefixed
 # pair in this file.
+agen_const_expr(e) = e isa Number ||
+    (e isa Expr && e.head == :call && e.args[1] in (:+, :-, :*, :/) && all(agen_const_expr, e.args[2:end]))
+
+function agen_linear_call(op, args)
+    (op == :+ || op == :-) && return true
+    op == :* && return count(a -> !agen_const_expr(a), args) == 1
+    op == :/ && return length(args) == 2 && agen_const_expr(args[2])
+    return false
+end
+
 function agen_var_value_needed!(expr, acc, needed)
     if expr isa Expr && expr.head == :call
         op = expr.args[1]
         args = expr.args[2:end]
-        child_needed = (op == :+ || op == :-) ? needed : true
+        child_needed = agen_linear_call(op, args) ? needed : true
         for a in args
             agen_var_value_needed!(a, acc, child_needed)
         end
@@ -8131,8 +8155,9 @@ function cgen_last_assign_is_zero(body, v)
     return found
 end
 
+# A `while` has no bounds to prove an iteration from, so it never runs for certain.
 cgen_loop_runs_once(st) =
-    st.lo isa Number && st.hi isa Number && st.step isa Number &&
+    st.kind == :for && st.lo isa Number && st.hi isa Number && st.step isa Number &&
     (st.step > 0 ? st.hi >= st.lo : st.hi <= st.lo)
 
 function cgen_writes_var(body, v)
@@ -11427,15 +11452,16 @@ end
 function norm_first_touch(body, v)
     for st in body
         if st.kind == :assign
+            # any occurrence is a read here, linear or not: the primal executes it and sees the entry value
             reads = Set{Symbol}()
-            agen_var_value_needed!(st.rhs, reads, false)
+            agen_collect_expr_vars!(st.rhs, reads)
             if st.lhs isa Expr
                 for a in st.lhs.args[2:end]
-                    agen_var_value_needed!(a, reads, true)
+                    agen_collect_expr_vars!(a, reads)
                 end
             end
             v in reads && return :read
-            st.lhs isa Symbol && st.lhs == v && agen_count_var_refs(st.rhs, v) == 0 && return :write
+            st.lhs isa Symbol && st.lhs == v && return :write
         elseif st.kind == :for
             t = norm_first_touch(st.body, v)
             t === :read && return :read
@@ -11443,10 +11469,14 @@ function norm_first_touch(body, v)
                 (st.step > 0 ? st.hi >= st.lo : st.hi <= st.lo) && return :write
             end
         elseif st.kind == :while
-            t = norm_first_touch(st.body, v)
+            # the condition runs first and the body may not run at all
+            reads = Set{Symbol}()
+            agen_collect_expr_vars!(st.cond, reads)
+            v in reads && return :read
+            norm_first_touch(st.body, v) === :read && return :read
         elseif st.kind == :if
             reads = Set{Symbol}()
-            agen_var_value_needed!(st.cond, reads, true)
+            agen_collect_expr_vars!(st.cond, reads)
             v in reads && return :read
             tt = norm_first_touch(st.then, v)
             te = norm_first_touch(st.els, v)
@@ -12349,10 +12379,20 @@ end
 # canonical reduction write-back `out[i] = s` is linear in s and needs no restored primal, so it
 # must NOT count as an escape for a kind whose adjoint stays at the backward position -- counting
 # it would refuse every reduction loop there is. `out[i] = out[i] + s * s` does need it.
+ii_const_expr(e) = e isa Number ||
+    (e isa Expr && e.head == :call && e.args[1] in (:+, :-, :*, :/) && all(ii_const_expr, e.args[2:end]))
+
+function ii_linear_call(op, args)
+    (op == :+ || op == :-) && return true
+    op == :* && return count(a -> !ii_const_expr(a), args) == 1
+    op == :/ && return length(args) == 2 && ii_const_expr(args[2])
+    return false
+end
+
 function ii_value_reads(expr, vars, acc, needed)
     if expr isa Expr && expr.head == :call
         op = expr.args[1]
-        child = (op == :+ || op == :-) ? needed : true
+        child = ii_linear_call(op, expr.args[2:end]) ? needed : true
         for a in expr.args[2:end]
             ii_value_reads(a, vars, acc, child)
         end

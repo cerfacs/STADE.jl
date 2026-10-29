@@ -143,6 +143,11 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "hoist_bins" => 0, "hoist_nested" => 0, "hoist_sentinel" => 1,
         "idm_cse_acc" => 2, "ii_multiversion" => 0, "idm_src_consume" => 2, "idm_gather_rmw" => 6, "idm_overlap_plain" => 3,
         "idm_refuse_cond_read" => 3, "idm_refuse_scalar_read" => 3, "idm_refuse_consume_gap" => 3,
+        # idm_refuse_scalar_read_nl: the nonlinear twin of idm_refuse_scalar_read, kept so the scalar gate still has a witness once linear uses stopped saving the scalar
+        "idm_refuse_scalar_read_nl" => 3,
+        # lin_*: in-place linear loops (v0.4.27 value-needed rule); the carried and ping-pong loops are order-dependent and must stay on the host
+        "lin_pingpong" => 3, "lin_quotient" => 3, "lin_then_quad" => 3, "lin_quad_inside" => 3, "lin_guard_products" => 3,
+        "lin_carried_sum" => 3, "lin_carried_scale" => 3,
         "so_tile" => 0, "so_hostread" => 4, "so_liveout" => 9, "so_carry" => 5, "so_inner" => 5,
         # correctness kernels for the rematerialized-restore guards and the branch-scalar rewrite; not offload targets
         "if_scalar_rewrite" => 0, "remat_shapes" => 20,
@@ -157,7 +162,9 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "idm_gather_rmw" => [(:host, :rmw, :m)],
         "idm_cse_acc" => [(:host, :rmw, :mb)],
         "idm_overlap_plain" => [(:host, :overlap, :a)],
-        "idm_refuse_scalar_read" => [(:host, :scalar, nothing), (:host, :array, :vb)],
+        # a scalar used only linearly is no longer saved (v0.4.27), so this loop is now refused on the array alone; idm_refuse_scalar_read_nl pins the scalar gate
+        "idm_refuse_scalar_read" => [(:host, :array, :vb), (:host, :array, :v)],
+        "idm_refuse_scalar_read_nl" => [(:host, :scalar, nothing), (:host, :array, :v)],
         "idm_refuse_consume_gap" => [(:host, :scalar, nothing), (:host, :array, :u)],
         # so_*: the save-only scalar relaxation (cgen_saveonly_synth). so_tile offloads; each control breaks one of its four conditions
         "so_hostread" => [(:host, :scalar, nothing)],

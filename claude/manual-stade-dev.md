@@ -902,6 +902,18 @@ a write. A write counts only when it is guaranteed, which means both arms
 of an `if`, or a loop whose literal bounds prove at least one iteration.
 Anything weaker and the entry value can survive to a later read.
 
+A read here is **any occurrence** of the variable, linear or not. The
+question is whether the primal sees the entry value, not whether the
+adjoint needs it. `y[i] = s + 1.0` and `y[i] = 0.5 * s` both read `s`. A
+`while` proves no write, because its body may not run, and its condition
+and body are reads. Until v0.4.27 the test used the value-needed rule
+(`agen_var_value_needed!`), which skips linear reads. A carried scalar read
+through a sum before a branch that assigns it in both arms then got a
+reset at the top of the body, and the primal changed: the adjoint was wrong
+by a relative 0.8 in the corpus kernel `lin_carried_sum`, and by 0.3 in
+`while_carried_cond` for a `while` condition. Both kernels are in the
+corpus now, with sabotage cases in `test/validate_linear_scale.jl`.
+
 ## IV.8 `snap_*` — snapshot planning
 
 **Consumes** `kernel` and `active_map`. **Produces**
@@ -917,13 +929,34 @@ to-be-recorded. STADE implements the equivalent.
 ### The whole-variable layer
 
 `snap_var_value_needed!` walks an expression from the root, threading a
-`needed` flag. The flag starts false and stays false through nested `+`
-and `-`, because a constant partial derivative never needs its operand's
-value. Any other call is nonlinear, so `needed` flips true and stays true
-inside it.
+`needed` flag. The flag starts false and stays false through nested linear
+calls (`snap_linear_call`), because a partial derivative with no variable
+in it never needs its operand's value. A call is linear when it is `+` or
+`-`, a product with exactly one operand that is not a literal (`0.25 * x`,
+`2.0 * 3.0 * x`), or a quotient with a literal denominator (`x / 4.0`). Any
+other call is nonlinear, so `needed` flips true and stays true inside it.
 
-The consequence is worth internalizing. A copy or a sum needs nothing
-saved. A product, a power, or a `sin` needs its operands saved.
+The consequence is worth internalizing. A copy, a sum, or a scaling by a
+literal needs nothing saved. A product of two variables (`a * x`, `x * x`),
+a quotient by a variable, a power, or a `sin` needs its operands saved. A
+product with a scalar coefficient that is a variable stays nonlinear even
+when that coefficient is not differentiated. Using the activity map there
+would save more, and is not done.
+
+Before v0.4.27 only `+` and `-` were linear. A stencil written
+`u[i] + 0.25 * (u[i-1] - 2.0 * u[i] + u[i+1])` therefore marked `u` as
+needed, and an in-place time loop over it stored one snapshot per pass for
+nothing. The rule exists in three copies that must agree: `snap_linear_call`,
+`agen_linear_call` and `ii_linear_call`. `test/validate_linear_scale.jl`
+checks the three on the same expressions.
+
+A change to the value-needed rule can move a refusal pin. `idm_refuse_scalar_read`
+used `z[i] = s * 3.0`; once a linear use stopped saving `s`, the GPU stage no
+longer met the scalar gate and refused the loop on the array alone. The gate was
+not weakened, the control kernel stopped reaching it. `idm_refuse_scalar_read_nl`
+(`s * s`) keeps a witness, and `validate_offload.jl` pins both. When a pin
+breaks, read the report of the kernel before editing the pin, and add a twin
+that still reaches the gate.
 
 ### The site-level layer
 
@@ -2084,9 +2117,10 @@ arguments, treating the others as constants. `der_partials` returns the
 list for each operator.
 
 **Linear operation**
-An operation whose local partials are constants, so it never needs its
-operands' values saved. Addition and subtraction are the only ones STADE
-treats this way. Everything else is nonlinear for snapshot purposes.
+An operation whose local partials hold no variable, so it never needs its
+operands' values saved. STADE treats addition, subtraction, a product with
+exactly one non-literal operand, and a quotient with a literal denominator
+this way. Everything else is nonlinear for snapshot purposes.
 
 **Accumulation, pure accumulation**
 A write of the form `x = x + something`, where the left-hand side appears

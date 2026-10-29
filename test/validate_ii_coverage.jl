@@ -77,6 +77,10 @@ function validate_ii_coverage(dir::String = joinpath(@__DIR__, "val-corpus"))
         "asnap_nested" => 0, "asnap_nestedboth" => 0, "asnap_ok" => 0, "asnap_outside" => 0, "asnap_ragged" => 0, "asnap_readbefore" => 0,
         "asnap_readbetween" => 0, "asnap_selfnl" => 0, "asnap_slice" => 0, "asnap_twoarrays" => 0, "asnap_zerocover" => 0, "asnap_zerotrip" => 0,
         "early_stage_offset" => 0, "if_in_outer_loop" => 1, "if_scalar_then_if" => 0, "if_scalar_then_loop_if" => 0, "if_top_scalar" => 0,
+        # hoist_* (v0.4.25) and lin_* (v0.4.27) had no baseline; all are measured at 0 classified loops: the hoist kernels accumulate into shared bins, the lin_* loops carry or alias their arrays
+        "hoist_bins" => 0, "hoist_nested" => 0, "hoist_sentinel" => 0, "idm_refuse_scalar_read_nl" => 0,
+        "lin_pingpong" => 0, "lin_quotient" => 0, "lin_then_quad" => 0, "lin_quad_inside" => 0, "lin_guard_products" => 0,
+        "lin_carried_sum" => 0, "lin_carried_scale" => 0,
         "if_top_two" => 0, "inplace_stencil_if" => 0, "nest_if" => 0, "nest_if_scalar" => 0, "retire_if" => 0, "retire_in_if" => 0, "retire_nested" => 0,
     )
 

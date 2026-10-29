@@ -426,6 +426,18 @@ launch test; GPU parity uses `shared_private = 0` so the variant actually runs.
 - [ ] A GPU claim was measured for **both** `:adjoint` and `:hvp`, and the
       run changed a nonzero number of elements
 
+### Linearity and first touch
+
+The value-needed rule treats `+`, `-`, a product with exactly one
+non-literal operand, and a quotient with a literal denominator as linear.
+It lives in three copies, `snap_linear_call`, `agen_linear_call` and
+`ii_linear_call`, and they change together. A pass that asks whether the
+**primal** reads a value (`norm_first_touch`) must count every occurrence,
+never the value-needed rule: a linear read still sees the entry value, and a
+reset written over it changes the primal. A `while` proves no write.
+`cgen_loop_runs_once` is false for a `while`. `test/validate_linear_scale.jl`
+sabotage-tests each of these.
+
 ## Discipline
 
 1. Adversarial test kernels **before** implementing.
