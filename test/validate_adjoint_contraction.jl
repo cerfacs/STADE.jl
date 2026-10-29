@@ -58,6 +58,20 @@ function adj_hsrc(; pre = "gs = g[idx] / den[(h - 1) * tt + t]", loop = nothing,
     end"""
 end
 adj_hargs(sd; nh = 3, dh = 17, tt = 70, d = nh * dh) = (r = MersenneTwister(sd); Any[randn(r, tt * d + 8), randn(r, 3 * tt * d + 8), randn(r, nh * tt * tt + 8), randn(r, 3 * tt * d + 8), randn(r, nh * tt * tt + 8), rand(r, nh * tt) .+ 1.0, d, 3 * d, dh, tt])
+
+# the adjoint of a product in an HVP (v0.4.40): the value and the tangent of the seed (`gs`, `gd`) and the shadow arrays; a statement is one product or a sum of two
+tang_args(sd; kw...) = (a = adj_args(sd; kw...); r = MersenneTwister(sd + 50); L = length(a[2]); Any[a..., randn(r, length(a[1])), randn(r, L), randn(r, L), randn(r, L), randn(r, L)])
+const TANG_PARAMS = ", gg, wd, xd, xbd, wbd"
+const TANG_PRE = "gs = g[idx] * 2.0\n gd = gg[idx] * 3.0"
+const TANG_LOOP = """for c = 1:k
+                xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs
+                xbd[(t - 1) * k + c] = xbd[(t - 1) * k + c] + (gs * wd[(c - 1) * n + o] + w[(c - 1) * n + o] * gd)
+                wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + x[(t - 1) * k + c] * gs
+                wbd[(c - 1) * n + o] = wbd[(c - 1) * n + o] + (x[(t - 1) * k + c] * gd + gs * xd[(t - 1) * k + c])
+            end"""
+const TANG_ONE = """for c = 1:k
+                xbd[(t - 1) * k + c] = xbd[(t - 1) * k + c] + (gs * wd[(c - 1) * n + o] + w[(c - 1) * n + o] * gd)
+            end"""
 const ADJ_CASES = [
     ("two statements", adj_src(), :con_adj, adj_args, 2),
     ("first statement only", adj_src(loop = "for c = 1:k\n xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs\n end"), :con_adj, adj_args, 1),
@@ -172,10 +186,40 @@ const ADJ_CASES = [
     ("the seed is a parameter", adj_src(params = ", sg", loop = """for c = 1:k
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * sg
             end"""), :con_adj, sd -> adj_args(sd; extra = Any[0.5]), 0),
-    ("two seeds", adj_src(pre = "gs = g[idx] * 2.0\n gt = g[idx] * 3.0", loop = """for c = 1:k
+    # ---- a sum of two products and a second seed (v0.4.40) ----
+    ("tangent pair, four statements (one product and a sum of two, twice)", adj_src(params = TANG_PARAMS, pre = TANG_PRE, loop = TANG_LOOP), :con_adj, tang_args, 4),
+    ("tangent pair, a sum of two products alone", adj_src(params = TANG_PARAMS, pre = TANG_PRE, loop = TANG_ONE), :con_adj, tang_args, 1),
+    ("tangent pair, a descending loop and a bias after it", adj_src(params = TANG_PARAMS, pre = TANG_PRE, post = "bb[o] = bb[o] + gd", loop = replace(TANG_LOOP, "for c = 1:k" => "for c = k:-1:1")), :con_adj, tang_args, 4),
+    ("two seeds, one for each statement", adj_src(pre = "gs = g[idx] * 2.0\n gt = g[idx] * 3.0", loop = """for c = 1:k
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs
                 wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + x[(t - 1) * k + c] * gt
+            end"""), :con_adj, adj_args, 2),
+    ("a sum of two products with the same seed", adj_src(params = ", w2", loop = """for c = 1:k
+                xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + w2[(c - 1) * n + o] * gs)
+            end"""), :con_adj, sd -> (a = adj_args(sd); Any[a..., randn(MersenneTwister(51), length(a[3]))]), 1),
+    ("tangent pair, a recomputed forward value of one product", adj_src(params = TANG_PARAMS, pre = "s = 0.5\n for c = 1:k\n s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]\n end\n gs = tanh(s) * g[idx]\n gd = gg[idx] * 3.0", loop = TANG_LOOP), :con_adj, tang_args, 4),
+    ("batched, a sum of two products", adj_src(params = ", nb, gg, wd, xbd", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, pre = TANG_PRE, loop = """for c = 1:k
+                xbd[((h - 1) * m + t - 1) * k + c] = xbd[((h - 1) * m + t - 1) * k + c] + (gs * wd[((h - 1) * n + o - 1) * k + c] + w[((h - 1) * n + o - 1) * k + c] * gd)
+            end"""), :con_adj, sd -> (a = adj_bargs(sd); r = MersenneTwister(sd + 60); L = length(a[2]); Any[a[1:10]..., randn(r, length(a[1])), randn(r, L), randn(r, L)]), 1),
+    ("three seeds", adj_src(params = ", gg, hh, xbd, wbd, wd", pre = "gs = g[idx] * 2.0\n gt = gg[idx] * 3.0\n gu = hh[idx] * 4.0", loop = """for c = 1:k
+                xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs
+                wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + x[(t - 1) * k + c] * gt
+                xbd[(t - 1) * k + c] = xbd[(t - 1) * k + c] + w[(c - 1) * n + o] * gu
+            end"""), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(52); L = length(a[2]); Any[a..., randn(r, length(a[1])), randn(r, length(a[1])), randn(r, L), randn(r, L), randn(r, L)]), 0),
+    ("a sum of three products", adj_src(params = ", w2, w3", loop = """for c = 1:k
+                xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + w2[(c - 1) * n + o] * gs + w3[(c - 1) * n + o] * gs)
+            end"""), :con_adj, sd -> (a = adj_args(sd); Any[a..., randn(MersenneTwister(53), length(a[3])), randn(MersenneTwister(54), length(a[3]))]), 0),
+    ("a sum whose second term is not a product", adj_src(loop = """for c = 1:k
+                xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + gs)
             end"""), :con_adj, adj_args, 0),
+    ("a sum whose second term reads the row where the first reads the column", adj_src(loop = """for c = 1:k
+                xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + x[(t - 1) * k + c] * gs)
+            end"""), :con_adj, adj_args, 0),
+    ("a sum whose second operand is stored", adj_src(params = TANG_PARAMS, pre = TANG_PRE, post = "w[o] = gs", loop = TANG_ONE), :con_adj, tang_args, 0),
+    ("a sum whose second seed is a parameter", adj_src(params = ", gd, wd, xbd", pre = "gs = g[idx] * 2.0", loop = TANG_ONE), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(55); L = length(a[2]); Any[a..., 0.5, randn(r, L), randn(r, L)]), 0),
+    ("a sum whose second operand is also a target", adj_src(params = ", gg, wd, xbd", pre = TANG_PRE, loop = """for c = 1:k
+                xbd[(t - 1) * k + c] = xbd[(t - 1) * k + c] + (gs * wd[(c - 1) * n + o] + xbd[(c - 1) * n + o] * gd)
+            end"""), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(56); L = length(a[2]); Any[a..., randn(r, length(a[1])), randn(r, L), randn(r, L)]), 0),
     ("a temporary is read after the loop", adj_src(pre = "gs = g[idx] * 2.0\n a1 = 0.0", post = "bb[o] = bb[o] + a1", loop = """for c = 1:k
                 a1 = x[(t - 1) * k + c]
                 wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + a1 * gs
@@ -222,6 +266,9 @@ adj_kernel(pre, loop, post; first = "idx = 1 + (__tid - 1)", guard = "div(m * n 
     return nothing
 end""")
 const ADJ_LOOP = "for c = 1:k\n        CUDA.@atomic xb[(t - 1) * k + c] += w[(c - 1) * n + o] * gs\n        CUDA.@atomic wb[(c - 1) * n + o] += x[(t - 1) * k + c] * gs\n    end"
+const ADJ2_PRE = "gs = g[idx] * 2.0\n    gd = gg[idx] * 3.0"
+const ADJ2_PARAMS = ", gg, wd, xbd"
+const ADJ2_LOOP = "for c = 1:k\n        CUDA.@atomic xbd[(t - 1) * k + c] += gs * wd[(c - 1) * n + o] + w[(c - 1) * n + o] * gd\n    end"
 const ADJ_DIRECT = [
     ("control", "gs = g[idx] * 2.0", ADJ_LOOP, "bb[o] = gs", true),
     ("a plain store into an operand array after the loop", "gs = g[idx] * 2.0", ADJ_LOOP, "x[idx] = gs", false),
@@ -234,6 +281,13 @@ const ADJ_DIRECT = [
     ("an operand is also a target", "gs = g[idx] * 2.0", "for c = 1:k\n        CUDA.@atomic xb[(t - 1) * k + c] += xb[(c - 1) * n + o] * gs\n    end", "bb[o] = gs", false),
     ("a temporary has a parameter's name", "gs = g[idx] * 2.0", "for c = 1:k\n        CUDA.@atomic wb[(c - 1) * n + o + q] += x[(t - 1) * k + c] * gs\n        q = 0\n    end", "bb[o] = gs", false, ", q"),
     ("a temporary is read after the loop", "gs = g[idx] * 2.0\n    a1 = 0.0", "for c = 1:k\n        a1 = x[(t - 1) * k + c]\n        CUDA.@atomic wb[(c - 1) * n + o] += a1 * gs\n    end", "bb[o] = a1", false),
+    # v0.4.40: a sum of two products and a second seed. STADE's own passes keep a kernel that stores one of these operands off the recognizer, so the guards are tested on text.
+    ("the target index does not read the loop variable", "gs = g[idx] * 2.0", "for c = 1:k\n        CUDA.@atomic xb[t] += w[(c - 1) * n + o] * gs\n    end", "bb[o] = gs", false),
+    ("two terms, control", ADJ2_PRE, ADJ2_LOOP, "bb[o] = gs", true, ADJ2_PARAMS),
+    ("two terms, the second operand is stored", ADJ2_PRE, ADJ2_LOOP, "w[idx] = gs", false, ADJ2_PARAMS),
+    ("two terms, the first operand is stored", ADJ2_PRE, ADJ2_LOOP, "wd[idx] = gs", false, ADJ2_PARAMS),
+    ("two terms, the second operand is also a target", ADJ2_PRE, "for c = 1:k\n        CUDA.@atomic xbd[(t - 1) * k + c] += gs * wd[(c - 1) * n + o] + xbd[(c - 1) * n + o] * gd\n    end", "bb[o] = gs", false, ADJ2_PARAMS),
+    ("two terms, the second seed is not assigned before the loop", "gs = g[idx] * 2.0", ADJ2_LOOP, "bb[o] = gs", false, ADJ2_PARAMS),
 ]
 function adj_direct_checks()
     bad = 0
@@ -285,7 +339,7 @@ end
 adj_is_twin(n) = occursin(r"_t\d+!$", n)
 adj_is_stage(n) = endswith(n, "_f_t!")
 # the cases whose forward loop becomes a tiled kernel of its own
-const ADJ_STAGE = Set(["a recomputed forward value, a repeated decode and temporaries", "a recomputed forward value, subtracted, factors swapped", "two recomputed forward loops, the first is staged", "batched, a recomputed forward value and a repeated decode", "head in the column, a recomputed forward value and a repeated decode"])
+const ADJ_STAGE = Set(["a recomputed forward value, a repeated decode and temporaries", "tangent pair, a recomputed forward value of one product", "a recomputed forward value, subtracted, factors swapped", "two recomputed forward loops, the first is staged", "batched, a recomputed forward value and a repeated decode", "head in the column, a recomputed forward value and a repeated decode"])
 function adj_unit_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
@@ -316,6 +370,17 @@ function adj_unit_checks()
         end
     end
     bad += adj_direct_checks()
+    # the tile memory of a twin: one term 2064 values (16512 bytes), two terms 4128 values (33024 bytes), in the kernel and in the launch
+    try
+        name, src, entry, mk, _ = first(c for c in ADJ_CASES if startswith(c[1], "tangent pair, four statements"))
+        r = con_run(src, entry, mk(1), 1)
+        ks(sfx) = STADE.io_expr_to_source(first(k for k in r.plan.kernels if endswith(string(k.args[1].args[1]), sfx)))
+        hs = STADE.io_expr_to_source(r.plan.host)
+        check(occursin("CuDynamicSharedArray(Float64, 2064)", ks("_t1!")) && occursin("CuDynamicSharedArray(Float64, 2064)", ks("_t3!")) && occursin("CuDynamicSharedArray(Float64, 4128)", ks("_t2!")) && occursin("CuDynamicSharedArray(Float64, 4128)", ks("_t4!")), "$name: the tile memory is 2064 values for one term and 4128 for two")
+        check(count("shmem = 16512", hs) >= 2 && count("shmem = 33024", hs) >= 2, "$name: the launches ask for 16512 and 33024 bytes")
+    catch e
+        check(false, "tile memory: error " * first(split(sprint(showerror, e), "\n")))
+    end
     # thresholds. The product of 67 x 70 outputs is 2 tiles for each of the two twins. The input gradient has the layout "nt" (it wants cld(contraction, 32) tiles) and the
     # weight gradient "tn" (cld(contraction, 4)). The group runs if every twin can, at least one wants, and every twin has a quarter of the tiles it would want.
     # The weight gradient needs cld(cld(64 * contraction, 256), 4) of its 2 tiles: that holds up to 32 and fails at 33, where the group takes the plain kernel.
@@ -416,19 +481,24 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the loop variable may be the batch", "(cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing", "(cv in params || cv in (ov, tv, idxv)) && return nothing"),
             ("a temporary may have a parameter's name", "            tn in params && return nothing\n", ""),
             ("a temporary may be read outside the loop", "            cgen_count_symbol(outside, tn) == 0 || return nothing\n", ""),
-            ("a value that is not a product is accepted", "        (v isa Expr && v.head === :call && v.args[1] === :* && length(v.args) == 3) || return nothing\n        a, b = v.args[2], v.args[3]", "        a, b = (v isa Expr && v.head === :call && length(v.args) == 3) ? (v.args[2], v.args[3]) : (v, v)"),
-            ("two seeds are accepted", "        g === nothing || g === gs || return nothing\n", ""),
-            ("the seed may be the loop variable", "    g === cv && return nothing\n", ""),
-            ("the seed may be a parameter", "    any(st -> cgen_split_is_scalar(st) && st.args[1] === g, pre_rest) || return nothing\n", ""),
-            ("an operand that is stored is accepted", "(s.F.arr in stored || s.F.arr in targets) && return nothing", "(s.F.arr in targets) && return nothing"),
-            ("an operand that is a target is accepted", "(s.F.arr in stored || s.F.arr in targets) && return nothing", "(s.F.arr in stored) && return nothing"),
+            ("a value that is not a product is accepted", "        (v isa Expr && v.head === :call && v.args[1] === :* && length(v.args) == 3) || return nothing\n        a, b = v.args[2], v.args[3]", "        (v isa Expr && v.head === :call && length(v.args) == 3) || return nothing\n        a, b = v.args[2], v.args[3]"),
+            ("a sum of three seeds is accepted", "    length(gs_list) <= 2 || return nothing\n", ""),
+            ("a sum of more than two products is accepted", "v.args[1] === :+ && length(v.args) == 3 && product(v.args[2]) !== nothing && product(v.args[3]) !== nothing ?", "v.args[1] === :+ && product(v.args[2]) !== nothing ?"),
+            ("a second seed may be a parameter or a loop-local value", "    for g in gs_list\n        g === cv", "    for g in gs_list[1:1]\n        g === cv"),
+            ("the seed may be the loop variable", "        g === cv && return nothing\n", ""),
+            ("the seed may be a parameter", "        any(st -> cgen_split_is_scalar(st) && st.args[1] === g, pre_rest) || return nothing\n", ""),
+            ("an operand that is stored is accepted", "(tm.F.arr in stored || tm.F.arr in targets) && return nothing", "(tm.F.arr in targets) && return nothing"),
+            ("the operands of the second term are not checked", "        for tm in s.terms\n            (tm.F.arr in stored", "        for tm in s.terms[1:1]\n            (tm.F.arr in stored"),
+            ("an operand that is a target is accepted", "(tm.F.arr in stored || tm.F.arr in targets) && return nothing", "(tm.F.arr in stored) && return nothing"),
             ("a target that is read elsewhere is accepted", "        cgen_count_symbol(others, s.site.arr) == 0 || return nothing\n", ""),
-            ("the index roles are not checked", "if issubset(vi, union(params, Set([cu, cv]), bat)) && issubset(vw, union(params, Set([cvv, cv]), bat)) && cu in vi && cvv in vw && cv in vi && cv in vw", "if true"),
-            ("the target index may ignore the loop variable", " && cu in vi && cvv in vw && cv in vi && cv in vw", " && cu in vi && cvv in vw"),
+            ("the index roles are not checked", "            if issubset(vi, union(params, Set([cu, cv]), bat)) && cu in vi && cv in vi &&\n", "            if true || cu in vi && cv in vi &&\n"),
+            ("the index roles of the second term are not checked", "all(tm -> (vw = cgen_split_vars(tm.F.idx); ", "all(tm -> (vw = cgen_split_vars(s.terms[1].F.idx); "),
+            ("the target index may ignore the loop variable", "cu in vi && cv in vi &&\n", "cu in vi &&\n"),
+            ("the operand index may ignore the loop variable", "&& cvv in vw && cv in vw), s.terms)", "&& cvv in vw), s.terms)"),
             ("the whole-rows test is dropped", "                              Expr(:call, :(==), Expr(:call, :mod, X, hv === nothing ? N : Expr(:call, :*, N, M)), 0), target = site.arr))", "                              true, target = site.arr))"),
             ("the seed of a batched product ignores the batch", "Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, hv, 1), M), Expr(:call, :-, tv, 1)), N), ov)", "Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, 0, M), Expr(:call, :-, tv, 1)), N), ov)"),
             ("a batched twin ignores the batch of the target", "bat = hv !== nothing ? Set{Symbol}([hv]) : (derived ? Set{Symbol}([dbat.var]) : Set{Symbol}())\n    trip = ", "bat = Set{Symbol}()\n    trip = "),
-            ("a head is used when no statement reads it", "derived = dbat !== nothing && hv === nothing && any(s -> dbat.var in cgen_split_vars(s.site.idx) || dbat.var in cgen_split_vars(s.F.idx), sts)", "derived = dbat !== nothing && hv === nothing"),
+            ("a head is used when no statement reads it", "derived = dbat !== nothing && hv === nothing && any(s -> dbat.var in cgen_split_vars(s.site.idx) || any(tm -> dbat.var in cgen_split_vars(tm.F.idx), s.terms), sts)", "derived = dbat !== nothing && hv === nothing"),
             ("the head is not assigned once", "        count(st -> st isa Expr && st.head === :(=) && st.args[1] === dbat.var, leaves(Any[pre_rest..., post...])) == dbat.n || return nothing\n", ""),
             ("the head may be the loop variable", "(dbat.var === cv || dbat.var in params) && return nothing", "false && return nothing"),
             ("a head product keeps the full width for its rows and inner length", "derived && (u === ov ? (rows = dbat.dh) : (kdim = dbat.dh))", "nothing"),
@@ -441,8 +511,17 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("a head-derived product has the thresholds of a plain batch", "headcol = derived, dhexpr = derived ? dbat.dh : nothing,", "headcol = false, dhexpr = nothing,"),
             ("the head is not set in the tile", "batchvar = derived ? dbat.var : hv,", "batchvar = hv,"),
             ("the scratch array is too small", "Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, A.a.count)", "Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, 1)"),
-            ("the seed is stored before it is computed", "body = Any[parts.head, parts.guard, pre_a..., store, post..., emit_return_nothing()]", "body = Any[parts.head, parts.guard, store, pre_a..., post..., emit_return_nothing()]"),
-            ("the probe of the register limit is not built", "probe = Expr(:call, t.name, plain.args[2:end]..., d.target)", "probe = Expr(:call, t.name, plain.args[2:end]..., :__ct_g)"),
+            ("the seed is stored before it is computed", "body = Any[parts.head, parts.guard, pre_a..., stores..., post..., emit_return_nothing()]", "body = Any[parts.head, parts.guard, stores..., pre_a..., post..., emit_return_nothing()]"),
+            ("the second seed is not stored", "stores = Any[Expr(:(=), Expr(:ref, scratch_of(gg), idxv), gg) for gg in gs_list]", "stores = Any[Expr(:(=), Expr(:ref, scratch_of(gg), idxv), gg) for gg in gs_list[1:1]]"),
+            ("the second scratch array is not allocated", "body = Any[Expr(:(=), sc, zeros_expr) for sc in A.a.scratch]", "body = Any[Expr(:(=), sc, zeros_expr) for sc in A.a.scratch[1:1]]"),
+            ("the first kernel does not take the second scratch array", "Symbol[scratch_of(gg) for gg in gs_list]..., (fstage === nothing", "Symbol[:__ct_g]..., (fstage === nothing"),
+            ("a twin does not take the second scratch array", "fargs = Symbol[fargs..., unique(Symbol[scratch_of(tm.gs) for tm in s.terms])...],", "fargs = Symbol[fargs..., :__ct_g],"),
+            ("the second term is not loaded", "    for (q0, tm) in enumerate(tlist)\n", "    for (q0, tm) in enumerate(tlist[1:1])\n"),
+            ("the products of the second term are not added", "foldl(cadd, prods)", "prods[1]"),
+            ("the second term shares the tile of the first", "offq(e, q0) = q0 == 0 ? e : cadd(q0 * TS, e)", "offq(e, q0) = e"),
+            ("the tile memory is sized for one term", "call(:CuDynamicSharedArray, :Float64, nt * TS)", "call(:CuDynamicSharedArray, :Float64, TS)"),
+            ("the launch asks for the memory of one term", "shmem = 8 * nt * TS)", "shmem = 8 * TS)"),
+            ("the probe of the register limit is not built", "probe = Expr(:call, t.name, plain.args[2:end]..., (d.target for _ in d.scratch)...)", "probe = Expr(:call, t.name, plain.args[2:end]..., (:__ct_g for _ in d.scratch)...)"),
             ("the stage store goes to the wrong element", "Expr(:(=), Expr(:ref, :__cf_s, idxv), acf[1])", "Expr(:(=), Expr(:ref, :__cf_s, 1), acf[1])"),
             ("the stage is read from the wrong element", "pre_a[fstage.at] = Expr(:(=), fstage.acc, Expr(:ref, :__cf_s, idxv))", "pre_a[fstage.at] = Expr(:(=), fstage.acc, Expr(:ref, :__cf_s, 1))"),
             ("the stage replaces the wrong statement", "(desc = d0, acc = acf[1], at = fi + 1)", "(desc = d0, acc = acf[1], at = fi)"),

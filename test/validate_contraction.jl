@@ -830,7 +830,7 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the count of tiles does not scale with contraction", "    return cld(base * cmin, 256)", "    return base"),
             ("two summands that move with the inner index count as one", "        return n == 1 && any(a -> cgen_contraction_unit(a, v), ex.args[2:end])", "        return any(a -> cgen_contraction_unit(a, v), ex.args[2:end])"),
             ("a difference that subtracts the inner index counts as moving by 1", "        return cgen_contraction_unit(ex.args[2], v) && !has(ex.args[3])", "        return cgen_contraction_unit(ex.args[2], v)"),
-            ("the launch asks for too little shared memory", "shmem = 8 * ((TM + 1) * TK + TM * TK))", "shmem = 8 * ((TM + 1) * TK + TM * TK) - 8)"),
+            ("the launch asks for too little shared memory", "shmem = 8 * nt * TS)", "shmem = 8 * nt * TS - 8)"),
             ("a batched twin ignores the row threshold", ": call(:>=, d.Mh, cmin)\n", ": call(:>, d.Mh, 0)\n"),
             ("a head-derived twin needs the rows to reach the threshold, not the columns", "Expr(:||, call(:>=, d.Mh, cmin), call(:>=, d.Nh, cmin))", "call(:>=, d.Mh, cmin)"),
             ("a head-derived twin needs both the rows and the columns", "Expr(:||, call(:>=, d.Mh, cmin), call(:>=, d.Nh, cmin))", "Expr(:&&, call(:>=, d.Mh, cmin), call(:>=, d.Nh, cmin))"),
