@@ -10828,12 +10828,15 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     push!(body, asg(:__ct_ty, call(:-, ex(:., call(:threadIdx), QuoteNode(:y)), 1)))
     push!(body, asg(:__ct_r0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:y)), 1), TM)))
     push!(body, asg(:__ct_c0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:x)), 1), TM)))
+    bv = get(d, :batchvar, nothing)
+    bv === nothing || push!(body, asg(:__ct_bz, call(:-, ex(:., call(:blockIdx), QuoteNode(:z)), 1)))
     append!(body, d.prelude)
     push!(body, asg(sh, call(:CuDynamicSharedArray, :Float64, (TM + 1) * TK + TM * TK)))
     push!(body, asg(:__ct_tl, cadd(cmul(:__ct_ty, 16), :__ct_tx)))
     for sym in d.decls
         push!(body, asg(sym, 0))
     end
+    bv === nothing || push!(body, asg(bv, cadd(:__ct_bz, 1)))
     for i in 0:RT-1, j in 0:RT-1
         push!(body, asg(acc_ij(i, j), 0.0))
     end
@@ -10886,11 +10889,55 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     end
     push!(body, emit_return_nothing())
     kd = Expr(:function, Expr(:call, d.name, d.fargs...), Expr(:block, body...))
-    cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, cmin), call(:>=, d.Mh, cmin)), call(:>=, d.Kh, cmin)), call(:>, d.Nh, 0))
+    if bv === nothing
+        cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, cmin), call(:>=, d.Mh, cmin)), call(:>=, d.Kh, cmin)), call(:>, d.Nh, 0))
+    else
+        # a product batched over heads has short sides: the rows must reach `cmin`, the columns and the inner length only one step of the tile
+        cond = Expr(:&&, Expr(:&&, Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, min(cmin, 8)), call(:>=, d.Mh, cmin)), call(:>=, d.Kh, min(cmin, 8))), call(:>, d.Nh, 0)), call(:>, d.Bh, 0)), call(:<=, d.Bh, 65535))
+    end
     d.extra === nothing || (cond = Expr(:&&, cond, d.extra))
     bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM)
     by = call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM)
-    return (kdef = kd, name = d.name, cond = cond, bx = bx, by = by, shmem = 8 * ((TM + 1) * TK + TM * TK))
+    return (kdef = kd, name = d.name, cond = cond, bx = bx, by = by, bz = bv === nothing ? nothing : d.Bh, shmem = 8 * ((TM + 1) * TK + TM * TK))
+end
+
+# The decode of the flat index in a kernel with one thread per element. `X` is `idx - 1` or a variable that holds it. The column is `mod(X, N) + 1`. Without a batch the
+# row is `div(X, N) + 1`. With a batch the row is `mod(div(X, N), M) + 1` and the batch is `div(X, N * M) + 1` (the form that a nest of three independent loops flattens to).
+# Every size is an expression of kernel parameters. A decode may be repeated (a recomputed forward value has its own); every repeat names the same variable and the same size.
+# Returns (col, row, batch, N, M, n_col, n_row, n_batch) with the number of decodes of each, or nothing.
+function cgen_contraction_decode(stmts, idxv, params, holds)
+    isX(e) = e == Expr(:call, :-, idxv, 1) || (e isa Symbol && e in holds)
+    cols = Any[]; divs = Any[]; rowmods = Any[]
+    for st in stmts
+        (st isa Expr && st.head === :(=) && st.args[1] isa Symbol) || continue
+        r = st.args[2]
+        (r isa Expr && r.head === :call && r.args[1] === :+ && length(r.args) == 3 && r.args[3] == 1 && r.args[2] isa Expr && r.args[2].head === :call && length(r.args[2].args) == 3) || continue
+        f, a1, a2 = r.args[2].args
+        if f in (:mod, :div) && isX(a1)
+            issubset(cgen_split_vars(a2), params) || return nothing
+            push!(f === :mod ? cols : divs, (st.args[1], a2))
+        elseif f === :mod && a1 isa Expr && a1.head === :call && a1.args[1] === :div && length(a1.args) == 3 && isX(a1.args[2])
+            issubset(cgen_split_vars(a2), params) && issubset(cgen_split_vars(a1.args[3]), params) || return nothing
+            push!(rowmods, (st.args[1], a1.args[3], a2))
+        end
+    end
+    isempty(cols) && return nothing
+    ov, N = cols[1]
+    all(c -> c[1] === ov && c[2] == N, cols) || return nothing
+    if isempty(rowmods)
+        isempty(divs) && return nothing
+        tv = divs[1][1]
+        all(d -> d[1] === tv && d[2] == N, divs) || return nothing
+        return (col = ov, row = tv, batch = nothing, N = N, M = nothing, n_col = length(cols), n_row = length(divs), n_batch = 0)
+    end
+    tv, N2, M = rowmods[1]
+    N2 == N || return nothing
+    all(m -> m[1] === tv && m[2] == N && m[3] == M, rowmods) || return nothing
+    isempty(divs) && return nothing
+    hv = divs[1][1]
+    all(d -> d[1] === hv && (d[2] == Expr(:call, :*, N, M) || d[2] == Expr(:call, :*, M, N)), divs) || return nothing
+    (hv === ov || hv === tv || tv === ov) && return nothing
+    return (col = ov, row = tv, batch = hv, N = N, M = M, n_col = length(cols), n_row = length(rowmods), n_batch = length(divs))
 end
 
 # the names a kernel may not use: the twin's own variables all start with __ct_, and with `scratch` the scratch array of a recomputed forward product starts with __cf_
@@ -10924,27 +10971,12 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     for st in pre_rest
         st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])
     end
-    ov = tv = nothing; N = nothing
-    for st in pre_rest
-        r = st.args[2]
-        if r isa Expr && r.head === :call && r.args[1] === :+ && length(r.args) == 3 && r.args[3] == 1 && r.args[2] isa Expr && r.args[2].head === :call && length(r.args[2].args) == 3 &&
-           r.args[2].args[1] in (:mod, :div) && (r.args[2].args[2] == Expr(:call, :-, idxv, 1) || r.args[2].args[2] in holds)
-            nn = r.args[2].args[3]
-            issubset(cgen_split_vars(nn), params) || return nothing
-            N === nothing || N == nn || return nothing
-            N = nn
-            if r.args[2].args[1] === :mod
-                ov === nothing || return nothing
-                ov = st.args[1]
-            else
-                tv === nothing || return nothing
-                tv = st.args[1]
-            end
-        end
-    end
-    (ov !== nothing && tv !== nothing) || return nothing
-    # the column and the row are assigned once: a later change of either would make the tiles read other elements than the plain kernel
-    for v in (ov, tv)
+    dec = cgen_contraction_decode(pre_rest, idxv, params, holds)
+    dec === nothing && return nothing
+    ov, tv, hv, N, M = dec.col, dec.row, dec.batch, dec.N, dec.M
+    (dec.n_col == 1 && dec.n_row == 1 && dec.n_batch == (hv === nothing ? 0 : 1)) || return nothing
+    # the column, the row and the batch are assigned once: a later change of any would make the tiles read other elements than the plain kernel
+    for v in (hv === nothing ? (ov, tv) : (ov, tv, hv))
         count(st -> st isa Expr && st.head === :(=) && st.args[1] === v, Any[pre_rest..., post...]) == 1 || return nothing
     end
     # the loop
@@ -10964,7 +10996,8 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     # operands: A depends on (t, c) only, B on (o, c) only
     function classify(fa, fb)
         va = cgen_split_vars(fa.idx); vb = cgen_split_vars(fb.idx)
-        issubset(va, union(params, Set([tv, cv]))) && issubset(vb, union(params, Set([ov, cv]))) || return nothing
+        bat = hv === nothing ? Set{Symbol}() : Set{Symbol}([hv])
+        issubset(va, union(params, Set([tv, cv]), bat)) && issubset(vb, union(params, Set([ov, cv]), bat)) || return nothing
         (tv in va && ov in vb) || return nothing
         return (fa, fb)
     end
@@ -10983,9 +11016,12 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     end
     any(cv in cgen_split_vars(st) for st in pre_rest) && return nothing
     K = lp.lo == 1 ? lp.hi : Expr(:call, :+, Expr(:call, :-, lp.hi, lp.lo), 1)
-    Mh = Expr(:call, :div, n_iter, N)
+    Mh = hv === nothing ? Expr(:call, :div, n_iter, N) : M
+    Bh = hv === nothing ? nothing : Expr(:call, :div, n_iter, Expr(:call, :*, N, M))
+    flat(row, col) = hv === nothing ? Expr(:call, :+, Expr(:call, :+, Expr(:call, :*, row, :__ct_N), col), 1) :
+                     Expr(:call, :+, Expr(:call, :+, Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, :__ct_bz, :__ct_M), row), :__ct_N), col), 1)
     epilogue(row, col, a) = begin
-        out = Any[Expr(:(=), idxv, Expr(:call, :+, Expr(:call, :+, Expr(:call, :*, row, :__ct_N), col), 1))]
+        out = Any[Expr(:(=), idxv, flat(row, col))]
         append!(out, pre_rest)
         push!(out, Expr(:(=), acc, Expr(:call, op, acc, a)))
         append!(out, post)
@@ -10993,9 +11029,10 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     end
     # the rows are whole: a loop of 7 elements over rows of 3 has a partial last row that the tiles would not compute
     return (name = cgen_contraction_name(parts.sig.args[1]), fargs = fargs,
-            prelude = Any[Expr(:(=), :__ct_N, N), Expr(:(=), :__ct_M, Expr(:call, :div, n_iter, :__ct_N)), Expr(:(=), :__ct_K, K), Expr(:(=), :__ct_lo, lp.lo)],
-            rowvar = tv, colvar = ov, kvar = cv, rowbase = 1, colbase = 1, kbase = :__ct_lo, decls = (ov, tv, cv), A = fa, B = fb, epilogue = epilogue,
-            Mh = Mh, Nh = N, Kh = K, extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0))
+            prelude = Any[Expr(:(=), :__ct_N, N), Expr(:(=), :__ct_M, hv === nothing ? Expr(:call, :div, n_iter, :__ct_N) : M), Expr(:(=), :__ct_K, K), Expr(:(=), :__ct_lo, lp.lo)],
+            rowvar = tv, colvar = ov, kvar = cv, rowbase = 1, colbase = 1, kbase = :__ct_lo, decls = hv === nothing ? (ov, tv, cv) : (ov, tv, cv, hv), A = fa, B = fb, epilogue = epilogue,
+            Mh = Mh, Nh = N, Kh = K, batchvar = hv, Bh = Bh,
+            extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, hv === nothing ? N : Expr(:call, :*, N, M)), 0))
 end
 
 # ---- the adjoint of a product ----------------------------------------------------------------------------------------------------------------------
@@ -11048,34 +11085,20 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
     for st in pre_rest
         cgen_split_is_scalar(st) && st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])
     end
-    ov = tv = nothing; N = nothing; ndec_o = 0; ndec_t = 0
-    for st in pre_rest
-        cgen_split_is_scalar(st) || continue
-        r = st.args[2]
-        if r isa Expr && r.head === :call && r.args[1] === :+ && length(r.args) == 3 && r.args[3] == 1 && r.args[2] isa Expr && r.args[2].head === :call && length(r.args[2].args) == 3 &&
-           r.args[2].args[1] in (:mod, :div) && (r.args[2].args[2] == Expr(:call, :-, idxv, 1) || r.args[2].args[2] in holds)
-            nn = r.args[2].args[3]
-            issubset(cgen_split_vars(nn), params) || return nothing
-            N === nothing || N == nn || return nothing
-            N = nn
-            # the decode may be repeated (a recomputed forward value has its own); the counts below prove every repeat names the same variable
-            if r.args[2].args[1] === :mod
-                ov = st.args[1]; ndec_o += 1
-            else
-                tv = st.args[1]; ndec_t += 1
-            end
-        end
+    dec = cgen_contraction_decode(Any[st for st in pre_rest if cgen_split_is_scalar(st)], idxv, params, holds)
+    dec === nothing && return nothing
+    ov, tv, hv, N, M = dec.col, dec.row, dec.batch, dec.N, dec.M
+    # every assignment of the column, of the row and of the batch is one of these decodes
+    for (v, nd) in ((ov, dec.n_col), (tv, dec.n_row), (hv, dec.n_batch))
+        v === nothing && continue
+        count(st -> st isa Expr && st.head === :(=) && st.args[1] === v, leaves(Any[pre_rest..., post...])) == nd || return nothing
     end
-    (ov !== nothing && tv !== nothing) || return nothing
-    # every assignment of the column and of the row is one of these decodes
-    count(st -> st isa Expr && st.head === :(=) && st.args[1] === ov, leaves(Any[pre_rest..., post...])) == ndec_o || return nothing
-    count(st -> st isa Expr && st.head === :(=) && st.args[1] === tv, leaves(Any[pre_rest..., post...])) == ndec_t || return nothing
     # the loop: atomic adds `arr[ix] += F[iw] * g` and nothing else
     lp = cgen_split_loop(lpst)
     (lp !== nothing && !isempty(lp.body)) || return nothing
     issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing
     cv = lp.var
-    (cv in params || cv in (ov, tv, idxv)) && return nothing
+    (cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing
     g = nothing
     sts = Any[]
     # scalar temporaries of the loop body (common subexpressions of operand reads) are inlined, in order, into the later statements; none is read or assigned outside the loop
@@ -11130,7 +11153,9 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
     end
     # per statement: the target index reads one of (t, o) and c, the operand index the other one and c
     descs = Any[]
-    Mdec = Expr(:call, :div, X, N)
+    Mdec = hv === nothing ? Expr(:call, :div, X, N) : M
+    Bh = hv === nothing ? nothing : Expr(:call, :div, X, Expr(:call, :*, N, M))
+    bat = hv === nothing ? Set{Symbol}() : Set{Symbol}([hv])
     trip = cgen_trip_count(lp.lo, lp.step, lp.hi)
     colbase = lp.step == 1 ? lp.lo : lp.hi
     atomic = backend.atomic_macro
@@ -11138,22 +11163,23 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
         vi = cgen_split_vars(s.site.idx); vw = cgen_split_vars(s.F.idx)
         u = v = nothing
         for (cu, cvv) in ((tv, ov), (ov, tv))
-            if issubset(vi, union(params, Set([cu, cv]))) && issubset(vw, union(params, Set([cvv, cv]))) && cu in vi && cvv in vw && cv in vi && cv in vw
+            if issubset(vi, union(params, Set([cu, cv]), bat)) && issubset(vw, union(params, Set([cvv, cv]), bat)) && cu in vi && cvv in vw && cv in vi && cv in vw
                 u, v = cu, cvv
             end
         end
         u === nothing && return nothing
         rows = u === tv ? Mdec : N
         kdim = u === tv ? N : Mdec
-        aidx = Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, tv, 1), N), ov)
+        aidx = hv === nothing ? Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, tv, 1), N), ov) :
+               Expr(:call, :+, Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, hv, 1), M), Expr(:call, :-, tv, 1)), N), ov)
         site = s.site
         epilogue(row, col, a) = Any[Expr(:(=), u, Expr(:call, :+, row, 1)), Expr(:(=), cv, Expr(:call, :+, :__ct_cb, col)),
                                     Expr(:macrocall, atomic, nothing, Expr(:(+=), Expr(:ref, site.arr, site.idx), a))]
         push!(descs, (name = Symbol(string(cgen_split_name(parts.sig.args[1]))[1:end-3], "_t", length(descs) + 1, "!"), fargs = Symbol[fargs..., :__ct_g],
                       prelude = Any[Expr(:(=), :__ct_N, trip), Expr(:(=), :__ct_M, rows), Expr(:(=), :__ct_K, kdim), Expr(:(=), :__ct_cb, colbase)],
-                      rowvar = u, colvar = cv, kvar = v, rowbase = 1, colbase = :__ct_cb, kbase = 1, decls = (u, v, cv),
-                      A = (arr = :__ct_g, idx = aidx), B = s.F, epilogue = epilogue, Mh = rows, Nh = trip, Kh = kdim,
-                      extra = Expr(:call, :(==), Expr(:call, :mod, X, N), 0), target = site.arr))
+                      rowvar = u, colvar = cv, kvar = v, rowbase = 1, colbase = :__ct_cb, kbase = 1, decls = hv === nothing ? (u, v, cv) : (u, v, cv, hv),
+                      A = (arr = :__ct_g, idx = aidx), B = s.F, epilogue = epilogue, Mh = rows, Nh = trip, Kh = kdim, batchvar = hv, Bh = Bh,
+                      extra = Expr(:call, :(==), Expr(:call, :mod, X, hv === nothing ? N : Expr(:call, :*, N, M)), 0), target = site.arr))
     end
     nm = parts.sig.args[1]
     nms = string(nm); base = endswith(nms, "!") ? nms[1:end-1] : nms
@@ -11217,7 +11243,7 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
     (isempty(fwd) && isempty(adj)) && return (host, kernels)
     used = Set{Symbol}()
     fits(t, call) = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), call)), 256)
-    tiled(t, call) = Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), backend.threads_kw, Expr(:tuple, 16, 16)), Expr(:(=), backend.blocks_kw, Expr(:tuple, t.bx, t.by)), Expr(:(=), :shmem, t.shmem), call)
+    tiled(t, call) = Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), backend.threads_kw, Expr(:tuple, 16, 16)), Expr(:(=), backend.blocks_kw, t.bz === nothing ? Expr(:tuple, t.bx, t.by) : Expr(:tuple, t.bx, t.by, t.bz)), Expr(:(=), :shmem, t.shmem), call)
     function walk(e)
         e isa Expr || return e
         if (e.head === :if || e.head === :macrocall) && cgen_split_pure_launch(e, backend.launch_macro)

@@ -41,10 +41,11 @@ mutable struct State
     shared::Vector{Float64}          # the block's dynamic shared memory
     chans::Any                       # (resume, paused) channels of the running block, nothing outside a block launch
     detail::Dict{Tuple{Int,Int},NTuple{3,Set{NTuple{3,Int}}}}   # the same log with (thread, block, phase) per access, for launches with barriers
-    gx::Int                          # blockIdx().x and .y of the running block (bx is the linear block number)
+    gx::Int                          # blockIdx().x, .y and .z of the running block (bx is the linear block number)
     gy::Int
+    gz::Int
 end
-const ST = State(0, 0, 0, 0, Dict{Tuple{Int,Int},NTuple{3,Set{Int}}}(), 1, 0, 0, Float64[], nothing, Dict{Tuple{Int,Int},NTuple{3,Set{NTuple{3,Int}}}}(), 1, 1)
+const ST = State(0, 0, 0, 0, Dict{Tuple{Int,Int},NTuple{3,Set{Int}}}(), 1, 0, 0, Float64[], nothing, Dict{Tuple{Int,Int},NTuple{3,Set{NTuple{3,Int}}}}(), 1, 1, 1)
 const VIOLATIONS = NamedTuple[]
 const NEXTID = Ref(0)
 const LAUNCHES = Ref(0)
@@ -111,7 +112,7 @@ end
 allowscalar(::Bool) = nothing
 
 threadIdx() = (x = ST.tx, y = ST.ty)
-blockIdx() = (x = ST.gx, y = ST.gy)
+blockIdx() = (x = ST.gx, y = ST.gy, z = ST.gz)
 blockDim() = (x = ST.bdim,)
 
 # Shared memory and the block barrier exist only inside a launch with a two-dimensional block, where each thread of a block is a task and
@@ -173,8 +174,8 @@ function launch(f, args::Tuple, th::Tuple, bl::Union{Integer,Tuple}, sh::Integer
     push!(LAUNCHED, string(nameof(f)))
     nx, ny = th
     n = nx * ny
-    nbx, nby = bl isa Tuple ? bl : (bl, 1)
-    blocks = collect(1:nbx * nby)
+    nbx, nby, nbz = bl isa Tuple ? (bl..., ntuple(_ -> 1, 3 - length(bl))...) : (bl, 1, 1)
+    blocks = collect(1:nbx * nby * nbz)
     ORDER[] == :descending && reverse!(blocks)
     ORDER[] == :shuffled && Random.shuffle!(RNG[], blocks)
     for b in blocks
@@ -208,7 +209,8 @@ function launch(f, args::Tuple, th::Tuple, bl::Union{Integer,Tuple}, sh::Integer
                 ST.tid = (b - 1) * n + k
                 ST.bx = b
                 ST.gx = (b - 1) % nbx + 1
-                ST.gy = (b - 1) ÷ nbx + 1
+                ST.gy = ((b - 1) ÷ nbx) % nby + 1
+                ST.gz = (b - 1) ÷ (nbx * nby) + 1
                 ST.bdim = nx
                 put!(resume[k], nothing)
                 take!(paused[k]) === :done && (alive[k] = false)
@@ -275,6 +277,7 @@ function launch_1d(f, args::Tuple, th::Integer, bl::Integer)
         ST.bx = (tid - 1) ÷ th + 1
         ST.gx = ST.bx
         ST.gy = 1
+        ST.gz = 1
         ST.tx = (tid - 1) % th + 1
         ST.bdim = th
         f(args...)

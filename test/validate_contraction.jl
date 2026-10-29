@@ -302,6 +302,114 @@ const CON_CASES = [
         end
         return nothing
     end""", :con_kin, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    # products batched over a third index (heads), v0.4.36: the flat index decodes into a column, a row and a batch
+    ("batched product", """function con_bat(q, kk, y, nb, m, n, k)
+        for idx = 1:nb * m * n
+            o = mod(idx - 1, n) + 1
+            t = mod(div(idx - 1, n), m) + 1
+            h = div(idx - 1, m * n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + q[((h - 1) * m + t - 1) * k + c] * kk[((h - 1) * n + o - 1) * k + c]
+            end
+            y[idx] = exp(0.1 * s)
+        end
+        return nothing
+    end""", :con_bat, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k), randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), true),
+    ("batched product, one array with strided heads", """function con_bat2(qkv, y, nh, tt, dh, scale)
+        d = nh * dh
+        d3 = 3 * d
+        for idx = 1:nh * tt * tt
+            u = mod(idx - 1, tt) + 1
+            t = mod(div(idx - 1, tt), tt) + 1
+            h = div(idx - 1, tt * tt) + 1
+            ss = 0.0
+            for c = 1:dh
+                ss = ss + qkv[(t - 1) * d3 + (h - 1) * dh + c] * qkv[(u - 1) * d3 + d + (h - 1) * dh + c]
+            end
+            y[idx] = exp(ss * scale)
+        end
+        return nothing
+    end""", :con_bat2, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; Any[randn(r, tt * 3 * nh * dh), zeros(nh * tt * tt), nh, tt, dh, 0.1]), true),
+    ("batched product, divisor written the other way", """function con_bat3(q, kk, y, nb, m, n, k)
+        for idx = 1:nb * m * n
+            o = mod(idx - 1, n) + 1
+            t = mod(div(idx - 1, n), m) + 1
+            h = div(idx - 1, n * m) + 1
+            s = 1.0
+            for c = 1:k
+                s = s - q[((h - 1) * m + t - 1) * k + c] * kk[((h - 1) * n + o - 1) * k + c]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_bat3, sd -> (r = MersenneTwister(sd); nb = 2; n = 66; m = 65; k = 33; Any[randn(r, nb * m * k), randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), true),
+    ("batched, the batch size is not rows times columns", """function con_batn(q, kk, y, nb, m, n, k)
+        for idx = 1:nb * m * n
+            o = mod(idx - 1, n) + 1
+            t = mod(div(idx - 1, n), m) + 1
+            h = div(idx - 1, n * n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + q[((h - 1) * m + t - 1) * k + c] * kk[((h - 1) * n + o - 1) * k + c]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_batn, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k + 4000), randn(r, nb * n * k + 4000), zeros(nb * m * n), nb, m, n, k]), false),
+    ("batched, the row decode uses another size than the column", """function con_batr(q, kk, y, nb, m, n, k)
+        for idx = 1:nb * m * n
+            o = mod(idx - 1, n) + 1
+            t = mod(div(idx - 1, n + 1), m) + 1
+            h = div(idx - 1, m * n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + q[((h - 1) * m + t - 1) * k + c] * kk[((h - 1) * n + o - 1) * k + c]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_batr, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k + 4000), randn(r, nb * n * k + 4000), zeros(nb * m * n), nb, m, n, k]), false),
+    ("batched, the batch is changed after its decode", """function con_batc(q, kk, y, nb, m, n, k)
+        for idx = 1:nb * m * n
+            o = mod(idx - 1, n) + 1
+            t = mod(div(idx - 1, n), m) + 1
+            h = div(idx - 1, m * n) + 1
+            s = 0.0
+            h = h + 0
+            for c = 1:k
+                s = s + q[((h - 1) * m + t - 1) * k + c] * kk[((h - 1) * n + o - 1) * k + c]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_batc, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k), randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), false),
+    ("batched, a partial last batch", """function con_batp(q, kk, y, nb, m, n, k)
+        for idx = 1:nb * m * n + 7
+            o = mod(idx - 1, n) + 1
+            t = mod(div(idx - 1, n), m) + 1
+            h = div(idx - 1, m * n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + q[((h - 1) * m + t - 1) * k + c] * kk[((h - 1) * n + o - 1) * k + c]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_batp, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, (nb + 1) * m * k), randn(r, (nb + 1) * n * k), zeros(nb * m * n + 7), nb, m, n, k]), :plain),
+    ("batched, a product of three factors", """function con_batx(q, kk, hh, y, nb, m, n, k)
+        for idx = 1:nb * m * n
+            o = mod(idx - 1, n) + 1
+            t = mod(div(idx - 1, n), m) + 1
+            h = div(idx - 1, m * n) + 1
+            s = 0.0
+            for c = 1:k
+                s = s + q[((h - 1) * m + t - 1) * k + c] * kk[((h - 1) * n + o - 1) * k + c] * hh[1]
+            end
+            y[idx] = s
+        end
+        return nothing
+    end""", :con_batx, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k), randn(r, nb * n * k), randn(r, 1), zeros(nb * m * n), nb, m, n, k]), false),
 ]
 
 # The recognizer on hand-written kernel text, for the guards that STADE's own gates make unreachable from source: a store into an operand array, and a parameter that has the
@@ -415,6 +523,29 @@ function con_unit_checks()
     catch e
         check(false, "thresholds: error " * first(split(sprint(showerror, e), "\n")))
     end
+    # a product batched over heads: the rows must reach `contraction`, the columns and the inner length only min(contraction, 8); the grid has at most 65535 batches
+    try
+        name, src, entry, mk, _ = first(c for c in CON_CASES if c[1] == "batched product")
+        args = mk(1)                       # nb = 3, m = 67 rows, n = 70 columns, k = 19
+        ran(a) = any(n -> endswith(n, "_t!"), a.launched)
+        check(ran(con_run(src, entry, args, 67)) && !ran(con_run(src, entry, args, 68)), "$name: the twin runs at the row threshold (67) and not below it (68)")
+        argk = Any[args[1:end-1]..., 7]
+        check(ran(con_run(src, entry, argk, 1)) && !ran(con_run(src, entry, argk, 8)), "$name: an inner length of 7 runs the twin at contraction 1 and not at 8")
+        argn = Any[args[1:end-2]..., 7, args[end]]
+        check(ran(con_run(src, entry, argn, 1)) && !ran(con_run(src, entry, argn, 8)), "$name: 7 columns run the twin at contraction 1 and not at 8")
+        # an inner length of 9 is below one tile step of 16 and above the batched minimum of 8: the twin runs and agrees with the plain kernel
+        argk9 = Any[args[1:end-1]..., 9]
+        r9 = con_run(src, entry, argk9, 8); b9 = con_run(src, entry, argk9, 0)
+        check(ran(r9) && con_relerr(r9, b9) <= 1e-12, "$name: an inner length of 9 runs the twin at contraction 8 and agrees (error $(round(con_relerr(r9, b9), sigdigits = 3)))")
+        hostsrc = STADE.io_expr_to_source(con_run(src, entry, args, 1).plan.host)
+        plainsrc = STADE.io_expr_to_source(con_run(CON_CASES[1][2], CON_CASES[1][3], CON_CASES[1][4](1), 1).plan.host)
+        check(occursin("<= 65535", hostsrc) && !occursin("65535", plainsrc), "$name: the host test has the grid limit of 65535 batches, and the unbatched twin does not")
+        zb = Any[args[1:end-4]..., 0, args[end-2:end]...]
+        z = con_run(src, entry, zb, 1); zbase = con_run(src, entry, zb, 0)
+        check(!ran(z) && con_relerr(z, zbase) == 0.0, "$name: zero batches take the plain kernel")
+    catch e
+        check(false, "batched thresholds: error " * first(split(sprint(showerror, e), "\n")))
+    end
     return bad
 end
 
@@ -438,7 +569,7 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the outputs are not bounded", "Expr(:if, Expr(:&&, call(:<, :__ct_row, :__ct_M), call(:<, :__ct_col, :__ct_N)), Expr(:block, inner...))", "Expr(:if, true, Expr(:block, inner...))"),
             ("the loop start is ignored", "push!(loadA, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))", "push!(loadA, asg(d.kvar, cadd(cadd(1, :__ct_k0), :__ct_kk)))"),
             ("a descending loop is accepted", "(lp !== nothing && lp.step == 1 && length(lp.body) == 1) || return nothing", "(lp !== nothing && length(lp.body) == 1) || return nothing"),
-            ("operands that depend on the wrong index are accepted", "issubset(va, union(params, Set([tv, cv]))) && issubset(vb, union(params, Set([ov, cv]))) || return nothing", "true"),
+            ("operands that depend on the wrong index are accepted", "issubset(va, union(params, Set([tv, cv]), bat)) && issubset(vb, union(params, Set([ov, cv]), bat)) || return nothing", "true"),
             ("an operand of the product that is stored is accepted", "(fa.arr in stored || fb.arr in stored) && return nothing", "false && return nothing"),
             ("the loop variable may be read after the loop", "    for st in post\n        cv in cgen_split_vars(st) && return nothing\n    end\n", ""),
             ("the loop variable may be read before the loop", "    any(cv in cgen_split_vars(st) for st in pre_rest) && return nothing\n", ""),
@@ -450,9 +581,18 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("a held index may be changed", "        st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])", "        st.args[2] == Expr(:call, :-, idxv, 1) && push!(holds, st.args[1])"),
             ("the flat index may be offset", "(first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol && first_st.args[2] == :(1 + (__tid - 1))) || return nothing", "(first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol) || return nothing"),
             ("the register limit is not checked", "    fits(t, call) = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), call)), 256)", "    fits(t, call) = true"),
-            ("the whole-rows test is dropped", "Mh = Mh, Nh = N, Kh = K, extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0))", "Mh = Mh, Nh = N, Kh = K, extra = nothing)"),
+            ("the whole-rows test is dropped", "extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, hv === nothing ? N : Expr(:call, :*, N, M)), 0))", "extra = nothing)"),
             ("the size test is dropped", "cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, cmin), call(:>=, d.Mh, cmin)), call(:>=, d.Kh, cmin)), call(:>, d.Nh, 0))", "cond = call(:>, d.Nh, 0)"),
             ("the launch asks for too little shared memory", "shmem = 8 * ((TM + 1) * TK + TM * TK))", "shmem = 8 * ((TM + 1) * TK + TM * TK) - 8)"),
+            ("a batched twin ignores the row threshold", "call(:>=, d.Nh, min(cmin, 8)), call(:>=, d.Mh, cmin))", "call(:>=, d.Nh, min(cmin, 8)), call(:>, d.Mh, 0))"),
+            ("a batched twin ignores the column threshold", "call(:>=, d.Nh, min(cmin, 8))", "call(:>, d.Nh, 0)"),
+            ("a batched twin ignores the inner length threshold", "call(:>=, d.Kh, min(cmin, 8))", "call(:>, d.Kh, 0)"),
+            ("the grid limit of a batched twin is dropped", "call(:<=, d.Bh, 65535))", "true)"),
+            ("the batch variable is not set in the tile", "    bv === nothing || push!(body, asg(bv, cadd(:__ct_bz, 1)))\n", ""),
+            ("the batch index of the output is dropped", "Expr(:call, :*, :__ct_bz, :__ct_M)", "0"),
+            ("the batch divisor is not checked", "all(d -> d[1] === hv && (d[2] == Expr(:call, :*, N, M) || d[2] == Expr(:call, :*, M, N)), divs) || return nothing", "all(d -> d[1] === hv, divs) || return nothing"),
+            ("the size of the row decode may differ from the column's", "    N2 == N || return nothing\n    all(m -> m[1] === tv && m[2] == N && m[3] == M, rowmods) || return nothing", "    all(m -> m[1] === tv && m[3] == M, rowmods) || return nothing"),
+            ("the batch may be reassigned", "for v in (hv === nothing ? (ov, tv) : (ov, tv, hv))", "for v in (ov, tv)"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]

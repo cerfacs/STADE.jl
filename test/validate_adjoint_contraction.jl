@@ -35,6 +35,13 @@ end
 # random arguments for adj_src kernels: n columns, m rows, k inner length
 adj_args(sd; n = 70, m = 67, k = 19, extra = Any[]) = (r = MersenneTwister(sd); L = (m + 1) * k + k * n + n; Any[randn(r, m * n + 8), randn(r, L), randn(r, L), randn(r, L), randn(r, L), randn(r, n), m, n, k, extra...])
 
+# batched kernels (the adjoint of a product over heads): nb batches, m rows, n columns, k inner length; the head is the slowest index
+const ADJ_BDEC = "o = mod(idx - 1, n) + 1\n            t = mod(div(idx - 1, n), m) + 1\n            h = div(idx - 1, m * n) + 1"
+adj_bargs(sd; nb = 3, n = 70, m = 67, k = 19, extra = Any[]) = (r = MersenneTwister(sd); L = (nb + 1) * max(m, n) * k + 8; Any[randn(r, nb * m * n + 8), randn(r, L), randn(r, L), randn(r, L), randn(r, L), randn(r, n), m, n, k, nb, extra...])
+const ADJ_BLOOP = """for c = 1:k
+                xb[((h - 1) * m + t - 1) * k + c] = xb[((h - 1) * m + t - 1) * k + c] + w[((h - 1) * n + o - 1) * k + c] * gs
+                wb[((h - 1) * n + o - 1) * k + c] = wb[((h - 1) * n + o - 1) * k + c] + x[((h - 1) * m + t - 1) * k + c] * gs
+            end"""
 const ADJ_CASES = [
     ("two statements", adj_src(), :con_adj, adj_args, 2),
     ("first statement only", adj_src(loop = "for c = 1:k\n xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs\n end"), :con_adj, adj_args, 1),
@@ -90,7 +97,24 @@ const ADJ_CASES = [
         pre = "s = 0.5\n for c = 1:k\n s = s - w[(c - 1) * n + o] * x[(t - 1) * k + c]\n end\n gs = s * g[idx]"), :con_adj, adj_args, 2),
     ("two recomputed forward loops, the first is staged", adj_src(
         pre = "s = 0.5\n for c = 1:k\n s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]\n end\n s2 = 0.0\n for c = 1:k\n s2 = s2 + w[(c - 1) * n + o] * w[(c - 1) * n + o]\n end\n gs = s * s2 * g[idx]"), :con_adj, adj_args, 2),
+    # ---- batched over a third index (v0.4.36) ----
+    ("batched, two statements", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, loop = ADJ_BLOOP), :con_adj, adj_bargs, 2),
+    ("batched, a recomputed forward value and a repeated decode", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC,
+        pre = "s = 0.0\n for c = 1:k\n s = s + x[((h - 1) * m + t - 1) * k + c] * w[((h - 1) * n + o - 1) * k + c]\n end\n o = mod(idx - 1, n) + 1\n t = mod(div(idx - 1, n), m) + 1\n h = div(idx - 1, m * n) + 1\n gs = exp(0.1 * s) * g[idx]",
+        loop = ADJ_BLOOP), :con_adj, adj_bargs, 2),
+    ("batched, a target that does not read the batch", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, loop = """for c = 1:k
+                xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[((h - 1) * n + o - 1) * k + c] * gs
+                wb[((h - 1) * n + o - 1) * k + c] = wb[((h - 1) * n + o - 1) * k + c] + x[(t - 1) * k + c] * gs
+            end"""), :con_adj, adj_bargs, 2),
+    ("batched, the divisor written the other way", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = "o = mod(idx - 1, n) + 1\n            t = mod(div(idx - 1, n), m) + 1\n            h = div(idx - 1, n * m) + 1", loop = ADJ_BLOOP), :con_adj, adj_bargs, 2),
+    ("batched, a partial last batch", adj_src(params = ", nb", head = "for idx = 1:nb * m * n + 7", dec = ADJ_BDEC, loop = ADJ_BLOOP), :con_adj, adj_bargs, :plain),
     # ---- refusals ----
+    ("batched, the batch size is not rows times columns", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = "o = mod(idx - 1, n) + 1\n            t = mod(div(idx - 1, n), m) + 1\n            h = div(idx - 1, n * n) + 1", loop = ADJ_BLOOP), :con_adj, sd -> adj_bargs(sd; k = 7), 0),
+    ("batched, the batch is changed after its decode", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, pre = "h = h + 0\n gs = g[idx] * 2.0", loop = ADJ_BLOOP), :con_adj, adj_bargs, 0),
+    ("batched, the loop variable has the batch's name", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, loop = """for h = 1:2
+                xb[((h - 1) * m + t - 1) * k + h] = xb[((h - 1) * m + t - 1) * k + h] + w[((h - 1) * n + o - 1) * k + h] * gs
+            end"""), :con_adj, adj_bargs, 0),
+    ("batched, the row decode uses another size than the column", adj_src(params = ", nb", head = "for idx = 1:nb * m * n", dec = "o = mod(idx - 1, n) + 1\n            t = mod(div(idx - 1, n + 1), m) + 1\n            h = div(idx - 1, m * n) + 1", loop = ADJ_BLOOP), :con_adj, adj_bargs, 0),
     ("a target is read elsewhere", adj_src(pre = "gs = g[idx] * 2.0 + xb[o]"), :con_adj, adj_args, 0),
     ("an operand is stored", adj_src(post = "x[o] = gs"), :con_adj, adj_args, 0),
     ("the target index reads neither the row nor the column", adj_src(loop = """for c = 1:k
@@ -200,6 +224,16 @@ function adj_direct_checks()
         println(rpad(ok ? "ok" : "FAIL", 6), "direct, $name: refused")
         ok || (bad += 1)
     end
+    # a batched kernel whose loop variable has the batch's name: STADE's own passes rename it before the recognizer sees it, so only hand-written text reaches the guard
+    bdec = "o = mod(idx - 1, n) + 1\n    t = mod(div(idx - 1, n), m) + 1\n    h = div(idx - 1, m * n) + 1"
+    for (name, v, must) in (("batched, control", "c", true), ("batched, the loop variable has the batch's name", "h", false))
+        loop = "for $v = 1:k\n        CUDA.@atomic xb[((h - 1) * m + t - 1) * k + $v] += w[((h - 1) * n + o - 1) * k + $v] * gs\n        CUDA.@atomic wb[((h - 1) * n + o - 1) * k + $v] += x[((h - 1) * m + t - 1) * k + $v] * gs\n    end"
+        kd = adj_kernel("gs = g[idx] * 2.0", loop, "bb[o] = gs"; dec = bdec, guard = "div(nb * m * n - 1, 1) + 1", params = ", nb")
+        t = try STADE.cgen_adjoint_contraction(kd, STADE.cgen_backend_cuda()) catch e; e end
+        ok = must ? (t isa NamedTuple) : t === nothing
+        println(rpad(ok ? "ok" : "FAIL", 6), "direct, $name: ", must ? "a twin is built" : "refused")
+        ok || (bad += 1)
+    end
     for (name, first, guard) in (("the flat index is offset", "idx = 2 + (__tid - 1)", "div(m * n - 1, 1) + 1"),
                                  ("the guard is not the product of the sizes", "idx = 1 + (__tid - 1)", "div(q - 1, 1) + 1"))
         kd = adj_kernel("gs = g[idx] * 2.0", ADJ_LOOP, "bb[o] = gs"; first = first, guard = guard)
@@ -214,7 +248,7 @@ end
 adj_is_twin(n) = occursin(r"_t\d+!$", n)
 adj_is_stage(n) = endswith(n, "_f_t!")
 # the cases whose forward loop becomes a tiled kernel of its own
-const ADJ_STAGE = Set(["a recomputed forward value, a repeated decode and temporaries", "a recomputed forward value, subtracted, factors swapped", "two recomputed forward loops, the first is staged"])
+const ADJ_STAGE = Set(["a recomputed forward value, a repeated decode and temporaries", "a recomputed forward value, subtracted, factors swapped", "two recomputed forward loops, the first is staged", "batched, a recomputed forward value and a repeated decode"])
 function adj_unit_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
@@ -299,14 +333,15 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the thread count may use a local", "    issubset(cgen_split_vars(X), params) || return nothing\n    pre_rest = pre[2:end]", "    pre_rest = pre[2:end]"),
             ("a branch may stand beside the loop", "    all(okst, pre_rest) && all(okst, post) || return nothing\n", ""),
             ("a held index may be changed", "cgen_split_is_scalar(st) && st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])", "cgen_split_is_scalar(st) && st.args[2] == Expr(:call, :-, idxv, 1) && push!(holds, st.args[1])"),
-            ("a decode of another value is accepted", "(r.args[2].args[2] == Expr(:call, :-, idxv, 1) || r.args[2].args[2] in holds)\n            nn = r.args[2].args[3]\n            issubset(cgen_split_vars(nn), params) || return nothing\n            N === nothing || N == nn || return nothing\n            N = nn\n            # the decode may be repeated", "true)\n            nn = r.args[2].args[3]\n            issubset(cgen_split_vars(nn), params) || return nothing\n            N === nothing || N == nn || return nothing\n            N = nn\n            # the decode may be repeated"),
-            ("a decode size computed in the kernel is accepted", "            issubset(cgen_split_vars(nn), params) || return nothing\n            N === nothing || N == nn || return nothing\n            N = nn\n            # the decode may", "            N === nothing || N == nn || return nothing\n            N = nn\n            # the decode may"),
-            ("the two decodes may use different sizes", "            N === nothing || N == nn || return nothing\n            N = nn\n            # the decode may", "            N = nn\n            # the decode may"),
-            ("the column may be changed after its decode", "    count(st -> st isa Expr && st.head === :(=) && st.args[1] === ov, leaves(Any[pre_rest..., post...])) == ndec_o || return nothing\n", ""),
-            ("the row may be changed after its decode", "    count(st -> st isa Expr && st.head === :(=) && st.args[1] === tv, leaves(Any[pre_rest..., post...])) == ndec_t || return nothing\n", ""),
+            ("a decode of another value is accepted", "    isX(e) = e == Expr(:call, :-, idxv, 1) || (e isa Symbol && e in holds)\n", "    isX(e) = true\n"),
+            ("a decode size computed in the kernel is accepted", "            issubset(cgen_split_vars(a2), params) || return nothing\n            push!(f === :mod ? cols : divs, (st.args[1], a2))", "            push!(f === :mod ? cols : divs, (st.args[1], a2))"),
+            ("the two decodes may use different sizes", "        all(d -> d[1] === tv && d[2] == N, divs) || return nothing", "        all(d -> d[1] === tv, divs) || return nothing"),
+            ("the column or the row may be changed after its decode", "        count(st -> st isa Expr && st.head === :(=) && st.args[1] === v, leaves(Any[pre_rest..., post...])) == nd || return nothing\n", ""),
+            ("the batch may be changed after its decode", "for (v, nd) in ((ov, dec.n_col), (tv, dec.n_row), (hv, dec.n_batch))", "for (v, nd) in ((ov, dec.n_col), (tv, dec.n_row))"),
             ("a loop bound computed in the kernel is accepted", "    issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing\n    cv = lp.var\n    (cv in params", "    cv = lp.var\n    (cv in params"),
-            ("the loop variable may be a parameter", "(cv in params || cv in (ov, tv, idxv)) && return nothing", "cv in (ov, tv, idxv) && return nothing"),
-            ("the loop variable may be the column or the row", "(cv in params || cv in (ov, tv, idxv)) && return nothing", "cv in params && return nothing"),
+            ("the loop variable may be a parameter", "(cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing", "(cv in (ov, tv, idxv) || cv === hv) && return nothing"),
+            ("the loop variable may be the column or the row", "(cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing", "(cv in params || cv === hv) && return nothing"),
+            ("the loop variable may be the batch", "(cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing", "(cv in params || cv in (ov, tv, idxv)) && return nothing"),
             ("a temporary may have a parameter's name", "            tn in params && return nothing\n", ""),
             ("a temporary may be read outside the loop", "            cgen_count_symbol(outside, tn) == 0 || return nothing\n", ""),
             ("a value that is not a product is accepted", "        (v isa Expr && v.head === :call && v.args[1] === :* && length(v.args) == 3) || return nothing\n        a, b = v.args[2], v.args[3]", "        a, b = (v isa Expr && v.head === :call && length(v.args) == 3) ? (v.args[2], v.args[3]) : (v, v)"),
@@ -316,9 +351,11 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("an operand that is stored is accepted", "(s.F.arr in stored || s.F.arr in targets) && return nothing", "(s.F.arr in targets) && return nothing"),
             ("an operand that is a target is accepted", "(s.F.arr in stored || s.F.arr in targets) && return nothing", "(s.F.arr in stored) && return nothing"),
             ("a target that is read elsewhere is accepted", "        cgen_count_symbol(others, s.site.arr) == 0 || return nothing\n", ""),
-            ("the index roles are not checked", "if issubset(vi, union(params, Set([cu, cv]))) && issubset(vw, union(params, Set([cvv, cv]))) && cu in vi && cvv in vw && cv in vi && cv in vw", "if true"),
+            ("the index roles are not checked", "if issubset(vi, union(params, Set([cu, cv]), bat)) && issubset(vw, union(params, Set([cvv, cv]), bat)) && cu in vi && cvv in vw && cv in vi && cv in vw", "if true"),
             ("the target index may ignore the loop variable", " && cu in vi && cvv in vw && cv in vi && cv in vw", " && cu in vi && cvv in vw"),
-            ("the whole-rows test is dropped", "extra = Expr(:call, :(==), Expr(:call, :mod, X, N), 0)", "extra = true"),
+            ("the whole-rows test is dropped", "extra = Expr(:call, :(==), Expr(:call, :mod, X, hv === nothing ? N : Expr(:call, :*, N, M)), 0)", "extra = true"),
+            ("the seed of a batched product ignores the batch", "Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, hv, 1), M), Expr(:call, :-, tv, 1)), N), ov)", "Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, 0, M), Expr(:call, :-, tv, 1)), N), ov)"),
+            ("a batched twin ignores the batch of the target", "bat = hv === nothing ? Set{Symbol}() : Set{Symbol}([hv])\n    trip = ", "bat = Set{Symbol}()\n    trip = "),
             ("the scratch array is too small", "Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, A.a.count)", "Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, 1)"),
             ("the seed is stored before it is computed", "body = Any[parts.head, parts.guard, pre_a..., store, post..., emit_return_nothing()]", "body = Any[parts.head, parts.guard, store, pre_a..., post..., emit_return_nothing()]"),
             ("the probe of the register limit is not built", "probe = Expr(:call, t.name, plain.args[2:end]..., d.target)", "probe = Expr(:call, t.name, plain.args[2:end]..., :__ct_g)"),

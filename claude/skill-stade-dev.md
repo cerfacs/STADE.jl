@@ -447,6 +447,8 @@ source needs a direct test on hand-written kernel text (`con_kernel`); a guard t
 
 `contraction` also tiles the adjoint of such a product (v0.4.35): the plain adjoint kernel stores its seed `gs` in a scratch array `__ct_g` and skips the loop of atomic adds; one tiled kernel per atomic statement reads `__ct_g` and adds into its target with one atomic add per element; a recomputed forward product gets a stage `<name>_f_t!` and a second scratch array `__cf_s`. The host takes the twin branch only if every kernel of the group passes the launch test. A product whose loop holds anything but atomic adds and scalars is refused. An HVP is not tiled.
 
+`contraction` also tiles a product batched over heads (v0.4.36): the flat index decodes into a column `mod(X, N) + 1`, a row `mod(div(X, N), M) + 1` and a batch `div(X, N * M) + 1`; the twin has a third grid dimension (`blockIdx().z` is the batch, at most 65535), the rows must reach `contraction` and the columns and the inner length `min(contraction, 8)`. A guard that STADE's own passes make unreachable from source (a loop variable with the batch's name is renamed before the recognizer sees it) needs a direct test on hand-written kernel text, and the sabotage run is what shows that it does.
+
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
 no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded
