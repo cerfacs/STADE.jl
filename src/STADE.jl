@@ -10805,7 +10805,98 @@ function cgen_contraction_factors(term)
     return out
 end
 
-# (kdef, name, cond, blocks_x, blocks_y, shmem) of the contraction twin of a plain kernel, or nothing
+# The tiled kernel of a contraction. `d` describes it:
+#   name, fargs          the new kernel's name and parameters
+#   prelude              statements that assign __ct_M (rows), __ct_N (columns) and __ct_K (inner length) from the parameters
+#   rowvar colvar kvar   the Int variables that the index expressions of the two operands read; each is assigned before a load
+#   rowbase colbase kbase  the value of each variable at position 0 of the tile
+#   decls                the variables declared Int before the loops
+#   A, B                 (arr, idx) of the operands, A[row, k] and B[k, col]
+#   epilogue             a function (row, col, acc) -> statements run for each output element; row and col name its 0-based position
+#   Mh Nh Kh extra       the three sizes as expressions of the parameters, and a further launch test (or nothing)
+# Returns (kdef, name, cond, bx, by, shmem).
+function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
+    TM = cgen_contr_tm(); TK = cgen_contr_tk(); RT = TM ÷ 16
+    sh = :__ct_sh
+    ex(h, args...) = Expr(h, args...)
+    asg(a, b) = Expr(:(=), a, b)
+    call(f, args...) = Expr(:call, f, args...)
+    cadd(a, b) = call(:+, a, b); cmul(a, b) = call(:*, a, b)
+    acc_ij(i, j) = Symbol("__ct_a", i, "_", j)
+    body = Any[]
+    push!(body, asg(:__ct_tx, call(:-, ex(:., call(:threadIdx), QuoteNode(:x)), 1)))
+    push!(body, asg(:__ct_ty, call(:-, ex(:., call(:threadIdx), QuoteNode(:y)), 1)))
+    push!(body, asg(:__ct_r0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:y)), 1), TM)))
+    push!(body, asg(:__ct_c0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:x)), 1), TM)))
+    append!(body, d.prelude)
+    push!(body, asg(sh, call(:CuDynamicSharedArray, :Float64, (TM + 1) * TK + TM * TK)))
+    push!(body, asg(:__ct_tl, cadd(cmul(:__ct_ty, 16), :__ct_tx)))
+    for sym in d.decls
+        push!(body, asg(sym, 0))
+    end
+    for i in 0:RT-1, j in 0:RT-1
+        push!(body, asg(acc_ij(i, j), 0.0))
+    end
+    # loads of the two pieces
+    zfill = asg(:__ct_v, 0.0)
+    loadA = Any[]
+    for q in 0:3
+        push!(loadA, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
+        push!(loadA, asg(:__ct_rr, call(:div, :__ct_e, TK)))
+        push!(loadA, asg(:__ct_kk, call(:mod, :__ct_e, TK)))
+        push!(loadA, asg(d.rowvar, cadd(cadd(:__ct_r0, :__ct_rr), d.rowbase)))
+        push!(loadA, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))
+        push!(loadA, zfill)
+        push!(loadA, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
+                          Expr(:block, asg(:__ct_v, Expr(:ref, d.A.arr, d.A.idx)))))
+        push!(loadA, asg(Expr(:ref, sh, cadd(cadd(cmul(:__ct_kk, TM + 1), :__ct_rr), 1)), :__ct_v))
+    end
+    loadB = Any[]
+    for q in 0:3
+        push!(loadB, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
+        push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TM)))
+        push!(loadB, asg(:__ct_cc, call(:mod, :__ct_e, TM)))
+        push!(loadB, asg(d.colvar, cadd(cadd(:__ct_c0, :__ct_cc), d.colbase)))
+        push!(loadB, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))
+        push!(loadB, zfill)
+        push!(loadB, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
+                          Expr(:block, asg(:__ct_v, Expr(:ref, d.B.arr, d.B.idx)))))
+        push!(loadB, asg(Expr(:ref, sh, cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), :__ct_cc), 1)), :__ct_v))
+    end
+    mac = Any[]
+    for i in 0:RT-1
+        push!(mac, asg(Symbol("__ct_av", i), Expr(:ref, sh, cadd(cadd(cmul(:__ct_kk, TM + 1), cadd(:__ct_ty, 16 * i)), 1))))
+    end
+    for j in 0:RT-1
+        push!(mac, asg(Symbol("__ct_bv", j), Expr(:ref, sh, cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), cadd(:__ct_tx, 16 * j)), 1))))
+    end
+    for i in 0:RT-1, j in 0:RT-1
+        push!(mac, asg(acc_ij(i, j), cadd(acc_ij(i, j), cmul(Symbol("__ct_av", i), Symbol("__ct_bv", j)))))
+    end
+    kloop = Expr(:for, asg(:__ct_k0, call(:(:), 0, TK, call(:-, :__ct_K, 1))),
+                 Expr(:block, loadA..., loadB..., call(:sync_threads),
+                      Expr(:for, asg(:__ct_kk, call(:(:), 0, TK - 1)), Expr(:block, mac...)),
+                      call(:sync_threads)))
+    push!(body, kloop)
+    for i in 0:RT-1, j in 0:RT-1
+        stmts = Any[asg(:__ct_row, cadd(:__ct_r0, cadd(:__ct_ty, 16 * i))), asg(:__ct_col, cadd(:__ct_c0, cadd(:__ct_tx, 16 * j)))]
+        inner = d.epilogue(:__ct_row, :__ct_col, acc_ij(i, j))
+        push!(stmts, Expr(:if, Expr(:&&, call(:<, :__ct_row, :__ct_M), call(:<, :__ct_col, :__ct_N)), Expr(:block, inner...)))
+        append!(body, stmts)
+    end
+    push!(body, emit_return_nothing())
+    kd = Expr(:function, Expr(:call, d.name, d.fargs...), Expr(:block, body...))
+    cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, cmin), call(:>=, d.Mh, cmin)), call(:>=, d.Kh, cmin)), call(:>, d.Nh, 0))
+    d.extra === nothing || (cond = Expr(:&&, cond, d.extra))
+    bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM)
+    by = call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM)
+    return (kdef = kd, name = d.name, cond = cond, bx = bx, by = by, shmem = 8 * ((TM + 1) * TK + TM * TK))
+end
+
+# the names a kernel may not use: the twin's own variables all start with __ct_, and with `scratch` the scratch array of a recomputed forward product starts with __cf_
+cgen_contraction_reserved(rest; scratch::Bool = false) = any(s -> startswith(string(s), "__ct_") || (scratch && startswith(string(s), "__cf_")), cgen_expr_symbols(Expr(:block, rest...)))
+
+# The contraction twin of a plain kernel whose inner loop sums a product, as a description for cgen_contraction_emit, or nothing
 function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     parts = cgen_kernel_parts(kdef)
     parts === nothing && return nothing
@@ -10814,10 +10905,7 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     n_iter = parts.guard.args[1].args[3]
     issubset(cgen_split_vars(n_iter), params) || return nothing
     rest = Any[x for x in parts.rest if !(x isa LineNumberNode)]
-    used = cgen_expr_symbols(Expr(:block, rest...))
-    for nm in (:__ct_tx, :__ct_ty, :__ct_r0, :__ct_c0, :__ct_sh, :__ct_M, :__ct_N, :__ct_K, :__ct_lo, :__ct_tl, :__ct_k0, :__ct_e, :__ct_rr, :__ct_cc, :__ct_kk, :__ct_v, :__ct_row, :__ct_col)
-        nm in used && return nothing
-    end
+    cgen_contraction_reserved(rest) && return nothing
     # split the statements around the single loop
     li = findfirst(x -> x isa Expr && x.head === :for, rest)
     li === nothing && return nothing
@@ -10831,12 +10919,16 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     for st in post
         (cgen_split_is_scalar(st) || (cgen_split_is_store(st) && cgen_atomic_site(st) === nothing)) || return nothing
     end
-    # the decode of the flat index into a column `o` and a row `t`
+    # the decode of the flat index into a column `o` and a row `t`, possibly through a variable that holds idx - 1 (assigned once)
+    holds = Set{Symbol}()
+    for st in pre_rest
+        st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])
+    end
     ov = tv = nothing; N = nothing
     for st in pre_rest
         r = st.args[2]
         if r isa Expr && r.head === :call && r.args[1] === :+ && length(r.args) == 3 && r.args[3] == 1 && r.args[2] isa Expr && r.args[2].head === :call && length(r.args[2].args) == 3 &&
-           r.args[2].args[1] in (:mod, :div) && r.args[2].args[2] == Expr(:call, :-, idxv, 1)
+           r.args[2].args[1] in (:mod, :div) && (r.args[2].args[2] == Expr(:call, :-, idxv, 1) || r.args[2].args[2] in holds)
             nn = r.args[2].args[3]
             issubset(cgen_split_vars(nn), params) || return nothing
             N === nothing || N == nn || return nothing
@@ -10890,126 +10982,284 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
         cv in cgen_split_vars(st) && return nothing
     end
     any(cv in cgen_split_vars(st) for st in pre_rest) && return nothing
-    # ---- emit ----
-    TM = cgen_contr_tm(); TK = cgen_contr_tk(); RT = TM ÷ 16
-    sh = :__ct_sh
     K = lp.lo == 1 ? lp.hi : Expr(:call, :+, Expr(:call, :-, lp.hi, lp.lo), 1)
-    ex(h, args...) = Expr(h, args...)
-    asg(a, b) = Expr(:(=), a, b)
-    call(f, args...) = Expr(:call, f, args...)
-    cadd(a, b) = call(:+, a, b); cmul(a, b) = call(:*, a, b)
-    acc_ij(i, j) = Symbol("__ct_a", i, "_", j)
-    body = Any[]
-    push!(body, asg(:__ct_tx, call(:-, ex(:., call(:threadIdx), QuoteNode(:x)), 1)))
-    push!(body, asg(:__ct_ty, call(:-, ex(:., call(:threadIdx), QuoteNode(:y)), 1)))
-    push!(body, asg(:__ct_r0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:y)), 1), TM)))
-    push!(body, asg(:__ct_c0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:x)), 1), TM)))
-    push!(body, asg(:__ct_N, N))
-    push!(body, asg(:__ct_M, call(:div, n_iter_total(n_iter), :__ct_N)))
-    push!(body, asg(:__ct_K, K))
-    push!(body, asg(:__ct_lo, lp.lo))
-    push!(body, asg(sh, call(:CuDynamicSharedArray, :Float64, (TM + 1) * TK + TM * TK)))
-    push!(body, asg(:__ct_tl, cadd(cmul(:__ct_ty, 16), :__ct_tx)))
-    for sym in (ov, tv, cv)
-        push!(body, asg(sym, 0))
+    Mh = Expr(:call, :div, n_iter, N)
+    epilogue(row, col, a) = begin
+        out = Any[Expr(:(=), idxv, Expr(:call, :+, Expr(:call, :+, Expr(:call, :*, row, :__ct_N), col), 1))]
+        append!(out, pre_rest)
+        push!(out, Expr(:(=), acc, Expr(:call, op, acc, a)))
+        append!(out, post)
+        out
     end
-    for i in 0:RT-1, j in 0:RT-1
-        push!(body, asg(acc_ij(i, j), 0.0))
-    end
-    # loads of the two pieces
-    zfill = asg(:__ct_v, 0.0)
-    loadA = Any[]
-    for q in 0:3
-        push!(loadA, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
-        push!(loadA, asg(:__ct_rr, call(:div, :__ct_e, TK)))
-        push!(loadA, asg(:__ct_kk, call(:mod, :__ct_e, TK)))
-        push!(loadA, asg(tv, cadd(cadd(:__ct_r0, :__ct_rr), 1)))
-        push!(loadA, asg(cv, cadd(cadd(:__ct_lo, :__ct_k0), :__ct_kk)))
-        push!(loadA, zfill)
-        push!(loadA, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
-                          Expr(:block, asg(:__ct_v, Expr(:ref, fa.arr, fa.idx)))))
-        push!(loadA, asg(Expr(:ref, sh, cadd(cadd(cmul(:__ct_kk, TM + 1), :__ct_rr), 1)), :__ct_v))
-    end
-    loadB = Any[]
-    for q in 0:3
-        push!(loadB, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
-        push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TM)))
-        push!(loadB, asg(:__ct_cc, call(:mod, :__ct_e, TM)))
-        push!(loadB, asg(ov, cadd(cadd(:__ct_c0, :__ct_cc), 1)))
-        push!(loadB, asg(cv, cadd(cadd(:__ct_lo, :__ct_k0), :__ct_kk)))
-        push!(loadB, zfill)
-        push!(loadB, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
-                          Expr(:block, asg(:__ct_v, Expr(:ref, fb.arr, fb.idx)))))
-        push!(loadB, asg(Expr(:ref, sh, cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), :__ct_cc), 1)), :__ct_v))
-    end
-    mac = Any[]
-    for i in 0:RT-1
-        push!(mac, asg(Symbol("__ct_av", i), Expr(:ref, sh, cadd(cadd(cmul(:__ct_kk, TM + 1), cadd(:__ct_ty, 16 * i)), 1))))
-    end
-    for j in 0:RT-1
-        push!(mac, asg(Symbol("__ct_bv", j), Expr(:ref, sh, cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), cadd(:__ct_tx, 16 * j)), 1))))
-    end
-    for i in 0:RT-1, j in 0:RT-1
-        push!(mac, asg(acc_ij(i, j), cadd(acc_ij(i, j), cmul(Symbol("__ct_av", i), Symbol("__ct_bv", j)))))
-    end
-    kloop = Expr(:for, asg(:__ct_k0, call(:(:), 0, TK, call(:-, :__ct_K, 1))),
-                 Expr(:block, loadA..., loadB..., call(:sync_threads),
-                      Expr(:for, asg(:__ct_kk, call(:(:), 0, TK - 1)), Expr(:block, mac...)),
-                      call(:sync_threads)))
-    push!(body, kloop)
-    for i in 0:RT-1, j in 0:RT-1
-        stmts = Any[asg(:__ct_row, cadd(:__ct_r0, cadd(:__ct_ty, 16 * i))), asg(:__ct_col, cadd(:__ct_c0, cadd(:__ct_tx, 16 * j)))]
-        inner = Any[asg(idxv, cadd(cadd(cmul(:__ct_row, :__ct_N), :__ct_col), 1))]
-        append!(inner, pre_rest)
-        push!(inner, asg(acc, call(op, acc, acc_ij(i, j))))
-        append!(inner, post)
-        push!(stmts, Expr(:if, Expr(:&&, call(:<, :__ct_row, :__ct_M), call(:<, :__ct_col, :__ct_N)), Expr(:block, inner...)))
-        append!(body, stmts)
-    end
-    push!(body, emit_return_nothing())
-    name = cgen_contraction_name(parts.sig.args[1])
-    kd = Expr(:function, Expr(:call, name, fargs...), Expr(:block, body...))
-    Mh = call(:div, n_iter_total(n_iter), N)
-    Kh = K
-    cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, N, cmin), call(:>=, Mh, cmin)), call(:>=, Kh, cmin)), call(:>, N, 0))
     # the rows are whole: a loop of 7 elements over rows of 3 has a partial last row that the tiles would not compute
-    cond = Expr(:&&, cond, call(:(==), call(:mod, n_iter_total(n_iter), N), 0))
-    bx = call(Expr(:., :Base, QuoteNode(:cld)), N, TM)
-    by = call(Expr(:., :Base, QuoteNode(:cld)), Mh, TM)
-    return (kdef = kd, name = name, cond = cond, bx = bx, by = by, shmem = 8 * ((TM + 1) * TK + TM * TK))
+    return (name = cgen_contraction_name(parts.sig.args[1]), fargs = fargs,
+            prelude = Any[Expr(:(=), :__ct_N, N), Expr(:(=), :__ct_M, Expr(:call, :div, n_iter, :__ct_N)), Expr(:(=), :__ct_K, K), Expr(:(=), :__ct_lo, lp.lo)],
+            rowvar = tv, colvar = ov, kvar = cv, rowbase = 1, colbase = 1, kbase = :__ct_lo, decls = (ov, tv, cv), A = fa, B = fb, epilogue = epilogue,
+            Mh = Mh, Nh = N, Kh = K, extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0))
 end
-# the number of iterations of the plain kernel's thread guard, `div(n - 1, 1) + 1` -> n
-n_iter_total(n_iter) = n_iter
+
+# ---- the adjoint of a product ----------------------------------------------------------------------------------------------------------------------
+# The adjoint of `out[t, o] = b[o] + sum_c x[t, c] * w[c, o]` is one thread per output element (t, o) that holds the seed of the element in a scalar `g` and
+# scatters it, in a loop over c, into the two input adjoints with atomic adds: `xb[ix(t, c)] += w[iw(o, c)] * g` and `wb[ix2(o, c)] += x[iw2(t, c)] * g`.
+# Each is a matrix product in the other direction: `xb[t, c] += sum_o g[t, o] * w[c, o]`. The twin splits the kernel in three. The first is the plain kernel with
+# the loop replaced by a store of `g` into a scratch array `__ct_g` at the thread's own flat index (the rest of the kernel, zeroing of the seed, bias adjoint, is
+# unchanged). Then one tiled kernel per atomic statement computes the sums from the scratch array and adds each into its target with an atomic add, one per output
+# element, so no proof is needed that the targets of different elements are distinct. The sum over o is formed in tile order: the last bits differ.
+# Recognized shape, after the thread guard: `idx = 1 + (__tid - 1)` or `idx = X + (__tid - 1) * -1` with X the thread count; statements that are scalar assignments
+# or stores (among them `o = mod(idx - 1, N) + 1` and `t = div(idx - 1, N) + 1`, the decode possibly through a variable that holds `idx - 1`); ONE flat loop whose
+# body is only atomic adds `arr[ix] += F[iw] * g` with one scalar `g` assigned before the loop; scalar assignments and stores. `ix` may read parameters, `c` and one of
+# `t`, `o`; `iw` parameters, `c` and the other. The `F` arrays are never stored and the target arrays never read in the kernel.
+function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_min())
+    parts = cgen_kernel_parts(kdef)
+    parts === nothing && return nothing
+    fargs = Symbol[parts.sig.args[2:end]...]
+    params = Set{Symbol}(fargs)
+    n_iter = parts.guard.args[1].args[3]
+    rest = Any[x for x in parts.rest if !(x isa LineNumberNode)]
+    cgen_contraction_reserved(rest; scratch = true) && return nothing
+    # the loop of atomic adds; a forward loop before it (the adjoint kernel recomputes the forward value) stays in the first kernel
+    li = findfirst(x -> (l = cgen_split_loop(x); l !== nothing && !isempty(l.body) && any(st -> cgen_atomic_site(st) !== nothing, l.body) && all(st -> cgen_atomic_site(st) !== nothing || cgen_split_is_scalar(st), l.body)), rest)
+    li === nothing && return nothing
+    pre = rest[1:li-1]; lpst = rest[li]; post = rest[li+1:end]
+    length(pre) >= 1 || return nothing
+    first_st = pre[1]
+    (first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol) || return nothing
+    idxv = first_st.args[1]
+    # the thread count X and the flat index: forward `1 + (__tid - 1)` over div(X - 1, 1) + 1, or reversed `X + (__tid - 1) * -1` over div(1 - X, -1) + 1
+    X = nothing
+    if n_iter isa Expr && n_iter == Expr(:call, :+, Expr(:call, :div, Expr(:call, :-, n_iter.args[2].args[2].args[2], 1), 1), 1) && first_st.args[2] == :(1 + (__tid - 1))
+        X = n_iter.args[2].args[2].args[2]
+    elseif n_iter isa Expr && n_iter.head === :call && length(n_iter.args) == 3 && n_iter.args[2] isa Expr && n_iter.args[2].head === :call && length(n_iter.args[2].args) == 3 &&
+           n_iter.args[2].args[2] isa Expr && n_iter.args[2].args[2].head === :call && length(n_iter.args[2].args[2].args) == 3
+        Xc = n_iter.args[2].args[2].args[3]
+        if n_iter == :(div(1 - $Xc, -1) + 1) && first_st.args[2] == :($Xc + (__tid - 1) * -1)
+            X = Xc
+        end
+    end
+    X === nothing && return nothing
+    issubset(cgen_split_vars(X), params) || return nothing
+    pre_rest = pre[2:end]
+    okst(st) = cgen_split_is_scalar(st) || cgen_split_is_store(st) || cgen_split_loop(st) !== nothing
+    all(okst, pre_rest) && all(okst, post) || return nothing
+    # the statements of the first kernel, loops opened
+    leaves(sts) = Any[l for st in sts for l in (st isa Expr && st.head === :for ? cgen_split_loop(st).body : Any[st])]
+    # the decode of the flat index into a column `o` and a row `t`, possibly through a variable that holds idx - 1
+    holds = Set{Symbol}()
+    for st in pre_rest
+        cgen_split_is_scalar(st) && st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])
+    end
+    ov = tv = nothing; N = nothing; ndec_o = 0; ndec_t = 0
+    for st in pre_rest
+        cgen_split_is_scalar(st) || continue
+        r = st.args[2]
+        if r isa Expr && r.head === :call && r.args[1] === :+ && length(r.args) == 3 && r.args[3] == 1 && r.args[2] isa Expr && r.args[2].head === :call && length(r.args[2].args) == 3 &&
+           r.args[2].args[1] in (:mod, :div) && (r.args[2].args[2] == Expr(:call, :-, idxv, 1) || r.args[2].args[2] in holds)
+            nn = r.args[2].args[3]
+            issubset(cgen_split_vars(nn), params) || return nothing
+            N === nothing || N == nn || return nothing
+            N = nn
+            # the decode may be repeated (a recomputed forward value has its own); the counts below prove every repeat names the same variable
+            if r.args[2].args[1] === :mod
+                ov = st.args[1]; ndec_o += 1
+            else
+                tv = st.args[1]; ndec_t += 1
+            end
+        end
+    end
+    (ov !== nothing && tv !== nothing) || return nothing
+    # every assignment of the column and of the row is one of these decodes
+    count(st -> st isa Expr && st.head === :(=) && st.args[1] === ov, leaves(Any[pre_rest..., post...])) == ndec_o || return nothing
+    count(st -> st isa Expr && st.head === :(=) && st.args[1] === tv, leaves(Any[pre_rest..., post...])) == ndec_t || return nothing
+    # the loop: atomic adds `arr[ix] += F[iw] * g` and nothing else
+    lp = cgen_split_loop(lpst)
+    (lp !== nothing && !isempty(lp.body)) || return nothing
+    issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing
+    cv = lp.var
+    (cv in params || cv in (ov, tv, idxv)) && return nothing
+    g = nothing
+    sts = Any[]
+    # scalar temporaries of the loop body (common subexpressions of operand reads) are inlined, in order, into the later statements; none is read or assigned outside the loop
+    subst(e, d) = e isa Symbol ? get(d, e, e) : (e isa Expr ? Expr(e.head, Any[subst(x, d) for x in e.args]...) : e)
+    tmps = Dict{Symbol,Any}()
+    lbody = Any[]
+    outside = Expr(:block, pre..., post...)
+    for st in lp.body
+        if cgen_split_is_scalar(st) && st.args[1] isa Symbol
+            tn = st.args[1]
+            tn in params && return nothing
+            cgen_count_symbol(outside, tn) == 0 || return nothing
+            rhs = subst(st.args[2], tmps)
+            tmps[tn] = rhs
+        else
+            push!(lbody, subst(st, tmps))
+        end
+    end
+    for st in lbody
+        # every statement left is an atomic add: the loop was chosen because its body is atomic adds and scalars
+        site = cgen_atomic_site(st)
+        v = site.val
+        (v isa Expr && v.head === :call && v.args[1] === :* && length(v.args) == 3) || return nothing
+        a, b = v.args[2], v.args[3]
+        isref(f) = f isa Expr && f.head === :ref && length(f.args) == 2 && f.args[1] isa Symbol
+        if a isa Symbol && isref(b)
+            gs, F = a, b
+        elseif b isa Symbol && isref(a)
+            gs, F = b, a
+        else
+            return nothing
+        end
+        g === nothing || g === gs || return nothing
+        g = gs
+        push!(sts, (site = site, F = (arr = F.args[1], idx = F.args[2])))
+    end
+    # g is a thread-local scalar assigned before the loop
+    g === cv && return nothing
+    any(st -> cgen_split_is_scalar(st) && st.args[1] === g, pre_rest) || return nothing
+    # arrays: an operand F is never stored in the kernel or a target of another statement; a target is read nowhere else in the kernel
+    others = Expr(:block, pre..., post...)
+    stored = Set{Symbol}()
+    for st in leaves(Any[pre_rest..., post...])
+        cgen_split_is_store(st) || continue
+        site = cgen_atomic_site(st)
+        push!(stored, site === nothing ? st.args[1].args[1] : site.arr)
+    end
+    targets = Set{Symbol}(s.site.arr for s in sts)
+    for s in sts
+        (s.F.arr in stored || s.F.arr in targets) && return nothing
+        cgen_count_symbol(others, s.site.arr) == 0 || return nothing
+    end
+    # per statement: the target index reads one of (t, o) and c, the operand index the other one and c
+    descs = Any[]
+    Mdec = Expr(:call, :div, X, N)
+    trip = cgen_trip_count(lp.lo, lp.step, lp.hi)
+    colbase = lp.step == 1 ? lp.lo : lp.hi
+    atomic = backend.atomic_macro
+    for s in sts
+        vi = cgen_split_vars(s.site.idx); vw = cgen_split_vars(s.F.idx)
+        u = v = nothing
+        for (cu, cvv) in ((tv, ov), (ov, tv))
+            if issubset(vi, union(params, Set([cu, cv]))) && issubset(vw, union(params, Set([cvv, cv]))) && cu in vi && cvv in vw && cv in vi && cv in vw
+                u, v = cu, cvv
+            end
+        end
+        u === nothing && return nothing
+        rows = u === tv ? Mdec : N
+        kdim = u === tv ? N : Mdec
+        aidx = Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, tv, 1), N), ov)
+        site = s.site
+        epilogue(row, col, a) = Any[Expr(:(=), u, Expr(:call, :+, row, 1)), Expr(:(=), cv, Expr(:call, :+, :__ct_cb, col)),
+                                    Expr(:macrocall, atomic, nothing, Expr(:(+=), Expr(:ref, site.arr, site.idx), a))]
+        push!(descs, (name = Symbol(string(cgen_split_name(parts.sig.args[1]))[1:end-3], "_t", length(descs) + 1, "!"), fargs = Symbol[fargs..., :__ct_g],
+                      prelude = Any[Expr(:(=), :__ct_N, trip), Expr(:(=), :__ct_M, rows), Expr(:(=), :__ct_K, kdim), Expr(:(=), :__ct_cb, colbase)],
+                      rowvar = u, colvar = cv, kvar = v, rowbase = 1, colbase = :__ct_cb, kbase = 1, decls = (u, v, cv),
+                      A = (arr = :__ct_g, idx = aidx), B = s.F, epilogue = epilogue, Mh = rows, Nh = trip, Kh = kdim,
+                      extra = Expr(:call, :(==), Expr(:call, :mod, X, N), 0), target = site.arr))
+    end
+    nm = parts.sig.args[1]
+    nms = string(nm); base = endswith(nms, "!") ? nms[1:end-1] : nms
+    # a forward product that the kernel recomputes before the loop of adds (the value its epilogue differentiates): a tiled kernel of its own stores the sum in
+    # a scratch array, and the first kernel reads it back in place of the loop
+    fstage = nothing
+    fi = findfirst(st -> st isa Expr && st.head === :for, pre_rest)
+    if fi !== nothing
+        lpf = cgen_split_loop(pre_rest[fi])
+        acf = (lpf !== nothing && length(lpf.body) == 1) ? cgen_split_accum(lpf.body[1]) : nothing
+        if acf !== nothing
+            fname = Symbol(base, "_f!")
+            sub = Expr(:function, Expr(:call, fname, fargs..., :__cf_s),
+                       Expr(:block, parts.head, parts.guard, pre[1:fi+1]..., Expr(:(=), Expr(:ref, :__cf_s, idxv), acf[1]), emit_return_nothing()))
+            d0 = cgen_contraction_kernel(sub; cmin)
+            d0 === nothing || (fstage = (desc = d0, acc = acf[1], at = fi + 1))
+        end
+    end
+    pre_a = Any[pre...]
+    fstage === nothing || (pre_a[fstage.at] = Expr(:(=), fstage.acc, Expr(:ref, :__cf_s, idxv)))
+    # the first kernel: the plain kernel with the loop replaced by the store of g
+    store = Expr(:(=), Expr(:ref, :__ct_g, idxv), g)
+    body = Any[parts.head, parts.guard, pre_a..., store, post..., emit_return_nothing()]
+    ka_name = Symbol(base, "_a", endswith(nms, "!") ? "!" : "")
+    ka = Expr(:function, Expr(:call, ka_name, fargs..., :__ct_g, (fstage === nothing ? Symbol[] : Symbol[:__cf_s])...), Expr(:block, body...))
+    return (ka = ka, ka_name = ka_name, descs = descs, count = X, fstage = fstage)
+end
+
+# the whole launch statement of a kernel (the macro call with its keywords), by the kernel's name
+function cgen_contraction_find_launch(e, launch_macro, base::Symbol)
+    e isa Expr || return nothing
+    if e.head === :macrocall && e.args[1] === launch_macro && e.args[end] isa Expr && e.args[end].head === :call && e.args[end].args[1] === base
+        return e
+    end
+    for a in e.args
+        r = cgen_contraction_find_launch(a, launch_macro, base)
+        r === nothing || return r
+    end
+    return nothing
+end
 
 # Adds the contraction twin of every kernel that has one and wraps the launch statement: the twin when its condition holds, the statement as it was otherwise.
+# A forward product gets one tiled kernel. An adjoint product gets a kernel that stores the seeds in a scratch array (allocated by the host function) and one
+# tiled kernel per atomic statement.
 function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin::Int = cgen_contraction_min())
-    twins = Dict{Symbol,Any}()
+    fwd = Dict{Symbol,Any}()
+    adj = Dict{Symbol,Any}()
     for k in kernels
         k.head === :function || continue
         nm = k.args[1].args[1]
         (cgen_is_coarse_variant(k) || endswith(string(nm), "_p!")) && continue
-        t = cgen_contraction_kernel(k; cmin)
-        t === nothing || (twins[nm] = t)
+        d = cgen_contraction_kernel(k; cmin)
+        if d !== nothing
+            fwd[nm] = cgen_contraction_emit(d; cmin)
+            continue
+        end
+        a = cgen_adjoint_contraction(k, backend; cmin)
+        a === nothing && continue
+        adj[nm] = (a = a, ts = [cgen_contraction_emit(d2; cmin) for d2 in a.descs], fs = a.fstage === nothing ? nothing : cgen_contraction_emit(a.fstage.desc; cmin))
     end
-    isempty(twins) && return (host, kernels)
+    (isempty(fwd) && isempty(adj)) && return (host, kernels)
     used = Set{Symbol}()
+    fits(t, call) = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), call)), 256)
+    tiled(t, call) = Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), backend.threads_kw, Expr(:tuple, 16, 16)), Expr(:(=), backend.blocks_kw, Expr(:tuple, t.bx, t.by)), Expr(:(=), :shmem, t.shmem), call)
     function walk(e)
         e isa Expr || return e
         if (e.head === :if || e.head === :macrocall) && cgen_split_pure_launch(e, backend.launch_macro)
             names = cgen_split_launched!(e, backend.launch_macro, Set{Symbol}())
             bases = Set{Symbol}(cgen_split_base_name(n) for n in names)
-            if length(bases) == 1 && first(bases) in keys(twins)
+            if length(bases) == 1
                 base = first(bases)
-                t = twins[base]
                 plain = cgen_split_first_call(e, backend.launch_macro, base)
-                plain === nothing && return e
-                call = Expr(:call, t.name, plain.args[2:end]...)
-                kws = Any[Expr(:(=), backend.threads_kw, Expr(:tuple, 16, 16)), Expr(:(=), backend.blocks_kw, Expr(:tuple, t.bx, t.by)), Expr(:(=), :shmem, t.shmem)]
-                launch = Expr(:macrocall, backend.launch_macro, nothing, kws..., call)
-                probe = Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), call)
-                fits = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), probe), 256)
-                push!(used, base)
-                return emit_if(Expr(:&&, t.cond, fits), Any[launch], Any[e])
+                if haskey(fwd, base) && plain !== nothing
+                    t = fwd[base]
+                    call = Expr(:call, t.name, plain.args[2:end]...)
+                    push!(used, base)
+                    return emit_if(Expr(:&&, t.cond, fits(t, call)), Any[tiled(t, call)], Any[e])
+                elseif haskey(adj, base) && plain !== nothing
+                    A = adj[base]
+                    launch = cgen_contraction_find_launch(e, backend.launch_macro, base)
+                    launch === nothing && return e
+                    cond = nothing
+                    zeros_expr = Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, A.a.count)
+                    body = Any[Expr(:(=), :__ct_g, zeros_expr)]
+                    kargs = Any[:__ct_g]
+                    if A.fs !== nothing
+                        push!(body, Expr(:(=), :__cf_s, zeros_expr))
+                        push!(kargs, :__cf_s)
+                        fcall = Expr(:call, A.fs.name, plain.args[2:end]..., :__cf_s)
+                        # the probe stands in an operand array for the scratch array: the same element type and rank
+                        fprobe = Expr(:call, A.fs.name, plain.args[2:end]..., A.a.fstage.desc.A.arr)
+                        cond = Expr(:&&, A.fs.cond, fits(A.fs, fprobe))
+                        push!(body, tiled(A.fs, fcall))
+                    end
+                    push!(body, Expr(:macrocall, backend.launch_macro, nothing, launch.args[3:end-1]..., Expr(:call, A.a.ka_name, plain.args[2:end]..., kargs...)))
+                    for (t, d) in zip(A.ts, A.a.descs)
+                        call = Expr(:call, t.name, plain.args[2:end]..., :__ct_g)
+                        # the probe stands in the target array for the scratch array: the same element type and rank
+                        probe = Expr(:call, t.name, plain.args[2:end]..., d.target)
+                        c = Expr(:&&, t.cond, fits(t, probe))
+                        cond = cond === nothing ? c : Expr(:&&, cond, c)
+                        push!(body, tiled(t, call))
+                    end
+                    push!(used, base)
+                    return emit_if(cond, body, Any[e])
+                end
             end
         end
         return Expr(e.head, Any[walk(a) for a in e.args]...)
@@ -11018,7 +11268,15 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
     isempty(used) && return (host, kernels)
     newk = copy(kernels)
     for nm in sort(collect(used); by = string)
-        push!(newk, twins[nm].kdef)
+        if haskey(fwd, nm)
+            push!(newk, fwd[nm].kdef)
+        else
+            push!(newk, adj[nm].a.ka)
+            adj[nm].fs === nothing || push!(newk, adj[nm].fs.kdef)
+            for t in adj[nm].ts
+                push!(newk, t.kdef)
+            end
+        end
     end
     return (newhost, newk)
 end
