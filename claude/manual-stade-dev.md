@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2437,6 +2437,16 @@ generated helper (`__stade_wa_add!`). With all 32 lanes active and one
 shared index it adds the lane values by a shuffle tree and lane 0 issues
 the single atomic; otherwise it issues the plain atomic. The summation
 order changes, so the last bits of a result differ.
+
+**Atomic hoisting** (`hoist_atomics`)
+All GPU backends (default on; `false` restores the old output exactly). In a
+device loop, an atomic add whose index is the same on every iteration is
+replaced by an add into a local accumulator, plus one atomic after the loop.
+A site qualifies only when its index has no array read, no variable the loop
+assigns and is not the loop variable; every use of its array in the loop is such
+a site; it is not inside a nested `for`; and the loop has at most 16 sites. A
+flag set in the loop guards the flush, so a loop that runs zero times flushes
+nothing (an index can be 0 exactly then). The order of the float sum changes.
 
 **Sync-free reduction** (`sync_free_reduce`)
 CUDA only. The large-trip branch of an array-element reduction is a

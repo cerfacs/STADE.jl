@@ -8787,7 +8787,7 @@ function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend,
         elseif stmt.kind == :if
             push!(exprs, emit_if(stmt.cond, cgen_device_body(stmt.then, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep)), cgen_device_body(stmt.els, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
+            append!(exprs, cgen_emit_device_loop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep)), cgen_hoist_atomics_on(backend)))
         elseif stmt.kind == :while
             # A while has no trip count, so no launch can size itself around
             # it and no thread can be assigned an iteration. cgen_body must
@@ -8796,6 +8796,143 @@ function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend,
         end
     end
     return exprs
+end
+
+# ---- loop-invariant atomic hoisting ----
+# A sequential loop inside a device thread can add to one element on every iteration: a weight-gradient bin whose index depends on the thread
+# and not on the loop. That is one atomic per iteration at one address. Summing in a register and issuing a single atomic after the loop gives the
+# same total, to within rounding. A site hoists only when (1) its index is invariant in the loop: no array read, no symbol assigned in the loop, not
+# the loop variable, and (2) every use of its array inside the loop is such a site, so nothing in the loop reads or overwrites the array between the
+# additions. A flag set beside each addition guards the flush, because a loop that may not run must not evaluate an index that is valid only when
+# it does.
+cgen_hoist_atomics_on(backend) = get(backend, :hoist_atomics, true) === true
+cgen_hoist_max_sites() = 16
+
+# `__stade_wa_add!(A, idx, val)` or `<macro> A[idx] += val` for a single-index ref of a named array, as cgen_atomic_add and jgen_device_assign emit
+function cgen_atomic_site(e)
+    e isa Expr || return nothing
+    if e.head == :call && length(e.args) == 4 && e.args[1] === cgen_warp_add_name() && e.args[2] isa Symbol
+        return (arr = e.args[2], idx = e.args[3], val = e.args[4])
+    end
+    if e.head == :macrocall && length(e.args) == 3 && e.args[3] isa Expr && e.args[3].head == :(+=)
+        tgt = e.args[3].args[1]
+        if tgt isa Expr && tgt.head == :ref && length(tgt.args) == 2 && tgt.args[1] isa Symbol
+            return (arr = tgt.args[1], idx = tgt.args[2], val = e.args[3].args[2])
+        end
+    end
+    return nothing
+end
+
+# the same atomic with its value replaced
+function cgen_atomic_rebuild(e, val)
+    if e.head == :call
+        return Expr(:call, e.args[1], e.args[2], e.args[3], val)
+    end
+    return Expr(:macrocall, e.args[1], e.args[2], Expr(:(+=), e.args[3].args[1], val))
+end
+
+cgen_count_symbol(x, s::Symbol) = x === s ? 1 : (x isa Expr ? sum(a -> cgen_count_symbol(a, s), x.args; init = 0) : 0)
+
+function cgen_assigned_symbols!(x, out::Set{Symbol})
+    x isa Expr || return out
+    x.head in (:(=), :(+=), :(-=), :(*=), :(/=)) && x.args[1] isa Symbol && push!(out, x.args[1])
+    for a in x.args
+        cgen_assigned_symbols!(a, out)
+    end
+    return out
+end
+
+# atomic sites reachable without entering a nested loop: the top level of `exprs` and the arms of `if`/`begin` blocks
+function cgen_collect_atomic_sites!(exprs, out::Vector{Any})
+    for e in exprs
+        e isa Expr || continue
+        if cgen_atomic_site(e) !== nothing
+            push!(out, e)
+        elseif e.head == :if
+            for arm in e.args[2:end]
+                arm isa Expr && cgen_collect_atomic_sites!(arm.head == :block ? arm.args : Any[arm], out)
+            end
+        elseif e.head == :block
+            cgen_collect_atomic_sites!(e.args, out)
+        end
+    end
+    return out
+end
+
+# Keys (array, index) hoistable out of the loop `for var = ...; body_exprs; end`, in first-use order.
+function cgen_hoistable_atomic_keys(var::Symbol, body_exprs::Vector)
+    sites = cgen_collect_atomic_sites!(body_exprs, Any[])
+    assigned = cgen_assigned_symbols!(Expr(:block, body_exprs...), Set{Symbol}([var]))
+    inv_count = Dict{Symbol,Int}()
+    keys = Any[]
+    for e in sites
+        site = cgen_atomic_site(e)
+        invariant = !cgen_expr_has_ref(site.idx) && isempty(intersect(cgen_expr_symbols(site.idx), assigned))
+        invariant || continue
+        inv_count[site.arr] = get(inv_count, site.arr, 0) + 1
+        key = (arr = site.arr, idx = site.idx)
+        key in keys || push!(keys, key)
+    end
+    whole = Expr(:block, body_exprs...)
+    # each site holds its array exactly once, so equality means no other use of the array exists in the loop
+    keys = Any[k for k in keys if cgen_count_symbol(whole, k.arr) == inv_count[k.arr]]
+    return length(keys) > cgen_hoist_max_sites() ? keys[1:cgen_hoist_max_sites()] : keys
+end
+
+# Rewrites the hoisted sites of `exprs` in place of an atomic: `acc = acc + val; flag = 1`.
+function cgen_rewrite_hoisted_sites(exprs, keys::Vector{Any}, accs::Vector{Symbol}, flags::Vector{Symbol})
+    out = Any[]
+    for e in exprs
+        if e isa Expr
+            site = cgen_atomic_site(e)
+            k = site === nothing ? nothing : findfirst(key -> key.arr === site.arr && key.idx == site.idx, keys)
+            if k !== nothing
+                push!(out, Expr(:(=), accs[k], Expr(:call, :+, accs[k], site.val)))
+                push!(out, Expr(:(=), flags[k], 1))
+                continue
+            elseif e.head == :if
+                arms = Any[e.args[1]]
+                for arm in e.args[2:end]
+                    push!(arms, arm isa Expr && arm.head == :block ? Expr(:block, cgen_rewrite_hoisted_sites(arm.args, keys, accs, flags)...) : arm)
+                end
+                push!(out, Expr(:if, arms...))
+                continue
+            elseif e.head == :block
+                push!(out, Expr(:block, cgen_rewrite_hoisted_sites(e.args, keys, accs, flags)...))
+                continue
+            end
+        end
+        push!(out, e)
+    end
+    return out
+end
+
+# Statements for one device loop: the loop itself, preceded by accumulator setup and followed by the guarded flush, or just the loop when
+# nothing hoists. `hoist = false` is the exact pre-hoisting output.
+function cgen_emit_device_loop(var::Symbol, lo, hi, step, body_exprs::Vector, hoist::Bool)
+    keys = hoist ? cgen_hoistable_atomic_keys(var, body_exprs) : Any[]
+    isempty(keys) && return Any[emit_forloop(var, lo, hi, step, body_exprs)]
+    sites = cgen_collect_atomic_sites!(body_exprs, Any[])
+    whole = Expr(:block, body_exprs...)
+    accs = Symbol[]; flags = Symbol[]
+    for (n, k) in enumerate(keys)
+        i = n
+        while cgen_count_symbol(whole, Symbol("__ac", i, "_", k.arr)) > 0 || Symbol("__ac", i, "_", k.arr) in accs
+            i += 1
+        end
+        push!(accs, Symbol("__ac", i, "_", k.arr)); push!(flags, Symbol("__ha", i, "_", k.arr))
+    end
+    pre = Any[]
+    for n in eachindex(keys)
+        push!(pre, Expr(:(=), accs[n], 0.0))
+        push!(pre, Expr(:(=), flags[n], 0))
+    end
+    post = Any[]
+    for (n, k) in enumerate(keys)
+        e = first(s for s in sites if (st = cgen_atomic_site(s); st.arr === k.arr && st.idx == k.idx))
+        push!(post, emit_if(Expr(:call, :!=, flags[n], 0), Any[cgen_atomic_rebuild(e, accs[n])], Any[]))
+    end
+    return vcat(pre, Any[emit_forloop(var, lo, hi, step, cgen_rewrite_hoisted_sites(body_exprs, keys, accs, flags))], post)
 end
 
 # ---- warp-aggregated atomics (CUDA) ----
@@ -9051,7 +9188,7 @@ end
 # device-array-backed ref) via a bare host assignment is a host setindex! against a device array; unlike
 # CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch (confirmed live: 'Scalar indexing is disallowed'). Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, depth::Int = 0)
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, depth::Int = 0, hoist_atomics::Bool = true)
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
     # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
@@ -9094,7 +9231,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # A missing clause here would be silent: the statement would fall
             # through and vanish from the generated host function.
             flush_pending!()
-            push!(exprs, emit_while(stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
+            push!(exprs, emit_while(stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics)))
         elseif stmt.kind == :if
             flush_pending!()
             # A host-side branch condition that reads a device array element needs the same @allowscalar
@@ -9104,7 +9241,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # the first full-corpus live GPU run.
             cond = cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ?
                    Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
+            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -9118,7 +9255,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             stage = synth === nothing ? gate.reason : !safe_scope ? :scope : cgen_contains_stackop(stmt.body) ? :stackop : :ok
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
             # codegen rather than a structural approximation of it
-            stage === :ok && !cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth)) && (stage = :kernel_def)
+            stage === :ok && !cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth, hoist_atomics)) && (stage = :kernel_def)
             # Same live-out refusal cgen_body applies -- jgen_body had no equivalent, and no root_body
             # to apply it against. A split loop's scalars live on the device; a later host statement
             # reading one gets the stale host copy instead. ii_kill is the witness: cgen keeps that loop
@@ -9184,7 +9321,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     aidx = length(kernels) + 1
                     afargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
-                    push!(kernels, jgen_kernel_def(stmt, owner, aidx, afargs, loop_reduce_vars, synth))
+                    push!(kernels, jgen_kernel_def(stmt, owner, aidx, afargs, loop_reduce_vars, synth, hoist_atomics))
                     push!(exprs, emit_if(Expr(:call, :<, n_iter, reduction_threshold),
                                          Any[jgen_launch_expr(stmt, owner, aidx, afargs)],
                                          red_exprs))
@@ -9192,11 +9329,11 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     idx = length(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
-                    push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth))
+                    push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth, hoist_atomics))
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics)))
             end
             decisions === nothing || push!(decisions, cgen_decision_record(owner, stmt, depth, verdict, stage, gate.array, gate.idiom))
             delete!(known_consts, stmt.var)
@@ -9230,7 +9367,7 @@ end
 # MAX_TUPLE_SPLAT the compiler emits a dynamic jl_f__apply_iterate that no GPU can run (ttgc's 42-argument HVP kernel, measured on a V100).
 const JGEN_MAX_SPLAT_ARGS = 32
 
-function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, reduce_vars::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}())
+function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, reduce_vars::Set{Symbol}, synth::Dict{Symbol,Any} = Dict{Symbol,Any}(), hoist::Bool = true)
     jidx = :__jacc_i
     packed = length(fargs) > JGEN_MAX_SPLAT_ARGS
     # A packed kernel takes its free variables as one tuple and unpacks them first, so JACC's splat sees a single argument.
@@ -9243,7 +9380,7 @@ function jgen_kernel_def(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, r
         push!(body, Expr(:(=), v, c))
     end
     fbody = cgen_fold_accumulates(stmt.body)
-    append!(body, jgen_device_body(fbody, stmt.var, reduce_vars, cgen_race_write_arrays(fbody, stmt.var)))
+    append!(body, jgen_device_body(fbody, stmt.var, reduce_vars, cgen_race_write_arrays(fbody, stmt.var), Set([stmt.var]), Set([stmt.var]), hoist))
     push!(body, emit_return_nothing())
     return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, (packed ? Any[:__jargs] : fargs)...), Expr(:block, body...))
 end
@@ -9264,7 +9401,7 @@ function jgen_launch_expr(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol})
     return Expr(:if, Expr(:call, :>, n_iter, 0), Expr(:block, (packed ? Any[Expr(:(=), tname, Expr(:tuple, fargs...))] : Any[])..., launch))
 end
 
-function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol}, race_arrays::Set{Symbol} = Set{Symbol}(), thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]))
+function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_vars::Set{Symbol}, race_arrays::Set{Symbol} = Set{Symbol}(), thread_dep::Set{Symbol} = Set([thread_var]), injective_dep::Set{Symbol} = Set([thread_var]), hoist::Bool = true)
     exprs = Any[]
     for stmt in body
         if stmt.kind == :assign
@@ -9288,9 +9425,9 @@ function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_v
                 end
             end
         elseif stmt.kind == :if
-            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep)), jgen_device_body(stmt.els, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
+            push!(exprs, emit_if(stmt.cond, jgen_device_body(stmt.then, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep), hoist), jgen_device_body(stmt.els, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep), hoist)))
         elseif stmt.kind == :for
-            push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
+            append!(exprs, cgen_emit_device_loop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep), hoist), hoist))
         elseif stmt.kind == :while
             # A while has no trip count, so no launch can size itself around
             # it and no thread can be assigned an iteration. jgen_body must
@@ -9342,13 +9479,13 @@ jgen_host_fname(name::Symbol) = Symbol(string(name) * "_jacc")
 # JACC API: a future AMDGPU/Metal-backed image needs a different default.
 jgen_default_allowscalar_macro() = Expr(:., :CUDA, QuoteNode(Symbol("@allowscalar")))
 
-function jgen_emit(gk; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, allowscalar_macro = jgen_default_allowscalar_macro())
+function jgen_emit(gk; reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, allowscalar_macro = jgen_default_allowscalar_macro(), hoist_atomics::Bool = true)
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
     fn_args = Set{Symbol}(gk.args)
     outer_defs = cgen_scalar_def_map(gk.body)
     decisions = NamedTuple[]
-    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, decisions)
+    host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, decisions, hoist_atomics)
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the reverse.
     reduce_vars_sorted = sort(collect(reduce_vars); by = string)
@@ -11203,7 +11340,8 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true)
+    hoist_atomics || (backend = merge(backend, (hoist_atomics = false,)))
     warp_atomics || (backend = merge(backend, (warp_atomics = false,)))
     sync_free_reduce || (backend = merge(backend, (sync_free_reduce = false,)))
     p = precision === nothing ? backend.default_precision : precision
@@ -11217,8 +11355,8 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -11230,13 +11368,13 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
@@ -11246,8 +11384,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -11258,20 +11396,20 @@ stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Ty
 # locked default here for the same reason: Float64 unless the caller asks otherwise.
 # On JACC a matched reduction becomes one
 # JACC.@parallel_reduce call instead of @parallel_for + Atomix.@atomic.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
-    plan = jgen_emit(cgen_ingest(expr); reduction_threshold)
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true)
+    plan = jgen_emit(cgen_ingest(expr); reduction_threshold, hoist_atomics)
     p = precision === nothing ? Float64 : precision
     p === Float64 && return (host = plan.host, kernels = plan.kernels)
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_jacc(expr; precision, reduction_threshold)
+        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
@@ -11782,7 +11920,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -11796,13 +11934,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the
@@ -11858,7 +11996,7 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
                                    self_check::Bool = true,
                                    keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                    mode::Symbol = :adjoint,
-                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true)
     keep_push_pop &&
         error("stade_validate_jacc_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -11873,8 +12011,8 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
     backend = val_jacc_backend()
-    jacc_init = stade_jacc(gen_out.initstacks)
-    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold)
+    jacc_init = stade_jacc(gen_out.initstacks; hoist_atomics = hoist_atomics)
+    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold, hoist_atomics = hoist_atomics)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     tan_seeds   = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]

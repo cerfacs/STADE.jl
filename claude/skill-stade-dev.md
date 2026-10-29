@@ -307,8 +307,8 @@ cancels, so it complements rather than replaces.
 ## GPU (`cgen_`/`jgen_`)
 
 `stade_gpu` ingests **already-generated** code; its only keywords are
-`precision`, `reduction_threshold`, and the CUDA-only `warp_atomics` and
-`sync_free_reduce` (both default on; `false` restores the old output exactly). **Only `keep_push_pop=false` output is
+`precision`, `reduction_threshold`, `hoist_atomics` (all backends) and the CUDA-only `warp_atomics` and
+`sync_free_reduce` (all default on; `false` restores the old output exactly). **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
@@ -387,6 +387,14 @@ arrays at full length while every loop bound collapses to zero trips.
 Count elements changed. GPU baselines live in their own `.gpu.yaml`
 namespace, because `.yaml` is gitignored and `validate_zerotrip.jl`
 deliberately draws integers from `[0, 2]`.
+
+A loop-invariant atomic is hoisted (`cgen_hoistable_atomic_keys`) only after
+its index passes four tests: no array read, no variable assigned in the loop,
+not the loop variable, and every use of the array in the loop is a site. The
+flush after the loop is guarded by a flag set inside it. A zero-trip loop must
+not flush: an index can be 0 exactly when the loop does not run, and the flush
+would write out of bounds. `test/validate_atomic_hoist.jl` sabotage-tests each
+test, the flag and the cap.
 
 ## Self-check before returning STADE code
 

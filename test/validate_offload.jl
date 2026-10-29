@@ -139,6 +139,8 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # is refused and why, since an improvement there would mean an unsafe loop reached the device.
         "idm_slots" => 0, "idm_zerotrip" => 0, "idm_acc_two" => 0, "idm_tile" => 0,
         "idm_dup_write" => 0,
+        # loop-invariant atomic hoisting: ragged per-row loops that accumulate into a shared bin; the one host loop of hoist_sentinel is the prefix table of its Tier B trip counts in initstacks_*
+        "hoist_bins" => 0, "hoist_nested" => 0, "hoist_sentinel" => 1,
         "idm_cse_acc" => 2, "ii_multiversion" => 0, "idm_src_consume" => 2, "idm_gather_rmw" => 6, "idm_overlap_plain" => 3,
         "idm_refuse_cond_read" => 3, "idm_refuse_scalar_read" => 3, "idm_refuse_consume_gap" => 3,
         "so_tile" => 0, "so_hostread" => 4, "so_liveout" => 9, "so_carry" => 5, "so_inner" => 5,
