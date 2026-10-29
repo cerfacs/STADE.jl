@@ -4151,10 +4151,11 @@ end
 
 # bound-variables of a :for statement that are reassigned somewhere
 # else in the kernel -- the same set snap_plan's :tripcount sites are
-# keyed on
+# keyed on. Sorted by name: all :tripcount sites share one stack, so the push order and the
+# (reversed) pop order must be the same list every time it is asked for.
 function agen_tripcount_bound_vars(stmt, reassigned)
     bound_vars = agen_for_bound_vars(stmt)
-    return [bv for bv in bound_vars if bv in reassigned]
+    return sort!([bv for bv in bound_vars if bv in reassigned]; by = string)
 end
 
 # A :for statement's own lo/hi/step free variables, factored out so agen_tier_b_walk's
@@ -5990,7 +5991,8 @@ function agen_backward_body(plan, primal_body, kinds, active_map, unsafe, value_
                 # adjoint either direction, so reversing it costs nothing. Over-reversal is always
                 # right, under-reversal a silent wrong gradient -- not worth an analysis.
                 loop_expr = emit_forloop(stmt.var, agen_reverse_start(stmt.lo, stmt.step, stmt.hi), stmt.lo, agen_negate_step(stmt.step), inner)
-                for bv in agen_tripcount_bound_vars(stmt, reassigned)
+                # LIFO: the forward sweep pushed the bounds in sorted order, so pop them in reverse
+                for bv in reverse(agen_tripcount_bound_vars(stmt, reassigned))
                     push!(exprs, Expr(:(=), bv, agen_emit_pop(stacks[(:tripcount, bv)], ectx, agen_site_key(primal_body, idx, bv), exprs)))
                 end
                 push!(exprs, loop_expr)

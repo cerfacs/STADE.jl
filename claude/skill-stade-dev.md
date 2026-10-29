@@ -460,3 +460,11 @@ deliberately draws integers from `[0, 2]`.
     bound that it cannot rebuild must be a generation-time refusal
     (`agen_refuse_unsized`). It must never become an `UndefVarError` in
     `initstacks_*`.
+
+13. **A shared stack is last-in first-out; the pop order is the reverse of the
+    push order.** All `:tripcount` sites share one stack. Never take the order
+    of pushes from a `Set` or `Dict`: the order is not defined, and the pop
+    side must walk the same list in reverse. Sort the list, and pop it
+    reversed. A kernel with two reassigned loop bounds in one loop is the
+    shape that shows the defect. Run `test/fuzz_int_state.jl` over seeds 3001
+    to 3030 after any change to this code.

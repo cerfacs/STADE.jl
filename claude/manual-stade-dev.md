@@ -1181,8 +1181,11 @@ the source.
 - Seeds 1 to 999: general shapes.
 - Seeds 1000 to 1999: a restricted mode. Every loop has a bound that
   `initstacks_*` can compute, so `keep_push_pop = false` is accepted and runs.
-- Seeds 2000 and up: integer accumulators, integer-conditioned statements, and
+- Seeds 2000 to 2999: integer accumulators, integer-conditioned statements, and
   strided and reversed loops.
+- Seeds 3000 and up: ragged range loops (`fz_range_kernel`). The kernel takes
+  `rp` (row pointers) and `n`, and each outer iteration runs an inner loop from
+  `rp[v]` to `rp[v + 1] - 1`. The loop has two bounds that are reassigned.
 
 The generator pins the type of every integer array (`fz_int_typed`). A literal
 that has only array-valued pairs promotes an integer array to `Float64`, and the
@@ -1194,6 +1197,15 @@ that the corpus and the earlier validators never reached. On the v0.4.21 tree,
 600 general seeds, 250 restricted seeds and 300 seeds from 2001 to 2300 gave no
 failure. Run the fuzzer after any change to `snap_itbr_*`, `agen_unsafe_int_vars`,
 the `:tripcount` sites or `initstacks_*`.
+
+The ragged mode found a seventh defect in v0.4.21 and earlier. All `:tripcount`
+sites of one kernel share a single stack, so the push order and the pop order
+must be last-in first-out. The code took the bounds from a `Set{Symbol}`, whose
+iteration order is not defined, and used the same order for the push and for
+the pop. With two reassigned bounds in one loop, the reverse sweep read the
+values swapped. The gradient was wrong without any error. `agen_tripcount_bound_vars`
+now returns the bounds sorted by name, and the pop side walks them in reverse.
+Seeds 3001 to 3030 give 30 failures on v0.4.21 and none on v0.4.22.
 
 ## IV.12 `keep_push_pop = false` in detail
 

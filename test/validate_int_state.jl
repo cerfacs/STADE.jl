@@ -92,6 +92,8 @@ const INT_CASES = [
     ("scalar_two_sites",   "scalar_two_sites",   () -> [:x => X6V, :idx => [4, 2, 6, 1, 3, 5], :n => 5, :out => zeros(1)], X6),
     ("bound_from_written_array", "bound_from_written_array", () -> Pair{Symbol,Any}[:x => X6V, :cnt => [1, 2, 1], :out => zeros(1)], X6),
     ("bound_from_array_branch", "bound_from_array_branch", () -> Pair{Symbol,Any}[:x => X6V, :cnt => [4, 2, 1], :out => zeros(1)], X6),
+    # found while benchmarking: a loop with two reassigned bounds popped them in the order it pushed them (v0.4.22)
+    ("range_bounds_pair",  "range_bounds_pair",  () -> Pair{Symbol,Any}[:x => [0.3, 0.5, 0.7, 0.9, 1.1], :rp => [1, 3, 3, 6], :n => 3, :out => zeros(1)], [(:x, i) for i in 1:5]),
     # controls: these passed before the change and must keep passing
     ("for_gather",         "for_gather",         () -> gather_args(3),  [(:x, 1), (:x, 2), (:x, 3)]),
     ("while_inline_index", "while_inline_index", arith_args,   [(:x, 1), (:y, 1)]),

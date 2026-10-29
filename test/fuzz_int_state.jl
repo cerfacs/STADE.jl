@@ -177,7 +177,49 @@ end
 # Seeds 1000 to 1999 make the restricted kind: only counted loops over `n`, plain and gathered integer writes, no counter
 # and no integer array that is read for a bound. These are the kernels `keep_push_pop = false` should accept, so that the
 # GPU path is exercised and not refused.
+# Seeds 3000 and up: ragged loops. Node v owns the entries rp[v] .. rp[v+1] - 1 of x, and both ends of the inner range are
+# scalars assigned in the outer loop body, so both go on the trip-count stack and must come off in the reverse order.
+# A bound that is read before the other is assigned, a float branch in the body and a second ragged loop vary the shape.
+function fz_range_kernel(seed::Int)
+    rng = MersenneTwister(seed)
+    order_hi_first = rand(rng) < 0.5
+    inner = fz_pick(rng, ["t += x[e] * x[e]", "t += x[e] * x[v]", "t += x[e] * x[e] * x[v]"])
+    branch = rand(rng) < 0.3
+    after = fz_pick(rng, ["s += t * t", "s += t * x[v]", "s += t"])
+    two = rand(rng) < 0.4
+    lo_name, hi_name = fz_pick(rng, [("lo", "hi"), ("lo", "hi"), ("b1", "a2"), ("e0", "e1")])
+    function loop(ind)
+        l = String[]
+        push!(l, "for v = 1:n")
+        a = "$lo_name = rp[v]"; b = "$hi_name = rp[v + 1] - 1"
+        append!(l, ["    " * t for t in (order_hi_first ? (b, a) : (a, b))])
+        push!(l, "    t = 0.0")
+        push!(l, "    for e = $lo_name:$hi_name")
+        if branch
+            push!(l, "        if x[e] > 0.55")
+            push!(l, "            $inner")
+            push!(l, "        end")
+        else
+            push!(l, "        $inner")
+        end
+        push!(l, "    end")
+        push!(l, "    " * after)
+        push!(l, "end")
+        return l
+    end
+    lines = loop(1)
+    two && append!(lines, loop(2))
+    src = IOBuffer()
+    println(src, "# fz(x, rp, n, out)\n#\n# Random ragged kernel, seed $seed, made by test/fuzz_int_state.jl.\n#")
+    println(src, "# x: float array of length 6\n# rp: integer array of length n + 1, row pointers\n# out: length-1 output array; out[1] receives the sum")
+    println(src, "function fz(x, rp, n, out)\n    s = 0.0")
+    for l in lines; println(src, "    ", l); end
+    println(src, "    out[1] = s\n    return nothing\nend")
+    return String(take!(src)), ["x", "rp", "n", "out"]
+end
+
 function fz_kernel(seed::Int)
+    seed >= 3000 && return fz_range_kernel(seed)
     gpu = 1000 <= seed < 2000
     ext = seed >= 2000
     rng = MersenneTwister(seed)
@@ -270,6 +312,12 @@ function fz_args(seed::Int, args)
     end
     vals = Dict{Symbol,Any}(:x => x, :w => 0.5 .+ rand(rng, NXF), :idx => rand(rng, 1:NXF, NXF), :cnt => rand(rng, 1:3, 3),
                             :n => rand(rng, 3:NXF), :steps => rand(rng, 1:3), :nf => rand(rng, 2:NXF) + 0.5, :out => zeros(1))
+    if seed >= 3000     # row pointers: n rows, 0 to 3 entries each, at most NXF entries in all
+        n = rand(rng, 2:4)
+        counts = rand(rng, 0:3, n)
+        while sum(counts) > NXF; counts = rand(rng, 0:3, n); end
+        vals[:n] = n; vals[:rp] = vcat(1, 1 .+ cumsum(counts))
+    end
     return [Symbol(a) => vals[Symbol(a)] for a in args]
 end
 
