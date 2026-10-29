@@ -105,19 +105,36 @@ threadIdx() = (x = ST.tx,)
 blockIdx() = (x = ST.bx,)
 blockDim() = (x = ST.bdim,)
 
+# `@cuda launch=false f(args)` compiles without launching: it returns a FakeKernel that `registers` can be asked about. The register count of a
+# kernel comes from REGS, a function of the kernel's name, so a test can give the plain kernel and its coarsened twin any pair of counts.
+struct FakeKernel
+    name::String
+end
+const PROBES = String[]   # name of every kernel compiled with launch=false, in order
+const REGS = Ref{Function}(name -> (endswith(name, "_c!") || endswith(name, "_c")) ? 48 : 40)
+registers(k::FakeKernel) = REGS[](k.name)
+
 macro cuda(args...)
     call = args[end]
     (call isa Expr && call.head == :call) || error("CUDA shim: @cuda expects a call, got: $(call)")
     th = 1
     bl = 1
+    probe = false
     for o in args[1:end-1]
         (o isa Expr && o.head == :(=)) || error("CUDA shim: unsupported @cuda option: $(o)")
         o.args[1] == :threads ? (th = o.args[2]) :
         o.args[1] == :blocks  ? (bl = o.args[2]) :
+        (o.args[1] == :launch && o.args[2] === false) ? (probe = true) :
         error("CUDA shim: unsupported @cuda option: $(o.args[1])")
     end
+    probe && return Expr(:call, GlobalRef(@__MODULE__, :probe), esc(call.args[1]))
     return Expr(:call, GlobalRef(@__MODULE__, :launch), esc(call.args[1]),
                 Expr(:tuple, map(esc, call.args[2:end])...), esc(th), esc(bl))
+end
+
+function probe(f)
+    push!(PROBES, string(nameof(f)))
+    return FakeKernel(string(nameof(f)))
 end
 
 function launch(f, args::Tuple, th::Integer, bl::Integer)

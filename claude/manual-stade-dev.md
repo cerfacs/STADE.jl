@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=true, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=true, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2509,7 +2509,7 @@ property a gathered kernel has in place of atomics: exactly one plain write to t
 receiving array, at the thread's own index, and no access at any other index; its
 checks of the atomic repair of a scatter run with `gather_stencil = false`.
 
-**Coarsened kernel variant** (`coarsen`, `coarsen_min`, `coarsen_fill`)
+**Coarsened kernel variant** (`coarsen`, `coarsen_min`, `coarsen_fill`, `coarsen_occ`)
 CUDA only, opt-in (`coarsen = 1`, the default, emits exactly the v0.4.28 code; 700 CUDA and
 JACC plans hash identical). With `coarsen = K` (2 to 4) a kernel whose atomic adds can
 be merged also gets a *variant* `<name>_c!` beside the plain kernel; the host launches
@@ -2540,17 +2540,32 @@ are for: a backward kernel with `D = 64` and 32768 threads got 21% slower, one w
 12288 threads 30% slower, and every kernel with `D >= 256` and at least 65536 threads got
 15 to 35% faster. `mlp3` (2048 threads) and `mpnn_gather` (`D = 16`) build a variant that
 the tests decline (times identical to the plain kernel); forced, they take +28% and
-+112%. **The transformer is a known regression**: with the default thresholds its
-backward kernels with `D` of 512 to 2048 and over 260000 threads still take the variant
-and the adjoint goes from 38.26 to 44.60 ms (+17%; forced, +17.6%). Merged share of
-atomic sites, register count and body size were each tried as a separator and do not
-tell these kernels from unet2's; the cause is not known, which is why the default is
-off. A K of 3 was slower than 2 in the spike (register pressure). A plain owner-computes
-rewrite (one thread per received element) also lost. `test/validate_coarsen.jl`: unit
++112%. **Occupancy gate (v0.4.30, `coarsen_occ = 0.6`)**: the transformer lost 17% in v0.4.29 because
+the variant takes 1.6 to 2 times the registers (88 against 48 for `b_12`), so 2 blocks of 256
+threads fit on an SM where 5 did. Measured on a V100 with one job that read `CUDA.registers`,
+the local memory and the block limit of the plain kernel, the variant and a variant without
+the register merge: no kernel spills (32 bytes of local memory everywhere), the merge helps in
+every kernel (variant faster than the no-merge variant), and the ratio of blocks per SM by
+registers (65536 per SM, 256-thread blocks, registers rounded up to 8), variant over plain,
+separates all 15 kernels measured: 0.50 or less gave +17 to +39% (transformer `b_12`, `b_13`,
+`b_16`, `b_17`, `b_20`), 0.60 or more gave -1 to -35% (transformer `b_19` -1%, every `unet2`
+kernel). Merged share, register count alone and body size do not. So when `coarsen_occ > 0` the
+host condition ends with a `let` that compiles both kernels with `@cuda launch=false`, reads
+`CUDA.registers` of each and requires `100 * blocks(variant) >= 100 * coarsen_occ *
+blocks(plain)` (`cgen_coarsen_occ_gate`); it runs last, so a launch that the thread-count tests
+decline probes nothing (`mlp3` probes 0 times), and the probe costs a few microseconds per
+launch otherwise. `coarsen_occ = 0` removes the gate and gives the v0.4.29 output. With the
+gate (`coarsen = 2`, defaults): `unet2` 45.60, 46.90, 53.99 -> 37.40, 39.33, 44.58 ms (-18, -16,
+-17%), transformer 38.18 -> 38.20 ms (d512_T512) and 439.4 -> 435.1 ms (d1024_T1024), `mlp3` and
+`mpnn_gather` unchanged. Two families on one GPU model: treat 0.6 as measured, not proven, and
+time your own kernel before turning `coarsen` on. The 65536-register file is hard-coded. A K of 3
+was slower than 2 in the spike (register pressure). A plain owner-computes rewrite (one thread
+per received element) also lost. `test/validate_coarsen.jl`: unit
 kernels, shim execution at K = 2, 3, 4 in two thread orders with zero-trip and ragged
 sizes, "forced launches only variants, unreachable threshold launches only plain
-kernels", corpus byte-identity of every plain kernel, and sabotage of every guard, the
-merge and the selector. `validate_ownership` runs with `OWN_COARSEN=2` (forced variants
+kernels", the gate on 11 register pairs (the shim models `launch=false` and `CUDA.registers`),
+corpus byte-identity of every plain kernel, and sabotage of every guard, the merge, the
+selector and the gate. `validate_ownership` runs with `OWN_COARSEN=2` (forced variants
 of every corpus plan against the CPU adjoint).
 
 **Block-private accumulators** (`shared_private`)

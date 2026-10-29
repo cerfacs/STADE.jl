@@ -222,9 +222,9 @@ crs_merged(k) = length(collect(eachmatch(r"__jmi\d+_2 == __jmi\d+_1", crs_src(k)
 crs_plan(e; kw...) = STADE.stade_gpu(e, STADE.cgen_backend_cuda(); kw...)
 
 # runs the plan on the shim and the original kernel on the CPU; returns (largest relative difference, flagged elements, elements changed)
-function crs_exec(src::String, fname::String, args::Vector, K::Int, order::Symbol; cmin::Int = 0)
+function crs_exec(src::String, fname::String, args::Vector, K::Int, order::Symbol; cmin::Int = 0, occ::Real = 0.6, regs = nothing)
     e = Meta.parse(src)
-    plan = crs_plan(e; warp_atomics = false, shared_private = false, coarsen = K, coarsen_min = cmin, coarsen_fill = cmin == 0 ? 0 : 65536)
+    plan = crs_plan(e; warp_atomics = false, shared_private = false, coarsen = K, coarsen_min = cmin, coarsen_fill = cmin == 0 ? 0 : 65536, coarsen_occ = occ)
     m = Module(:CrsRun)
     Core.eval(m, :(using Main.CUDA))
     Core.eval(m, :(const CuArray = Main.CUDA.TArray))
@@ -240,7 +240,14 @@ function crs_exec(src::String, fname::String, args::Vector, K::Int, order::Symbo
     Main.CUDA.ORDER[] = order
     empty!(Main.CUDA.VIOLATIONS)
     empty!(Main.CUDA.LAUNCHED)
-    Base.invokelatest(getfield(m, Symbol(fname * "_cuda")), dev...)
+    empty!(Main.CUDA.PROBES)
+    default_regs = Main.CUDA.REGS[]
+    regs === nothing || (Main.CUDA.REGS[] = name -> (endswith(name, "_c!") ? regs[2] : regs[1]))
+    try
+        Base.invokelatest(getfield(m, Symbol(fname * "_cuda")), dev...)
+    finally
+        Main.CUDA.REGS[] = default_regs
+    end
     Main.CUDA.ORDER[] = :ascending
     err = 0.0
     changed = 0
@@ -250,7 +257,7 @@ function crs_exec(src::String, fname::String, args::Vector, K::Int, order::Symbo
         err = max(err, maximum(abs.(got .- c) ./ max.(abs.(c), 1.0); init = 0.0))
         changed += count(got .!= a)
     end
-    return (err = err, flagged = length(Main.CUDA.VIOLATIONS), changed = changed, coarse = count(n -> endswith(n, "_c!"), Main.CUDA.LAUNCHED), launches = length(Main.CUDA.LAUNCHED))
+    return (err = err, flagged = length(Main.CUDA.VIOLATIONS), changed = changed, coarse = count(n -> endswith(n, "_c!"), Main.CUDA.LAUNCHED), launches = length(Main.CUDA.LAUNCHED), probes = copy(Main.CUDA.PROBES))
 end
 
 function crs_guard_checks()
@@ -361,7 +368,7 @@ function crs_unit_checks(; execute::Bool = true, only::Union{Nothing,Vector{Stri
     for (label, jam, merged, src, fname, sizes, mk) in crs_units()
         fname == "jam_twosite" || continue
         hs = crs_src(crs_plan(Meta.parse(src); coarsen = 2).host)
-        check(occursin(r"if max\(.*\) >= 256", hs), "jam_twosite: two merged sites select on the larger count ($(join(strip.(filter(l -> occursin("if max(", l), split(hs, "\n"))), "; ")))")
+        check(occursin(r"if \(max\(.*\) >= 256", hs), "jam_twosite: two merged sites select on the larger count ($(join(strip.(filter(l -> occursin("if (max(", l), split(hs, "\n"))), "; ")))")
     end
     # two offloaded loops: launch indices skip the variants, so the plain kernels keep the numbers they have at coarsen = 1
     for (label, jam, merged, src, fname, sizes, mk) in crs_units()
@@ -372,6 +379,33 @@ function crs_unit_checks(; execute::Bool = true, only::Union{Nothing,Vector{Stri
         n1 = [string(k.args[1].args[1]) for k in p1.kernels]
         n2 = [string(k.args[1].args[1]) for k in crs_plain(p2.kernels)]
         check(n1 == n2 && length(unique(n1)) == length(n1) && (fname != "jam_seq" || length(n1) == 2), "$fname: plain kernels keep their names ($(join(n2, ", ")))")
+    end
+    # the occupancy gate: the variant is launched only when its thread blocks per SM, by registers, stay at `coarsen_occ` of the plain kernel's
+    for (label, jam, merged, src, fname, sizes, mk) in crs_units()
+        fname == "jam_wgrad" || continue
+        e = Meta.parse(src)
+        hs = crs_src(crs_plan(e; coarsen = 2).host)
+        check(occursin("CUDA.registers", hs) && occursin("launch = false", hs), "$fname: the host reads both kernels' register counts")
+        check(occursin(">= 60 *", hs), "$fname: the default gate is 60 percent")
+        check(occursin(">= 75 *", crs_src(crs_plan(e; coarsen = 2, coarsen_occ = 0.75).host)), "$fname: coarsen_occ sets the gate")
+        check(!occursin("registers", crs_src(crs_plan(e; coarsen = 2, coarsen_occ = 0).host)), "$fname: coarsen_occ = 0 has no gate")
+        check(!occursin("registers", crs_src(crs_plan(e; coarsen = 1).host)), "$fname: coarsen = 1 has no gate")
+        sz = (4, 40, 3)
+        # (plain registers, variant registers, occupancy, launched?): blocks per SM of 256 threads, plain -> variant
+        cases = [(48, 99, 0.6, false, "4 -> 2 blocks"), (48, 88, 0.6, false, "5 -> 2 blocks"), (40, 80, 0.6, false, "6 -> 3 blocks, ratio 0.5"),
+                 (44, 78, 0.6, true, "5 -> 3 blocks, ratio 0.6 exactly"), (73, 114, 0.6, true, "3 -> 2 blocks"), (84, 122, 0.6, true, "2 -> 2 blocks"),
+                 (60, 60, 0.6, true, "equal"), (80, 40, 0.6, true, "the variant uses fewer"), (73, 114, 0.8, false, "3 -> 2 blocks against a 0.8 gate"),
+                 (84, 122, 0.8, true, "2 -> 2 blocks against a 0.8 gate"), (48, 99, 0.0, true, "gate off")]
+        ok_all = true; detail = String[]
+        for (rp, rv, occ, want, what) in cases
+            r = try crs_exec(src, fname, mk(MersenneTwister(7), sz), 2, :ascending; occ = occ, regs = (rp, rv)) catch err; (err = Inf, flagged = 0, changed = 0, coarse = -1, launches = 0, probes = String[]) end
+            launched = r.coarse > 0
+            probed = any(n -> endswith(n, "_c!"), r.probes) && any(n -> !endswith(n, "_c!"), r.probes)
+            good = launched == want && r.err <= 1e-12 && r.flagged == 0 && r.changed > 0 && probed == (occ > 0)
+            good || (push!(detail, "$what: launched=$launched probed=$probed err=$(r.err)"))
+            ok_all &= good
+        end
+        check(ok_all, "$fname: $(length(cases)) register pairs, launched exactly when the blocks per SM hold up, answer unchanged" * (isempty(detail) ? "" : " -- " * join(detail, "; ")))
     end
     bad += crs_guard_checks()
     return bad
@@ -419,14 +453,19 @@ function crs_corpus_checks(dir::String; names = nothing, report::Bool = true)
     return bad
 end
 
-function validate_coarsen(dir::String = joinpath(@__DIR__, "val-corpus"); sabotage::Bool = true)
+# `phases` and `slice` split a long run into jobs that fit a time limit: the unit checks, the corpus checks, and a slice of the sabotage cases
+function validate_coarsen(dir::String = joinpath(@__DIR__, "val-corpus"); sabotage::Bool = true, phases = (:units, :corpus, :sabotage), slice = 1:typemax(Int))
     isdefined(Main, :CUDA) || include(joinpath(@__DIR__, "ownership_shim.jl"))
     bad = 0
-    println("-- unit and execution checks")
-    bad += crs_unit_checks()
-    println("-- corpus")
-    bad += crs_corpus_checks(dir)
-    if sabotage
+    if :units in phases
+        println("-- unit and execution checks")
+        bad += crs_unit_checks()
+    end
+    if :corpus in phases
+        println("-- corpus")
+        bad += crs_corpus_checks(dir)
+    end
+    if sabotage && :sabotage in phases
         println("-- sabotage")
         check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
         repo = abspath(joinpath(@__DIR__, ".."))
@@ -449,10 +488,17 @@ function validate_coarsen(dir::String = joinpath(@__DIR__, "val-corpus"); sabota
             ("tail lanes 31 apart", "Expr(:call, :*, 32, :__jmk)", "Expr(:call, :*, 31, :__jmk)"),
             ("copies not renamed apart", "maps = [Dict{Symbol,Symbol}(s => Symbol(string(s), \"__j\", k) for s in R) for k in 1:K]", "maps = [Dict{Symbol,Symbol}(s => Symbol(string(s), \"__j\", 1) for s in R) for k in 1:K]"),
             ("launch ignores the variant's thread count", "nthreads = cv.nthreads, kname = cv.name)", "kname = cv.name)"),
-            ("variant launched always", "cond = Expr(:&&, Expr(:call, :>=, best, cgen_coarsen_min_threads(backend)), Expr(:call, :>=, n_iter, cgen_coarsen_fill_threads(backend))))", "cond = Expr(:call, :>=, 1, 0))"),
-            ("variant never launched", "cond = Expr(:&&, Expr(:call, :>=, best, cgen_coarsen_min_threads(backend)), Expr(:call, :>=, n_iter, cgen_coarsen_fill_threads(backend))))", "cond = Expr(:call, :>=, 0, 1))"),
+            ("variant launched always", "    cond = Expr(:&&, Expr(:call, :>=, best, cgen_coarsen_min_threads(backend)), Expr(:call, :>=, n_iter, cgen_coarsen_fill_threads(backend)))\n", "    cond = Expr(:call, :>=, 1, 0)\n"),
+            ("variant never launched", "    cond = Expr(:&&, Expr(:call, :>=, best, cgen_coarsen_min_threads(backend)), Expr(:call, :>=, n_iter, cgen_coarsen_fill_threads(backend)))\n", "    cond = Expr(:call, :>=, 0, 1)\n"),
             ("coarsen_fill ignored", "cgen_coarsen_fill_threads(backend) = get(backend, :coarsen_fill, 65536)", "cgen_coarsen_fill_threads(backend) = 65536"),
             ("variant dropped when a private kernel exists", "push!(out, emit_if(cond, Any[private], plain_stmts))", "push!(out, emit_if(cond, Any[private], Any[plain]))"),
+            ("occupancy gate dropped", "    occ > 0 && (cond = Expr(:&&, cond, cgen_coarsen_occ_gate(cgen_kernel_fname(owner, idx, backend), name, fargs, backend, occ)))\n", ""),
+            ("gate probes the variant twice", "Expr(:(=), :__reg_plain, probe(plain_name))", "Expr(:(=), :__reg_plain, probe(twin_name))"),
+            ("gate probes the plain kernel twice", "Expr(:(=), :__reg_twin, probe(twin_name))", "Expr(:(=), :__reg_twin, probe(plain_name))"),
+            ("gate compares the wrong way", "Expr(:call, :>=, Expr(:call, :*, 100, blocks(:__reg_twin)), Expr(:call, :*, occ, blocks(:__reg_plain)))", "Expr(:call, :>=, Expr(:call, :*, 100, blocks(:__reg_plain)), Expr(:call, :*, occ, blocks(:__reg_twin)))"),
+            ("gate ignores the register allocation unit", "Expr(:call, Expr(:., :Base, QuoteNode(:cld)), r, 8), 8)", "Expr(:call, Expr(:., :Base, QuoteNode(:cld)), r, 1), 1)"),
+            ("gate assumes another block size", "Expr(:call, :*, Expr(:call, :*, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), r, 8), 8), :nthread_per_block)", "Expr(:call, :*, Expr(:call, :*, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), r, 8), 8), 512)"),
+            ("occupancy keyword ignored", "cgen_coarsen_occ_percent(backend) = round(Int, 100 * get(backend, :coarsen_occ, 0.6))", "cgen_coarsen_occ_percent(backend) = 60"),
             ("coarsen_min ignored", "cgen_coarsen_min_threads(backend) = get(backend, :coarsen_min, 256)", "cgen_coarsen_min_threads(backend) = 256"),
             ("one count for every site", "best = length(jam.counts) == 1 ? jam.counts[1] : Expr(:call, :max, jam.counts...)", "best = jam.counts[1]"),
             ("variant privatized", "            cgen_is_coarse_variant(k) && continue\n", ""),
@@ -461,7 +507,7 @@ function validate_coarsen(dir::String = joinpath(@__DIR__, "val-corpus"); sabota
             ("invariant address counted as one thread", "d = c === :inv ? n_iter : cgen_jam_resolve(d, defs, fargs, 0)", "d = c === :inv ? 1 : cgen_jam_resolve(d, defs, fargs, 0)"),
         ]
         mktempdir() do tmp
-            for (label, old, new) in cases
+            for (label, old, new) in cases[intersect(eachindex(cases), slice)]
                 n = length(findall(old, text))
                 if n != 1
                     check(false, "sabotage \"$label\": anchor found $n times")

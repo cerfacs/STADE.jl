@@ -309,7 +309,7 @@ cancels, so it complements rather than replaces.
 `stade_gpu` ingests **already-generated** code; its only keywords are
 `precision`, `reduction_threshold`, `hoist_atomics`, `gather_stencil` (all backends) and the CUDA-only `warp_atomics`,
 `sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly), plus the CUDA-only opt-in
-`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it). **Only `keep_push_pop=false` output is
+`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
@@ -430,9 +430,13 @@ launches it only when `D >= coarsen_min` (threads per address) and the trip coun
 `coarsen_fill`, and a private kernel (`shared_private`) wins over it. The plain kernel is never edited,
 which is what keeps `coarsen = 1` byte-identical. Launch indices skip variants (`cgen_kernel_count`),
 a variant is never privatized, and the validators force it with `coarsen_min = 0`. Measured on a V100
-it wins on `unet2` (-16 to -18%) and loses on the transformer (+17%) for a reason not found, so it stays
-opt-in; a candidate separator (merged share of atomic sites) was tried and did not separate them, so do
-not add it back without new data. `test/validate_coarsen.jl` sabotage-tests each guard and the selector.
+it wins on `unet2` (-16 to -18%) and, without the gate, lost on the transformer (+17%): the variant takes 1.6 to 2 times
+the registers, so fewer blocks fit per SM. The ratio of blocks per SM by registers (variant over plain) separated all 15
+kernels measured (<= 0.50 lost 17 to 39%, >= 0.60 gained or was neutral), so the host compiles both kernels with `launch=false`,
+reads `CUDA.registers` and launches the variant only if that ratio is at least `coarsen_occ` (v0.4.30; it runs after the
+thread-count tests, so a declined launch probes nothing). Merged share of atomic sites and the register count alone did not separate
+the kernels; do not add them back without new data. The gate stays opt-in with `coarsen`, and 0.6 is measured on two kernel families
+on one GPU model. `test/validate_coarsen.jl` sabotage-tests each guard, the selector and the gate (its CPU shim models `launch=false` and `CUDA.registers`).
 
 ## Self-check before returning STADE code
 
