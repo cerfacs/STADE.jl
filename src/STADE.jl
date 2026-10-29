@@ -6653,6 +6653,266 @@ function cgen_ingest(expr::Expr)
     end
 end
 
+# ---- gather form of a scatter loop (cgen_gather_*) -----------------
+
+# An adjoint of `y[i] = f(x[i-1], x[i], x[i+1])` scatters: iteration i adds into xb[i-1], xb[i], xb[i+1], so a device kernel needs atomics.
+# When the arrays that receive the scatter are touched by nothing else in the loop, a thread can instead own one element xb[j] and add the
+# terms that iterations j-c would have added (each term recomputed at i = j - c). Iterations stay independent, so no atomic is needed.
+# The loop is split in two: the gather loop writes only the receiving arrays, and the residual loop keeps every other write, so no thread reads
+# an element another thread writes in the same launch.
+
+# (coefficient of var, constant) of an integer-affine expression in var, or nothing
+function cgen_gather_lin(e, var::Symbol)
+    e isa Integer && return (0, Int(e))
+    e === var && return (1, 0)
+    (e isa Expr && e.head == :call) || return nothing
+    op = e.args[1]
+    args = e.args[2:end]
+    if op == :+ && !isempty(args)
+        acc = (0, 0)
+        for a in args
+            l = cgen_gather_lin(a, var)
+            l === nothing && return nothing
+            acc = (acc[1] + l[1], acc[2] + l[2])
+        end
+        return acc
+    elseif op == :- && length(args) == 1
+        l = cgen_gather_lin(args[1], var)
+        return l === nothing ? nothing : (-l[1], -l[2])
+    elseif op == :- && length(args) == 2
+        a = cgen_gather_lin(args[1], var)
+        b = cgen_gather_lin(args[2], var)
+        return (a === nothing || b === nothing) ? nothing : (a[1] - b[1], a[2] - b[2])
+    end
+    return nothing
+end
+
+function cgen_gather_offset(idx, var::Symbol)
+    l = cgen_gather_lin(idx, var)
+    return (l !== nothing && l[1] == 1) ? l[2] : nothing
+end
+
+# `A[idx] = A[idx] + e [+ e2 ...]` as (A, idx, e), else nothing. A one-index array only.
+function cgen_gather_accum(stmt)
+    stmt.kind == :assign || return nothing
+    lhs = stmt.lhs
+    (lhs isa Expr && lhs.head == :ref && length(lhs.args) == 2 && lhs.args[1] isa Symbol) || return nothing
+    r = stmt.rhs
+    (r isa Expr && r.head == :call && r.args[1] == :+ && length(r.args) >= 3 && r.args[2] == lhs) || return nothing
+    e = length(r.args) == 3 ? r.args[3] : Expr(:call, :+, r.args[3:end]...)
+    return (lhs.args[1], lhs.args[2], e)
+end
+
+# every array element read in e, as (array, index expressions)
+function cgen_gather_refs!(e, out::Vector{Any})
+    e isa Expr || return out
+    if e.head == :ref && e.args[1] isa Symbol
+        push!(out, (e.args[1], e.args[2:end]))
+    end
+    for a in e.args
+        cgen_gather_refs!(a, out)
+    end
+    return out
+end
+
+# The replacement statements for one `for` statement, or nothing when the loop does not qualify. `tag` makes the new names unique.
+function cgen_gather_loop(stmt, tag::Int)
+    stmt.kind == :for || return nothing
+    (stmt.step isa Integer && abs(stmt.step) == 1) || return nothing
+    var, body = stmt.var, stmt.body
+    isempty(body) && return nothing
+    all(s -> s.kind == :assign && !cgen_is_stackop_assign(s) && !cgen_is_stack_alloc(s.rhs) && !cgen_is_length_call(s.rhs), body) || return nothing
+    # a scalar the loop assigns must be defined before every use in the same iteration, so a replay at another index sees the same values
+    scalars = Set{Symbol}(s.lhs for s in body if s.lhs isa Symbol)
+    var in scalars && return nothing
+    (cgen_expr_has_ref(stmt.lo) || cgen_expr_has_ref(stmt.hi)) && return nothing
+    isdisjoint(union(cgen_expr_symbols(stmt.lo), cgen_expr_symbols(stmt.hi)), scalars) || return nothing
+    defined = Set{Symbol}()
+    for s in body
+        reads = cgen_read_vars(s.rhs)
+        s.lhs isa Expr && union!(reads, cgen_read_vars(Expr(:tuple, s.lhs.args[2:end]...)))
+        for r in reads
+            (r in scalars && !(r in defined)) && return nothing
+        end
+        s.lhs isa Symbol && push!(defined, s.lhs)
+    end
+    # per array: writes (statement, is accumulation, index) and reads (statement, index); the self-read of an accumulation is not a read
+    writes = Dict{Symbol,Vector{Any}}()
+    reads = Dict{Symbol,Vector{Any}}()
+    accs = Dict{Int,Any}()
+    for (k, s) in enumerate(body)
+        a = cgen_gather_accum(s)
+        rhs_refs = Any[]
+        if a !== nothing
+            accs[k] = a
+            push!(get!(writes, a[1], Any[]), (k, true, a[2]))
+            cgen_gather_refs!(a[2], rhs_refs)
+            cgen_gather_refs!(a[3], rhs_refs)
+        else
+            if s.lhs isa Expr
+                arr = s.lhs.args[1]
+                arr isa Symbol || return nothing
+                push!(get!(writes, arr, Any[]), (k, false, length(s.lhs.args) == 2 ? s.lhs.args[2] : nothing))
+                for ix in s.lhs.args[2:end]
+                    cgen_gather_refs!(ix, rhs_refs)
+                end
+            end
+            cgen_gather_refs!(s.rhs, rhs_refs)
+        end
+        for (arr, idxs) in rhs_refs
+            push!(get!(reads, arr, Any[]), (k, length(idxs) == 1 ? idxs[1] : nothing))
+        end
+    end
+    gathered = Symbol[]
+    owned = Symbol[]
+    for (arr, w) in writes
+        r = get(reads, arr, Any[])
+        if isempty(r) && all(x -> x[2] && cgen_gather_offset(x[3], var) !== nothing, w)
+            any(x -> cgen_gather_offset(x[3], var) != 0, w) && push!(gathered, arr)
+            continue
+        end
+        # any other written array must be owned by the iteration: every access at exactly `var`. The replay keeps its element in a scalar.
+        all(x -> x[3] === var, w) || return nothing
+        all(x -> x[2] === var, r) || return nothing
+        push!(owned, arr)
+    end
+    isempty(gathered) && return nothing
+    sort!(gathered)
+    gset = Set(gathered)
+    # An owned array is only touched at index `var`, so in a replay its element is a scalar: reads and writes of A[var] become reads and writes of
+    # __ow_A, which starts as A[var] at the replayed index. Statements that write another array are not replayed.
+    oset = Set(owned)
+    own_name(arr) = Symbol("__ow_", arr)
+    function own_ren(e)
+        e isa Expr || return e
+        (e.head == :ref && length(e.args) == 2 && e.args[1] in oset && e.args[2] === var) && return own_name(e.args[1])
+        return Expr(e.head, Any[own_ren(a) for a in e.args]...)
+    end
+    prog = Vector{Any}(nothing, length(body))
+    for (k, s) in enumerate(body)
+        if s.lhs isa Symbol
+            prog[k] = (s.lhs, own_ren(s.rhs))
+        elseif haskey(accs, k) && accs[k][1] in oset
+            nm = own_name(accs[k][1])
+            prog[k] = (nm, Expr(:call, :+, nm, own_ren(accs[k][3])))
+        elseif !haskey(accs, k) && s.lhs.args[1] in oset
+            prog[k] = (own_name(s.lhs.args[1]), own_ren(s.rhs))
+        end
+    end
+    scalars = union(scalars, Set{Symbol}(own_name(a) for a in owned))
+    # the terms: statement index => (array, offset, term) for every accumulation into a gathered array
+    terms = Dict{Int,Any}(k => (a[1], cgen_gather_offset(a[2], var), own_ren(a[3])) for (k, a) in accs if a[1] in gset)
+    offsets = sort(unique(t[2] for t in values(terms)))
+    length(offsets) <= 8 || return nothing
+    first_val, last_val = stmt.lo, stmt.hi
+    amin, amax = stmt.step == 1 ? (first_val, last_val) : (last_val, first_val)
+    add(e, c) = c == 0 ? e : e isa Integer ? e + c : Expr(:call, c > 0 ? :+ : :-, e, abs(c))
+    jv = Symbol("__gj_", tag)
+    gbody = NamedTuple[]
+    for arr in gathered
+        push!(gbody, (kind = :assign, lhs = Symbol("__ga_", arr), rhs = 0.0))
+        push!(gbody, (kind = :assign, lhs = Symbol("__gh_", arr), rhs = 0))
+    end
+    for (ti, c) in enumerate(offsets)
+        ks = sort([k for (k, t) in terms if t[2] == c])
+        # statements this offset needs: backward liveness over the scalar assignments
+        needed = Set{Symbol}()
+        keep = Set{Int}(ks)
+        for k in length(body):-1:1
+            if k in ks
+                union!(needed, intersect(cgen_read_vars(terms[k][3]), scalars))
+            elseif prog[k] !== nothing && prog[k][1] in needed
+                push!(keep, k)
+                delete!(needed, prog[k][1])
+                union!(needed, intersect(cgen_read_vars(prog[k][2]), scalars))
+            end
+        end
+        length(keep) <= 24 || return nothing
+        gi = Symbol("__gi_", tag, "_", ti)
+        ren = Dict{Symbol,Any}(s => Symbol(s, "_g", tag, "_", ti) for s in scalars)
+        ren[var] = gi
+        blk = NamedTuple[(kind = :assign, lhs = gi, rhs = add(jv, -c))]
+        # an owned element still needed at the top starts as the array element
+        for arr in owned
+            own_name(arr) in needed && push!(blk, (kind = :assign, lhs = ren[own_name(arr)], rhs = Expr(:ref, arr, gi)))
+        end
+        touched = Set{Symbol}()
+        for k in sort(collect(keep))
+            if k in ks
+                arr, _, e = terms[k]
+                acc = Symbol("__ga_", arr)
+                push!(blk, (kind = :assign, lhs = acc, rhs = Expr(:call, :+, acc, cgen_subst_expr(e, ren))))
+                if !(arr in touched)
+                    push!(touched, arr)
+                    push!(blk, (kind = :assign, lhs = Symbol("__gh_", arr), rhs = 1))
+                end
+            else
+                push!(blk, (kind = :assign, lhs = ren[prog[k][1]], rhs = cgen_subst_expr(prog[k][2], ren)))
+            end
+        end
+        inner = (kind = :if, cond = Expr(:call, :<=, jv, add(amax, c)), then = blk, els = NamedTuple[])
+        outer = (kind = :if, cond = Expr(:call, :>=, jv, add(amin, c)), then = NamedTuple[inner], els = NamedTuple[])
+        push!(gbody, outer)
+    end
+    for arr in gathered
+        ref = Expr(:ref, arr, jv)
+        push!(gbody, (kind = :if, cond = Expr(:call, :>, Symbol("__gh_", arr), 0),
+                      then = NamedTuple[(kind = :assign, lhs = ref, rhs = Expr(:call, :+, ref, Symbol("__ga_", arr)))], els = NamedTuple[]))
+    end
+    gather = (kind = :for, var = jv, lo = add(amin, offsets[1]), hi = add(amax, offsets[end]), step = 1, body = gbody)
+    rest = NamedTuple[s for (k, s) in enumerate(body) if !haskey(terms, k)]
+    # a residual with no array write and only generated temporaries computes nothing anyone reads
+    residual_dead = !any(s -> s.lhs isa Expr, rest) && all(s -> s.lhs isa Symbol && startswith(string(s.lhs), "__"), rest)
+    residual_dead && return NamedTuple[gather]
+    return NamedTuple[gather, merge(stmt, (body = rest,))]
+end
+
+function cgen_gather_expand(body::Vector{NamedTuple}, tag::Base.RefValue{Int})
+    out = NamedTuple[]
+    for stmt in body
+        if stmt.kind == :for
+            rep = cgen_gather_loop(stmt, tag[] + 1)
+            if rep === nothing
+                push!(out, merge(stmt, (body = cgen_gather_expand(stmt.body, tag),)))
+            else
+                tag[] += 1
+                append!(out, rep)
+            end
+        elseif stmt.kind == :if
+            push!(out, merge(stmt, (then = cgen_gather_expand(stmt.then, tag), els = cgen_gather_expand(stmt.els, tag))))
+        elseif stmt.kind == :while
+            push!(out, merge(stmt, (body = cgen_gather_expand(stmt.body, tag),)))
+        else
+            push!(out, stmt)
+        end
+    end
+    return out
+end
+
+# the ingested kernel with its scatter loops in gather form (see above); `on = false` returns it unchanged
+cgen_gather_stencil(gk, on::Bool) = on ? merge(gk, (body = cgen_gather_expand(gk.body, Ref(0)),)) : gk
+
+# the statements of an ingested kernel back as plain Julia source; used to run a rewritten kernel on the host, which is how the rewrite is tested
+function cgen_gather_stmt_expr(s)
+    if s.kind == :assign
+        return Expr(:(=), s.lhs, s.rhs)
+    elseif s.kind == :for
+        return Expr(:for, Expr(:(=), s.var, Expr(:call, :(:), s.lo, s.step, s.hi)), Expr(:block, Any[cgen_gather_stmt_expr(b) for b in s.body]...))
+    elseif s.kind == :if
+        blocks = Any[Expr(:block, Any[cgen_gather_stmt_expr(b) for b in s.then]...)]
+        isempty(s.els) || push!(blocks, Expr(:block, Any[cgen_gather_stmt_expr(b) for b in s.els]...))
+        return Expr(:if, s.cond, blocks...)
+    elseif s.kind == :while
+        return Expr(:while, s.cond, Expr(:block, Any[cgen_gather_stmt_expr(b) for b in s.body]...))
+    elseif s.kind == :stackpush
+        return Expr(:call, :push!, s.stack, s.value)
+    end
+    error("cgen_gather_stmt_expr: unsupported statement kind $(s.kind)")
+end
+
+cgen_gather_function_expr(gk) = Expr(:function, Expr(:call, gk.name, gk.args...),
+    Expr(:block, Any[cgen_gather_stmt_expr(s) for s in gk.body]..., Expr(:return, isempty(gk.ret) ? :nothing : length(gk.ret) == 1 ? gk.ret[1] : Expr(:tuple, gk.ret...))))
+
 # ---- stack-op detection (blocks kernel-splitting for a loop) -------
 
 cgen_is_stackop_assign(stmt) = stmt.kind == :assign && cgen_is_pop_call(stmt.rhs)
@@ -11638,7 +11898,7 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
     hoist_atomics || (backend = merge(backend, (hoist_atomics = false,)))
@@ -11648,15 +11908,15 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
     if backend.precision_locked && p !== backend.default_precision
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
-    plan = cgen_emit(cgen_ingest(expr), backend; reduction_threshold)
+    plan = cgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil), backend; reduction_threshold)
     p === Float64 && return (host = plan.host, kernels = plan.kernels, helpers = plan.helpers)
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels], helpers = plan.helpers)
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -11668,13 +11928,13 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
@@ -11684,8 +11944,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -11696,20 +11956,20 @@ stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Ty
 # locked default here for the same reason: Float64 unless the caller asks otherwise.
 # On JACC a matched reduction becomes one
 # JACC.@parallel_reduce call instead of @parallel_for + Atomix.@atomic.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true)
-    plan = jgen_emit(cgen_ingest(expr); reduction_threshold, hoist_atomics)
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Bool = true)
+    plan = jgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil); reduction_threshold, hoist_atomics)
     p = precision === nothing ? Float64 : precision
     p === Float64 && return (host = plan.host, kernels = plan.kernels)
     return (host = cgen_convert_precision(plan.host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics)
+        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics, gather_stencil)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
@@ -11719,10 +11979,10 @@ end
 
 # Per-loop offload decisions for one input file, one record per `for` loop (see cgen_decision_record). `backend` is a gpu_backend
 # value, or `nothing` for the JACC path. The report runs the same walk as stade_gpu_file and writes no file.
-function stade_gpu_report_file(in_path::String, backend = cgen_backend_cuda(); reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT)
+function stade_gpu_report_file(in_path::String, backend = cgen_backend_cuda(); reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, gather_stencil::Bool = true)
     records = NamedTuple[]
     for expr in io_read_kernel_bundle(in_path)
-        plan = backend === nothing ? jgen_emit(cgen_ingest(expr); reduction_threshold) : cgen_emit(cgen_ingest(expr), backend; reduction_threshold)
+        plan = backend === nothing ? jgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil); reduction_threshold) : cgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil), backend; reduction_threshold)
         append!(records, plan.decisions)
     end
     return records
@@ -12220,7 +12480,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -12234,13 +12494,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the
@@ -12296,7 +12556,7 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
                                    self_check::Bool = true,
                                    keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                    mode::Symbol = :adjoint,
-                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true)
+                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Bool = true)
     keep_push_pop &&
         error("stade_validate_jacc_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -12311,8 +12571,8 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
     backend = val_jacc_backend()
-    jacc_init = stade_jacc(gen_out.initstacks; hoist_atomics = hoist_atomics)
-    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold, hoist_atomics = hoist_atomics)
+    jacc_init = stade_jacc(gen_out.initstacks; hoist_atomics = hoist_atomics, gather_stencil = gather_stencil)
+    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold, hoist_atomics = hoist_atomics, gather_stencil = gather_stencil)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     tan_seeds   = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
