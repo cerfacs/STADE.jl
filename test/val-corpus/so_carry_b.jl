@@ -1,10 +1,9 @@
 function initstacks_so_carry_b(i_n)
-    wv_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + 1)
     run_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + 1)
-    return (wv_stack, run_stack)
+    return run_stack
 end
 
-function so_carry_b(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, wv_stack, run_stack)
+function so_carry_b(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, run_stack)
     a = 0.0
     run = 0.0
     wv = 0.0
@@ -22,40 +21,30 @@ function so_carry_b(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, wv_stack, run_s
             wv = w[(ci - 1) * 3 + 3]
             a = a + x[t + 2] * wv
         end
-        __icse_0 = (t - 1) + 1
-        __idx_run_stack_2 = __icse_0
+        __idx_run_stack_2 = (t - 1) + 1
         run_stack[__idx_run_stack_2] = run
         run = run * 0.5 + a
         y[t] = run
-        __idx_wv_stack_6 = __icse_0
-        wv_stack[__idx_wv_stack_6] = wv
     end
     for k = 1:i_n
-        __cse_1 = y[k]
-        loss[1] = loss[1] + __cse_1 * __cse_1
+        __cse_0 = y[k]
+        loss[1] = loss[1] + __cse_0 * __cse_0
     end
-    __icse_2 = max(0, div(i_n - 1, 1) + 1) + 1
-    __idx_run_stack_3 = __icse_2
+    __icse_1 = max(0, div(i_n - 1, 1) + 1) + 1
+    __idx_run_stack_3 = __icse_1
     run_stack[__idx_run_stack_3] = run
-    __idx_wv_stack_5 = __icse_2
-    wv_stack[__idx_wv_stack_5] = wv
-    __idx_run_stack_0 = __icse_2
+    __idx_run_stack_0 = __icse_1
     run = run_stack[__idx_run_stack_0]
-    __idx_wv_stack_2 = __icse_2
-    wv = wv_stack[__idx_wv_stack_2]
     for k = i_n:-1:1
-        __cse_3 = y[k] * lossb[1]
-        yb[k] = yb[k] + __cse_3
-        yb[k] = yb[k] + __cse_3
+        __cse_2 = y[k] * lossb[1]
+        yb[k] = yb[k] + __cse_2
+        yb[k] = yb[k] + __cse_2
     end
     for t = i_n:-1:1
-        __icse_4 = (t - 1) + 1
-        __idx_wv_stack_0 = __icse_4
-        wv = wv_stack[__idx_wv_stack_0]
         __oldb_0 = yb[t]
         yb[t] = 0.0
         runb = runb + __oldb_0
-        __idx_run_stack_0 = __icse_4
+        __idx_run_stack_0 = (t - 1) + 1
         run = run_stack[__idx_run_stack_0]
         __oldb_2 = runb
         runb = 0.0

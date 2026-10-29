@@ -1118,6 +1118,83 @@ the generated body. It checks the actual generated code and never predicts
 the outcome ahead of time, because a variable's fusion coverage does not
 by itself guarantee its stack became unused.
 
+### Integer state in the reverse sweep
+
+The reverse sweep re-runs, at the top of its body, every integer assignment that
+is not marked unsafe (scalars and integer-array writes), in forward order. A
+scalar assigned once per iteration from values that do not change is then correct
+at every iteration. Three mechanisms cover what that recompute cannot rebuild.
+Each one lives in a `snap_*`/`agen_*` pair that is edited identically.
+
+- `:ivalue` stacks restore an integer scalar at the block boundary (v0.4.18).
+- `snap_itbr_arrays`, `snap_itbr_vars` and `agen_unsafe_int_vars` restore an
+  integer array that the kernel reads and then writes again, and mark every
+  scalar that depends on it unsafe (v0.4.19).
+- `:tripcount` sites push a reassigned loop bound before the loop and pop it
+  before the reverse loop.
+
+v0.4.21 closed four ways in which a restore was still missing. All four gave a
+silent wrong gradient.
+
+1. **A scalar assigned at more than one site of a loop body**
+   (`jj = idx[i]; ...; jj = idx[j]`). The recompute keeps the last write, so a
+   read before it sees the wrong value. `agen_seed_unsafe_multi_site!` marks such
+   a scalar unsafe when a read sits before its last write. The same name in two
+   different loops does not count: each loop body is its own scope.
+2. **A loop bound that several loops share, or that a loop rewrites.**
+   `agen_multisite_bound_vars` and `agen_collect_reassigned_all` widen the
+   `reassigned` test, which used to require an assignment inside a loop. A bound
+   assigned between two loops at the top level now gets its own `:tripcount` push.
+3. **A bound read from an array element** (`for i = 1:cnt[3]`).
+   `parse_hoist_array_bounds` rewrites it to a scalar that is assigned just
+   before the loop, so it goes through the same sites as any scalar bound.
+4. **An integer copy of an array element that is used only as a number**
+   (`c = cnt[i]; s += c * x[i]`). `shape_expr_int_status` now returns `:int` for a
+   `:ref` to an integer array. Before, `c` stayed float and kept the value of the
+   last iteration in the reverse sweep.
+
+Two smaller changes. `agen_propagate_unsafe!` counts the index expressions of an
+array left-hand side, so a write at an index that is itself unsafe is not
+replayed. `agen_init_derived_stmts` skips a derived scalar that reads an array
+the kernel writes, because `initstacks_*` sees the arguments as they are on
+entry, not as they are at that point of the kernel.
+
+**`keep_push_pop = false` refuses what it cannot size.** A loop bound that
+`initstacks_*` cannot rebuild from the arguments (an array element, a value
+derived from a written array, a scalar assigned at several sites) used to give
+`UndefVarError` when the allocator ran. `agen_refuse_unsized` now raises a
+generation-time error. The text names the free variables and the two ways out:
+pass the bound as an integer argument, or use `keep_push_pop = true`.
+
+### The differential fuzzer (`test/fuzz_int_state.jl`)
+
+`julia fuzz_int_state.jl FIRST LAST [OUTDIR]` builds one random integer-state
+kernel per seed and checks it against several oracles: the tangent and the
+adjoint against central differences, the exact tangent-vs-adjoint dot-product
+identity, and `keep_push_pop = false` against `true`. A refusal whose text
+contains "must be restored", "no trip count" or "cannot size the stacks" is a
+legal answer. The run counts it and never counts it as a pass. A failure writes
+`OUTDIR/fail_SEED.jl` with the kernel, the inputs and the verdict of each
+oracle. `STADE_SRC=path/to/STADE.jl` runs the fuzzer against another version of
+the source.
+
+- Seeds 1 to 999: general shapes.
+- Seeds 1000 to 1999: a restricted mode. Every loop has a bound that
+  `initstacks_*` can compute, so `keep_push_pop = false` is accepted and runs.
+- Seeds 2000 and up: integer accumulators, integer-conditioned statements, and
+  strided and reversed loops.
+
+The generator pins the type of every integer array (`fz_int_typed`). A literal
+that has only array-valued pairs promotes an integer array to `Float64`, and the
+finite-difference harness then perturbs it. Such a failure belongs to the
+harness, not to STADE.
+
+Against v0.4.19 the fuzzer found six defects, four of them silent wrong gradients
+that the corpus and the earlier validators never reached. On the v0.4.21 tree,
+600 general seeds, 250 restricted seeds and 300 seeds from 2001 to 2300 gave no
+failure. Run the fuzzer after any change to `snap_itbr_*`, `agen_unsafe_int_vars`,
+the `:tripcount` sites or `initstacks_*`.
+
 ## IV.12 `keep_push_pop = false` in detail
 
 This flag replaces every `push!` and `pop!` with an indexed write and read
@@ -2460,6 +2537,8 @@ julia validate_gpu_stack_compare.jl      # stack comparison in the parity script
 julia validate_if_nesting.jl             # nested ifs, branch scalars, nested retiring writes, early-stage size terms, with sabotage
 julia validate_elision_coverage.jl       # snapshot-elision branches, no GPU needed
 julia validate_gpu_truth.jl              # BigFloat truth criterion of the parity script, no GPU needed, with sabotage
+julia validate_int_state.jl              # integer-state restores: values, refusals, with sabotage
+julia fuzz_int_state.jl 1 300            # differential fuzzer for integer-state kernels
 julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```
 

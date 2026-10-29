@@ -1,13 +1,9 @@
 function initstacks_so_tile_b(i_n)
-    xv_stack = Vector{Float64}(undef, (max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1)) + 1)
-    wv_stack = Vector{Float64}(undef, (max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1)) + 1)
     a_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + max(0, div(i_n - 1, 1) + 1))
-    return (xv_stack, wv_stack, a_stack)
+    return a_stack
 end
 
-function so_tile_hv(x, xb, w, wb, b, bb, y, yb, z, zb, loss, lossb, i_n, i_nc, xd, xbd, wd, wbd, bd, bbd, yd, ybd, zd, zbd, lossd, lossbd, xv_stack, wv_stack, a_stack)
-    xv_stack_d = Vector{Float64}(undef, length(xv_stack))
-    wv_stack_d = Vector{Float64}(undef, length(wv_stack))
+function so_tile_hv(x, xb, w, wb, b, bb, y, yb, z, zb, loss, lossb, i_n, i_nc, xd, xbd, wd, wbd, bd, bbd, yd, ybd, zd, zbd, lossd, lossbd, a_stack)
     a_stack_d = Vector{Float64}(undef, length(a_stack))
     a = 0.0
     wv = 0.0
@@ -41,16 +37,9 @@ function so_tile_hv(x, xb, w, wb, b, bb, y, yb, z, zb, loss, lossb, i_n, i_nc, x
         __hcse_0 = a + b[1]
         yd[t] = (0.5 * (1.0 + sign(__hcse_0))) * (ad + bd[1])
         y[t] = max(__hcse_0, 0.0)
-        __icse_0 = (t - 1) + 1
-        __idx_a_stack_3 = __icse_0
+        __idx_a_stack_3 = (t - 1) + 1
         a_stack_d[__idx_a_stack_3] = ad
         a_stack[__idx_a_stack_3] = a
-        __idx_wv_stack_5 = __icse_0
-        wv_stack_d[__idx_wv_stack_5] = wvd
-        wv_stack[__idx_wv_stack_5] = wv
-        __idx_xv_stack_7 = __icse_0
-        xv_stack_d[__idx_xv_stack_7] = xvd
-        xv_stack[__idx_xv_stack_7] = xv
     end
     for t = 1:i_n
         ad = 0.0
@@ -71,62 +60,31 @@ function so_tile_hv(x, xb, w, wb, b, bb, y, yb, z, zb, loss, lossb, i_n, i_nc, x
         end
         zd[t] = ad
         z[t] = a
-        __icse_1 = max(0, div(i_n - 1, 1) + 1) + ((t - 1) + 1)
-        __idx_a_stack_3 = __icse_1
+        __idx_a_stack_3 = max(0, div(i_n - 1, 1) + 1) + ((t - 1) + 1)
         a_stack_d[__idx_a_stack_3] = ad
         a_stack[__idx_a_stack_3] = a
-        __idx_wv_stack_5 = __icse_1
-        wv_stack_d[__idx_wv_stack_5] = wvd
-        wv_stack[__idx_wv_stack_5] = wv
-        __idx_xv_stack_7 = __icse_1
-        xv_stack_d[__idx_xv_stack_7] = xvd
-        xv_stack[__idx_xv_stack_7] = xv
     end
     for k = 1:i_n
-        __cse_2d = zd[k]
-        __cse_2 = z[k]
-        __hcse_1 = __cse_2 * __cse_2d
+        __cse_0d = zd[k]
+        __cse_0 = z[k]
+        __hcse_1 = __cse_0 * __cse_0d
         lossd[1] = lossd[1] + (__hcse_1 + __hcse_1)
-        loss[1] = loss[1] + __cse_2 * __cse_2
+        loss[1] = loss[1] + __cse_0 * __cse_0
     end
-    __ihcse_2 = max(0, div(i_n - 1, 1) + 1)
-    __icse_3 = __ihcse_2
-    __icse_4 = (__icse_3 + __icse_3) + 1
-    __idx_wv_stack_3 = __icse_4
-    wv_stack_d[__idx_wv_stack_3] = wvd
-    wv_stack[__idx_wv_stack_3] = wv
-    __idx_xv_stack_5 = __icse_4
-    xv_stack_d[__idx_xv_stack_5] = xvd
-    xv_stack[__idx_xv_stack_5] = xv
-    __icse_5 = __ihcse_2
-    __icse_6 = (__icse_5 + __icse_5) + 1
-    __idx_wv_stack_0 = __icse_6
-    wvd = wv_stack_d[__idx_wv_stack_0]
-    wv = wv_stack[__idx_wv_stack_0]
-    __idx_xv_stack_2 = __icse_6
-    xvd = xv_stack_d[__idx_xv_stack_2]
-    xv = xv_stack[__idx_xv_stack_2]
     for k = i_n:-1:1
-        __hcse_3 = lossb[1]
-        __hcse_4 = z[k]
-        __cse_7d = __hcse_3 * zd[k] + __hcse_4 * lossbd[1]
-        __cse_7 = __hcse_4 * __hcse_3
-        zbd[k] = zbd[k] + __cse_7d
-        zb[k] = zb[k] + __cse_7
-        zbd[k] = zbd[k] + __cse_7d
-        zb[k] = zb[k] + __cse_7
+        __hcse_2 = lossb[1]
+        __hcse_3 = z[k]
+        __cse_1d = __hcse_2 * zd[k] + __hcse_3 * lossbd[1]
+        __cse_1 = __hcse_3 * __hcse_2
+        zbd[k] = zbd[k] + __cse_1d
+        zb[k] = zb[k] + __cse_1
+        zbd[k] = zbd[k] + __cse_1d
+        zb[k] = zb[k] + __cse_1
     end
     for t = i_n:-1:1
-        __icse_8 = max(0, div(i_n - 1, 1) + 1) + ((t - 1) + 1)
-        __idx_a_stack_0 = __icse_8
+        __idx_a_stack_0 = max(0, div(i_n - 1, 1) + 1) + ((t - 1) + 1)
         ad = a_stack_d[__idx_a_stack_0]
         a = a_stack[__idx_a_stack_0]
-        __idx_wv_stack_2 = __icse_8
-        wvd = wv_stack_d[__idx_wv_stack_2]
-        wv = wv_stack[__idx_wv_stack_2]
-        __idx_xv_stack_4 = __icse_8
-        xvd = xv_stack_d[__idx_xv_stack_4]
-        xv = xv_stack[__idx_xv_stack_4]
         __oldb_0d = zbd[t]
         __oldb_0 = zb[t]
         zbd[t] = 0.0
@@ -179,27 +137,20 @@ function so_tile_hv(x, xb, w, wb, b, bb, y, yb, z, zb, loss, lossb, i_n, i_nc, x
         ab = 0.0
     end
     for t = i_n:-1:1
-        __icse_9 = (t - 1) + 1
-        __idx_a_stack_0 = __icse_9
+        __idx_a_stack_0 = (t - 1) + 1
         ad = a_stack_d[__idx_a_stack_0]
         a = a_stack[__idx_a_stack_0]
-        __idx_wv_stack_2 = __icse_9
-        wvd = wv_stack_d[__idx_wv_stack_2]
-        wv = wv_stack[__idx_wv_stack_2]
-        __idx_xv_stack_4 = __icse_9
-        xvd = xv_stack_d[__idx_xv_stack_4]
-        xv = xv_stack[__idx_xv_stack_4]
         __oldb_0d = ybd[t]
         __oldb_0 = yb[t]
         ybd[t] = 0.0
         yb[t] = 0.0
-        __hcse_5 = 0.5 * (1.0 + sign(a + b[1]))
-        __cse_10d = __hcse_5 * __oldb_0d
-        __cse_10 = __hcse_5 * __oldb_0
-        abd = abd + __cse_10d
-        ab = ab + __cse_10
-        bbd[1] = bbd[1] + __cse_10d
-        bb[1] = bb[1] + __cse_10
+        __hcse_4 = 0.5 * (1.0 + sign(a + b[1]))
+        __cse_2d = __hcse_4 * __oldb_0d
+        __cse_2 = __hcse_4 * __oldb_0
+        abd = abd + __cse_2d
+        ab = ab + __cse_2
+        bbd[1] = bbd[1] + __cse_2d
+        bb[1] = bb[1] + __cse_2
         for ci = i_nc:-1:1
             wvd = wd[(ci - 1) * 2 + 2]
             wv = w[(ci - 1) * 2 + 2]

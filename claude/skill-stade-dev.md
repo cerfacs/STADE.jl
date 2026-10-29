@@ -446,3 +446,17 @@ deliberately draws integers from `[0, 2]`.
     draw carrying NO SIGNAL -- every derivative check comparing 0 to 0 --
     and `val_generate_baseline` now rejects those explicitly instead,
     which is what makes `int_lo = 0` usable.
+
+12. **The reverse sweep re-runs integer assignments in forward order.**
+    A scalar that the body assigns at two or more sites, an integer array
+    element copied to a scalar, and a loop bound that is shared or rewritten
+    each need a restore. The re-run keeps only the last write. Before adding a
+    shape to the integer-state analyses, run `test/fuzz_int_state.jl` over
+    seeds 1 to 300, 1000 to 1125 and 2001 to 2150 with the old and the new
+    source (`STADE_SRC=...`). A fuzzer that finds nothing against the old
+    source has no teeth.
+
+    `keep_push_pop = false` sizes the stacks from the arguments alone. A loop
+    bound that it cannot rebuild must be a generation-time refusal
+    (`agen_refuse_unsized`). It must never become an `UndefVarError` in
+    `initstacks_*`.

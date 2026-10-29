@@ -1,11 +1,9 @@
 function initstacks_so_carry_b(i_n)
-    wv_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + 1)
     run_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + 1)
-    return (wv_stack, run_stack)
+    return run_stack
 end
 
-function so_carry_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd, wd, wbd, yd, ybd, lossd, lossbd, wv_stack, run_stack)
-    wv_stack_d = Vector{Float64}(undef, length(wv_stack))
+function so_carry_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd, wd, wbd, yd, ybd, lossd, lossbd, run_stack)
     run_stack_d = Vector{Float64}(undef, length(run_stack))
     a = 0.0
     run = 0.0
@@ -41,62 +39,46 @@ function so_carry_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd, wd, w
             ad = ad + (wv * xd[t + 2] + __hcse_2 * wvd)
             a = a + __hcse_2 * wv
         end
-        __icse_0 = (t - 1) + 1
-        __idx_run_stack_2 = __icse_0
+        __idx_run_stack_2 = (t - 1) + 1
         run_stack_d[__idx_run_stack_2] = rund
         run_stack[__idx_run_stack_2] = run
         rund = 0.5rund + ad
         run = run * 0.5 + a
         yd[t] = rund
         y[t] = run
-        __idx_wv_stack_6 = __icse_0
-        wv_stack_d[__idx_wv_stack_6] = wvd
-        wv_stack[__idx_wv_stack_6] = wv
     end
     for k = 1:i_n
-        __cse_1d = yd[k]
-        __cse_1 = y[k]
-        __hcse_3 = __cse_1 * __cse_1d
+        __cse_0d = yd[k]
+        __cse_0 = y[k]
+        __hcse_3 = __cse_0 * __cse_0d
         lossd[1] = lossd[1] + (__hcse_3 + __hcse_3)
-        loss[1] = loss[1] + __cse_1 * __cse_1
+        loss[1] = loss[1] + __cse_0 * __cse_0
     end
     __ihcse_4 = max(0, div(i_n - 1, 1) + 1) + 1
-    __icse_2 = __ihcse_4
-    __idx_run_stack_3 = __icse_2
+    __idx_run_stack_3 = __ihcse_4
     run_stack_d[__idx_run_stack_3] = rund
     run_stack[__idx_run_stack_3] = run
-    __idx_wv_stack_5 = __icse_2
-    wv_stack_d[__idx_wv_stack_5] = wvd
-    wv_stack[__idx_wv_stack_5] = wv
-    __icse_3 = __ihcse_4
-    __idx_run_stack_0 = __icse_3
+    __idx_run_stack_0 = __ihcse_4
     rund = run_stack_d[__idx_run_stack_0]
     run = run_stack[__idx_run_stack_0]
-    __idx_wv_stack_2 = __icse_3
-    wvd = wv_stack_d[__idx_wv_stack_2]
-    wv = wv_stack[__idx_wv_stack_2]
     for k = i_n:-1:1
         __hcse_5 = lossb[1]
         __hcse_6 = y[k]
-        __cse_4d = __hcse_5 * yd[k] + __hcse_6 * lossbd[1]
-        __cse_4 = __hcse_6 * __hcse_5
-        ybd[k] = ybd[k] + __cse_4d
-        yb[k] = yb[k] + __cse_4
-        ybd[k] = ybd[k] + __cse_4d
-        yb[k] = yb[k] + __cse_4
+        __cse_1d = __hcse_5 * yd[k] + __hcse_6 * lossbd[1]
+        __cse_1 = __hcse_6 * __hcse_5
+        ybd[k] = ybd[k] + __cse_1d
+        yb[k] = yb[k] + __cse_1
+        ybd[k] = ybd[k] + __cse_1d
+        yb[k] = yb[k] + __cse_1
     end
     for t = i_n:-1:1
-        __icse_5 = (t - 1) + 1
-        __idx_wv_stack_0 = __icse_5
-        wvd = wv_stack_d[__idx_wv_stack_0]
-        wv = wv_stack[__idx_wv_stack_0]
         __oldb_0d = ybd[t]
         __oldb_0 = yb[t]
         ybd[t] = 0.0
         yb[t] = 0.0
         runbd = runbd + __oldb_0d
         runb = runb + __oldb_0
-        __idx_run_stack_0 = __icse_5
+        __idx_run_stack_0 = (t - 1) + 1
         rund = run_stack_d[__idx_run_stack_0]
         run = run_stack[__idx_run_stack_0]
         __oldb_2d = runbd

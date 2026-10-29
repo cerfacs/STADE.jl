@@ -49,6 +49,8 @@ fmm_args() = [:s => fmm_slowness(), :T => zeros(NX_FMM * NX_FMM), :state => zero
 # which is how a wrong index in the reverse sweep went unseen
 const AMR_TARGETS = [(:x0,), (:xl, 1), (:xl, 2), (:xr, 2), (:xr, 4)]
 const X4 = [(:x, 1), (:x, 2), (:x, 3), (:x, 4)]
+const X6 = [(:x, i) for i in 1:6]
+const X6V = [0.31, 0.52, 0.73, 0.94, 0.45, 0.66]
 const BC = [(:x, 1), (:x, 2), (:w, 2), (:w, 3), (:w, 4)]
 
 # (label, kernel, args, targets)
@@ -79,6 +81,17 @@ const INT_CASES = [
     ("after_loop_zero",    "after_loop_read",    () -> [:x => [1.0, 2.0, 3.0, 4.0], :idx => [2, 3, 1], :n => 0.5, :out => zeros(1)], [(:x, 1), (:x, 2), (:x, 3)]),
     ("float_trip_below",   "float_trip",         () -> [:x => [0.6249], :lim => 10.0, :out => zeros(1)], [(:x, 1)]),
     ("float_trip_above",   "float_trip",         () -> [:x => [0.6251], :lim => 10.0, :out => zeros(1)], [(:x, 1)]),
+    # found by test/fuzz_int_state.jl: each of these was a wrong gradient or a crash in v0.4.19
+    ("int_copy_as_number", "int_copy_as_number", () -> [:x => [0.5, 0.7, 0.9, 1.1], :cnt => [2, 3, 1, 2], :n => 4, :out => zeros(1)], X4),
+    ("int_copy_rewritten", "int_copy_rewritten", () -> [:x => [0.5, 0.7, 0.9, 1.1], :cnt => [2, 3, 1, 2], :n => 4, :out => zeros(1)], X4),
+    ("bound_shared_toplevel", "bound_shared_toplevel", () -> [:x => [0.5, 0.7, 0.9, 1.1], :n => 4, :m => 2, :out => zeros(1)], X4),
+    ("int_bound_self",     "int_bound_self",     () -> [:x => X6V, :cnt => [2, 3, 3], :n => 4, :out => zeros(1)], X6),
+    ("int_bound_passes",   "int_bound_passes",   () -> [:x => X6V, :cnt => [1, 3, 1], :steps => 3, :out => zeros(1)], X6),
+    ("int_index_unsafe",   "int_index_unsafe",   () -> [:x => X6V, :idx => [4, 2, 6, 1, 3, 5], :cnt => [2, 1, 1], :n => 4, :out => zeros(1)], X6),
+    ("dead_copy_written_back", "dead_copy_written_back", () -> [:x => X6V, :w => [1.1, 1.2, 1.3, 1.4, 1.5, 1.6], :idx => [4, 2, 6, 1, 3, 5], :n => 5, :out => zeros(1)], X6),
+    ("scalar_two_sites",   "scalar_two_sites",   () -> [:x => X6V, :idx => [4, 2, 6, 1, 3, 5], :n => 5, :out => zeros(1)], X6),
+    ("bound_from_written_array", "bound_from_written_array", () -> Pair{Symbol,Any}[:x => X6V, :cnt => [1, 2, 1], :out => zeros(1)], X6),
+    ("bound_from_array_branch", "bound_from_array_branch", () -> Pair{Symbol,Any}[:x => X6V, :cnt => [4, 2, 1], :out => zeros(1)], X6),
     # controls: these passed before the change and must keep passing
     ("for_gather",         "for_gather",         () -> gather_args(3),  [(:x, 1), (:x, 2), (:x, 3)]),
     ("while_inline_index", "while_inline_index", arith_args,   [(:x, 1), (:y, 1)]),
@@ -269,6 +282,34 @@ function validate_int_state(; trials::Int = 3)
     expect_refusal("keep_push_pop = false, while HVP", "no trip count",
                    () -> STADE.stade_hvp(STADE.io_read_corpus_entry(joinpath(@__DIR__, "while-corpus", "while_count.jl"));
                                          keep_push_pop = false))
+
+    # a loop bound read from an array that the kernel writes cannot be sized before the kernel runs (it used to give an
+    # initstacks_* that referenced an undefined name, or one that sized the stack from the array on entry)
+    expect_refusal("keep_push_pop = false, bound read from a written array", "cannot size the stacks",
+                   () -> STADE.stade_adjoint(entry("bound_from_written_array"); keep_push_pop = false))
+    expect_refusal("keep_push_pop = false, bound from a written array, HVP", "cannot size the stacks",
+                   () -> STADE.stade_hvp(entry("bound_from_written_array"); keep_push_pop = false))
+    expect_refusal("keep_push_pop = false, array element rewritten as its own bound", "must be restored",
+                   () -> STADE.stade_adjoint(entry("int_bound_self"); keep_push_pop = false))
+    # two integers assigned at several sites in one body: the reverse sweep must restore them, so no closed-form size
+    expect_refusal("keep_push_pop = false, scalar assigned twice in a body", "must be restored",
+                   () -> STADE.stade_adjoint(entry("scalar_two_sites"); keep_push_pop = false))
+    # accepted, and then correct: a bound read from an array that is never written, and a bound reassigned between loops
+    for kname in ("bound_from_array_branch", "bound_shared_toplevel")
+        checks += 1
+        mk = Dict("bound_from_array_branch" => () -> Pair{Symbol,Any}[:x => X6V, :cnt => [4, 2, 1], :out => zeros(1)],
+                  "bound_shared_toplevel" => () -> [:x => [0.5, 0.7, 0.9, 1.1], :n => 4, :m => 2, :out => zeros(1)])[kname]
+        yp = int_state_baseline(kname, mk(), mktempdir())
+        Random.seed!(hash(kname))
+        r = try
+            STADE.stade_validate_adjoint_file(joinpath(INT_DIR, kname * ".jl"); yaml_path = yp, trials = 3,
+                                              keep_push_pop = false, fuse_ii_loops = false)
+        catch e
+            (ok = false, max_rel_err = NaN)
+        end
+        r.ok || (bad += 1)
+        say(rpad("keep_push_pop = false accepted and correct: $kname", 52), r.ok ? " ok" : " FAIL")
+    end
 
     say("\n", checks, " refusal checks run",
             bad == 0 ? "   all integer-state checks passed" : "   *** $bad NOT OK ***")

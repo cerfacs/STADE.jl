@@ -12,12 +12,10 @@ function initstacks_coarsen_retire_b(levels, n)
         __tot_tripcount_stack_1 = __tot_tripcount_stack_1 + 1
     end
     tripcount_stack = Vector{Int64}(undef, __tot_tripcount_stack_1)
-    t_stack = Vector{Float64}(undef, __tot_t_stack_1 + 1)
-    return (tripcount_stack, t_stack, prefix_t_stack_1, prefix_tripcount_stack_1, __tot_t_stack_1, __tot_tripcount_stack_1)
+    return (tripcount_stack, prefix_t_stack_1, prefix_tripcount_stack_1, __tot_t_stack_1, __tot_tripcount_stack_1)
 end
 
-function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd, outd, outbd, tripcount_stack, t_stack, prefix_t_stack_1, prefix_tripcount_stack_1, __tot_t_stack_1, __tot_tripcount_stack_1)
-    t_stack_d = Vector{Float64}(undef, length(t_stack))
+function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd, outd, outbd, tripcount_stack, prefix_t_stack_1, prefix_tripcount_stack_1, __tot_t_stack_1, __tot_tripcount_stack_1)
     t = 0.0
     tb = 0.0
     td = 0.0
@@ -37,19 +35,9 @@ function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd,
             y[i] = y[i] + t * t
         end
         cur = div(cur + 1, 2)
-        __idx_t_stack_1_4 = prefix_t_stack_1[(i_l - 1) + 1] + 1
-        t_stack_d[__idx_t_stack_1_4] = td
-        t_stack[__idx_t_stack_1_4] = t
     end
     outd[1] = yd[1]
     out[1] = y[1]
-    __ihcse_2 = __tot_t_stack_1 + 1
-    __idx_t_stack_3 = __ihcse_2
-    t_stack_d[__idx_t_stack_3] = td
-    t_stack[__idx_t_stack_3] = t
-    __idx_t_stack_0 = __ihcse_2
-    td = t_stack_d[__idx_t_stack_0]
-    t = t_stack[__idx_t_stack_0]
     __oldb_0d = outbd[1]
     __oldb_0 = outb[1]
     outbd[1] = 0.0
@@ -57,20 +45,17 @@ function coarsen_retire_hv(x, xb, y, yb, n, levels, out, outb, xd, xbd, yd, ybd,
     ybd[1] = ybd[1] + __oldb_0d
     yb[1] = yb[1] + __oldb_0
     for i_l = levels:-1:1
-        __idx_t_stack_1_0 = prefix_t_stack_1[(i_l - 1) + 1] + 1
-        td = t_stack_d[__idx_t_stack_1_0]
-        t = t_stack[__idx_t_stack_1_0]
-        __idx_tripcount_stack_1_2 = prefix_tripcount_stack_1[(i_l - 1) + 1] + 1
-        cur = tripcount_stack[__idx_tripcount_stack_1_2]
+        __idx_tripcount_stack_1_0 = prefix_tripcount_stack_1[(i_l - 1) + 1] + 1
+        cur = tripcount_stack[__idx_tripcount_stack_1_0]
         for i = cur:-1:1
             __cse_1d = xd[i]
             __cse_1 = x[i]
-            __hcse_3 = __cse_1 * __cse_1d
-            td = __hcse_3 + __hcse_3
+            __hcse_2 = __cse_1 * __cse_1d
+            td = __hcse_2 + __hcse_2
             t = __cse_1 * __cse_1
-            __hcse_4 = yb[i]
-            __cse_2d = __hcse_4 * td + t * ybd[i]
-            __cse_2 = t * __hcse_4
+            __hcse_3 = yb[i]
+            __cse_2d = __hcse_3 * td + t * ybd[i]
+            __cse_2 = t * __hcse_3
             tbd = tbd + __cse_2d
             tb = tb + __cse_2
             tbd = tbd + __cse_2d

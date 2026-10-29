@@ -499,7 +499,7 @@ function parse_kernel(expr::Expr)
     length(expr.args) == 2 ||
         error("parse_kernel: malformed function Expr (expected signature + body)")
     name, args = parse_signature(expr.args[1])
-    body = parse_statements(parse_strip_lines(expr.args[2]))
+    body = parse_hoist_array_bounds(parse_statements(parse_strip_lines(expr.args[2])), Ref(0))
     kinds = shape_infer((name = name, args = args), body)
     indep, dep = parse_infer_indep_dep(args, kinds)
     sig = (name = name, args = args, kinds = kinds,
@@ -586,6 +586,43 @@ end
 
 function parse_statements(stmts::Vector)
     return NamedTuple[parse_statement(s) for s in stmts]
+end
+
+# A `for` bound that reads an array element (`for m = 1:cnt[1]`) is evaluated once, when the loop is entered. The
+# reverse sweep rebuilds a bound from scalars it can restore, and cannot rebuild one from an array element that the
+# loop body (or a later pass of an enclosing loop) rewrites: it would see the value after the loop. The bound is
+# therefore read into a scalar just before the loop, which is exactly what Julia does, and the loop uses the scalar.
+function parse_expr_reads_array(e)
+    e isa Expr || return false
+    e.head == :ref && return true
+    return any(parse_expr_reads_array, e.args)
+end
+
+function parse_hoist_array_bounds(body::Vector, counter::Base.RefValue{Int})
+    out = NamedTuple[]
+    for stmt in body
+        if stmt.kind == :for
+            bounds = Any[stmt.lo, stmt.step, stmt.hi]
+            for q in 1:3
+                if parse_expr_reads_array(bounds[q])
+                    counter[] += 1
+                    tmp = Symbol("__bnd_", counter[])
+                    push!(out, (kind = :assign, lhs = tmp, rhs = bounds[q]))
+                    bounds[q] = tmp
+                end
+            end
+            push!(out, merge(stmt, (lo = bounds[1], step = bounds[2], hi = bounds[3],
+                                    body = parse_hoist_array_bounds(stmt.body, counter))))
+        elseif stmt.kind == :while
+            push!(out, merge(stmt, (body = parse_hoist_array_bounds(stmt.body, counter),)))
+        elseif stmt.kind == :if
+            push!(out, merge(stmt, (then = parse_hoist_array_bounds(stmt.then, counter),
+                                    els = parse_hoist_array_bounds(stmt.els, counter))))
+        else
+            push!(out, stmt)
+        end
+    end
+    return out
 end
 
 function parse_statement(stmt)
@@ -1166,6 +1203,10 @@ function shape_expr_int_status(expr, is_int::Dict{Symbol,Bool})
         return :int
     elseif expr isa AbstractFloat
         return :float
+    elseif expr isa Expr && expr.head == :ref
+        # an element of an integer array is an integer: `c = cnt[i]` is an integer scalar even when `c` is only used as a number
+        base = expr.args[1]
+        return (base isa Symbol && get(is_int, base, false)) ? :int : :unknown
     elseif expr isa Expr && expr.head == :call
         op = expr.args[1]
         arg_status = [shape_expr_int_status(a, is_int) for a in expr.args[2:end]]
@@ -2281,7 +2322,7 @@ end
 function snap_itbr_scalars(kernel, active_map, unsafe, iarr = Set{Symbol}())
     kinds = kernel.sig.kinds
     isempty(unsafe) && return Set{Symbol}()
-    reassigned = agen_collect_reassigned(kernel.body)
+    reassigned = agen_collect_reassigned_all(kernel.body)
     counts = agen_count_assign_sites(kernel.body)
     reads = Set{Symbol}()
     snap_itbr_collect_reads!(kernel.body, kinds, active_map, reassigned, reads, iarr)
@@ -2374,7 +2415,7 @@ function snap_itbr_vars(kernel, active_map)
 end
 
 function snap_plan(kernel, active_map; site_needed = nothing)
-    reassigned = snap_collect_reassigned(kernel.body)
+    reassigned = snap_collect_reassigned_all(kernel.body)
     value_needed = snap_value_needed_vars(kernel)
     assign_counts = snap_count_assign_sites(kernel.body)
     sites = NamedTuple[]
@@ -3162,7 +3203,7 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
         # block can't resolve. ii_plan/fuse_ii_loops is exercised with keep_push_pop=false against the full
         # corpus; the Phase 3 cleanup below prunes a fused var's now-unused stack in this mode too.
         value_needed = agen_value_needed_vars(kernel)
-        reassigned = agen_collect_reassigned(kernel.body)
+        reassigned = agen_collect_reassigned_all(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
         stacks = agen_stack_map(snapshot_plan)
         layout = agen_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = push_pop)
@@ -3237,7 +3278,7 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
     fargs = vcat(agen_signature_args(kernel.sig), agen_stack_names(sites), tier_b_extra_args)
 
     value_needed = agen_value_needed_vars(kernel)
-    reassigned = agen_collect_reassigned(kernel.body)
+    reassigned = agen_collect_reassigned_all(kernel.body)
     unsafe = agen_unsafe_int_vars(kernel, agen_itbr_vars(stacks))
     exempt = agen_exempt_vars(kernel, value_needed)
 
@@ -3264,11 +3305,82 @@ function agen_unsafe_int_vars(kernel, itbr_arrays = Set{Symbol}())
     kinds = kernel.sig.kinds
     unsafe = Set{Symbol}(a for a in itbr_arrays if get(kinds, a, :none) == :array_int)
     agen_seed_unsafe_self_ref!(kernel.body, kinds, unsafe)
+    agen_seed_unsafe_multi_site!(kernel.body, kinds, unsafe)
     changed = true
     while changed
         changed = agen_propagate_unsafe!(kernel.body, kinds, unsafe)
     end
     return unsafe
+end
+
+# The reverse body re-runs a loop body's integer assignments up front, in forward order, so a scalar that the body
+# assigns at two or more sites ends the re-run with its last value. A read that sits before the last assignment, in
+# program order, would see the wrong one. Such a scalar is unsafe, and the restore analysis decides what it needs. A scalar
+# assigned once per body, or at several sites that nothing reads in between, stays safe, and so does the same name used in
+# two different loops (each loop body is its own scope). Positions are the pre-order index of the statement; a nested
+# loop's reads count in the scope that encloses it, its writes belong to the nested scope.
+function agen_multi_site_walk!(body, kinds, sites, reads, pos, nested)
+    for st in body
+        pos[] += 1
+        if st.kind == :assign
+            rd = Set{Symbol}()
+            agen_collect_expr_vars!(st.rhs, rd)
+            st.lhs isa Expr && for ix in st.lhs.args[2:end]
+                agen_collect_expr_vars!(ix, rd)
+            end
+            for r in rd
+                push!(get!(reads, r, Int[]), pos[])
+            end
+            if !nested && st.lhs isa Symbol && get(kinds, st.lhs, :none) == :scalar_int
+                push!(get!(sites, st.lhs, Int[]), pos[])
+            end
+        elseif st.kind == :for
+            rd = Set{Symbol}()
+            for e in (st.lo, st.hi, st.step)
+                agen_collect_expr_vars!(e, rd)
+            end
+            for r in rd
+                push!(get!(reads, r, Int[]), pos[])
+            end
+            agen_multi_site_walk!(st.body, kinds, sites, reads, pos, true)
+        elseif st.kind == :while
+            rd = Set{Symbol}()
+            agen_collect_expr_vars!(st.cond, rd)
+            for r in rd
+                push!(get!(reads, r, Int[]), pos[])
+            end
+            agen_multi_site_walk!(st.body, kinds, sites, reads, pos, true)
+        elseif st.kind == :if
+            rd = Set{Symbol}()
+            agen_collect_expr_vars!(st.cond, rd)
+            for r in rd
+                push!(get!(reads, r, Int[]), pos[])
+            end
+            agen_multi_site_walk!(st.then, kinds, sites, reads, pos, nested)
+            agen_multi_site_walk!(st.els, kinds, sites, reads, pos, nested)
+        end
+    end
+    return nothing
+end
+
+function agen_seed_unsafe_multi_site!(body, kinds, unsafe)
+    sites = Dict{Symbol,Vector{Int}}()
+    reads = Dict{Symbol,Vector{Int}}()
+    agen_multi_site_walk!(body, kinds, sites, reads, Ref(0), false)
+    for (v, ws) in sites
+        length(ws) >= 2 || continue
+        last_w = maximum(ws)
+        any(p -> p < last_w, get(reads, v, Int[])) && push!(unsafe, v)
+    end
+    for st in body
+        if st.kind == :for || st.kind == :while
+            agen_seed_unsafe_multi_site!(st.body, kinds, unsafe)
+        elseif st.kind == :if
+            agen_seed_unsafe_multi_site!(st.then, kinds, unsafe)
+            agen_seed_unsafe_multi_site!(st.els, kinds, unsafe)
+        end
+    end
+    return nothing
 end
 
 function agen_seed_unsafe_self_ref!(body, kinds, unsafe)
@@ -3298,6 +3410,10 @@ function agen_propagate_unsafe!(body, kinds, unsafe)
             if kinds[var] in (:scalar_int, :array_int) && !(var in unsafe)
                 refs = Set{Symbol}()
                 agen_collect_expr_vars!(stmt.rhs, refs)
+                # the index of an array write is re-run with it, so an unsafe integer in the index taints the array too
+                stmt.lhs isa Expr && for ix in stmt.lhs.args[2:end]
+                    agen_collect_expr_vars!(ix, refs)
+                end
                 if any(r in unsafe for r in refs)
                     push!(unsafe, var)
                     changed = true
@@ -3449,13 +3565,34 @@ function agen_collect_assigned_syms!(e, acc)
     return nothing
 end
 
+# The arrays that some statement of the kernel writes.
+function agen_written_arrays!(body, acc)
+    for st in body
+        if st.kind == :assign
+            st.lhs isa Expr && push!(acc, st.lhs.args[1])
+        elseif st.kind == :for || st.kind == :while
+            agen_written_arrays!(st.body, acc)
+        elseif st.kind == :if
+            agen_written_arrays!(st.then, acc)
+            agen_written_arrays!(st.els, acc)
+        end
+    end
+    return acc
+end
+
 function agen_init_derived_stmts(kernel, wanted, already_defined)
     defs = Dict{Symbol,Any}()
     counts = agen_count_assign_sites(kernel.body)
+    # a scalar read from an array can be rebuilt at init only if the kernel never writes that array: the sizing function
+    # sees the array as it is on entry, and a size taken from it would be too small, or too large, for the loop that runs
+    written = agen_written_arrays!(kernel.body, Set{Symbol}())
     for stmt in kernel.body
         stmt.kind == :assign || continue
         stmt.lhs isa Symbol || continue
         get(counts, stmt.lhs, 0) == 1 || continue
+        rd = Set{Symbol}()
+        agen_collect_expr_vars!(stmt.rhs, rd)
+        isempty(intersect(rd, written)) || continue
         haskey(defs, stmt.lhs) || (defs[stmt.lhs] = stmt.rhs)
     end
     args = Set{Symbol}(kernel.sig.args)
@@ -3563,8 +3700,84 @@ function agen_init_emit(kernel, sites; keep_push_pop::Bool = true, layout = noth
     isempty(snap_arrays) || (fargs = sort(union(fargs, snap_arrays); by = string))
     val_names = vcat(val_names, Symbol[agen_asnap_len(A) for A in snap_arrays])
     body = vcat(len_stmts, derived_stmts, sizing_stmts, table_stmts, alloc_stmts)
+    keep_push_pop || agen_refuse_unsized(kernel, fargs, body)
     push!(body, emit_return_scalars(vcat(names, table_names, tot_names, val_names)))
     return (Expr(:function, Expr(:call, fname, fargs...), Expr(:block, body...)), table_names, tot_names, val_names)
+end
+
+# The names an `initstacks_*` body reads that nothing in it defines: not a parameter, not assigned in the body, not a loop
+# variable, not a Base name. Flow-insensitive on purpose: it catches a name that is never defined, which is what an
+# `UndefVarError` at the first call comes from.
+function agen_init_free_names(fargs, body)
+    defined = Set{Symbol}(fargs)
+    reads = Set{Symbol}()
+    function walk(e, as_read = true)
+        if e isa Symbol
+            as_read && push!(reads, e)
+        elseif e isa Expr
+            if e.head == :(=) || e.head in (:+=, :-=, :*=)
+                lhs = e.args[1]
+                if lhs isa Symbol
+                    push!(defined, lhs)
+                    e.head == :(=) || push!(reads, lhs)
+                else
+                    walk(lhs)
+                end
+                walk(e.args[2])
+            elseif e.head == :for
+                hdr = e.args[1]
+                hdr isa Expr && hdr.head == :(=) && hdr.args[1] isa Symbol && push!(defined, hdr.args[1])
+                hdr isa Expr && walk(hdr.args[2])
+                walk(e.args[2])
+            elseif e.head == :curly
+                # a type, never a variable
+            elseif e.head == :call
+                e.args[1] isa Symbol || walk(e.args[1])
+                for a in e.args[2:end]
+                    walk(a)
+                end
+            else
+                for a in e.args
+                    walk(a)
+                end
+            end
+        end
+        return nothing
+    end
+    for st in body
+        walk(st)
+    end
+    return sort([v for v in reads if !(v in defined) && !isdefined(Base, v) && v != :undef && v != :nothing]; by = string)
+end
+
+# `keep_push_pop = false` sizes every stack from the kernel's arguments, before the kernel runs. A loop bound that is read
+# from an array the kernel writes (`c = cnt[1]` after `cnt[1] = ...`), or from a scalar assigned at several sites, is a value
+# the sizing pass cannot know: the array on entry is not the array when the loop runs. The sizing function would reference an
+# undefined name. It is refused here, with the alternative named.
+function agen_refuse_unsized(kernel, fargs, body)
+    free = agen_init_free_names(fargs, body)
+    isempty(free) && return nothing
+    defs = Dict{Symbol,Any}()
+    function find(stmts)
+        for st in stmts
+            if st.kind == :assign && st.lhs isa Symbol
+                haskey(defs, st.lhs) || (defs[st.lhs] = st.rhs)
+            elseif st.kind == :for || st.kind == :while
+                find(st.body)
+            elseif st.kind == :if
+                find(st.then); find(st.els)
+            end
+        end
+    end
+    find(kernel.body)
+    what = String[]
+    for v in free
+        push!(what, haskey(defs, v) ? "`$(v)` (= `$(defs[v])`)" : "`$(v)`")
+    end
+    error("stade_adjoint: `keep_push_pop = false` cannot size the stacks of `$(kernel.sig.name)`: the size depends on " *
+          join(what, ", ") * ", which cannot be rebuilt before the kernel runs. The sizing function rebuilds a scalar only from " *
+          "the arguments and from arrays that the kernel never writes, and only if the scalar is assigned once. Pass the loop " *
+          "bound as an integer argument, or use keep_push_pop = true")
 end
 
 # :array/:value stacks hold the popped Float64 scalar itself (every push is one exact lhs
@@ -3602,6 +3815,34 @@ function agen_collect_reassigned(body, in_loop = false)
     end
     return reassigned
 end
+
+# A loop bound held in a scalar that is assigned at two or more sites (`c = n`, a loop, `c = m`, a loop) is reassigned in the
+# sense that matters here, even when no assignment sits in a loop: the reverse sweep reaches the first loop with the value
+# the last assignment left. Such a bound goes on a :tripcount stack like one reassigned inside a loop. Shared by the snap_ and
+# agen_ copies, so the two cannot disagree.
+function agen_collect_for_bound_vars!(body, acc)
+    for st in body
+        if st.kind == :for
+            union!(acc, agen_for_bound_vars(st))
+            agen_collect_for_bound_vars!(st.body, acc)
+        elseif st.kind == :while
+            agen_collect_for_bound_vars!(st.body, acc)
+        elseif st.kind == :if
+            agen_collect_for_bound_vars!(st.then, acc)
+            agen_collect_for_bound_vars!(st.els, acc)
+        end
+    end
+    return acc
+end
+
+function agen_multisite_bound_vars(body)
+    counts = agen_count_assign_sites(body)
+    bounds = agen_collect_for_bound_vars!(body, Set{Symbol}())
+    return Set{Symbol}(v for v in bounds if get(counts, v, 0) >= 2)
+end
+
+agen_collect_reassigned_all(body) = union(agen_collect_reassigned(body), agen_multisite_bound_vars(body))
+snap_collect_reassigned_all(body) = union(snap_collect_reassigned(body), agen_multisite_bound_vars(body))
 
 # ---- block-boundary scalar restoration ----
 # A scalar var written only inside a nested sub-:for/:if of `body` has no restore reaching a later sibling
@@ -4431,7 +4672,7 @@ function agen_tier_b_sizing_stmts(kernel, active_map, value_needed, exempt, stac
     isempty(tainted_stacks) && return (Any[], Dict{Symbol,Symbol}())
     total_of = Dict(nm => Symbol("__sz_" * string(nm)) for nm in tainted_stacks)
     decls = Any[Expr(:(=), total_of[nm], 0) for nm in sort(collect(tainted_stacks); by = string)]
-    reassigned = agen_collect_reassigned(kernel.body)
+    reassigned = agen_collect_reassigned_all(kernel.body)
     body = agen_tier_b_sizing_walk(kernel.body, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
     return (vcat(decls, body), total_of)
 end
@@ -5924,7 +6165,7 @@ function hvp_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = tru
     sig = kernel.sig
     stacks = agen_stack_map(sites)
     value_needed = agen_value_needed_vars(kernel)
-    reassigned = agen_collect_reassigned(kernel.body)
+    reassigned = agen_collect_reassigned_all(kernel.body)
     unsafe = agen_unsafe_int_vars(kernel, agen_itbr_vars(stacks))
     exempt = agen_exempt_vars(kernel, value_needed)
 
@@ -10822,7 +11063,7 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     if !keep_push_pop
         # Tier B: see the matching comment in agen_emit above.
         value_needed = agen_value_needed_vars(kernel)
-        reassigned = agen_collect_reassigned(kernel.body)
+        reassigned = agen_collect_reassigned_all(kernel.body)
         exempt = agen_exempt_vars(kernel, value_needed)
         stacks = agen_stack_map(snapshot_plan)
         layout = agen_layout(kernel, kernel.sig.kinds, active_map, value_needed, reassigned, exempt, stacks; push_pop = agen_sites)
@@ -12316,7 +12557,7 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # backward position against whatever `cur` holds there rather than the value this iteration
     # used. Gate 2 above only inspects the loop's body, so this shape slipped through and
     # produced wrong gradients in both stack modes whenever fusion was on.
-    isempty(agen_tripcount_bound_vars(stmt, snap_collect_reassigned(kernel.body))) || return :none
+    isempty(agen_tripcount_bound_vars(stmt, snap_collect_reassigned_all(kernel.body))) || return :none
     vn_red = intersect(vn_local, redvars)
     vn_ind = setdiff(vn_local, redvars)
     # Each half is checked independently against its own safety condition rather than requiring
@@ -12350,7 +12591,7 @@ function snap_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # ii_body_has_surviving_snapshot.
     if (!isempty(vn_red) || has_escape || defer) &&
        (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, snap_value_needed_sites(kernel),
-                                        vn_local, snap_collect_reassigned(kernel.body)) ||
+                                        vn_local, snap_collect_reassigned_all(kernel.body)) ||
         # the backward-position recompute drops array writes -- see
         # ii_body_scalar_reads_own_array_write. :independent does not
         # recompute at all, so this does not apply to it.
@@ -12408,7 +12649,7 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     # holds rather than what this iteration used. Gate 2 above only inspects the loop's body, so
     # this shape slipped through and produced wrong gradients in both stack modes whenever
     # fusion was on.
-    isempty(agen_tripcount_bound_vars(stmt, agen_collect_reassigned(kernel.body))) || return :none
+    isempty(agen_tripcount_bound_vars(stmt, agen_collect_reassigned_all(kernel.body))) || return :none
     vn_red = intersect(vn_local, redvars)
     vn_ind = setdiff(vn_local, redvars)
     if !isempty(vn_red)
@@ -12436,7 +12677,7 @@ function agen_ii_classify(stmt, kernel, value_needed, known_consts, active_map, 
     defer = !isempty(live_out)
     if (!isempty(vn_red) || has_escape || defer) &&
        (ii_body_has_surviving_snapshot(stmt.body, kernel.sig.kinds, active_map, agen_value_needed_sites(kernel),
-                                        vn_local, agen_collect_reassigned(kernel.body)) ||
+                                        vn_local, agen_collect_reassigned_all(kernel.body)) ||
         # the backward-position recompute drops array writes -- see
         # ii_body_scalar_reads_own_array_write. :independent does not
         # recompute at all, so this does not apply to it.

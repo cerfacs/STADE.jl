@@ -1,10 +1,8 @@
 function initstacks_ii_multiversion_b(i_n)
-    wv_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + 1)
-    return wv_stack
+    return nothing
 end
 
-function ii_multiversion_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd, wd, wbd, yd, ybd, lossd, lossbd, wv_stack)
-    wv_stack_d = Vector{Float64}(undef, length(wv_stack))
+function ii_multiversion_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd, wd, wbd, yd, ybd, lossd, lossbd)
     a = 0.0
     wv = 0.0
     ab = 0.0
@@ -35,9 +33,6 @@ function ii_multiversion_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd
         end
         yd[t] = ad
         y[t] = a
-        __idx_wv_stack_3 = (t - 1) + 1
-        wv_stack_d[__idx_wv_stack_3] = wvd
-        wv_stack[__idx_wv_stack_3] = wv
     end
     for k = 1:i_n
         __cse_0d = yd[k]
@@ -46,27 +41,17 @@ function ii_multiversion_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd
         lossd[1] = lossd[1] + (__hcse_3 + __hcse_3)
         loss[1] = loss[1] + __cse_0 * __cse_0
     end
-    __ihcse_4 = max(0, div(i_n - 1, 1) + 1) + 1
-    __idx_wv_stack_2 = __ihcse_4
-    wv_stack_d[__idx_wv_stack_2] = wvd
-    wv_stack[__idx_wv_stack_2] = wv
-    __idx_wv_stack_0 = __ihcse_4
-    wvd = wv_stack_d[__idx_wv_stack_0]
-    wv = wv_stack[__idx_wv_stack_0]
     for k = i_n:-1:1
-        __hcse_5 = lossb[1]
-        __hcse_6 = y[k]
-        __cse_1d = __hcse_5 * yd[k] + __hcse_6 * lossbd[1]
-        __cse_1 = __hcse_6 * __hcse_5
+        __hcse_4 = lossb[1]
+        __hcse_5 = y[k]
+        __cse_1d = __hcse_4 * yd[k] + __hcse_5 * lossbd[1]
+        __cse_1 = __hcse_5 * __hcse_4
         ybd[k] = ybd[k] + __cse_1d
         yb[k] = yb[k] + __cse_1
         ybd[k] = ybd[k] + __cse_1d
         yb[k] = yb[k] + __cse_1
     end
     for t = i_n:-1:1
-        __idx_wv_stack_0 = (t - 1) + 1
-        wvd = wv_stack_d[__idx_wv_stack_0]
-        wv = wv_stack[__idx_wv_stack_0]
         __oldb_0d = ybd[t]
         __oldb_0 = yb[t]
         ybd[t] = 0.0
@@ -78,9 +63,9 @@ function ii_multiversion_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd
             wv = w[(ci - 1) * 3 + 3]
             xbd[t + 2] = xbd[t + 2] + (ab * wvd + wv * abd)
             xb[t + 2] = xb[t + 2] + wv * ab
-            __hcse_7 = x[t + 2]
-            wvbd = wvbd + (ab * xd[t + 2] + __hcse_7 * abd)
-            wvb = wvb + __hcse_7 * ab
+            __hcse_6 = x[t + 2]
+            wvbd = wvbd + (ab * xd[t + 2] + __hcse_6 * abd)
+            wvb = wvb + __hcse_6 * ab
             wvd = wd[(ci - 1) * 3 + 2]
             wv = w[(ci - 1) * 3 + 2]
             __oldb_1d = wvbd
@@ -91,9 +76,9 @@ function ii_multiversion_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd
             wb[(ci - 1) * 3 + 3] = wb[(ci - 1) * 3 + 3] + __oldb_1
             xbd[t + 1] = xbd[t + 1] + (ab * wvd + wv * abd)
             xb[t + 1] = xb[t + 1] + wv * ab
-            __hcse_8 = x[t + 1]
-            wvbd = wvbd + (ab * xd[t + 1] + __hcse_8 * abd)
-            wvb = wvb + __hcse_8 * ab
+            __hcse_7 = x[t + 1]
+            wvbd = wvbd + (ab * xd[t + 1] + __hcse_7 * abd)
+            wvb = wvb + __hcse_7 * ab
             wvd = wd[(ci - 1) * 3 + 1]
             wv = w[(ci - 1) * 3 + 1]
             __oldb_1d = wvbd
@@ -104,9 +89,9 @@ function ii_multiversion_hv(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, xd, xbd
             wb[(ci - 1) * 3 + 2] = wb[(ci - 1) * 3 + 2] + __oldb_1
             xbd[t] = xbd[t] + (ab * wvd + wv * abd)
             xb[t] = xb[t] + wv * ab
-            __hcse_9 = x[t]
-            wvbd = wvbd + (ab * xd[t] + __hcse_9 * abd)
-            wvb = wvb + __hcse_9 * ab
+            __hcse_8 = x[t]
+            wvbd = wvbd + (ab * xd[t] + __hcse_8 * abd)
+            wvb = wvb + __hcse_8 * ab
             __oldb_0d = wvbd
             __oldb_0 = wvb
             wvbd = 0.0

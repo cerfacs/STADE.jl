@@ -1,9 +1,8 @@
 function initstacks_ii_multiversion_b(i_n)
-    wv_stack = Vector{Float64}(undef, max(0, div(i_n - 1, 1) + 1) + 1)
-    return wv_stack
+    return nothing
 end
 
-function ii_multiversion_b(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, wv_stack)
+function ii_multiversion_b(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc)
     a = 0.0
     wv = 0.0
     ab = 0.0
@@ -19,26 +18,17 @@ function ii_multiversion_b(x, xb, w, wb, y, yb, loss, lossb, i_n, i_nc, wv_stack
             a = a + x[t + 2] * wv
         end
         y[t] = a
-        __idx_wv_stack_3 = (t - 1) + 1
-        wv_stack[__idx_wv_stack_3] = wv
     end
     for k = 1:i_n
         __cse_0 = y[k]
         loss[1] = loss[1] + __cse_0 * __cse_0
     end
-    __icse_1 = max(0, div(i_n - 1, 1) + 1) + 1
-    __idx_wv_stack_2 = __icse_1
-    wv_stack[__idx_wv_stack_2] = wv
-    __idx_wv_stack_0 = __icse_1
-    wv = wv_stack[__idx_wv_stack_0]
     for k = i_n:-1:1
-        __cse_2 = y[k] * lossb[1]
-        yb[k] = yb[k] + __cse_2
-        yb[k] = yb[k] + __cse_2
+        __cse_1 = y[k] * lossb[1]
+        yb[k] = yb[k] + __cse_1
+        yb[k] = yb[k] + __cse_1
     end
     for t = i_n:-1:1
-        __idx_wv_stack_0 = (t - 1) + 1
-        wv = wv_stack[__idx_wv_stack_0]
         __oldb_0 = yb[t]
         yb[t] = 0.0
         ab = ab + __oldb_0
