@@ -4339,13 +4339,21 @@ agen_size_trip_count(lo, step, hi) = Expr(:call, :max, 0, cgen_trip_count(lo, st
 # non-loop site
 agen_local_multiplicity(loop_ctx) = agen_prod_exprs(Any[agen_size_trip_count(f.lo, f.step, f.hi) for f in loop_ctx])
 
-# 1-based row-major flat position within one occurrence's own local block, from the current
+# 1-based flat position within one occurrence's own local block, from the current
 # enclosing loop nest (outermost first) -- degenerates to the literal 1 for a non-loop site.
-# Verified against a hand-derived nested-loop offset formula (a single global +1, not one
-# per level).
+# Element-major: the OUTERMOST frame is the fastest-varying digit, the inner frames stay row-major.
+# Verified against a hand-derived nested-loop offset formula (a single global +1, not one per level).
 function agen_local_position(loop_ctx)
     isempty(loop_ctx) && return 1
-    terms = Any[agen_mul_exprs(agen_pos0(loop_ctx[i]), agen_stride(loop_ctx, i)) for i in eachindex(loop_ctx)]
+    # The GPU thread is normally the outermost loop's iteration, so adjacent threads touch adjacent stack elements
+    # (coalesced). Still a bijection onto 1:multiplicity, so sizes, offsets and the hoisted-index checks are unchanged.
+    # LIMIT: if the outermost frame is a sequential loop (a time or level loop inside the kernel) and the thread is an
+    # inner frame, adjacent threads sit trip(outermost) slots apart. On a V100 that costs 2.6 to 47 times on stores and
+    # 1.3 to 6.7 times on loads against the old order (bench/gpu/microbench/stack_layout_outer_sequential.jl).
+    inner = Any[agen_mul_exprs(agen_pos0(loop_ctx[i]), agen_stride(loop_ctx, i)) for i in 2:length(loop_ctx)]
+    outer_trip = cgen_trip_count(loop_ctx[1].lo, loop_ctx[1].step, loop_ctx[1].hi)
+    terms = Any[agen_pos0(loop_ctx[1])]
+    isempty(inner) || push!(terms, agen_mul_exprs(agen_sum_exprs(inner), outer_trip))
     return agen_add_exprs(agen_sum_exprs(terms), 1)
 end
 
