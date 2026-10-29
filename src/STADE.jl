@@ -10244,6 +10244,122 @@ function cgen_emit(gk, backend; reduction_threshold::Int = CGEN_REDUCTION_THRESH
     return (host = host, kernels = kernels, decisions = decisions, helpers = helpers)
 end
 
+# ---- kernel finishing: dead scalar updates and the bounds-check switch ------
+# Both passes run on the finished kernel functions (private and coarsened twins included) and both are exact rollbacks when switched off.
+
+# every Symbol an expression mentions, call heads included: a superset of what it reads, which can only keep a statement alive
+function cgen_dead_syms!(e, out::Set{Symbol})
+    if e isa Symbol
+        push!(out, e)
+    elseif e isa Expr
+        for a in e.args
+            cgen_dead_syms!(a, out)
+        end
+    end
+    return out
+end
+
+# Functions with no effect other than their value. A kernel's own scalar update may be deleted only when its right side calls nothing else:
+# a shuffle or an atomic is a collective or a store, and a thread that skips one deadlocks or loses an update.
+const CGEN_DEAD_PURE_CALLS = (:+, :-, :*, :/, :^, :div, :mod, :rem, :fld, :cld, :abs, :sqrt, :exp, :log, :log10, :sin, :cos, :tan, :asin, :acos, :atan,
+                              :sinh, :cosh, :tanh, :max, :min, :sign, :floor, :ceil, :trunc, :ifelse, :<, :>, :<=, :>=, :(==), :!=)
+
+# `refs_ok`: an array read may be deleted. It may raise an out-of-range error when bounds checks are on, so it is deleted only under @inbounds.
+function cgen_dead_pure(e, refs_ok::Bool)
+    e isa Symbol && return true
+    e isa Number && return true
+    e isa Expr || return false
+    if e.head === :ref
+        return refs_ok && all(a -> cgen_dead_pure(a, refs_ok), e.args)
+    elseif e.head === :call
+        e.args[1] in CGEN_DEAD_PURE_CALLS || return false
+        return all(a -> cgen_dead_pure(a, refs_ok), e.args[2:end])
+    end
+    return false
+end
+
+# Backward liveness over one statement list. `live` holds the scalars read later in the thread. Returns (statements, live-in). A plain scalar
+# assignment whose target is not live and whose right side is pure is dropped and adds no reads; that holds in a loop's fixpoint too, which is
+# the least fixpoint, so `s = s + x` alone in a loop is dead. A statement of any other form is opaque: it keeps every symbol it mentions live and
+# kills nothing, which can only keep more.
+function cgen_dead_walk(stmts::AbstractVector, live_out::Set{Symbol}, refs_ok::Bool)
+    live = copy(live_out)
+    out = Any[]
+    for s in Iterators.reverse(stmts)
+        if s isa LineNumberNode
+            push!(out, s)
+        elseif s isa Expr && s.head === :(=) && s.args[1] isa Symbol
+            v = s.args[1]
+            if !(v in live) && cgen_dead_pure(s.args[2], refs_ok)
+                continue
+            end
+            delete!(live, v)
+            cgen_dead_syms!(s.args[2], live)
+            push!(out, s)
+        elseif s isa Expr && s.head === :for && length(s.args) == 2 && s.args[1] isa Expr && s.args[1].head === :(=) && s.args[1].args[1] isa Symbol && s.args[2] isa Expr && s.args[2].head === :block
+            var = s.args[1].args[1]
+            rng = cgen_dead_syms!(s.args[1].args[2], Set{Symbol}())
+            head = union(live, rng)
+            while true
+                _, bin = cgen_dead_walk(s.args[2].args, head, refs_ok)
+                nh = union(live, rng, setdiff(bin, Set([var])))
+                nh == head && break
+                head = nh
+            end
+            nb, _ = cgen_dead_walk(s.args[2].args, head, refs_ok)
+            push!(out, Expr(:for, s.args[1], Expr(:block, nb...)))
+            live = head
+        elseif s isa Expr && (s.head === :if || s.head === :elseif) && length(s.args) >= 2 && s.args[2] isa Expr && s.args[2].head === :block &&
+               (length(s.args) == 2 || (length(s.args) == 3 && s.args[3] isa Expr && s.args[3].head in (:block, :elseif)))
+            tb, tl = cgen_dead_walk(s.args[2].args, live, refs_ok)
+            args = Any[s.args[1], Expr(:block, tb...)]
+            nl = union(tl, cgen_dead_syms!(s.args[1], Set{Symbol}()))
+            if length(s.args) == 3
+                eb, el = s.args[3].head === :block ? cgen_dead_walk(s.args[3].args, live, refs_ok) :
+                         cgen_dead_walk(Any[s.args[3]], live, refs_ok)
+                push!(args, s.args[3].head === :block ? Expr(:block, eb...) : (length(eb) == 1 ? eb[1] : Expr(:block, eb...)))
+                union!(nl, el)
+            else
+                union!(nl, live)
+            end
+            push!(out, Expr(s.head, args...))
+            live = nl
+        elseif s isa Expr && s.head === :block
+            nb, nl = cgen_dead_walk(s.args, live, refs_ok)
+            push!(out, Expr(:block, nb...))
+            live = nl
+        else
+            cgen_dead_syms!(s, live)
+            push!(out, s)
+        end
+    end
+    return (reverse(out), live)
+end
+
+# One walk is enough: a dropped statement adds no reads, so the statements that fed it are found dead in the same backward sweep (the corpus check
+# confirms that a second walk deletes nothing).
+function cgen_dead_scalars(k::Expr, refs_ok::Bool)
+    (k.head === :function && length(k.args) == 2 && k.args[2] isa Expr && k.args[2].head === :block) || return k
+    stmts, _ = cgen_dead_walk(k.args[2].args, Set{Symbol}(), refs_ok)
+    return Expr(:function, k.args[1], Expr(:block, stmts...))
+end
+
+# The whole body inside one @inbounds block, the thread guard's early return included. The macro is the only change to the text.
+function cgen_inbounds_wrap(k::Expr)
+    (k.head === :function && length(k.args) == 2 && k.args[2] isa Expr && k.args[2].head === :block) || return k
+    return Expr(:function, k.args[1], Expr(:block, Expr(:macrocall, Symbol("@inbounds"), nothing, k.args[2])))
+end
+
+function cgen_finish_kernels(kernels::Vector{Expr}; inbounds::Bool = true, dead_scalars::Bool = true)
+    (inbounds || dead_scalars) || return kernels
+    out = Expr[]
+    for k in kernels
+        kk = dead_scalars ? cgen_dead_scalars(k, inbounds) : k
+        push!(out, inbounds ? cgen_inbounds_wrap(kk) : kk)
+    end
+    return out
+end
+
 # Opt-in, applied only when the caller passes precision=T: converts every Float64 literal to T, leaving Int-typed
 # loop/index arithmetic untouched. Just a literal walk, no operand-forcing rewrite, since every array/scalar is caller-
 # supplied (skill-stade rule 8) -- precision is the caller's job. Caveat: a handful of Base operations return Float64
@@ -12447,7 +12563,7 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill), coarsen_occ = Float64(coarsen_occ))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
@@ -12459,18 +12575,19 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
     plan = cgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil), backend; reduction_threshold)
-    p === Float64 && return (host = plan.host, kernels = plan.kernels, helpers = plan.helpers)
+    kernels = cgen_finish_kernels(plan.kernels; inbounds, dead_scalars)
+    p === Float64 && return (host = plan.host, kernels = kernels, helpers = plan.helpers)
     return (host = cgen_convert_precision(plan.host, p),
-            kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels], helpers = plan.helpers)
+            kernels = Expr[cgen_convert_precision(k, p) for k in kernels], helpers = plan.helpers)
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ)
-stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
-    stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold)
-stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
-    stade_gpu(expr, cgen_backend_metal(); precision, reduction_threshold)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars)
+stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
+    stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
+stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
+    stade_gpu(expr, cgen_backend_metal(); precision, reduction_threshold, inbounds, dead_scalars)
 
 # Path in, path out. Reads every function def in in_path and writes one file: every device kernel first, then every host
 # function in original order. precision applies uniformly to every function converted in this call; for per-function
@@ -12478,13 +12595,13 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
@@ -12494,32 +12611,33 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ)
-stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
-    stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold)
-stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
-    stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision, reduction_threshold)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars)
+stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
+stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_metal(); precision, reduction_threshold, inbounds, dead_scalars)
 
 # JACC has no gpu_backend value at all -- there's only one JACC target from cgen_/jgen_'s point
 # of view, since which vendor it runs on is chosen later, outside this call. precision has no
 # locked default here for the same reason: Float64 unless the caller asks otherwise.
 # On JACC a matched reduction becomes one
 # JACC.@parallel_reduce call instead of @parallel_for + Atomix.@atomic.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true)
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true)
     plan = jgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil); reduction_threshold, hoist_atomics)
+    kernels = cgen_finish_kernels(plan.kernels; inbounds, dead_scalars)
     p = precision === nothing ? Float64 : precision
-    p === Float64 && return (host = plan.host, kernels = plan.kernels)
+    p === Float64 && return (host = plan.host, kernels = kernels)
     return (host = cgen_convert_precision(plan.host, p),
-            kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
+            kernels = Expr[cgen_convert_precision(k, p) for k in kernels])
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics, gather_stencil)
+        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics, gather_stencil, inbounds, dead_scalars)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
@@ -13030,7 +13148,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -13044,13 +13162,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the
@@ -13106,7 +13224,7 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
                                    self_check::Bool = true,
                                    keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                    mode::Symbol = :adjoint,
-                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true)
+                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true)
     keep_push_pop &&
         error("stade_validate_jacc_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -13121,8 +13239,8 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
     backend = val_jacc_backend()
-    jacc_init = stade_jacc(gen_out.initstacks; hoist_atomics = hoist_atomics, gather_stencil = gather_stencil)
-    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold, hoist_atomics = hoist_atomics, gather_stencil = gather_stencil)
+    jacc_init = stade_jacc(gen_out.initstacks; hoist_atomics = hoist_atomics, gather_stencil = gather_stencil, inbounds = inbounds, dead_scalars = dead_scalars)
+    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold, hoist_atomics = hoist_atomics, gather_stencil = gather_stencil, inbounds = inbounds, dead_scalars = dead_scalars)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     tan_seeds   = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
