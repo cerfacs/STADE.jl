@@ -7781,6 +7781,7 @@ function cgen_backend_cuda()
         precision_lock_reason = "",
         warp_atomics = true,
         sync_free_reduce = true,
+        shared_private = true,
     )
 end
 
@@ -8320,20 +8321,24 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     idx = length(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
-                    push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth))
-                    atomic_branch = cgen_launch_expr(stmt, owner, idx, fargs, backend)
+                    kdef = cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
+                    push!(kernels, kdef)
+                    parr = cgen_private_on(backend) ? cgen_private_arrays(kdef) : Symbol[]
+                    atomic_branch = cgen_launch_stmts(stmt, owner, idx, fargs, backend, parr, Set{Symbol}(a for a in parr if cgen_private_straight(kdef, a)))
                     reduce_branch = cgen_reduce_into_element(backend, target, op, value, arrs, term, stmt)
                     flush_pending!()
                     push!(exprs, emit_if(Expr(:call, :<,
                                               cgen_trip_count(stmt.lo, stmt.step, stmt.hi),
                                               reduction_threshold),
-                                         Any[atomic_branch], Any[reduce_branch]))
+                                         atomic_branch, Any[reduce_branch]))
                 else
                     idx = length(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
-                    push!(kernels, cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth))
-                    push!(exprs, cgen_launch_expr(stmt, owner, idx, fargs, backend))
+                    kdef = cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
+                    push!(kernels, kdef)
+                    parr = cgen_private_on(backend) ? cgen_private_arrays(kdef) : Symbol[]
+                    append!(exprs, cgen_launch_stmts(stmt, owner, idx, fargs, backend, parr, Set{Symbol}(a for a in parr if cgen_private_straight(kdef, a))))
                 end
             elseif local_red !== nothing
                 verdict = :reduction
@@ -8935,6 +8940,263 @@ function cgen_emit_device_loop(var::Symbol, lo, hi, step, body_exprs::Vector, ho
     return vcat(pre, Any[emit_forloop(var, lo, hi, step, cgen_rewrite_hoisted_sites(body_exprs, keys, accs, flags))], post)
 end
 
+# ---- block-private accumulators (CUDA) ----
+# A weight gradient accumulated by every thread of a launch lands on a few hundred addresses, so the atomics serialise at the L2. A block can sum
+# its own contributions in shared memory and issue one atomic per element when it ends: the global traffic drops by the number of threads that
+# share an address. An array qualifies when (1) the kernel only accumulates into it, so nothing reads a partial sum, (2) every index is thread-invariant
+# or depends on the thread only through `mod`, so threads of a block collide on it rather than spreading over the array, and (3) the index varies
+# inside the kernel, a bare constant being the scalar-reduction case the warp helper already serves. The array must also fit a fixed shared-memory
+# budget and must pay off, which only the launch can check, so the kernel is emitted twice: unchanged, and as a `_p` variant that takes one byte offset
+# per array. The host launches the variant when every array fits and pays off, and the original otherwise.
+cgen_private_on(backend) = get(backend, :shared_private, false) === true
+cgen_private_max_bytes() = 8192
+# A block flushes its whole private copy once, so an array pays off only when the launch has many more threads than the array has elements. Below
+# this ratio the host passes -1 and the kernel runs its plain atomics. `shared_private = r` (an integer) sets the ratio; 0 privatizes whenever the array fits.
+cgen_private_min_ratio(backend) = get(backend, :private_min_ratio, 32)
+cgen_private_max_arrays() = 8
+
+cgen_class_join(a::Symbol, b::Symbol) = (a === :wide || b === :wide) ? :wide : (a === :bnd || b === :bnd) ? :bnd : :inv
+
+# How an index expression spreads over threads: :inv (the same for every thread), :bnd (differs by thread only through a mod by an invariant),
+# :wide (anything else, including every array read).
+function cgen_expr_class(e, env::Dict{Symbol,Symbol})
+    e isa Symbol && return get(env, e, :inv)
+    e isa Expr || return :inv
+    e.head == :ref && return :wide
+    if e.head == :call
+        f = e.args[1]
+        args = e.args[2:end]
+        if f === :mod && length(args) == 2
+            cb = cgen_expr_class(args[2], env)
+            cb === :inv || return :wide
+            return cgen_expr_class(args[1], env) === :inv ? :inv : :bnd
+        elseif f === :div && length(args) == 2
+            return (cgen_expr_class(args[1], env) === :inv && cgen_expr_class(args[2], env) === :inv) ? :inv : :wide
+        end
+        c = :inv
+        for a in args
+            c = cgen_class_join(c, cgen_expr_class(a, env))
+        end
+        return c
+    end
+    c = :inv
+    for a in e.args
+        c = cgen_class_join(c, cgen_expr_class(a, env))
+    end
+    return c
+end
+
+# one flow-insensitive pass: every assigned symbol takes the join of everything assigned to it, a loop variable the join of its bounds
+function cgen_class_walk!(exprs, env::Dict{Symbol,Symbol})
+    changed = false
+    for e in exprs
+        e isa Expr || continue
+        if e.head in (:(=), :(+=), :(-=), :(*=), :(/=)) && e.args[1] isa Symbol
+            c = cgen_class_join(get(env, e.args[1], :inv), cgen_expr_class(e.head == :(=) ? e.args[2] : Expr(:call, :+, e.args[1], e.args[2]), env))
+            get(env, e.args[1], :inv) === c || (env[e.args[1]] = c; changed = true)
+        elseif e.head == :for
+            hdr = e.args[1]
+            c = :inv
+            for a in hdr.args[2].args[2:end]
+                c = cgen_class_join(c, cgen_expr_class(a, env))
+            end
+            c = cgen_class_join(get(env, hdr.args[1], :inv), c)
+            get(env, hdr.args[1], :inv) === c || (env[hdr.args[1]] = c; changed = true)
+            changed |= cgen_class_walk!(e.args[2].args, env)
+        elseif e.head == :if
+            for arm in e.args[2:end]
+                arm isa Expr && (changed |= cgen_class_walk!(arm.head == :block ? arm.args : Any[arm], env))
+            end
+        elseif e.head == :block
+            changed |= cgen_class_walk!(e.args, env)
+        end
+    end
+    return changed
+end
+
+# every atomic site of the kernel, at any depth, nested loops included
+function cgen_all_atomic_sites!(exprs, out::Vector{Any})
+    for e in exprs
+        e isa Expr || continue
+        if cgen_atomic_site(e) !== nothing
+            push!(out, e)
+        elseif e.head == :for
+            cgen_all_atomic_sites!(e.args[2].args, out)
+        elseif e.head == :if
+            for arm in e.args[2:end]
+                arm isa Expr && cgen_all_atomic_sites!(arm.head == :block ? arm.args : Any[arm], out)
+            end
+        elseif e.head == :block
+            cgen_all_atomic_sites!(e.args, out)
+        end
+    end
+    return out
+end
+
+# Splits a kernel from cgen_kernel_def into (name, args, guard-free pieces), or nothing for any other shape
+function cgen_kernel_parts(kdef)
+    kdef isa Expr && kdef.head == :function || return nothing
+    sig = kdef.args[1]; blk = kdef.args[2]
+    bl = Any[x for x in blk.args if !(x isa LineNumberNode)]
+    length(bl) >= 3 || return nothing
+    g = bl[2]
+    (g isa Expr && g.head == :if && length(g.args) == 2 && g.args[1] isa Expr && g.args[1].head == :call && g.args[1].args[1] === :> && g.args[1].args[2] === :__tid) || return nothing
+    bl[end] == emit_return_nothing() || return nothing
+    return (sig = sig, head = bl[1], guard = g, rest = bl[3:end-1])
+end
+
+# arrays of kernel `kdef` that qualify, in first-use order
+function cgen_private_arrays(kdef)
+    parts = cgen_kernel_parts(kdef)
+    parts === nothing && return Symbol[]
+    fargs = Set{Symbol}(parts.sig.args[2:end])
+    body = Any[parts.head, parts.rest...]
+    env = Dict{Symbol,Symbol}(:__tid => :wide)
+    for _ in 1:8
+        cgen_class_walk!(body, env) || break
+    end
+    assigned = cgen_assigned_symbols!(Expr(:block, body...), Set{Symbol}())
+    sites = cgen_all_atomic_sites!(body, Any[])
+    whole = Expr(:block, body...)
+    arrs = Symbol[]
+    for e in sites
+        a = cgen_atomic_site(e).arr
+        a in arrs || push!(arrs, a)
+    end
+    out = Symbol[]
+    for a in arrs
+        a in fargs || continue
+        mine = [cgen_atomic_site(e) for e in sites if cgen_atomic_site(e).arr === a]
+        cgen_count_symbol(whole, a) == length(mine) || continue
+        all(st -> cgen_expr_class(st.idx, env) !== :wide, mine) || continue
+        any(st -> !isempty(intersect(cgen_expr_symbols(st.idx), assigned)), mine) || continue
+        push!(out, a)
+        length(out) >= cgen_private_max_arrays() && break
+    end
+    return out
+end
+
+cgen_private_off_sym(a::Symbol) = Symbol("__po_", a)
+cgen_private_sh_sym(a::Symbol) = Symbol("__sh_", a)
+
+cgen_private_kernel_name(name::Symbol) = (s = string(name); endswith(s, "!") ? Symbol(s[1:end-1], "_p!") : Symbol(s, "_p"))
+
+# True when no accumulation into `a` sits under a loop of the kernel, so a thread adds to it a fixed small number of times
+function cgen_private_straight(kdef, a::Symbol)
+    parts = cgen_kernel_parts(kdef)
+    parts === nothing && return false
+    function under_loop(exprs, inside)
+        for e in exprs
+            e isa Expr || continue
+            site = cgen_atomic_site(e)
+            site !== nothing && site.arr === a && inside && return true
+            if e.head == :for
+                under_loop(e.args[2].args, true) && return true
+            elseif e.head == :if || e.head == :block
+                under_loop([x for x in e.args if x isa Expr], inside) && return true
+            end
+        end
+        return false
+    end
+    return !under_loop(Any[parts.head, parts.rest...], false)
+end
+
+# The private variant of a kernel: a second function, named with a `_p` suffix, in which the arrays of `arrs` are accumulated in shared memory. The host
+# launches it only when every array fits and pays off, and otherwise launches the original kernel unchanged, so a launch that declines privatization runs
+# exactly the code of `shared_private = false`. Every thread must reach the barriers, so the thread guard turns into a predicate around the body.
+function cgen_private_kernel(kdef, arrs::Vector{Symbol}, backend)
+    isempty(arrs) && return kdef
+    parts = cgen_kernel_parts(kdef)
+    parts === nothing && return kdef
+    n_iter = parts.guard.args[1].args[3]
+    atomic_macro = backend.atomic_macro
+    function rewrite(exprs)
+        out = Any[]
+        for e in exprs
+            if e isa Expr
+                site = cgen_atomic_site(e)
+                if site !== nothing && site.arr in arrs
+                    sh_arr = cgen_private_sh_sym(site.arr)
+                    push!(out, e.head == :call ? Expr(:call, e.args[1], sh_arr, site.idx, site.val) :
+                               Expr(:macrocall, atomic_macro, nothing, Expr(:(+=), Expr(:ref, sh_arr, site.idx), site.val)))
+                    continue
+                elseif e.head == :for
+                    push!(out, Expr(:for, e.args[1], Expr(:block, rewrite(e.args[2].args)...)))
+                    continue
+                elseif e.head == :if
+                    push!(out, Expr(:if, e.args[1], [arm isa Expr && arm.head == :block ? Expr(:block, rewrite(arm.args)...) : arm for arm in e.args[2:end]]...))
+                    continue
+                elseif e.head == :block
+                    push!(out, Expr(:block, rewrite(e.args)...))
+                    continue
+                end
+            end
+            push!(out, e)
+        end
+        return out
+    end
+    pre = Any[]
+    post = Any[]
+    q = :__q
+    for a in arrs
+        po = cgen_private_off_sym(a); sh = cgen_private_sh_sym(a)
+        ln = Symbol("__ln_", a)
+        push!(pre, Expr(:(=), ln, Expr(:call, :length, a)))
+        push!(pre, Expr(:(=), sh, Expr(:call, :CuDynamicSharedArray, Expr(:call, :eltype, a), ln, po)))
+        rng = Expr(:call, :(:), Expr(:., Expr(:call, :threadIdx), QuoteNode(:x)), Expr(:., Expr(:call, :blockDim), QuoteNode(:x)), ln)
+        push!(pre, Expr(:for, Expr(:(=), q, rng), Expr(:block, Expr(:(=), Expr(:ref, sh, q), 0.0))))
+        push!(post, Expr(:for, Expr(:(=), q, rng), Expr(:block, Expr(:macrocall, atomic_macro, nothing, Expr(:(+=), Expr(:ref, a, q), Expr(:ref, sh, q))))))
+    end
+    body = Any[parts.head]
+    append!(body, pre)
+    push!(body, Expr(:call, :sync_threads))
+    push!(body, Expr(:if, Expr(:call, :<=, :__tid, n_iter), Expr(:block, rewrite(parts.rest)...)))
+    push!(body, Expr(:call, :sync_threads))
+    append!(body, post)
+    push!(body, emit_return_nothing())
+    sig = Expr(:call, cgen_private_kernel_name(parts.sig.args[1]), parts.sig.args[2:end]..., [cgen_private_off_sym(a) for a in arrs]...)
+    return Expr(:function, sig, Expr(:block, body...))
+end
+
+# Host statements of one launch. Every array gets a byte offset, packed in order and rounded to 8. The private variant is launched when the total fits
+# the budget and every array pays off, otherwise the plain kernel. An array pays off when the launch has at least `ratio` threads per element, since
+# each block flushes its whole copy, and, if its accumulations sit under no loop (one add per thread), when a block has at least four threads per element.
+function cgen_launch_stmts(stmt, owner::Symbol, idx::Int, fargs::Vector{Symbol}, backend, arrs::Vector{Symbol} = Symbol[], straight::Set{Symbol} = Set{Symbol}())
+    plain = cgen_launch_expr(stmt, owner, idx, fargs, backend)
+    isempty(arrs) && return Any[plain]
+    n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+    pn = Symbol("__pn_", idx)
+    out = Any[Expr(:(=), pn, 0)]
+    offs = Any[]
+    conds = Any[]
+    ratio = cgen_private_min_ratio(backend)
+    for a in arrs
+        po = Symbol("__po_", a, "_", idx)
+        push!(offs, po)
+        bytes = Expr(:call, :*, 8, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), Expr(:call, :*, Expr(:call, :length, a), Expr(:call, :sizeof, Expr(:call, :eltype, a))), 8))
+        push!(out, Expr(:(=), po, pn))
+        push!(out, Expr(:(=), pn, Expr(:call, :+, pn, bytes)))
+        if ratio > 0
+            push!(conds, Expr(:call, :>=, n_iter, Expr(:call, :*, ratio, Expr(:call, :length, a))))
+            a in straight && push!(conds, Expr(:call, :<=, Expr(:call, :*, 4, Expr(:call, :length, a)), :nthread_per_block))
+        end
+    end
+    fits = Expr(:call, :<=, pn, cgen_private_max_bytes())
+    cond = fits
+    for c in conds
+        cond = Expr(:&&, cond, c)
+    end
+    nblocks = Expr(:call, :max, 1, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), n_iter, :nthread_per_block))
+    call = Expr(:call, cgen_private_kernel_name(cgen_kernel_fname(owner, idx, backend)), fargs..., offs...)
+    private = Expr(:macrocall, backend.launch_macro, nothing,
+                   Expr(:(=), backend.threads_kw, :nthread_per_block),
+                   Expr(:(=), backend.blocks_kw, nblocks),
+                   Expr(:(=), :shmem, pn),
+                   call)
+    push!(out, emit_if(cond, Any[private], Any[plain]))
+    return out
+end
+
 # ---- warp-aggregated atomics (CUDA) ----
 # An atomic add whose address is the same for every lane of a warp (a weight-gradient accumulation, a boxed scalar reduction) serializes 32 lanes on one
 # address. The helper sums the 32 values with shuffles and lets lane 0 do one atomic. It stays correct for any address: it aggregates only when all 32
@@ -9138,6 +9400,12 @@ function cgen_emit(gk, backend; reduction_threshold::Int = CGEN_REDUCTION_THRESH
     end
     push!(host_body, emit_return_scalars(gk.ret))
     host = Expr(:function, Expr(:call, cgen_host_fname(gk.name, backend), gk.args...), Expr(:block, host_body...))
+    if cgen_private_on(backend)
+        for k in copy(kernels)
+            arrs = cgen_private_arrays(k)
+            isempty(arrs) || push!(kernels, cgen_private_kernel(k, arrs, backend))
+        end
+    end
     helpers = any(k -> cgen_expr_calls(k, cgen_warp_add_name()), kernels) ? cgen_warp_helper_exprs() : Expr[]
     return (host = host, kernels = kernels, decisions = decisions, helpers = helpers)
 end
@@ -11340,7 +11608,9 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true)
+    shared_private === false && (backend = merge(backend, (shared_private = false,)))
+    shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
     hoist_atomics || (backend = merge(backend, (hoist_atomics = false,)))
     warp_atomics || (backend = merge(backend, (warp_atomics = false,)))
     sync_free_reduce || (backend = merge(backend, (sync_free_reduce = false,)))
@@ -11355,8 +11625,8 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -11368,13 +11638,13 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
@@ -11384,8 +11654,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
@@ -11920,7 +12190,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, shared_private::Union{Bool,Integer} = true)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -11934,13 +12204,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the

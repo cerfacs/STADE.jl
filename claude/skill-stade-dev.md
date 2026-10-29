@@ -307,8 +307,8 @@ cancels, so it complements rather than replaces.
 ## GPU (`cgen_`/`jgen_`)
 
 `stade_gpu` ingests **already-generated** code; its only keywords are
-`precision`, `reduction_threshold`, `hoist_atomics` (all backends) and the CUDA-only `warp_atomics` and
-`sync_free_reduce` (all default on; `false` restores the old output exactly). **Only `keep_push_pop=false` output is
+`precision`, `reduction_threshold`, `hoist_atomics` (all backends) and the CUDA-only `warp_atomics`,
+`sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly). **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
@@ -395,6 +395,16 @@ flush after the loop is guarded by a flag set inside it. A zero-trip loop must
 not flush: an index can be 0 exactly when the loop does not run, and the flush
 would write out of bounds. `test/validate_atomic_hoist.jl` sabotage-tests each
 test, the flag and the cap.
+
+A privatized kernel is a **second function** (`_p` suffix) chosen by the host,
+never a branch inside the original: a first version kept both paths in one
+kernel and cost 7 to 14 percent on kernels that declined privatization. A
+privatization test passes only if a device run shows the variant faster at
+the size it is chosen for; the same kernel changes sign between sizes, so
+measure two sizes. A site that used the warp helper keeps it on the shared
+copy: dropping it made a 3M-parameter MLP adjoint 2.6 times slower.
+`test/validate_shared_private.jl` sabotage-tests each qualification and each
+launch test; GPU parity uses `shared_private = 0` so the variant actually runs.
 
 ## Self-check before returning STADE code
 

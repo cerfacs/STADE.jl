@@ -150,7 +150,7 @@ function validate_atomic_hoist(dir::String = joinpath(@__DIR__, "val-corpus"); o
         for (mode, gen) in (("adjoint", STADE.stade_adjoint), ("hvp", STADE.stade_hvp)), fuse in (false, true)
             out = try gen(pe; keep_push_pop = false, fuse_ii_loops = fuse) catch; continue end
             e = mode == "hvp" ? out.hvp : out.adjoint
-            for (label, mk) in (("cuda", h -> STADE.stade_gpu(e, cuda; hoist_atomics = h)), ("jacc", h -> STADE.stade_jacc(e; hoist_atomics = h)))
+            for (label, mk) in (("cuda", h -> STADE.stade_gpu(e, cuda; hoist_atomics = h, shared_private = false)), ("jacc", h -> STADE.stade_jacc(e; hoist_atomics = h)))
                 on = mk(true); off = mk(false)
                 plans += 1
                 n = sum(count_hoists(k) for k in on.kernels; init = 0)

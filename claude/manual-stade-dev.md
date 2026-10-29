@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, shared_private=true)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2447,6 +2447,21 @@ assigns and is not the loop variable; every use of its array in the loop is such
 a site; it is not inside a nested `for`; and the loop has at most 16 sites. A
 flag set in the loop guards the flush, so a loop that runs zero times flushes
 nothing (an index can be 0 exactly then). The order of the float sum changes.
+
+**Block-private accumulators** (`shared_private`)
+CUDA only (default on; `false` restores the old output exactly, an integer sets
+the threads-per-element ratio, 0 turns the launch tests off). A kernel whose
+atomic accumulations go to a few small arrays is emitted twice: unchanged, and
+as a `_p` variant in which each block adds into a shared-memory copy and issues
+one global atomic per element at the end. An array qualifies when the kernel
+only accumulates into it, every index is thread-invariant or depends on the
+thread through `mod` by an invariant, some index varies in the kernel, and it
+is a kernel argument. The host launches the variant only when every
+qualifying array fits 8192 bytes, there are at least 32 threads per element,
+and an array accumulated under no loop has four block threads per element.
+One array that does not fit keeps the whole kernel on the original. A warp-helper
+site keeps the helper on the private array. The CPU ownership shim has no shared
+memory, so `validate_ownership` runs with `shared_private = false`.
 
 **Sync-free reduction** (`sync_free_reduce`)
 CUDA only. The large-trip branch of an array-element reduction is a
