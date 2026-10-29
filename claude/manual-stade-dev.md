@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=true, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2483,7 +2483,7 @@ flag set in the loop guards the flush, so a loop that runs zero times flushes
 nothing (an index can be 0 exactly then). The order of the float sum changes.
 
 **Gather form of affine stencil adjoints** (`gather_stencil`)
-All GPU backends (default on; `false` restores the v0.4.27 output exactly). The
+All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The
 adjoint of `y[i] = f(x[i-1], x[i], x[i+1])` scatters: iteration `i` adds to
 `xb[i-1]`, `xb[i]` and `xb[i+1]`, so threads collide and every add is atomic.
 The rewrite, run on the ingested adjoint before any other GPU pass, turns such a
@@ -2508,6 +2508,25 @@ sabotage-tests each guard and refusal. `test/validate_write_overlap.jl` checks t
 property a gathered kernel has in place of atomics: exactly one plain write to the
 receiving array, at the thread's own index, and no access at any other index; its
 checks of the atomic repair of a scatter run with `gather_stencil = false`.
+
+*Zero-fold* (level 2). The adjoint of a time-stepping loop zeroes each received array after
+it has been used (`o = ub[i]; ub[i] = 0.0`), which the gather rewrite leaves in its residual
+loop, and that loop is a launch of its own. `cgen_gather_fold_pair` moves such a residual `R`
+into the gather loop `G` that follows it, as a guarded prologue (`if jv >= amin; if jv <= amax;
+<body of R at jv>`): each thread zeroes its own element and then adds its terms. The
+fold needs all of these: `R` is an owned loop (step +1 or -1, assignments only, every array
+reference at exactly the loop variable, no carried scalar, no stack operation) that writes at
+least one array; no scalar of `R` is read after `R` (`ii_escapes_nested` is empty); `G` is a
+gather loop (`__gj_` variable, step 1) that touches every array `R` writes only at `G`'s own
+variable; the range of `R` lies inside the range of `G` (an affine comparison that accepts a
+constant difference only); and the two loops are adjacent in one statement list. A residual
+cannot fold into the gather *before* it, because neighbour threads still read the old values.
+So in `heat1d_multi` the zero of `ub` folds into the next gather and the zero of `vb` (the last
+one of the time step, with no gather after it) stays a launch: 4 backward launches become 3 per
+step. Dead temporaries of the folded statements are removed by backward liveness and the
+remaining scalars get the suffix `_z<tag>`; the renaming is defence in depth, since the escape
+test already guarantees no clash, so no sabotage case can see it. The folded loop is
+bit-identical to the unfolded pair (the unit checks compare them with `isequal`).
 
 **Coarsened kernel variant** (`coarsen`, `coarsen_min`, `coarsen_fill`, `coarsen_occ`)
 CUDA only, opt-in (`coarsen = 1`, the default, emits exactly the v0.4.28 code; 700 CUDA and

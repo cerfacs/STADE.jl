@@ -423,6 +423,16 @@ kernel has no atomic, so `validate_write_overlap` checks the property instead (o
 write at the thread's own index, no other access of that array); its atomic-repair checks
 run with `gather_stencil = false`, which is the exact rollback.
 
+`gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
+**zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
+no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded
+prologue; each thread zeroes its own element and then adds. It cannot fold into the preceding
+gather, because neighbour threads still read the old values, so the last zero of a time step (no
+gather after it) stays a launch. Fold only when the residual's range lies provably inside the
+gather's (constant affine difference) and the gather touches the zeroed arrays only at its own
+variable. `test/validate_gather_stencil.jl` sabotage-tests each condition; the scalar rename
+`_z<tag>` is redundant with the escape test and cannot be sabotage-tested.
+
 `coarsen = K` (CUDA, opt-in) emits a second kernel `<name>_c!` beside the plain one, in which a
 thread runs K iterations 32 apart and sums the atomic adds of the copies in registers when their
 addresses agree (thread-invariant, or a division of the thread index by a divisor above 32); the host

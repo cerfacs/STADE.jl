@@ -337,6 +337,308 @@ end"""
     return bad
 end
 
+
+# The zero-fold: a loop that touches only its own elements (the residual of a gather, or a plain zeroing loop), folded into the gather loop that
+# follows it. (label, loops without the fold, loops with it, source). A loop that is refused must come back unchanged.
+const GAT_FUSE_UNIT = [
+    ("the ping-pong adjoint: the zeroing of ub joins the second gather", 4, 3, """
+function f(ub, vb, a, n)
+    for i = n - 1:-1:2
+        o = ub[i]
+        ub[i] = 0.0
+        vb[i] = vb[i] + o
+        vb[i - 1] = vb[i - 1] + 0.25 * o
+        vb[i + 1] = vb[i + 1] + 0.25 * o
+    end
+    for i = n - 1:-1:2
+        o = vb[i]
+        vb[i] = 0.0
+        ub[i] = ub[i] + o
+        ub[i - 1] = ub[i - 1] + 0.25 * o
+        ub[i + 1] = ub[i + 1] + 0.25 * o
+    end
+    return nothing
+end"""),
+    ("a zeroing loop before a gather into another array", 3, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        o = ub[i]
+        ub[i] = 0.0
+        vb[i] = vb[i] + o
+        vb[i - 1] = vb[i - 1] + 0.25 * o
+    end
+    for i = 2:n - 1
+        wb[i - 1] = wb[i - 1] + a * vb[i]
+        wb[i + 1] = wb[i + 1] + vb[i]
+    end
+    return nothing
+end"""),
+    ("a plain zeroing loop before a gather into the same array", 2, 1, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        ub[i] = 0.0
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i] = ub[i] + 2.0 * wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a zeroing loop that two later gathers could take: only the next one", 3, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        ub[i] = 0.0
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + 2.0 * wb[i]
+        ub[i + 1] = ub[i + 1] + 2.0 * wb[i]
+    end
+    return nothing
+end"""),
+    ("the gather reads the zeroed array at another index: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        ub[i] = 0.0
+    end
+    for i = 2:n - 1
+        wb[i - 1] = wb[i - 1] + ub[i]
+        wb[i + 1] = wb[i + 1] + ub[i]
+    end
+    return nothing
+end"""),
+    ("the gather reads the zeroed array through a scalar chain: refused", 4, 4, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        o = ub[i]
+        ub[i] = 0.0
+        vb[i] = vb[i] + o
+        vb[i - 1] = vb[i - 1] + o
+    end
+    for i = 2:n - 1
+        p = ub[i] * a
+        wb[i - 1] = wb[i - 1] + p
+        wb[i + 1] = wb[i + 1] + 2.0 * p
+    end
+    return nothing
+end"""),
+    ("the zeroed range is wider than the gather range: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 1:n
+        ub[i] = 0.0
+    end
+    for i = 3:n - 2
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("the zeroed range is inside the gather range", 2, 1, """
+function f(ub, vb, wb, a, n)
+    for i = 4:n - 3
+        ub[i] = 0.0
+    end
+    for i = 3:n - 2
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a scalar of the zeroing loop is read after the gather: refused", 3, 3, """
+function f(ub, vb, wb, a, n)
+    o = 0.0
+    for i = 2:n - 1
+        o = ub[i]
+        ub[i] = 0.0
+        vb[i] = vb[i] + o
+        vb[i - 1] = vb[i - 1] + o
+    end
+    for i = 2:n - 1
+        wb[i - 1] = wb[i - 1] + vb[i]
+        wb[i + 1] = wb[i + 1] + vb[i]
+    end
+    wb[1] = o
+    return nothing
+end"""),
+    ("a zeroing loop that carries a scalar: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    s = 0.0
+    for i = 2:n - 1
+        s = s + ub[i]
+        ub[i] = s
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a zeroing loop that reads a neighbour: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        ub[i] = 0.5 * ub[i - 1]
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a zeroing loop that writes at an offset: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        ub[i + 1] = 0.0
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a statement between the two loops: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        ub[i] = 0.0
+    end
+    wb[1] = a
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a zeroing loop with a step of 2: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:2:n - 1
+        ub[i] = 0.0
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a zeroing loop with a step of 2 and constant bounds, inside the gather range: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 4:2:10
+        ub[i] = 0.0
+    end
+    for i = 2:11
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a zeroing loop with a branch: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        if ub[i] > 0.0
+            ub[i] = 0.0
+        end
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("a zeroing loop that also writes an array the gather accumulates into at another index: refused", 2, 2, """
+function f(ub, vb, wb, a, n)
+    for i = 2:n - 1
+        wb[i] = 0.0
+        ub[i] = 0.0
+    end
+    for i = 2:n - 1
+        ub[i - 1] = ub[i - 1] + wb[i]
+        ub[i + 1] = ub[i + 1] + wb[i]
+    end
+    return nothing
+end"""),
+    ("the zeroing loop sits inside a time loop (the time loop counts as one)", 5, 4, """
+function f(ub, vb, a, n, nt)
+    for t = 1:nt
+        for i = n - 1:-1:2
+            o = ub[i]
+            ub[i] = 0.0
+            vb[i] = vb[i] + o
+            vb[i - 1] = vb[i - 1] + 0.25 * o
+            vb[i + 1] = vb[i + 1] + 0.25 * o
+        end
+        for i = n - 1:-1:2
+            o = vb[i]
+            vb[i] = 0.0
+            ub[i] = ub[i] + o
+            ub[i - 1] = ub[i - 1] + 0.25 * o
+            ub[i + 1] = ub[i + 1] + 0.25 * o
+        end
+    end
+    return nothing
+end"""),
+]
+
+# the loops of a body at any depth (a fold removes one per fused pair)
+gat_loops_deep(body) = gat_count_for(body)
+
+# run the same function at gather level 1 (no fold) and level 2 (fold) and the original: the loop counts, the largest difference to the original, and
+# whether the two rewritten functions agree to the last bit
+
+# one call of a rewritten function on copies of the arrays; the copies come back
+function gat_call(f, names, arrs, scal)
+    cp = Dict(k => copy(v) for (k, v) in arrs)
+    vals = Any[haskey(cp, nm) ? cp[nm] : scal[nm] for nm in names]
+    Base.invokelatest(f, vals...)
+    return cp
+end
+
+function gat_run_fuse_unit(src::String; ns = (0, 1, 2, 3, 4, 5, 6, 9, 13, 20), nargs = 3)
+    expr = Meta.parse(src)
+    gk = STADE.cgen_ingest(expr)
+    g1 = STADE.cgen_gather_stencil(gk, 1)
+    g2 = STADE.cgen_gather_stencil(gk, 2)
+    m0, m1, m2 = Module(), Module(), Module()
+    f0 = Core.eval(m0, STADE.cgen_gather_function_expr(gk))
+    f1 = Core.eval(m1, STADE.cgen_gather_function_expr(g1))
+    f2 = Core.eval(m2, STADE.cgen_gather_function_expr(g2))
+    names = [string(a) for a in gk.args]
+    rng = MersenneTwister(hash(src))
+    worst = 0.0
+    exact = true
+    for n in ns
+        len = 2 * n + 12
+        arrs = Dict("ub" => randn(rng, len), "vb" => randn(rng, len), "wb" => randn(rng, len))
+        scal = Dict{String,Any}("a" => randn(rng), "n" => n, "nt" => 3)
+        r0, r1, r2 = gat_call(f0, names, arrs, scal), gat_call(f1, names, arrs, scal), gat_call(f2, names, arrs, scal)
+        for k in sort(collect(keys(r0)))
+            worst = max(worst, maximum(abs.(r0[k] .- r2[k])))
+            exact &= all(isequal.(r1[k], r2[k]))
+        end
+    end
+    GC.gc()
+    return gat_loops_deep(g1.body), gat_loops_deep(g2.body), worst, exact
+end
+
+function gat_fuse_checks()
+    bad = 0
+    check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
+    for (label, want1, want2, src) in GAT_FUSE_UNIT
+        try
+            l1, l2, worst, exact = gat_run_fuse_unit(src)
+            if startswith(label, "the ping-pong adjoint")
+                folded_src = STADE.io_expr_to_source(STADE.cgen_gather_function_expr(STADE.cgen_gather_stencil(STADE.cgen_ingest(Meta.parse(src)), 2)))
+                check(!occursin("_z", folded_src) && occursin("ub[__gj_2] = 0.0", folded_src), "$(label): the folded statements are the zeroing alone (the temporaries nobody reads are dropped)")
+            end
+            check(l1 == want1 && l2 == want2 && worst <= 1e-12 && exact, "$(label): $(l1) loops without the fold (want $(want1)), $(l2) with it (want $(want2)), difference to the original $(worst), folded and unfolded " * (exact ? "identical" : "DIFFER"))
+        catch e
+            check(false, "$(label): error $(first(split(sprint(showerror, e), "\n")))")
+        end
+    end
+    return bad
+end
+
 # every kernel of the corpus, adjoint and HVP, with and without fusion: the rewritten code must pass the oracles. Returns (failures, rewritten loops by kernel)
 function gat_kernel_check(path::String, fuse::Bool, mode::Symbol, scratch::String; int_lo::Int = 3, int_hi::Int = 5)
     name = splitext(basename(path))[1]
@@ -350,10 +652,12 @@ function gat_kernel_check(path::String, fuse::Bool, mode::Symbol, scratch::Strin
     adj = STADE.stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse)
     stack_arg_names = Symbol[a for a in adj.initstacks.args[1].args[2:end]]
     nrew = Ref(0)
+    nfold = Ref(0)
     function rewrite(e)
         gk = STADE.cgen_ingest(e)
         gk2 = STADE.cgen_gather_stencil(gk, true)
         nrew[] += gat_count_gather(gk2.body) - gat_count_gather(gk.body)
+        nfold[] += gat_loops_deep(STADE.cgen_gather_stencil(gk, 1).body) - gat_loops_deep(gk2.body)
         return STADE.cgen_gather_function_expr(gk2)
     end
     adj2 = merge(adj, (adjoint = rewrite(adj.adjoint),))
@@ -364,11 +668,13 @@ function gat_kernel_check(path::String, fuse::Bool, mode::Symbol, scratch::Strin
         hv2 = merge(hv, (hvp = rewrite(hv.hvp),))
         r = STADE.val_validate_hvp(kernel, primal_expr, adj2, hv2, baseline; trials = 3, epsilon = 1e-6, rtol = 1e-3, stack_arg_names = stack_arg_names)
     end
-    return r.ok, nrew[]
+    return r.ok, nrew[], nfold[]
 end
 
 # kernels that must be rewritten (loops added, in the adjoint) and kernels that must not be
 const GAT_MUST = ["gat_sum_scalar", "gat_pingpong", "gat_diff1", "gat_wide", "gat_two_targets", "gat_accum_out", "gat_reverse", "gat_nonlinear"]
+# kernels whose adjoint has a zeroing loop that folds into the next gather
+const GAT_FOLD_MUST = ["gat_pingpong", "lin_pingpong", "lin_quotient", "lin_then_quad"]
 const GAT_MUST_NOT = ["gat_inplace_seq", "gat_stride", "gat_reduce_scalar", "gat_alias", "gat_rows", "gat_const_idx"]
 
 function gat_corpus_checks(dir::String; names = nothing, fuses = (false, true), modes = (:adjoint, :hvp), int_lo::Int = 3, int_hi::Int = 5, report = true)
@@ -377,17 +683,19 @@ function gat_corpus_checks(dir::String; names = nothing, fuses = (false, true), 
     files = sort(filter(f -> endswith(f, ".jl") && !any(endswith(f, s) for s in ("_b.jl", "_d.jl", "_hv.jl")), readdir(dir)))
     names === nothing || (files = [f for f in files if splitext(f)[1] in names])
     rewritten = Dict{String,Int}()
+    folded = Dict{String,Int}()
     mktempdir() do scratch
         for f in files
             name = splitext(f)[1]
             for fuse in fuses, mode in modes
-                ok, n = try
+                ok, n, nf = try
                     gat_kernel_check(joinpath(dir, f), fuse, mode, scratch; int_lo, int_hi)
                 catch e
                     println("  !! ", name, " ", first(split(sprint(showerror, e), "\n"))[1:min(end, 160)])
-                    (false, 0)
+                    (false, 0, 0)
                 end
                 rewritten[name] = max(get(rewritten, name, 0), n)
+                folded[name] = max(get(folded, name, 0), nf)
                 if report
                     check(ok, "$(rpad(name, 28)) [$(mode), fuse=$(Int(fuse))] oracles pass, $(n) loop(s) added by the rewrite")
                 elseif !ok
@@ -404,6 +712,10 @@ function gat_corpus_checks(dir::String; names = nothing, fuses = (false, true), 
         (names === nothing || k in names) || continue
         check(get(rewritten, k, 0) == 0, "$(k): the rewrite refuses ($(get(rewritten, k, 0)) loops added)")
     end
+    for k in GAT_FOLD_MUST
+        (names === nothing || k in names) || continue
+        check(get(folded, k, 0) > 0, "$(k): the zero-fold fires ($(get(folded, k, 0)) loops folded)")
+    end
     if names === nothing
         total = count(>(0), values(rewritten))
         check(total >= 10, "$(total) of $(length(rewritten)) corpus kernels have a rewritten loop (need at least 10, or the rewrite is not exercised)")
@@ -417,19 +729,29 @@ end
   1. UNIT: 23 loops through the rewrite (offsets of both signs, several receiving arrays, a descending loop, replayed scalar chains, owned arrays kept in scalars, and 12
      shapes that must be refused). The original and the rewritten function run on the same random arrays for n from 0 to 20, so zero-trip loops
      are included. A loop that is refused must come back as one loop.
+  1b. ZERO-FOLD: 18 sources through gather level 1 and level 2 (6 in which the zeroing of a received array joins the next gather loop, and 12 shapes that
+     must not fold). The loop counts are fixed (level 2 has one loop fewer per fold) and the level 2 function must
+     agree with the level 1 function to the last bit (`isequal`) and with the original to rounding.
   2. CORPUS: every kernel, adjoint and HVP, with and without fusion, with the gather rewrite applied to the generated code, must pass the
      finite-difference oracle. 8 `gat_*` kernels must be rewritten and 6 must be refused. At least 10 kernels of the corpus must have a rewritten
-     loop.
-  3. SABOTAGE: each of the edits of the rewrite listed below (offset sign, each guard, each end of the gather range, orientation, the write flag,
-     each refusal condition, the residual) must fail a check.
+     loop. `gat_pingpong`, `lin_pingpong`, `lin_quotient` and `lin_then_quad` must fold.
+  3. SABOTAGE: 37 edits of the rewrite and of the fold (offset sign, each guard, each end of the gather range, orientation, the write flag,
+     each refusal condition, the residual, each condition and guard of the fold) must fail a check. Every anchor must occur exactly once in
+     `STADE.jl`. `phases` and `slice` split the run (a full run takes about 30 minutes).
 """
-function validate_gather_stencil(dir::String = joinpath(@__DIR__, "val-corpus"); sabotage::Bool = true)
+function validate_gather_stencil(dir::String = joinpath(@__DIR__, "val-corpus"); sabotage::Bool = true, phases = (:units, :corpus, :sabotage), slice = 1:typemax(Int))
     bad = 0
-    println("-- unit checks")
-    bad += gat_unit_checks()
-    println("-- corpus")
-    bad += gat_corpus_checks(dir; report = false)
-    if sabotage
+    if :units in phases
+        println("-- unit checks")
+        bad += gat_unit_checks()
+        println("-- zero-fold checks")
+        bad += gat_fuse_checks()
+    end
+    if :corpus in phases
+        println("-- corpus")
+        bad += gat_corpus_checks(dir; report = false)
+    end
+    if sabotage && :sabotage in phases
         println("-- sabotage")
         check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
         repo = abspath(joinpath(@__DIR__, ".."))
@@ -450,17 +772,31 @@ function validate_gather_stencil(dir::String = joinpath(@__DIR__, "val-corpus");
             ("owned plain write not replayed", "elseif !haskey(accs, k) && s.lhs.args[1] in oset", "elseif false && s.lhs.args[1] in oset"),
             ("owned accumulation replayed as a plain write", "prog[k] = (nm, Expr(:call, :+, nm, own_ren(accs[k][3])))", "prog[k] = (nm, own_ren(accs[k][3]))"),
             ("owned reads not renamed in a gathered term", "terms = Dict{Int,Any}(k => (a[1], cgen_gather_offset(a[2], var), own_ren(a[3]))", "terms = Dict{Int,Any}(k => (a[1], cgen_gather_offset(a[2], var), a[3])"),
-            ("scalars may be read before they are defined", "(r in scalars && !(r in defined)) && return nothing", "false && return nothing"),
+            ("scalars may be read before they are defined", "for r in reads\n            (r in scalars && !(r in defined)) && return nothing", "for r in reads\n            false && return nothing"),
             ("any step is accepted", "(stmt.step isa Integer && abs(stmt.step) == 1) || return nothing", "stmt.step isa Integer || return nothing"),
             ("offset cap removed", "length(offsets) <= 8 || return nothing", "true"),
             ("replay cap removed", "length(keep) <= 24 || return nothing", "true"),
             ("residual always dropped", "residual_dead = !any(s -> s.lhs isa Expr, rest) &&", "residual_dead = true || !any(s -> s.lhs isa Expr, rest) &&"),
             ("residual always kept", "residual_dead && return NamedTuple[gather]", "false && return NamedTuple[gather]"),
             ("scalar definitions not replayed", "union!(needed, intersect(cgen_read_vars(terms[k][3]), scalars))", "nothing"),
-            ("branches in the body accepted", "all(s -> s.kind == :assign && !cgen_is_stackop_assign(s)", "all(s -> !cgen_is_stackop_assign(s)"),
+            ("branches in the body accepted", "all(s -> s.kind == :assign && !cgen_is_stackop_assign(s) && !cgen_is_stack_alloc(s.rhs) && !cgen_is_length_call(s.rhs), body) || return nothing", "all(s -> !cgen_is_stackop_assign(s) && !cgen_is_stack_alloc(s.rhs) && !cgen_is_length_call(s.rhs), body) || return nothing"),
+            ("fold: the zeroed range may be wider than the gather range", "    cgen_gather_ge(amin, G.lo) && cgen_gather_ge(G.hi, amax) || return nothing\n", ""),
+            ("fold: a scalar that is read later may be folded", "    isempty(locals) || isempty(ii_escapes_nested(root, R.body, locals)) || return nothing\n", ""),
+            ("fold: the gather may read a zeroed array at another index", "        (arr in wr && !(length(idxs) == 1 && idxs[1] === G.var)) && return nothing\n", ""),
+            ("fold: a carried scalar is accepted", "        for r in cgen_read_vars(s.rhs)\n            (r in scalars && !(r in defined)) && return nothing\n        end\n", ""),
+            ("fold: a read at a neighbouring index is accepted", "            (length(idxs) == 1 && idxs[1] === var) || return nothing\n            push!(rd, arr)", "            push!(rd, arr)"),
+            ("fold: a write at an offset is accepted", "        (l isa Expr && l.head == :ref && length(l.args) == 2 && l.args[1] isa Symbol && l.args[2] === var) || return nothing\n            push!(wr, l.args[1])", "        push!(wr, l.args[1])"),
+            ("fold: any step is accepted", "    (st.step isa Integer && abs(st.step) == 1) || return nothing\n    isempty(st.body) && return nothing", "    isempty(st.body) && return nothing"),
+            ("fold: a branch in the zeroed loop is accepted", "    all(s -> s.kind == :assign && !cgen_is_stackop_assign(s) && !cgen_is_stack_alloc(s.rhs) && !cgen_is_length_call(s.rhs), st.body) || return nothing", "    all(s -> !cgen_is_stackop_assign(s) && !cgen_is_stack_alloc(s.rhs) && !cgen_is_length_call(s.rhs), st.body) || return nothing"),
+            ("fold: the upper guard is dropped", "inner = (kind = :if, cond = Expr(:call, :<=, G.var, amax), then = stmts, els = NamedTuple[])", "inner = (kind = :if, cond = Expr(:call, :<=, 0, 1), then = stmts, els = NamedTuple[])"),
+            ("fold: the lower guard is dropped", "outer = (kind = :if, cond = Expr(:call, :>=, G.var, amin), then = NamedTuple[inner], els = NamedTuple[])", "outer = (kind = :if, cond = Expr(:call, :>=, 1, 0), then = NamedTuple[inner], els = NamedTuple[])"),
+            ("fold: the zeroing runs after the gather's own write", "return merge(G, (body = vcat(NamedTuple[outer], G.body),))", "return merge(G, (body = vcat(G.body, NamedTuple[outer]),))"),
+            ("fold: temporaries nobody reads are kept", "        if s.lhs isa Symbol && !(s.lhs in live)\n            continue\n        end\n", ""),
+            ("fold: level 1 folds too", "    lv >= 2 || return g\n", ""),
+            ("fold: level 2 does not fold", "    lv >= 2 || return g\n", "    return g\n"),
         ]
         mktempdir() do tmp
-            for (label, old, new) in cases
+            for (label, old, new) in cases[intersect(eachindex(cases), slice)]
                 n = length(findall(old, text))
                 if n != 1
                     check(false, "sabotage \"$label\": anchor found $n times")
@@ -472,7 +808,8 @@ function validate_gather_stencil(dir::String = joinpath(@__DIR__, "val-corpus");
                     include($(repr(path)))
                     include($(repr(joinpath(@__DIR__, "validate_gather_stencil.jl"))))
                     n = gat_unit_checks()
-                    n += gat_corpus_checks($(repr(dir)); names = ["gat_pingpong", "gat_diff1", "gat_two_targets", "gat_reverse", "gat_wide"], modes = (:adjoint,), report = false)
+                    n += gat_fuse_checks()
+                    n += gat_corpus_checks($(repr(dir)); names = ["gat_pingpong", "gat_diff1", "gat_two_targets", "gat_reverse", "gat_wide", "lin_pingpong"], modes = (:adjoint,), report = false)
                     println("RESULT ", n)
                 """
                 out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end

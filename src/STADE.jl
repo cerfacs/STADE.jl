@@ -6889,8 +6889,186 @@ function cgen_gather_expand(body::Vector{NamedTuple}, tag::Base.RefValue{Int})
     return out
 end
 
-# the ingested kernel with its scatter loops in gather form (see above); `on = false` returns it unchanged
-cgen_gather_stencil(gk, on::Bool) = on ? merge(gk, (body = cgen_gather_expand(gk.body, Ref(0)),)) : gk
+# ---- zero-fold: a loop that touches only its own elements, folded into the gather loop that follows it ----
+# The residual of a gather is often a loop that only zeroes the elements the iteration consumed (`o = ub[i]; ub[i] = 0.0`), and the next gather
+# then adds into the same array at its own element. That residual cannot join the gather that precedes it (its neighbours still read the old values),
+# but it can join the one that follows: a thread zeroes its own element and then adds, which is the order the two launches had, with one launch fewer.
+
+# (coefficient of each symbol, constant) of an integer-affine expression, or nothing
+function cgen_gather_affine(e)
+    e isa Integer && return (Dict{Symbol,Int}(), Int(e))
+    e isa Symbol && return (Dict{Symbol,Int}(e => 1), 0)
+    (e isa Expr && e.head == :call && !isempty(e.args)) || return nothing
+    op = e.args[1]
+    args = e.args[2:end]
+    parts = Any[cgen_gather_affine(a) for a in args]
+    any(isnothing, parts) && return nothing
+    comb(ps, sg) = begin
+        d = Dict{Symbol,Int}()
+        c = 0
+        for (k, pp) in enumerate(ps)
+            for (sym, v) in pp[1]
+                d[sym] = get(d, sym, 0) + sg[k] * v
+            end
+            c += sg[k] * pp[2]
+        end
+        (d, c)
+    end
+    if op == :+ && !isempty(args)
+        return comb(parts, fill(1, length(parts)))
+    elseif op == :- && length(args) == 1
+        return comb(parts, [-1])
+    elseif op == :- && length(args) == 2
+        return comb(parts, [1, -1])
+    elseif op == :* && length(args) == 2
+        for (k, o) in ((1, 2), (2, 1))
+            if isempty(parts[k][1])
+                m = parts[k][2]
+                return (Dict{Symbol,Int}(sym => m * v for (sym, v) in parts[o][1]), m * parts[o][2])
+            end
+        end
+    end
+    return nothing
+end
+
+# is a >= b for every value of the symbols? Only a constant difference is provable.
+function cgen_gather_ge(a, b)
+    pa, pb = cgen_gather_affine(a), cgen_gather_affine(b)
+    (pa === nothing || pb === nothing) && return false
+    for sym in union(keys(pa[1]), keys(pb[1]))
+        get(pa[1], sym, 0) == get(pb[1], sym, 0) || return false
+    end
+    return pa[2] >= pb[2]
+end
+
+# A loop whose iterations touch only element `var` of every array and carry no scalar: (arrays written, arrays read, scalars assigned), or nothing
+function cgen_gather_owned_loop(st)
+    st.kind == :for || return nothing
+    (st.step isa Integer && abs(st.step) == 1) || return nothing
+    isempty(st.body) && return nothing
+    (cgen_expr_has_ref(st.lo) || cgen_expr_has_ref(st.hi)) && return nothing
+    all(s -> s.kind == :assign && !cgen_is_stackop_assign(s) && !cgen_is_stack_alloc(s.rhs) && !cgen_is_length_call(s.rhs), st.body) || return nothing
+    var = st.var
+    scalars = Set{Symbol}(s.lhs for s in st.body if s.lhs isa Symbol)
+    var in scalars && return nothing
+    isdisjoint(union(cgen_expr_symbols(st.lo), cgen_expr_symbols(st.hi)), scalars) || return nothing
+    wr, rd = Set{Symbol}(), Set{Symbol}()
+    defined = Set{Symbol}()
+    for s in st.body
+        for r in cgen_read_vars(s.rhs)
+            (r in scalars && !(r in defined)) && return nothing
+        end
+        refs = cgen_gather_refs!(s.rhs, Any[])
+        for (arr, idxs) in refs
+            (length(idxs) == 1 && idxs[1] === var) || return nothing
+            push!(rd, arr)
+        end
+        if s.lhs isa Symbol
+            push!(defined, s.lhs)
+        else
+            l = s.lhs
+            (l isa Expr && l.head == :ref && length(l.args) == 2 && l.args[1] isa Symbol && l.args[2] === var) || return nothing
+            push!(wr, l.args[1])
+        end
+    end
+    return (wr, rd, scalars)
+end
+
+# every array element touched by statements of a gather loop, as (array, index expressions); nothing if a statement kind is not understood
+function cgen_gather_stmt_refs!(stmts, out::Vector{Any})
+    for s in stmts
+        if s.kind == :assign
+            s.lhs isa Expr && (push!(out, (s.lhs.args[1], s.lhs.args[2:end])); foreach(ix -> cgen_gather_refs!(ix, out), s.lhs.args[2:end]))
+            cgen_gather_refs!(s.rhs, out)
+        elseif s.kind == :if
+            cgen_gather_refs!(s.cond, out)
+            cgen_gather_stmt_refs!(s.then, out) === nothing && return nothing
+            cgen_gather_stmt_refs!(s.els, out) === nothing && return nothing
+        else
+            return nothing
+        end
+    end
+    return out
+end
+
+# the statements of the folded loop's body at the gather loop's variable, with the scalars renamed apart and the ones nobody reads dropped
+function cgen_gather_fold_stmts(R, G, tag::Int, scalars::Set{Symbol})
+    ren = Dict{Symbol,Any}(sc => Symbol(sc, "_z", tag) for sc in scalars)
+    ren[R.var] = G.var
+    live = Set{Symbol}()
+    kept = NamedTuple[]
+    for s in reverse(R.body)
+        if s.lhs isa Symbol && !(s.lhs in live)
+            continue
+        end
+        s.lhs isa Symbol && delete!(live, s.lhs)
+        union!(live, intersect(cgen_read_vars(s.rhs), scalars))
+        pushfirst!(kept, (kind = :assign, lhs = cgen_subst_expr(s.lhs, ren), rhs = cgen_subst_expr(s.rhs, ren)))
+    end
+    return kept
+end
+
+# the gather loop with `R` folded in, or nothing when the fold is not provably safe
+function cgen_gather_fold_pair(root, R, G, tag::Int)
+    G.kind == :for && startswith(string(G.var), "__gj_") && G.step == 1 || return nothing
+    info = cgen_gather_owned_loop(R)
+    info === nothing && return nothing
+    wr, rd, scalars = info
+    isempty(wr) && return nothing
+    # a scalar of R that anything reads later would see a different value once R is folded
+    locals = setdiff(cgen_locally_assigned_scalars(R.body), Set([R.var]))
+    isempty(locals) || isempty(ii_escapes_nested(root, R.body, locals)) || return nothing
+    # the gather loop touches an array R writes only at its own element
+    grefs = cgen_gather_stmt_refs!(G.body, Any[])
+    grefs === nothing && return nothing
+    for (arr, idxs) in grefs
+        (arr in wr && !(length(idxs) == 1 && idxs[1] === G.var)) && return nothing
+    end
+    # every element R covers is a thread of the gather loop
+    amin, amax = R.step == 1 ? (R.lo, R.hi) : (R.hi, R.lo)
+    cgen_gather_ge(amin, G.lo) && cgen_gather_ge(G.hi, amax) || return nothing
+    stmts = cgen_gather_fold_stmts(R, G, tag, scalars)
+    isempty(stmts) && return nothing
+    inner = (kind = :if, cond = Expr(:call, :<=, G.var, amax), then = stmts, els = NamedTuple[])
+    outer = (kind = :if, cond = Expr(:call, :>=, G.var, amin), then = NamedTuple[inner], els = NamedTuple[])
+    return merge(G, (body = vcat(NamedTuple[outer], G.body),))
+end
+
+function cgen_gather_fold_body(root, body::Vector{NamedTuple}, tag::Base.RefValue{Int})
+    out = NamedTuple[]
+    i = 1
+    while i <= length(body)
+        st = body[i]
+        if st.kind == :for && i < length(body)
+            fused = cgen_gather_fold_pair(root, st, body[i + 1], tag[] + 1)
+            if fused !== nothing
+                tag[] += 1
+                push!(out, merge(fused, (body = fused.body,)))
+                i += 2
+                continue
+            end
+        end
+        if st.kind in (:for, :while)
+            push!(out, merge(st, (body = cgen_gather_fold_body(root, st.body, tag),)))
+        elseif st.kind == :if
+            push!(out, merge(st, (then = cgen_gather_fold_body(root, st.then, tag), els = cgen_gather_fold_body(root, st.els, tag))))
+        else
+            push!(out, st)
+        end
+        i += 1
+    end
+    return out
+end
+
+# the ingested kernel with its scatter loops in gather form (see above). `level` 0 or false returns it unchanged, 1 is the gather form alone, 2 or true
+# adds the zero-fold
+function cgen_gather_stencil(gk, level)
+    lv = level === true ? 2 : level === false ? 0 : Int(level)
+    lv <= 0 && return gk
+    g = merge(gk, (body = cgen_gather_expand(gk.body, Ref(0)),))
+    lv >= 2 || return g
+    return merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),))
+end
 
 # the statements of an ingested kernel back as plain Julia source; used to run a rewritten kernel on the host, which is how the rewrite is tested
 function cgen_gather_stmt_expr(s)
@@ -12269,7 +12447,7 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill), coarsen_occ = Float64(coarsen_occ))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
@@ -12287,7 +12465,7 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6) =
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6) =
     stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold)
@@ -12300,7 +12478,7 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
@@ -12316,7 +12494,7 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6) =
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6) =
     stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold)
@@ -12328,7 +12506,7 @@ stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Ty
 # locked default here for the same reason: Float64 unless the caller asks otherwise.
 # On JACC a matched reduction becomes one
 # JACC.@parallel_reduce call instead of @parallel_for + Atomix.@atomic.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Bool = true)
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true)
     plan = jgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil); reduction_threshold, hoist_atomics)
     p = precision === nothing ? Float64 : precision
     p === Float64 && return (host = plan.host, kernels = plan.kernels)
@@ -12336,7 +12514,7 @@ function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}}
             kernels = Expr[cgen_convert_precision(k, p) for k in plan.kernels])
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Bool = true)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
@@ -12351,7 +12529,7 @@ end
 
 # Per-loop offload decisions for one input file, one record per `for` loop (see cgen_decision_record). `backend` is a gpu_backend
 # value, or `nothing` for the JACC path. The report runs the same walk as stade_gpu_file and writes no file.
-function stade_gpu_report_file(in_path::String, backend = cgen_backend_cuda(); reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, gather_stencil::Bool = true)
+function stade_gpu_report_file(in_path::String, backend = cgen_backend_cuda(); reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, gather_stencil::Union{Bool,Integer} = true)
     records = NamedTuple[]
     for expr in io_read_kernel_bundle(in_path)
         plan = backend === nothing ? jgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil); reduction_threshold) : cgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil), backend; reduction_threshold)
@@ -12852,7 +13030,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Bool = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -12928,7 +13106,7 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
                                    self_check::Bool = true,
                                    keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                    mode::Symbol = :adjoint,
-                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Bool = true)
+                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true)
     keep_push_pop &&
         error("stade_validate_jacc_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
