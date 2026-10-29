@@ -83,7 +83,9 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
         fin = get(ENV, "OWN_FINISH", "checked")   # checked: bounds checks on, dead scalar updates dropped; full: @inbounds too; off: neither
         # OWN_SPLIT=L forces the split-reduction twins (L lanes) on every launch that has one
         spl = parse(Int, get(ENV, "OWN_SPLIT", "0"))
-        fkw = (inbounds = fin == "full", dead_scalars = fin != "off", split_reduce = spl, split_min_inner = 0, split_max_out = 10^9)
+        # OWN_CONTRACT=n forces the contraction twins (tiled matrix products) on every launch that has one, with n as the smallest side
+        con = parse(Int, get(ENV, "OWN_CONTRACT", "0"))
+        fkw = (inbounds = fin == "full", dead_scalars = fin != "off", split_reduce = spl, split_min_inner = 0, split_max_out = 10^9, contraction = con)
         # OWN_DYADIC=1 rounds every float input to a multiple of 2^-10: a kernel built from +, - and * then adds exactly in any order, so a
         # run that re-partitions a sum must agree with the CPU bit for bit (an error of 0.0 is expected there)
         if get(ENV, "OWN_DYADIC", "0") == "1"
@@ -165,6 +167,8 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
         println("coarsened kernel launches: ", count(n -> endswith(n, "_c!"), Main.CUDA.LAUNCHED), " of ", length(Main.CUDA.LAUNCHED))
     parse(Int, get(ENV, "OWN_SPLIT", "0")) > 0 && isdefined(Main.CUDA, :LAUNCHED) &&
         println("split twin launches over the run: ", count(n -> endswith(n, "_s!"), Main.CUDA.LAUNCHED), " of ", length(Main.CUDA.LAUNCHED))
+    parse(Int, get(ENV, "OWN_CONTRACT", "0")) > 0 && isdefined(Main.CUDA, :LAUNCHED) &&
+        println("contraction twin launches over the run: ", count(n -> endswith(n, "_t!"), Main.CUDA.LAUNCHED), " of ", length(Main.CUDA.LAUNCHED))
     println(length(rows) - bad, "/", length(rows), " ownership checks passed",
             bad == 0 ? "" : "   *** $bad NOT OK ***")
     return (rows = rows, bad = bad)

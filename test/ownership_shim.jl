@@ -41,8 +41,10 @@ mutable struct State
     shared::Vector{Float64}          # the block's dynamic shared memory
     chans::Any                       # (resume, paused) channels of the running block, nothing outside a block launch
     detail::Dict{Tuple{Int,Int},NTuple{3,Set{NTuple{3,Int}}}}   # the same log with (thread, block, phase) per access, for launches with barriers
+    gx::Int                          # blockIdx().x and .y of the running block (bx is the linear block number)
+    gy::Int
 end
-const ST = State(0, 0, 0, 0, Dict{Tuple{Int,Int},NTuple{3,Set{Int}}}(), 1, 0, 0, Float64[], nothing, Dict{Tuple{Int,Int},NTuple{3,Set{NTuple{3,Int}}}}())
+const ST = State(0, 0, 0, 0, Dict{Tuple{Int,Int},NTuple{3,Set{Int}}}(), 1, 0, 0, Float64[], nothing, Dict{Tuple{Int,Int},NTuple{3,Set{NTuple{3,Int}}}}(), 1, 1)
 const VIOLATIONS = NamedTuple[]
 const NEXTID = Ref(0)
 const LAUNCHES = Ref(0)
@@ -109,13 +111,16 @@ end
 allowscalar(::Bool) = nothing
 
 threadIdx() = (x = ST.tx, y = ST.ty)
-blockIdx() = (x = ST.bx,)
+blockIdx() = (x = ST.gx, y = ST.gy)
 blockDim() = (x = ST.bdim,)
 
 # Shared memory and the block barrier exist only inside a launch with a two-dimensional block, where each thread of a block is a task and
 # sync_threads hands control back to the scheduler. Two accesses conflict when the threads differ and either the blocks differ or no barrier
 # separates them.
-CuDynamicSharedArray(::Type, n::Integer, off::Integer = 0) = ST.shared
+function CuDynamicSharedArray(::Type, n::Integer, off::Integer = 0)
+    off + n <= length(ST.shared) || error("CUDA shim: shared array of $n elements does not fit the $(length(ST.shared)) the launch asked for")
+    return ST.shared
+end
 function sync_threads()
     ST.chans === nothing && error("CUDA shim: sync_threads outside a launch with a two-dimensional block")
     k = ST.k
@@ -161,13 +166,14 @@ function probe(f)
     return FakeKernel(string(nameof(f)))
 end
 
-function launch(f, args::Tuple, th::Tuple, bl::Integer, sh::Integer)
+function launch(f, args::Tuple, th::Tuple, bl::Union{Integer,Tuple}, sh::Integer)
     empty!(ST.log); empty!(ST.detail)
     LAUNCHES[] += 1
     push!(LAUNCHED, string(nameof(f)))
     nx, ny = th
     n = nx * ny
-    blocks = collect(1:bl)
+    nbx, nby = bl isa Tuple ? bl : (bl, 1)
+    blocks = collect(1:nbx * nby)
     ORDER[] == :descending && reverse!(blocks)
     ORDER[] == :shuffled && Random.shuffle!(RNG[], blocks)
     for b in blocks
@@ -200,6 +206,8 @@ function launch(f, args::Tuple, th::Tuple, bl::Integer, sh::Integer)
                 ST.ty = (k - 1) ÷ nx + 1
                 ST.tid = (b - 1) * n + k
                 ST.bx = b
+                ST.gx = (b - 1) % nbx + 1
+                ST.gy = (b - 1) ÷ nbx + 1
                 ST.bdim = nx
                 put!(resume[k], nothing)
                 take!(paused[k]) === :done && (alive[k] = false)
@@ -264,6 +272,8 @@ function launch_1d(f, args::Tuple, th::Integer, bl::Integer)
     for tid in tids
         ST.tid = tid
         ST.bx = (tid - 1) ÷ th + 1
+        ST.gx = ST.bx
+        ST.gy = 1
         ST.tx = (tid - 1) % th + 1
         ST.bdim = th
         f(args...)

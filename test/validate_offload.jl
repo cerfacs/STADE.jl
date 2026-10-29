@@ -202,7 +202,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
                 gen_fn(joinpath(dir, f), out; keep_push_pop = false, fuse_ii_loops = true)
                 for e in STADE.io_read_kernel_bundle(out)
                     total += count_for(e)
-                    host += count_for(STADE.stade_gpu(e, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, split_reduce = 0).host)
+                    host += count_for(STADE.stade_gpu(e, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0).host)
                 end
             catch
                 status = :refused
@@ -271,7 +271,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
             gen = mode == :hvp ? STADE.stade_hvp(primal; keep_push_pop = false, fuse_ii_loops = true) :
                                  STADE.stade_adjoint(primal; keep_push_pop = false, fuse_ii_loops = true)
             expr = mode == :hvp ? gen.hvp : gen.adjoint
-            for (label, host) in (("cuda", STADE.stade_gpu(expr, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, split_reduce = 0).host),
+            for (label, host) in (("cuda", STADE.stade_gpu(expr, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0).host),
                                   ("jacc", STADE.stade_jacc(expr; inbounds = false, dead_scalars = false).host))
                 assigned = Set{Symbol}()
                 collect_assigned(e) = e isa Expr &&

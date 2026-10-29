@@ -245,7 +245,7 @@ function spl_run_body(src::String, entry::Symbol, args, split::Int, maxt)
     Main.CUDA.MAXT[] = maxt === nothing ? (name -> 1024) : maxt
     cuda = STADE.cgen_backend_cuda()
     plan = STADE.stade_gpu(Meta.parse(src), cuda; warp_atomics = false, shared_private = false, inbounds = false,
-                           split_reduce = split, split_min_inner = 0, split_max_out = 10^9)
+                           split_reduce = split, split_min_inner = 0, split_max_out = 10^9, contraction = 0)
     for k in plan.kernels; Core.eval(Main, k); end
     Core.eval(Main, plan.host)
     host = plan.host.args[1].args[1]
@@ -325,7 +325,7 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("an accumulator may feed another statement", "                            v in cgen_split_vars(st2.args[2]) && return nothing", "                            false && return nothing"),
             ("a loop temporary may be read after the loop", "                        v in cgen_split_vars(st.args[2]) && return nothing\n                        (v in later) && return nothing\n                        push!(defined, v)\n                    end\n                    for r in cgen_split_vars(st.args[2])\n                        (r in assigned && !haskey(accs, r) && !(r in defined)) && return nothing", "                        v in cgen_split_vars(st.args[2]) && return nothing\n                        push!(defined, v)\n                    end\n                    for r in cgen_split_vars(st.args[2])\n                        (r in assigned && !haskey(accs, r) && !(r in defined)) && return nothing"),
             ("an integer start is accepted", "(items[k][2].args[2] isa Integer) && return nothing", "false && return nothing"),
-            ("an inner bound computed in the kernel is accepted", "issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing", "true"),
+            ("an inner bound computed in the kernel is accepted", "lp === nothing && return nothing\n            issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing", "lp === nothing && return nothing\n            true"),
             ("the register limit is not checked", "fits = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), probe), 32 * t.lanes)", "fits = true"),
             ("the clamp of the thread index is dropped", "Expr(:(=), :__tid, Expr(:call, :min, :__tidr, n_iter))]", "Expr(:(=), :__tid, :__tidr)]"),
             ("update loops run for inactive threads", "push!(body, Expr(:if, act, Expr(:block, lane_loop(lp, lp.body))))", "push!(body, lane_loop(lp, lp.body))"),

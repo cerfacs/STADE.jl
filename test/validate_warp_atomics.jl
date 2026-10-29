@@ -36,8 +36,8 @@ function validate_warp_atomics(dir::String = joinpath(@__DIR__, "val-corpus"); o
         for (mode, gen) in (("adjoint", STADE.stade_adjoint), ("hvp", STADE.stade_hvp))
             out = try gen(pe; keep_push_pop = false, fuse_ii_loops = true) catch; continue end
             e = mode == "hvp" ? out.hvp : out.adjoint
-            on = STADE.stade_gpu(e, cuda; inbounds = false, dead_scalars = false, split_reduce = 0)
-            off = STADE.stade_gpu(e, cuda; warp_atomics = false, inbounds = false, dead_scalars = false, split_reduce = 0)
+            on = STADE.stade_gpu(e, cuda; inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
+            off = STADE.stade_gpu(e, cuda; warp_atomics = false, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
             n = sum(ncalls(k) for k in on.kernels; init = 0)
             total += n; n > 0 && (kernels_with += 1)
             same = length(on.kernels) == length(off.kernels) && all(src(unwa(a)) == src(b) for (a, b) in zip(on.kernels, off.kernels)) && src(on.host) == src(off.host)
@@ -45,7 +45,7 @@ function validate_warp_atomics(dir::String = joinpath(@__DIR__, "val-corpus"); o
             check((n > 0) == !isempty(on.helpers), "$name [$mode]: helpers present iff a call is ($(length(on.helpers)) definition(s))")
             check(isempty(off.helpers) && !any(k -> STADE.cgen_expr_calls(k, wa), off.kernels), "$name [$mode]: warp_atomics = false has no helper and no call")
             for (label, be) in (("amdgpu", STADE.cgen_backend_amdgpu()), ("metal", STADE.cgen_backend_metal()))
-                pl = try STADE.stade_gpu(e, be; inbounds = false, dead_scalars = false, split_reduce = 0) catch; continue end
+                pl = try STADE.stade_gpu(e, be; inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0) catch; continue end
                 check(isempty(pl.helpers) && !any(k -> STADE.cgen_expr_calls(k, wa), pl.kernels), "$name [$mode]: $label output has no warp call")
             end
         end

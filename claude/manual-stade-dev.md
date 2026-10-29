@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6, inbounds=true, dead_scalars=true, split_reduce=16, split_min_inner=256, split_max_out=32768)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6, inbounds=true, dead_scalars=true, split_reduce=16, split_min_inner=256, split_max_out=32768, contraction=256)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2539,6 +2539,29 @@ the twin on, `split_min_inner = 0`) test the transformation on the CPU shim, whi
 and reports a conflict between threads no barrier orders.
 
 *Comparison with the CPU in `validate_ownership`.* The twin changes the order of a sum, so a result can differ from the CPU Float64 result by more than the tolerance of the draw while being closer to the exact value (the `unet` HVP at `OWN_SPLIT=16`: 7.7e-12 from the CPU result, tolerance 5.6e-12; the CPU result is 9.5e-12 from the BigFloat value and the twin 1.8e-12). A draw that fails the tolerance is therefore run again against the BigFloat truth (`gval_check_backend(...; truth = true)`, 192 bits), with the rule of the GPU validators: at most 20 times the CPU error, or 1e-10, and never below the tolerance. The row says when it passed this way. A device result perturbed by 1e-7 still fails. `validate_inbounds` generates both of its plans with `split_reduce = 0`: the dead-scalar pass lets one more kernel split, and the pass under test is not the split.
+
+**Contraction** (`contraction`)
+CUDA only (accepted, and ignored, by the other backends' `stade_gpu` calls). `contraction = n` (default 256; 0 is off; any other value is the smallest `M`, `N` and `K` for which the twin runs) builds a
+second kernel `<name>_t!` beside a plain kernel that computes a matrix product, and the host launches it instead of the plain kernel when a test holds. The plain kernel runs one thread per output element
+and reads every operand element from global memory once for every output element it takes part in; the twin computes a tile of 64 x 64 outputs per block of 16 x 16 threads (4 x 4 outputs per thread),
+reads a 64 x 16 piece of the left operand and a 16 x 64 piece of the right operand into shared memory (`CuDynamicSharedArray`, 2064 doubles, 16512 bytes) for each step of 16 along the inner index, and
+runs the statements before the loop (the start value of the sum) and after it (activation, residual, stores) once per output element, on the same text as the plain kernel.
+`contraction = 0` gives exactly the text without it (with `split_reduce = 0` also exactly v0.4.33).
+
+*Shape.* After the thread guard: `idx = 1 + (__tid - 1)`; scalar statements, among them the decode of the flat index into a column `o = mod(idx - 1, N) + 1` and a row `t = div(idx - 1, N) + 1`; the start value of the sum, a scalar assigned once before the loop; ONE flat loop over a step of +1 whose body is the one accumulation `acc = acc + A[ia] * B[ib]`
+(`+`, `-`, either order of the factors; the factors are plain array references); then scalar statements and plain stores. `ia` reads only kernel parameters, the row and the loop variable; `ib` only parameters,
+the column and the loop variable; the loop bounds are parameters; neither operand array is stored in the kernel; the loop variable, the column and the row are not read or assigned elsewhere.
+
+*Mechanism.* The inner sum keeps its order (index ascending) and is added to the start value at the end, so the result differs from the plain kernel in the last bits only. The tile reads are guarded by the sizes
+and filled with zeros outside them. Threads outside the matrix take part in every `sync_threads()` and store nothing.
+
+*Launch test* (the plain kernel runs otherwise): `M`, `N` and `K` are at least `contraction`, `N > 0`, the loop covers whole rows (`mod(n_iter, N) == 0`: a loop of 7 elements over rows of 3 has a partial last row that the
+tiles would not compute), and the block of 256 threads fits the register limit of the compiled twin (`CUDA.maxthreads` of a `launch = false` build, at least 256).
+
+*Measured* on a V100 (`transformer_block`, forward product, medians): d1024 56.3 to 20.7 ms (2.72 times), d512 7.63 to 3.13 ms (2.44), d256 1.23 to 0.80 ms (1.54); below that the twin is slower (d128 0.73 times,
+d64 0.56, d32 0.78, `small` 0.86, `tiny` 0.79), so the default is 256. The adjoint of the same kernel is unchanged (ratio 1.00 to 1.02); `unet2` has one kernel that matches (the output convolution), and with the twin forced (`contraction = 1`) its primal changes by at most 1% at the three bench sizes (0.99 to 1.00 times; `small` 0.93 and `tiny` 0.88); at the default it never launches it there (the channel count is below 256). `test/validate_contraction.jl`
+(8 sources that must tile, 15 that must not, direct recognizer cases for guards that STADE's own gates make unreachable from source, threshold, zero-length and register-limit checks, and sabotage cases, each of which one case must catch)
+and `OWN_CONTRACT=n` for `validate_ownership` (forces the twin on every launch that has one, with `n` as the smallest side) test the transformation on the CPU shim, which models 2D grids and blocks.
 
 **Gather form of affine stencil adjoints** (`gather_stencil`)
 All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The

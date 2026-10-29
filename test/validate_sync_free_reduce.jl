@@ -40,15 +40,15 @@ function validate_sync_free_reduce(dir::String = joinpath(@__DIR__, "val-corpus"
         for (mode, gen) in (("adjoint", STADE.stade_adjoint), ("hvp", STADE.stade_hvp))
             out = try gen(pe; keep_push_pop = false, fuse_ii_loops = true) catch; continue end
             e = mode == "hvp" ? out.hvp : out.adjoint
-            on = STADE.stade_gpu(e, cuda; reduction_threshold = 0, inbounds = false, dead_scalars = false, split_reduce = 0)
-            off = STADE.stade_gpu(e, cuda; reduction_threshold = 0, sync_free_reduce = false, inbounds = false, dead_scalars = false, split_reduce = 0)
+            on = STADE.stade_gpu(e, cuda; reduction_threshold = 0, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
+            off = STADE.stade_gpu(e, cuda; reduction_threshold = 0, sync_free_reduce = false, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
             n_on = count_sf(on.host); n_off = count_host(off.host)
             total += n_off; n_off > 0 && (plans_with += 1)
             check(n_on == n_off, "$name [$mode]: $n_on sync-free form(s) replace $n_off allowscalar reduction(s)")
             check(length(on.kernels) == length(off.kernels) && all(src(a) == src(b) for (a, b) in zip(on.kernels, off.kernels)), "$name [$mode]: kernels unchanged")
             check(count_sf(off.host) == 0, "$name [$mode]: sync_free_reduce = false has no sync-free form")
             for (label, be) in (("amdgpu", STADE.cgen_backend_amdgpu()), ("metal", STADE.cgen_backend_metal()))
-                pl = try STADE.stade_gpu(e, be; reduction_threshold = 0, inbounds = false, dead_scalars = false, split_reduce = 0) catch; continue end
+                pl = try STADE.stade_gpu(e, be; reduction_threshold = 0, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0) catch; continue end
                 check(count_sf(pl.host) == 0, "$name [$mode]: $label output has no sync-free form")
             end
         end
