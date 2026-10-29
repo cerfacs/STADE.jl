@@ -10696,6 +10696,420 @@ function cgen_reuse_stored(host::Expr, kernels::Vector{Expr}, backend; inbounds:
     return (Expr(:function, host.args[1], Expr(:block, hs...)), newk)
 end
 
+# ---- dead stack stores (CUDA, v0.4.44) -------------------------------------------------------------------------------------------------------
+# The adjoint's forward kernels push a value to a stack at every step, one slot per push site and iteration. After the dead-scalar pass the backward
+# kernels often read one site only (a running sum is pushed at every step and read back once, at the end). A store is dead when no read can see its slot.
+# Each site owns a region of the array that no other site's slots overlap, so a read sees the slots of the sites whose index formula it repeats. The
+# formula of a store or a read is its index with the kernel's `__icse_*`/`__idx_*` scalars inlined, the kernel parameters replaced by the host arguments, and
+# the loop variables left free. A stack whose reads do not all repeat the formula of a store, or whose formula holds anything else, is left alone; a store
+# whose formula is not recognised is kept. A deleted store must have a pure index and value. The pass repeats until nothing changes, since a deleted store
+# can leave the reads of another stack unused. A stack with no access left is returned: its allocation can shrink.
+function cgen_dstack_syms(e, out::Set{Symbol})
+    if e isa Symbol
+        push!(out, e)
+    elseif e isa Expr
+        for a in (e.head === :call ? e.args[2:end] : e.args); cgen_dstack_syms(a, out); end
+    end
+    return out
+end
+
+function cgen_dstack_assigned!(e, out::Set{Symbol})
+    if e isa Expr
+        e.head === :(=) && e.args[1] isa Symbol && push!(out, e.args[1])
+        for a in e.args; cgen_dstack_assigned!(a, out); end
+    end
+    return out
+end
+
+function cgen_dstack_inline(e, env::Dict{Symbol,Any})
+    e isa Symbol && return haskey(env, e) ? env[e] : e
+    e isa Expr || return e
+    e.head === :call && return Expr(:call, e.args[1], Any[cgen_dstack_inline(a, env) for a in e.args[2:end]]...)
+    return Expr(e.head, Any[cgen_dstack_inline(a, env) for a in e.args]...)
+end
+
+# The index formula, or nothing when it holds a symbol that is not a parameter, a loop variable or a thread variable, or an array read.
+function cgen_dstack_formula(e, env, lvars::Set{Symbol}, psub::Dict{Symbol,Any})
+    f = cgen_dstack_inline(e, env)
+    ok = Ref(true)
+    function sub(x)
+        if x isa Symbol
+            haskey(psub, x) && return psub[x]
+            x in lvars || (ok[] = false)
+            return x
+        elseif x isa Expr
+            x.head === :call || (ok[] = false)
+            x.head === :call && x.args[1] isa Symbol || (ok[] = false)
+            return Expr(:call, x.args[1], Any[sub(a) for a in x.args[2:end]]...)
+        end
+        return x
+    end
+    g = sub(f)
+    return ok[] ? g : nothing
+end
+
+# The prefix a formula adds to its own index: `P + local` with the sum's two terms, `P` as host expression and `local` as kernel expression.
+function cgen_dstack_split(e, env, lvars, psub)
+    fk = cgen_dstack_inline(e, env)
+    hk = cgen_dstack_formula(fk, Dict{Symbol,Any}(), lvars, psub)
+    hk === nothing && return nothing
+    (fk isa Expr && fk.head === :call && fk.args[1] === :+ && length(fk.args) == 3 && hk isa Expr && hk.head === :call && hk.args[1] === :+ && length(hk.args) == 3) || return nothing
+    return (Ph = hk.args[2], Lk = fk.args[3])
+end
+
+# One walk over a kernel body. `ctx.names`: tracked parameter => stack. mode :collect fills ctx.stores / ctx.reads / ctx.bad / ctx.prefix; mode :strip drops the
+# dead stores; mode :compact replaces the index of every access to a stack of ctx.compact by its own term (the prefix dropped).
+function cgen_dstack_reads!(e, env, lvars, ctx)
+    e isa Expr || return nothing
+    if e.head === :ref && e.args[1] isa Symbol && haskey(ctx.names, e.args[1])
+        x = ctx.names[e.args[1]]
+        f = length(e.args) == 2 ? cgen_dstack_formula(e.args[2], env, lvars, ctx.psub[x]) : nothing
+        f === nothing ? push!(ctx.bad, x) : push!(get!(ctx.reads, x, Set{Any}()), f)
+        sp = length(e.args) == 2 ? cgen_dstack_split(e.args[2], env, lvars, ctx.psub[x]) : nothing
+        push!(get!(ctx.prefix, x, Set{Any}()), sp === nothing ? :NOSPLIT : sp.Ph)
+        cgen_dstack_reads!(e.args[2:end], env, lvars, ctx)
+        return nothing
+    else
+        for a in e.args
+            a isa Symbol && haskey(ctx.names, a) && e.head !== :ref && push!(ctx.bad, ctx.names[a])
+            cgen_dstack_reads!(a, env, lvars, ctx)
+        end
+    end
+    return nothing
+end
+cgen_dstack_reads!(v::AbstractVector, env, lvars, ctx) = (for a in v; cgen_dstack_reads!(a, env, lvars, ctx); end; nothing)
+
+function cgen_dstack_rw(e, env, lvars, ctx)
+    e isa Expr || return e
+    if e.head === :ref && e.args[1] isa Symbol && haskey(ctx.names, e.args[1]) && ctx.names[e.args[1]] in ctx.compact && length(e.args) == 2
+        sp = cgen_dstack_split(e.args[2], env, lvars, ctx.psub[ctx.names[e.args[1]]])
+        sp === nothing && error("dead_stack: an access of $(e.args[1]) lost its prefix between the check and the rewrite")
+        return Expr(:ref, e.args[1], sp.Lk)
+    end
+    return Expr(e.head, Any[cgen_dstack_rw(a, env, lvars, ctx) for a in e.args]...)
+end
+
+function cgen_dstack_walk(stmts, env::Dict{Symbol,Any}, lvars::Set{Symbol}, ctx, mode::Symbol)
+    out = Any[]
+    cx(e) = mode === :compact ? cgen_dstack_rw(e, env, lvars, ctx) : e
+    for s in stmts
+        if s isa Expr && s.head === :(=) && s.args[1] isa Expr && s.args[1].head === :ref && s.args[1].args[1] isa Symbol && haskey(ctx.names, s.args[1].args[1])
+            x = ctx.names[s.args[1].args[1]]
+            idx = s.args[1].args[2:end]
+            cgen_dstack_reads!(idx, env, lvars, ctx); cgen_dstack_reads!(s.args[2], env, lvars, ctx)
+            f = length(idx) == 1 ? cgen_dstack_formula(idx[1], env, lvars, ctx.psub[x]) : nothing
+            if mode === :collect
+                f === nothing || push!(get!(ctx.stores, x, Set{Any}()), f)
+                sp = length(idx) == 1 ? cgen_dstack_split(idx[1], env, lvars, ctx.psub[x]) : nothing
+                push!(get!(ctx.prefix, x, Set{Any}()), sp === nothing ? :NOSPLIT : sp.Ph)
+                push!(out, s)
+            elseif mode === :compact
+                if x in ctx.compact
+                    sp = cgen_dstack_split(idx[1], env, lvars, ctx.psub[x])
+                    sp === nothing && error("dead_stack: a store to $(s.args[1].args[1]) lost its prefix between the check and the rewrite")
+                    push!(out, Expr(:(=), Expr(:ref, s.args[1].args[1], sp.Lk), cx(s.args[2])))
+                else
+                    push!(out, Expr(:(=), s.args[1], cx(s.args[2])))
+                end
+            else
+                dead = x in ctx.strip && (f === nothing ? !haskey(ctx.reads, x) : !(f in get(ctx.reads, x, Set{Any}()))) &&
+                       all(a -> cgen_dead_pure(a, ctx.refs_ok), idx) && cgen_dead_pure(s.args[2], ctx.refs_ok)
+                dead || push!(out, s)
+            end
+        elseif s isa Expr && s.head === :(=) && s.args[1] isa Symbol
+            cgen_dstack_reads!(s.args[2], env, lvars, ctx)
+            v = s.args[1]
+            (startswith(string(v), "__icse_") || startswith(string(v), "__idx_")) ? (env[v] = cgen_dstack_inline(s.args[2], env)) : delete!(env, v)
+            push!(out, Expr(:(=), v, cx(s.args[2])))
+        elseif s isa Expr && s.head === :for && length(s.args) == 2 && s.args[1] isa Expr && s.args[1].head === :(=) && s.args[1].args[1] isa Symbol && s.args[2] isa Expr && s.args[2].head === :block
+            cgen_dstack_reads!(s.args[1].args[2], env, lvars, ctx)
+            asg = cgen_dstack_assigned!(s.args[2], Set{Symbol}())
+            for v in asg; delete!(env, v); end
+            nb = cgen_dstack_walk(s.args[2].args, copy(env), union(lvars, Set([s.args[1].args[1]])), ctx, mode)
+            push!(out, Expr(:for, Expr(:(=), s.args[1].args[1], cx(s.args[1].args[2])), Expr(:block, nb...)))
+        elseif s isa Expr && (s.head === :if || s.head === :elseif) && length(s.args) >= 2
+            cgen_dstack_reads!(s.args[1], env, lvars, ctx)
+            asg = cgen_dstack_assigned!(s, Set{Symbol}())
+            args = Any[cx(s.args[1])]
+            for br in s.args[2:end]
+                if br isa Expr && br.head === :block
+                    push!(args, Expr(:block, cgen_dstack_walk(br.args, copy(env), lvars, ctx, mode)...))
+                elseif br isa Expr && br.head === :elseif
+                    push!(args, cgen_dstack_walk(Any[br], copy(env), lvars, ctx, mode)[1])
+                else
+                    push!(args, br)
+                end
+            end
+            for v in asg; delete!(env, v); end
+            push!(out, Expr(s.head, args...))
+        elseif s isa Expr && s.head === :block
+            asg = cgen_dstack_assigned!(s, Set{Symbol}())
+            nb = cgen_dstack_walk(s.args, copy(env), lvars, ctx, mode)
+            for v in asg; delete!(env, v); end
+            push!(out, Expr(:block, nb...))
+        else
+            cgen_dstack_reads!(s, env, lvars, ctx)
+            push!(out, cx(s))
+        end
+    end
+    return out
+end
+
+# Host scalars with one definition, as a map symbol => right side; a formula is compared after every such symbol is replaced by its definition.
+function cgen_dstack_localdefs(host::Expr)
+    defs = Dict{Symbol,Vector{Any}}()
+    function visit(e)
+        if e isa Expr
+            e.head === :(=) && e.args[1] isa Symbol && push!(get!(defs, e.args[1], Any[]), e.args[2])
+            e.head in (:for, :while) && e.args[1] isa Expr && e.args[1].head === :(=) && e.args[1].args[1] isa Symbol && push!(get!(defs, e.args[1].args[1], Any[]), :loop)
+            for a in e.args; visit(a); end
+        end
+    end
+    visit(host.args[2])
+    return Dict{Symbol,Any}(k => unique(v)[1] for (k, v) in defs if length(unique(v)) == 1 && unique(v)[1] !== :loop)
+end
+
+function cgen_dstack_inline_all(e, defs::Dict{Symbol,Any}, depth::Int = 0)
+    e isa Symbol && return (haskey(defs, e) && depth < 12) ? cgen_dstack_inline_all(defs[e], defs, depth + 1) : e
+    e isa Expr || return e
+    e.head === :call && return Expr(:call, e.args[1], Any[cgen_dstack_inline_all(a, defs, depth) for a in e.args[2:end]]...)
+    return Expr(e.head, Any[cgen_dstack_inline_all(a, defs, depth) for a in e.args]...)
+end
+
+# The terms of a left-nested sum `(((t1 + t2) + t3) + ...)`, and the nested sub-sum of the first j terms.
+function cgen_dstack_chain(e)
+    terms = Any[]
+    node = e
+    while node isa Expr && node.head === :call && node.args[1] === :+ && length(node.args) == 3
+        pushfirst!(terms, node.args[3])
+        node = node.args[2]
+    end
+    pushfirst!(terms, node)
+    return terms
+end
+
+function cgen_dead_stack_apply(host::Expr, kernels::Vector{Expr}, backend; inbounds::Bool = true, init_hosts = nothing, compact_ok::Bool = true)
+    (host.head === :function && length(host.args) == 2 && host.args[2] isa Expr && host.args[2].head === :block) || return (host, kernels, Symbol[], Dict{Symbol,Any}(), nothing)
+    hparams = Set{Symbol}(a for a in host.args[1].args[2:end] if a isa Symbol)
+    kdefs = Dict{Symbol,Expr}()
+    for k in kernels
+        k.head === :function && (kdefs[k.args[1].args[1]] = k)
+    end
+    # the stacks: a host parameter, or the shadow stack (`*_stack_d`) an HVP host allocates, that a kernel is launched with
+    cands = Set{Symbol}()
+    function find_stacks(e)
+        if e isa Expr
+            e.head === :call && e.args[1] isa Symbol && haskey(kdefs, e.args[1]) &&
+                for a in e.args[2:end]; a isa Symbol && (endswith(string(a), "_stack") || endswith(string(a), "_stack_d")) && push!(cands, a); end
+            for a in e.args; find_stacks(a); end
+        end
+    end
+    find_stacks(host.args[2])
+    # Only a stack that an `initstacks_*` host allocates is one of STADE's own: an array of the caller that happens to end in `_stack` may be an output the host
+    # reads after the call. Without the init host nothing is deleted. A shadow stack counts when the stack it shadows does.
+    iname = nothing; ihost = nothing; alloc = Dict{Symbol,Any}()
+    if init_hosts !== nothing
+        best = 0
+        for (nm, ih) in init_hosts
+            al = Dict{Symbol,Any}()
+            for st in ih.args[2].args
+                st isa Expr && st.head === :(=) && st.args[1] isa Symbol && st.args[2] isa Expr && st.args[2].head === :call && :undef in st.args[2].args &&
+                    (al[st.args[1]] = (st.args[2].args[end] isa Expr && st.args[2].args[end].head === :tuple && length(st.args[2].args[end].args) == 1) ? st.args[2].args[end].args[1] : st.args[2].args[end])
+            end
+            n = count(x -> haskey(al, x), cands)
+            n > best && (best = n; iname = nm; ihost = ih; alloc = al)
+        end
+    end
+    ihost === nothing && return (host, kernels, Symbol[], Dict{Symbol,Any}(), nothing)
+    filter!(x -> haskey(alloc, x) || (endswith(string(x), "_stack_d") && haskey(alloc, Symbol(string(x)[1:end-2]))), cands)
+    isempty(cands) && return (host, kernels, Symbol[], Dict{Symbol,Any}(), iname)
+    bind = Dict{Symbol,Vector{Tuple{Symbol,Int}}}()
+    skip = Set{Symbol}()
+    cgen_dstack_bind!(host.args[2], kdefs, cands, bind, skip)
+    # a host scalar a kernel formula may name: a parameter or a scalar assigned once, so that it has one value at every launch
+    nasg = Dict{Symbol,Vector{Any}}()
+    function count_asg(e)
+        if e isa Expr
+            e.head === :(=) && e.args[1] isa Symbol && push!(get!(nasg, e.args[1], Any[]), e.args[2])
+            e.head in (:for, :while) && e.args[1] isa Expr && e.args[1].head === :(=) && e.args[1].args[1] isa Symbol && push!(get!(nasg, e.args[1].args[1], Any[]), :loop)
+            for a in e.args; count_asg(a); end
+        end
+    end
+    count_asg(host.args[2])
+    function hstable(sy, depth = 0)
+        rs = unique(get(nasg, sy, Any[]))
+        isempty(rs) && return true
+        (length(rs) == 1 && depth < 8 && rs[1] !== :loop) || return false
+        return all(t -> hstable(t, depth + 1), cgen_dstack_syms(rs[1], Set{Symbol}()))
+    end
+    kcalls = Dict{Symbol,Vector{Any}}()
+    function collect_calls(e)
+        if e isa Expr
+            e.head === :call && e.args[1] isa Symbol && haskey(kdefs, e.args[1]) && push!(get!(kcalls, e.args[1], Any[]), e.args[2:end])
+            for a in e.args; collect_calls(a); end
+        end
+    end
+    collect_calls(host.args[2])
+    # per launched kernel: the tracked stack parameters and the host argument of every other parameter. Two different bindings of one parameter rule the stacks out.
+    kctx = Dict{Symbol,Any}()
+    for kn in unique(kn for bs in values(bind) for (kn, _) in bs)
+        params = kdefs[kn].args[1].args[2:end]
+        names = Dict{Symbol,Symbol}(); ps = Dict{Symbol,Any}()
+        ok = all(p -> p isa Symbol, params)
+        if ok
+            for (j, pj) in enumerate(params)
+                vals = unique(Any[c[j] for c in kcalls[kn]])
+                if length(vals) != 1; (vals[1] isa Symbol && vals[1] in cands) && push!(skip, vals[1]); continue; end
+                v = vals[1]
+                if v isa Symbol && v in cands
+                    names[pj] = v
+                elseif v isa Number || (v isa Symbol && hstable(v)) || (v isa Expr && all(hstable, cgen_dstack_syms(v, Set{Symbol}())))
+                    ps[pj] = v
+                end
+            end
+        end
+        if !ok || length(names) != count(((k2, _),) -> k2 === kn, [(k2, i) for bs in values(bind) for (k2, i) in bs])
+            for (x, bs) in bind; any(((k2, _),) -> k2 === kn, bs) && push!(skip, x); end
+        end
+        kctx[kn] = (names = names, psub = ps)
+    end
+    function newctx(c, stores, reads, bad, strip, prefix = Dict{Symbol,Set{Any}}(), compact = Set{Symbol}())
+        (names = c.names, psub = Dict{Symbol,Dict{Symbol,Any}}(x => c.psub for x in values(c.names)), stores = stores, reads = reads, bad = bad, strip = strip, prefix = prefix, compact = compact, refs_ok = inbounds)
+    end
+    function tidvars(body)
+        out = Set{Symbol}()
+        function visit(e)
+            if e isa Expr
+                e.head === :(=) && e.args[1] isa Symbol && any(y -> y === :__tid, cgen_dstack_syms(e.args[2], Set{Symbol}())) && push!(out, e.args[1])
+                for a in e.args; visit(a); end
+            end
+        end
+        foreach(visit, body)
+        return out
+    end
+    touched = Set{Symbol}()
+    stripped = Set{Symbol}()
+    for _ in 1:(length(cands) + 2)
+        stacks = setdiff(cands, skip)
+        isempty(stacks) && break
+        reads = Dict{Symbol,Set{Any}}(); stores = Dict{Symbol,Set{Any}}(); bad = Set{Symbol}()
+        for (kn, c) in kctx
+            body = kdefs[kn].args[2].args
+            cgen_dstack_walk(body, Dict{Symbol,Any}(), tidvars(body), newctx(c, stores, reads, bad, Set{Symbol}()), :collect)
+        end
+        strip = Set{Symbol}(x for x in stacks if !(x in bad) && all(r -> r in get(stores, x, Set{Any}()), get(reads, x, Set{Any}())))
+        isempty(strip) && break
+        changed = false
+        for (kn, c) in kctx
+            k = kdefs[kn]
+            body = k.args[2].args
+            nk = Expr(:function, k.args[1], Expr(:block, cgen_dstack_walk(body, Dict{Symbol,Any}(), tidvars(body), newctx(c, stores, reads, bad, strip), :strip)...))
+            if nk != k
+                kdefs[kn] = cgen_dead_scalars(nk, inbounds)
+                push!(touched, kn); changed = true
+            end
+        end
+        union!(stripped, strip)
+        changed || break
+    end
+    # the kept region of a stack moves to the start of the array when every access repeats one prefix and the allocation in the paired `initstacks_*` host
+    # is a left-nested sum whose first j terms are that prefix: the array then holds the terms from j + 1 on (the prefix cut off)
+    compact = Dict{Symbol,Any}()
+    if compact_ok && ihost isa Expr && !isempty(stripped)
+        hdefs = cgen_dstack_localdefs(host); idefs = cgen_dstack_localdefs(ihost)
+        prefix = Dict{Symbol,Set{Any}}()
+        stores = Dict{Symbol,Set{Any}}(); reads = Dict{Symbol,Set{Any}}(); bad = Set{Symbol}()
+        for (kn, c) in kctx
+            body = kdefs[kn].args[2].args
+            cgen_dstack_walk(body, Dict{Symbol,Any}(), tidvars(body), newctx(c, stores, reads, bad, Set{Symbol}(), prefix), :collect)
+        end
+        for x in sort!(collect(setdiff(stripped, skip)))
+            (x in bad || !haskey(alloc, x) || !haskey(prefix, x)) && continue
+            ps = prefix[x]
+            (length(ps) == 1 && !(:NOSPLIT in ps)) || continue
+            ph = cgen_dstack_inline_all(first(ps), hdefs)
+            terms = cgen_dstack_chain(alloc[x])
+            for j in 1:length(terms)-1
+                sub = terms[1]
+                for t in terms[2:j]; sub = Expr(:call, :+, sub, t); end
+                if cgen_dstack_inline_all(sub, idefs) == ph
+                    # the array keeps every region from the kept one on: an access of the kept formula is the old index less the prefix
+                    rest = terms[j+1]
+                    for t in terms[j+2:end]; rest = Expr(:call, :+, rest, t); end
+                    compact[x] = rest
+                    break
+                end
+            end
+        end
+        if !isempty(compact)
+            cset = Set{Symbol}(keys(compact))
+            for (kn, c) in kctx
+                any(x -> x in cset, values(c.names)) || continue
+                k = kdefs[kn]
+                body = k.args[2].args
+                kdefs[kn] = Expr(:function, k.args[1], Expr(:block, cgen_dstack_walk(body, Dict{Symbol,Any}(), tidvars(body), newctx(c, stores, reads, bad, Set{Symbol}(), prefix, cset), :compact)...))
+                push!(touched, kn)
+            end
+        end
+    end
+    isempty(touched) && return (host, kernels, Symbol[], Dict{Symbol,Any}(), iname)
+    newk = Expr[k.head === :function && k.args[1].args[1] in touched ? kdefs[k.args[1].args[1]] : k for k in kernels]
+    gone = Symbol[x for x in sort!(collect(stripped)) if !any(((kn, i),) -> cgen_dstack_uses(kdefs[kn].args[2], kdefs[kn].args[1].args[1+i]), get(bind, x, Tuple{Symbol,Int}[]))]
+    # a shadow stack the host allocates itself shrinks here; the stacks of the `initstacks_*` host are shrunk by the caller
+    own = Symbol[x for x in gone if endswith(string(x), "_stack_d")]
+    isempty(own) || (host = cgen_shrink_stacks(host, own))
+    return (host, newk, Symbol[x for x in gone if !(x in own)], compact, iname)
+end
+
+function cgen_dstack_uses(e, p::Symbol)
+    e isa Symbol && return e === p
+    e isa Expr || return false
+    return any(a -> cgen_dstack_uses(a, p), e.args)
+end
+
+function cgen_dstack_bind!(e, kdefs, cands::Set{Symbol}, bind, live::Set{Symbol})
+    if e isa Symbol
+        e in cands && push!(live, e)
+    elseif e isa Expr
+        if e.head === :call && e.args[1] === :length && length(e.args) == 2 && e.args[2] isa Symbol
+            # the size of a stack is not a read of it
+        elseif e.head === :(=) && e.args[1] isa Symbol && e.args[1] in cands && e.args[2] isa Expr && e.args[2].head === :call && :undef in e.args[2].args
+            # nor is its allocation
+            cgen_dstack_bind!(e.args[2], kdefs, cands, bind, live)
+        elseif e.head === :call && e.args[1] isa Symbol && haskey(kdefs, e.args[1])
+            for (i, a) in enumerate(e.args[2:end])
+                if a isa Symbol && a in cands
+                    push!(get!(bind, a, Tuple{Symbol,Int}[]), (e.args[1], i))
+                else
+                    cgen_dstack_bind!(a, kdefs, cands, bind, live)
+                end
+            end
+        else
+            for a in e.args; cgen_dstack_bind!(a, kdefs, cands, bind, live); end
+        end
+    end
+    return nothing
+end
+
+# The stacks of an `initstacks_*` host that no kernel touches are allocated with one slot.
+function cgen_shrink_stacks(host::Expr, dead, compact = Dict{Symbol,Any}())
+    (host.head === :function && length(host.args) == 2 && host.args[2] isa Expr && host.args[2].head === :block) || return host
+    (isempty(dead) && isempty(compact)) && return host
+    stmts = Any[]
+    for s in host.args[2].args
+        if s isa Expr && s.head === :(=) && s.args[1] isa Symbol && s.args[2] isa Expr && s.args[2].head === :call &&
+           length(s.args[2].args) >= 3 && s.args[2].args[2] === :undef
+            if s.args[1] in dead
+                s = Expr(:(=), s.args[1], Expr(:call, s.args[2].args[1], :undef, Expr(:tuple, 1)))
+            elseif haskey(compact, s.args[1])
+                s = Expr(:(=), s.args[1], Expr(:call, s.args[2].args[1], :undef, Expr(:tuple, compact[s.args[1]])))
+            end
+        end
+        push!(stmts, s)
+    end
+    return Expr(:function, host.args[1], Expr(:block, stmts...))
+end
+
 # ---- split reduction (CUDA): the lanes of a block share one output's inner loops --------------------------------------------------------------
 # A thread that owns one output and runs a long inner loop leaves a GPU idle when the output count is small: a layer of 5120 units runs 5120 threads,
 # 160 warps for 80 SMs. The split kernel of such a loop gives each output `L` lanes (a block is 32 outputs by L lanes, threadIdx().x is the output, so a
@@ -14123,7 +14537,7 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, init_hosts = nothing)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill), coarsen_occ = Float64(coarsen_occ))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
@@ -14138,17 +14552,19 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
     host, kernels = plan.host, plan.kernels
     dead_scalars && (kernels = Expr[cgen_dead_scalars(k, inbounds) for k in kernels])
     backend.kernel_tag == "cuda" && dead_scalars && reuse_stored >= 1 && ((host, kernels) = cgen_reuse_stored(host, kernels, backend; inbounds))
+    dead_stacks = Symbol[]; compact_stacks = Dict{Symbol,Any}(); stack_init = nothing
+    backend.kernel_tag == "cuda" && dead_scalars && dead_stack >= 1 && ((host, kernels, dead_stacks, compact_stacks, stack_init) = cgen_dead_stack_apply(host, kernels, backend; inbounds, init_hosts, compact_ok = dead_stack >= 2))
     backend.kernel_tag == "cuda" && contraction >= 1 && ((host, kernels) = cgen_contraction_apply(host, kernels, backend; cmin = Int(contraction)))
     backend.kernel_tag == "cuda" && split_reduce >= 2 && ((host, kernels) = cgen_split_apply(host, kernels, Int(split_reduce), backend; min_inner = Int(split_min_inner), max_out = Int(split_max_out), fallback = Int(split_fallback)))
     inbounds && (kernels = Expr[cgen_inbounds_wrap(k) for k in kernels])
-    p === Float64 && return (host = host, kernels = kernels, helpers = plan.helpers)
+    p === Float64 && return (host = host, kernels = kernels, helpers = plan.helpers, dead_stacks = dead_stacks, compact_stacks = compact_stacks, stack_init = stack_init)
     return (host = cgen_convert_precision(host, p),
-            kernels = Expr[cgen_convert_precision(k, p) for k in kernels], helpers = plan.helpers)
+            kernels = Expr[cgen_convert_precision(k, p) for k in kernels], helpers = plan.helpers, dead_stacks = dead_stacks, compact_stacks = compact_stacks, stack_init = stack_init)
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -14160,24 +14576,33 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
+    deads = Dict{Symbol,Any}(); inits = Dict{Symbol,Expr}()
+    # two functions that take stacks may share one `initstacks_*`: neither may change it then
+    nclaim = count(d -> d isa Expr && d.args[1] isa Expr && !startswith(string(d.args[1].args[1]), "initstacks_") && any(a -> a isa Symbol && endswith(string(a), "_stack"), d.args[1].args[2:end]), defs)
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, init_hosts = (nclaim > 1 ? nothing : inits))
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
+        (plan.stack_init !== nothing && !(isempty(plan.dead_stacks) && isempty(plan.compact_stacks))) && (deads[plan.stack_init] = (plan.dead_stacks, plan.compact_stacks))
+        startswith(string(plan.host.args[1].args[1]), "initstacks_") && (inits[plan.host.args[1].args[1]] = plan.host)
+    end
+    # the allocation of a stack no kernel touches shrinks, and a stack whose kept region moved to the start shrinks to that region, in the `initstacks_*` host
+    for (i, h) in enumerate(hosts)
+        h.head === :function && haskey(deads, h.args[1].args[1]) && (hosts[i] = cgen_shrink_stacks(h, deads[h.args[1].args[1]][1], deads[h.args[1].args[1]][2]))
     end
     io_write_gpu_file(out_path, vcat(helpers, kernels, hosts); preamble = backend.preamble)
     return out_path
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -14716,7 +15141,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -14730,13 +15155,14 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, init_hosts = Dict{Symbol,Expr}(gpu_init.host.args[1].args[1] => gpu_init.host))
+    gpu_init = merge(gpu_init, (host = cgen_shrink_stacks(gpu_init.host, gpu_gen.dead_stacks, gpu_gen.compact_stacks),))
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the

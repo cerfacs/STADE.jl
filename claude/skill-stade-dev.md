@@ -463,6 +463,8 @@ The baseline generator redraws up to 256 times (v0.4.42): a kernel with a low ac
 
 The split twin has a fallback of fewer lanes (v0.4.43, keyword `split_fallback`, default 8): when a block of 32 x 16 threads does not fit the registers, the launch uses a twin of 8 lanes before the plain kernel. `split_fallback = 0` is the v0.4.42 text.
 
+`dead_stack` (CUDA, v0.4.44, default 2) deletes the stores to a stack that no kernel reads and, at level 2, moves the one kept region to the start of the array and shrinks the allocation of the `initstacks_*` host. It is the same kind of pass as `reuse_stored` and has the same trap: every comparison is on text, so a name that stands for two values (a host scalar with two definitions, a local scalar of the kernel that differs between two kernels) makes two formulas equal that are not, and the store that is then deleted is the one that is read. Each such name has its own case and its own sabotage. A stack is one of STADE's own only if an `initstacks_*` host allocates it; a naming rule alone would delete the output array of a caller that ends in `_stack`. The device-versus-host stack comparison of the GPU parity script now differs in the slots that were deleted; it is informational.
+
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
 no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded

@@ -391,7 +391,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         if run_cuda
             try
                 plan_init = STADE.stade_gpu(gen_out.initstacks, cuda_backend)
-                plan_gen  = STADE.stade_gpu(gen_expr, cuda_backend)
+                plan_gen  = STADE.stade_gpu(gen_expr, cuda_backend; init_hosts = Dict{Symbol,Expr}(plan_init.host.args[1].args[1] => plan_init.host))
+                plan_init = merge(plan_init, (host = STADE.cgen_shrink_stacks(plan_init.host, plan_gen.dead_stacks, plan_gen.compact_stacks),))
                 if write_generated
                     open(joinpath(dir, name * suffix * "_cuda.jl"), "w") do f
                         for h in plan_gen.helpers

@@ -43,6 +43,8 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
                             shim::String = get(ENV, "OWN_SHIM", joinpath(@__DIR__, "ownership_shim.jl")),
                             expected_flagged::Vector{String} = ["idm_dup_write"],
                             coarsen::Int = 1,
+                            # a function kernel -> (int_args, values) that replaces the random baseline (the real kit kernels have sizes the generator cannot draw)
+                            baseline_fn::Union{Function,Nothing} = nothing,
                             verbose::Bool = true)
     include(shim)
     Core.eval(Main, :(using .CUDA))
@@ -68,10 +70,10 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
     function one_draw(name, mode, path)
         Random.seed!(hash(name))   # reproducible draws per kernel: the global RNG otherwise differs from run to run
         yp = STADE.io_gpu_yaml_path(path)
-        isfile(yp) || STADE.stade_generate_baseline_file(path; yaml_path = yp, int_lo = int_lo, int_hi = int_hi, grow_max = 512)
+        baseline_fn === nothing && (isfile(yp) || STADE.stade_generate_baseline_file(path; yaml_path = yp, int_lo = int_lo, int_hi = int_hi, grow_max = 512))
         primal = STADE.io_read_corpus_entry(path)
         kernel = STADE.parse_kernel(primal)
-        baseline = STADE.io_read_baseline_yaml(yp)
+        baseline = baseline_fn === nothing ? STADE.io_read_baseline_yaml(yp) : baseline_fn(kernel)
         STADE.val_coerce_int_arrays!(kernel, baseline.values)
         # OWN_FUSE=1 generates with fuse_ii_loops = true, the setting of the benchmark kernels
         fuse = get(ENV, "OWN_FUSE", "0") == "1"
@@ -96,7 +98,9 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
             for sd in Iterators.flatten((seeds, tans, shts)); for (k, v) in sd; sd[k] = dy(v); end; end
         end
         pinit = STADE.stade_gpu(gen.initstacks, backend; warp_atomics = false, shared_private = false, coarsen, coarsen_min = 0, coarsen_fill = 0, fkw...)
-        pgen  = STADE.stade_gpu(gexpr, backend; warp_atomics = false, shared_private = false, coarsen, coarsen_min = 0, coarsen_fill = 0, fkw...)
+        pgen  = STADE.stade_gpu(gexpr, backend; warp_atomics = false, shared_private = false, coarsen, coarsen_min = 0, coarsen_fill = 0, init_hosts = Dict{Symbol,Expr}(pinit.host.args[1].args[1] => pinit.host), fkw...)
+        # the stacks the generated kernels do not touch, and the stacks whose kept region moved to the start, shrink in the allocation (dead_stack, v0.4.44)
+        pinit = merge(pinit, (host = STADE.cgen_shrink_stacks(pinit.host, pgen.dead_stacks, pgen.compact_stacks),))
         res = Dict{Symbol,Any}()
         viol = NamedTuple[]
         for order in orders
