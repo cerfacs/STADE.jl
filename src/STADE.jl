@@ -10360,6 +10360,342 @@ function cgen_finish_kernels(kernels::Vector{Expr}; inbounds::Bool = true, dead_
     return out
 end
 
+# ---- reuse of a stored value (CUDA): a backward kernel reads what a forward kernel stored, not recompute it -----------------------------------------
+# The adjoint of `h[j] = f(s)` after a reduction `s = b[j]; for i ...; s = s + w[..] * x[i]; end` needs `f(s)` (the derivative of tanh reads it). A generated backward kernel
+# computes `s` again, which reads the whole weight matrix a second time, although a forward kernel launched earlier stored `f(s)` in `h[j]`. This pass replaces `f(s)` in the
+# backward kernel by `h[j]`, and the dead-scalar pass deletes the reduction. It runs on the finished plan (host and kernels), before the contraction and split twins, and
+# only when every one of these holds:
+#   - the host launches the two kernels as plain statements of its body, and every statement between them is a launch or a scalar assignment;
+#   - the forward kernel has the reduction, then ONE store `h[j] = f(s)` at its top level (`f` reads nothing but `s`), and no other write to `h`;
+#   - the backward kernel has the same reduction (same text and the same scalars it reads, after the kernel parameters are replaced by the host arguments), the same thread
+#     index and the same thread guard, so that every `j` it runs was stored;
+#   - no kernel between the two, and neither of the two, writes `h` or an array the reduction reads;
+#   - `s` is not assigned after the reduction in the backward kernel, and the reduction is gone after the replacement (otherwise the plan is left as it was).
+# The value read is the value the forward kernel computed with the same summation order, so the result of the adjoint does not change.
+
+# the names a kernel may write: an array that is the base of a left side, or any symbol of an atomic, a macro or a call that is not a plain function
+function cgen_reuse_writes!(e, out::Set{Symbol})
+    e isa Expr || return out
+    if e.head in (:(=), :(+=), :(-=), :(*=), :(/=)) && e.args[1] isa Expr && e.args[1].head === :ref && e.args[1].args[1] isa Symbol
+        push!(out, e.args[1].args[1])
+        for a in e.args[1].args[2:end]; cgen_reuse_writes!(a, out); end
+        cgen_reuse_writes!(e.args[2], out)
+        return out
+    end
+    if e.head === :macrocall || (e.head === :call && !(e.args[1] in CGEN_DEAD_PURE_CALLS))
+        union!(out, cgen_expr_symbols(e))
+        return out
+    end
+    for a in e.args; cgen_reuse_writes!(a, out); end
+    return out
+end
+
+function cgen_reuse_subst(e, d::Dict{Symbol,Any})
+    e isa Symbol && return get(d, e, e)
+    e isa Expr || return e
+    if e.head === :call && !isempty(e.args)
+        return Expr(:call, e.args[1], Any[cgen_reuse_subst(a, d) for a in e.args[2:end]]...)
+    end
+    return Expr(e.head, Any[cgen_reuse_subst(a, d) for a in e.args]...)
+end
+
+# replaces every subexpression equal to `pat` by `rep`
+function cgen_reuse_replace(e, pat, rep)
+    e == pat && return rep
+    e isa Expr || return e
+    return Expr(e.head, Any[cgen_reuse_replace(a, pat, rep) for a in e.args]...)
+end
+
+cgen_reuse_assigns(e, v::Symbol) = e isa Expr && ((e.head in (:(=), :(+=), :(-=), :(*=), :(/=)) && e.args[1] === v) || any(a -> cgen_reuse_assigns(a, v), e.args))
+
+# the statement lists (the bodies of blocks) of an expression, and the number of times a subexpression occurs in it
+function cgen_reuse_lists(e, out::Vector{Vector{Any}})
+    e isa Expr || return out
+    e.head === :block && push!(out, Any[x for x in e.args if !(x isa LineNumberNode)])
+    for a in e.args; cgen_reuse_lists(a, out); end
+    return out
+end
+
+cgen_reuse_count(e, pat) = e == pat ? 1 : (e isa Expr ? sum(cgen_reuse_count(a, pat) for a in e.args; init = 0) : 0)
+
+# the statements of a body without the counted loops that have nothing left in them
+function cgen_reuse_drop_empty(stmts)
+    out = Any[]
+    for st in stmts
+        st isa LineNumberNode && continue
+        if st isa Expr && st.head === :for && length(st.args) == 2 && st.args[2] isa Expr && st.args[2].head === :block
+            inner = cgen_reuse_drop_empty(st.args[2].args)
+            isempty(inner) && continue
+            push!(out, Expr(:for, st.args[1], Expr(:block, inner...)))
+        else
+            push!(out, st)
+        end
+    end
+    return out
+end
+
+# the symbols that are the base of an indexing in `e`
+function cgen_reuse_ref_bases!(e, out::Set{Symbol})
+    e isa Expr || return out
+    e.head === :ref && e.args[1] isa Symbol && push!(out, e.args[1])
+    for a in e.args; cgen_reuse_ref_bases!(a, out); end
+    return out
+end
+
+# The reduction blocks of a kernel's top-level statements: (index of `v = init`, v, locals assigned in the block, symbols read) for `v = init; for ... end` with a scalar-only loop
+function cgen_reuse_blocks(rest)
+    out = NamedTuple[]
+    for k in 1:length(rest)-1
+        st = rest[k]
+        (st isa Expr && st.head === :(=) && st.args[1] isa Symbol && cgen_split_is_scalar(st)) || continue
+        lp = cgen_split_loop(rest[k+1])
+        lp === nothing && continue
+        all(cgen_split_is_scalar, lp.body) || continue
+        v = st.args[1]
+        locals = Set{Symbol}([v, lp.var])
+        for b in lp.body; push!(locals, b.args[1]); end
+        reads = union(cgen_split_vars(st), cgen_split_vars(rest[k+1]))
+        push!(out, (k = k, v = v, locals = locals, reads = setdiff(reads, locals), var = lp.var, arrs = cgen_reuse_ref_bases!(rest[k+1], cgen_reuse_ref_bases!(rest[k], Set{Symbol}()))))
+    end
+    return out
+end
+
+# The scalars the reads of a block depend on, with their single defining statements before it: Dict(name => right side), or nothing
+function cgen_reuse_closure(rest, k::Int, roots, params::Set{Symbol})
+    defs = Dict{Symbol,Any}()
+    todo = Symbol[r for r in roots if !(r in params)]
+    while !isempty(todo)
+        u = pop!(todo)
+        haskey(defs, u) && continue
+        u === :__tid && continue
+        idxs = [i for i in 1:length(rest) if cgen_reuse_assigns(rest[i], u)]
+        (length(idxs) == 1 && idxs[1] < k) || return nothing
+        st = rest[idxs[1]]
+        (st isa Expr && st.head === :(=) && st.args[1] === u && cgen_split_is_scalar(st)) || return nothing
+        defs[u] = st.args[2]
+        for w in cgen_split_vars(st.args[2])
+            (w in params || w === :__tid || haskey(defs, w)) || push!(todo, w)
+        end
+    end
+    return defs
+end
+
+# the arrays a launch statement of the host body may write, as host symbols; nothing when the statement is not a plain launch group
+function cgen_reuse_launch_info(st, kdefs::Dict{Symbol,Expr}, launch_macro)
+    cgen_split_pure_launch(st, launch_macro) || return nothing
+    names = cgen_split_launched!(st, launch_macro, Set{Symbol}())
+    bases = Set{Symbol}(cgen_split_base_name(n) for n in names)
+    length(bases) == 1 || return nothing
+    base = first(bases)
+    any(n -> endswith(string(n), "_c!"), names) && return nothing
+    haskey(kdefs, base) || return nothing
+    writes = Set{Symbol}()
+    for n in names
+        haskey(kdefs, n) || return nothing
+        kd = kdefs[n]
+        params = Symbol[kd.args[1].args[2:end]...]
+        call = cgen_split_first_call(st, launch_macro, n)
+        call === nothing && return nothing
+        length(call.args) - 1 == length(params) || return nothing
+        w = cgen_reuse_writes!(kd.args[2], Set{Symbol}())
+        for (i, pn) in enumerate(params)
+            pn in w && union!(writes, cgen_split_vars(call.args[i+1]))
+        end
+    end
+    plain = cgen_split_first_call(st, launch_macro, base)
+    plain === nothing && return nothing
+    return (names = names, base = base, writes = writes, call = plain)
+end
+
+# The forward kernel of a launch statement, if it holds the reduction `blk` of the backward kernel followed by one store `h[j] = f(s)`: a description, or nothing.
+# `parts_b`, `sub_b` and `defs_b` describe the backward kernel: its parts, its parameter map and the definitions of the scalars its block reads.
+function cgen_reuse_match(inf, kdefs::Dict{Symbol,Expr}, blk, blockstmts_b, defs_b, sub_b, parts_b)
+    kf = kdefs[inf.base]
+    parts_f = cgen_kernel_parts(kf)
+    parts_f === nothing && return nothing
+    params_f = Symbol[parts_f.sig.args[2:end]...]
+    args_f = inf.call.args[2:end]
+    length(args_f) == length(params_f) || return nothing
+    sub_f = Dict{Symbol,Any}(params_f[i] => args_f[i] for i in eachindex(params_f))
+    v = blk.v
+    # the thread index and the thread guard are the same after the parameters are replaced
+    cgen_reuse_subst(parts_f.head, sub_f) == cgen_reuse_subst(parts_b.head, sub_b) || return nothing
+    cgen_reuse_subst(parts_f.guard, sub_f) == cgen_reuse_subst(parts_b.guard, sub_b) || return nothing
+    rf = parts_f.rest
+    kf_blocks = cgen_reuse_blocks(rf)
+    bi = findfirst(b -> b.v === v, kf_blocks)
+    bi === nothing && return nothing
+    bf = kf_blocks[bi]
+    Any[cgen_reuse_subst(rf[bf.k], sub_f), cgen_reuse_subst(rf[bf.k+1], sub_f)] == blockstmts_b || return nothing
+    # a name that is a local of the block must not be a kernel parameter or a host argument of either kernel (the comparison above would mix them up)
+    names = union(Set(params_f), Set(Symbol[p for p in keys(sub_b)]), union((cgen_split_vars(a) for a in args_f)...), union((cgen_split_vars(a) for a in values(sub_b))...))
+    isempty(intersect(blk.locals, names)) || return nothing
+    # the scalars the block reads are defined by the same statements
+    defs_f = cgen_reuse_closure(rf, bf.k, Set{Symbol}(r for r in bf.reads if !(r in params_f)), Set(params_f))
+    defs_f === nothing && return nothing
+    (Set(keys(defs_f)) == Set(keys(defs_b))) || return nothing
+    for u in keys(defs_f)
+        cgen_reuse_subst(defs_f[u], sub_f) == cgen_reuse_subst(defs_b[u], sub_b) || return nothing
+    end
+    # one store after the block, at the top level: `h[idx] = f(s)`, nothing else assigns s or writes h, and `f` reads s only
+    after = rf[bf.k+2:end]
+    stores = [st for st in after if st isa Expr && st.head === :(=) && st.args[1] isa Expr && st.args[1].head === :ref && length(st.args[1].args) == 2 && st.args[1].args[1] isa Symbol && st.args[1].args[1] in params_f && v in cgen_split_vars(st.args[2])]
+    length(stores) == 1 || return nothing
+    st = stores[1]
+    hname = st.args[1].args[1]; idx = st.args[1].args[2]; F = st.args[2]
+    (idx isa Symbol && cgen_split_vars(F) == Set([v]) && cgen_dead_pure(F, true)) || return nothing
+    any(x -> cgen_reuse_assigns(x, v), after) && return nothing
+    # the index is a scalar defined by the same statement in both kernels
+    idx in params_f && return nothing
+    # h is written once in the forward kernel, and the forward kernel writes nothing the block reads
+    wr = cgen_reuse_writes!(kf.args[2], Set{Symbol}())
+    hname in wr || return nothing
+    count(x -> cgen_reuse_writes!(x, Set{Symbol}()) ∋ hname, rf) == 1 || return nothing
+    isempty(intersect(setdiff(wr, Set([hname])), bf.arrs)) || return nothing
+    harg = sub_f[hname]
+    harg isa Symbol || return nothing
+    return (v = v, F = F, idx = idx, hname = hname, harg = harg)
+end
+
+# the idx of the store must have the same definition in the backward kernel
+function cgen_reuse_same_idx(idx::Symbol, parts_f, parts_b, blk_f_k::Int, blk_b_k::Int, sub_f, sub_b, params_f, params_b)
+    df = cgen_reuse_closure(parts_f.rest, length(parts_f.rest) + 1, Set([idx]), Set(params_f))
+    db = cgen_reuse_closure(parts_b.rest, length(parts_b.rest) + 1, Set([idx]), Set(params_b))
+    (df === nothing || db === nothing) && return false
+    Set(keys(df)) == Set(keys(db)) || return false
+    return all(u -> cgen_reuse_subst(df[u], sub_f) == cgen_reuse_subst(db[u], sub_b), keys(df))
+end
+
+# the host statement and the kernels of the backward launch after the replacement, or nothing
+function cgen_reuse_rewrite(stmt, info_b, kdefs::Dict{Symbol,Expr}, lm, blk, cand, params_b, inbounds::Bool)
+    v = blk.v
+    harg = cand.harg
+    newk = Dict{Symbol,Expr}()
+    for n in info_b.names
+        kd = kdefs[n]
+        params = Symbol[kd.args[1].args[2:end]...]
+        call = cgen_split_first_call(stmt, lm, n)
+        call === nothing && return nothing
+        args = call.args[2:end]
+        body_syms = cgen_expr_symbols(kd.args[2])
+        # the stored array is a parameter already, or a new one named after the host symbol
+        pi = findfirst(a -> a === harg, args)
+        local hp::Symbol
+        newparam = false
+        if pi === nothing
+            harg in body_syms && return nothing
+            harg in params && return nothing
+            hp = harg; newparam = true
+        else
+            hp = params[pi]
+        end
+        # the kernel reads the stored array only
+        wr = cgen_reuse_writes!(kd.args[2], Set{Symbol}())
+        (hp in wr) && return nothing
+        # every use of `f(s)` is where `s` still holds the sum: after the block and before a later assignment to `s`
+        lists = cgen_reuse_lists(kd.args[2], Vector{Any}[])
+        sites = [(l, b) for l in lists for b in cgen_reuse_blocks(l) if b.v === v]
+        length(sites) == 1 || return nothing
+        lst, bk = sites[1]
+        tail = lst[bk.k+2:end]
+        fa = findfirst(x -> cgen_reuse_assigns(x, v), tail)
+        allowed = sum(cgen_reuse_count(x, cand.F) for x in (fa === nothing ? tail : tail[1:fa-1]); init = 0)
+        cgen_reuse_count(kd.args[2], cand.F) == allowed || return nothing
+        body = cgen_reuse_replace(kd.args[2], cand.F, Expr(:ref, hp, cand.idx))
+        body == kd.args[2] && return nothing
+        sig = newparam ? Expr(:call, kd.args[1].args[1], params..., hp) : kd.args[1]
+        k2 = Expr(:function, sig, body)
+        k2 = cgen_dead_scalars(k2, inbounds)
+        k2 = Expr(:function, k2.args[1], Expr(:block, cgen_reuse_drop_empty(k2.args[2].args)...))
+        # the reduction must be gone, or the replacement gains nothing
+        init = Expr(:(=), v, nothing)
+        has_block = any(b -> b.v === v, cgen_reuse_blocks(Any[x for x in k2.args[2].args if !(x isa LineNumberNode)]))
+        has_block && return nothing
+        newk[n] = k2
+    end
+    # every launch of the statement gets the extra argument when the kernel took a new parameter
+    function addarg(e)
+        e isa Expr || return e
+        if e.head === :macrocall && e.args[1] === lm && e.args[end] isa Expr && e.args[end].head === :call && e.args[end].args[1] in info_b.names
+            call = e.args[end]
+            kd = kdefs[call.args[1]]
+            np = length(newk[call.args[1]].args[1].args) - length(kd.args[1].args)
+            np == 1 || return e
+            return Expr(:macrocall, e.args[1:end-1]..., Expr(:call, call.args..., harg))
+        end
+        return Expr(e.head, Any[addarg(a) for a in e.args]...)
+    end
+    return (stmt = addarg(stmt), kdefs = newk)
+end
+
+# (host, kernels) with the replacements applied. `inbounds` is the flag the dead-scalar pass already used
+function cgen_reuse_stored(host::Expr, kernels::Vector{Expr}, backend; inbounds::Bool = true)
+    (host.head === :function && length(host.args) == 2 && host.args[2] isa Expr && host.args[2].head === :block) || return (host, kernels)
+    lm = backend.launch_macro
+    kdefs = Dict{Symbol,Expr}()
+    for k in kernels
+        k.head === :function && (kdefs[k.args[1].args[1]] = k)
+    end
+    hs = Any[x for x in host.args[2].args]
+    changed = false
+    for pb in 1:length(hs)
+        info_b = cgen_reuse_launch_info(hs[pb], kdefs, lm)
+        info_b === nothing && continue
+        parts_b = cgen_kernel_parts(kdefs[info_b.base])
+        parts_b === nothing && continue
+        params_b = Symbol[parts_b.sig.args[2:end]...]
+        args_b = info_b.call.args[2:end]
+        length(args_b) == length(params_b) || continue
+        sub_b = Dict{Symbol,Any}(params_b[i] => args_b[i] for i in eachindex(params_b))
+        for blk in cgen_reuse_blocks(parts_b.rest)
+            reads_arr = Set{Symbol}(r for r in blk.arrs if r in params_b)
+            defs_b = cgen_reuse_closure(parts_b.rest, blk.k, Set{Symbol}(r for r in blk.reads if !(r in params_b)), Set(params_b))
+            defs_b === nothing && continue
+            blockstmts_b = Any[cgen_reuse_subst(parts_b.rest[blk.k], sub_b), cgen_reuse_subst(parts_b.rest[blk.k+1], sub_b)]
+            host_reads = Set{Symbol}()
+            for r in reads_arr; union!(host_reads, cgen_split_vars(sub_b[r])); end
+            # a host scalar the block, its scalars, the thread index or the guard read must keep its value between the two launches
+            host_scalars = Set{Symbol}()
+            for e in Any[blockstmts_b..., cgen_reuse_subst(parts_b.head, sub_b), cgen_reuse_subst(parts_b.guard, sub_b), (cgen_reuse_subst(x, sub_b) for x in values(defs_b))...]
+                union!(host_scalars, cgen_split_vars(e))
+            end
+            # walk back over the statements before the launch: scalar assignments and launches only
+            between = NamedTuple[]
+            cand = nothing
+            ok = true
+            for pf in pb-1:-1:1
+                st = hs[pf]
+                (st isa LineNumberNode || (st isa Expr && st.head === :(=) && st.args[1] isa Symbol && !(st.args[1] in host_reads) && !(st.args[1] in host_scalars))) && continue
+                inf = cgen_reuse_launch_info(st, kdefs, lm)
+                if inf === nothing; ok = false; break; end
+                m = cgen_reuse_match(inf, kdefs, blk, blockstmts_b, defs_b, sub_b, parts_b)
+                if m !== nothing
+                    parts_f = cgen_kernel_parts(kdefs[inf.base])
+                    params_f = Symbol[parts_f.sig.args[2:end]...]
+                    sub_f = Dict{Symbol,Any}(params_f[i] => inf.call.args[1+i] for i in eachindex(params_f))
+                    if cgen_reuse_same_idx(m.idx, parts_f, parts_b, 0, 0, sub_f, sub_b, params_f, params_b)
+                        cand = m
+                    end
+                    break
+                end
+                isempty(intersect(inf.writes, host_reads)) || (ok = false; break)
+                push!(between, (pf = pf, inf = inf))
+            end
+            (ok && cand !== nothing) || continue
+            any(b -> cand.harg in b.inf.writes, between) && continue
+            res = cgen_reuse_rewrite(hs[pb], info_b, kdefs, lm, blk, cand, params_b, inbounds)
+            res === nothing && continue
+            hs[pb] = res.stmt
+            merge!(kdefs, res.kdefs)
+            changed = true
+            break
+        end
+    end
+    changed || return (host, kernels)
+    newk = Expr[k.head === :function && haskey(kdefs, k.args[1].args[1]) ? kdefs[k.args[1].args[1]] : k for k in kernels]
+    return (Expr(:function, host.args[1], Expr(:block, hs...)), newk)
+end
+
 # ---- split reduction (CUDA): the lanes of a block share one output's inner loops --------------------------------------------------------------
 # A thread that owns one output and runs a long inner loop leaves a GPU idle when the output count is small: a layer of 5120 units runs 5120 threads,
 # 160 warps for 80 SMs. The split kernel of such a loop gives each output `L` lanes (a block is 32 outputs by L lanes, threadIdx().x is the output, so a
@@ -13603,7 +13939,7 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill), coarsen_occ = Float64(coarsen_occ))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
@@ -13617,6 +13953,7 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
     plan = cgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil), backend; reduction_threshold)
     host, kernels = plan.host, plan.kernels
     dead_scalars && (kernels = Expr[cgen_dead_scalars(k, inbounds) for k in kernels])
+    backend.kernel_tag == "cuda" && dead_scalars && reuse_stored >= 1 && ((host, kernels) = cgen_reuse_stored(host, kernels, backend; inbounds))
     backend.kernel_tag == "cuda" && contraction >= 1 && ((host, kernels) = cgen_contraction_apply(host, kernels, backend; cmin = Int(contraction)))
     backend.kernel_tag == "cuda" && split_reduce >= 2 && ((host, kernels) = cgen_split_apply(host, kernels, Int(split_reduce), backend; min_inner = Int(split_min_inner), max_out = Int(split_max_out)))
     inbounds && (kernels = Expr[cgen_inbounds_wrap(k) for k in kernels])
@@ -13626,8 +13963,8 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction, reuse_stored)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -13639,13 +13976,13 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction, reuse_stored)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
@@ -13655,8 +13992,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction, reuse_stored)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -14195,7 +14532,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -14209,13 +14546,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the
