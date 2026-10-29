@@ -10360,6 +10360,425 @@ function cgen_finish_kernels(kernels::Vector{Expr}; inbounds::Bool = true, dead_
     return out
 end
 
+# ---- split reduction (CUDA): the lanes of a block share one output's inner loops --------------------------------------------------------------
+# A thread that owns one output and runs a long inner loop leaves a GPU idle when the output count is small: a layer of 5120 units runs 5120 threads,
+# 160 warps for 80 SMs. The split kernel of such a loop gives each output `L` lanes (a block is 32 outputs by L lanes, threadIdx().x is the output, so a
+# warp still reads adjacent addresses). It is derived from the finished plain kernel and only re-partitions its loops, in three kinds of item:
+#   :S, :R  scalar statements and loops that only accumulate: every lane runs the statements, a lane sums every L-th iteration, and the L partial sums
+#           go through shared memory, added in the same order by every lane. The sum changes its order, so its last bits differ from the plain kernel.
+#   :W      a store or an atomic at the top level: lane 1 alone runs it.
+#   :A      a loop whose body stores or accumulates: lane l runs every L-th iteration. A plain store needs an index that is affine in the loop
+#           variable with a stride the host can check to be nonzero, so that no two iterations store to one address.
+# A barrier separates a group of :S/:R items from a group of :W or :A items, and a :W group from an :A group. The host launches the split kernel only
+# when the output count is small and the inner trip count large, and otherwise runs the launch statements it already had.
+cgen_split_name(name::Symbol) = (s = string(name); endswith(s, "!") ? Symbol(s[1:end-1], "_s!") : Symbol(s, "_s"))
+cgen_split_max_out() = 32768
+cgen_split_min_inner() = 256
+
+# the variables an expression reads: call heads are not variables
+function cgen_split_vars!(e, out::Set{Symbol})
+    if e isa Symbol
+        push!(out, e)
+    elseif e isa Expr
+        for a in (e.head === :call ? e.args[2:end] : e.args)
+            cgen_split_vars!(a, out)
+        end
+    end
+    return out
+end
+cgen_split_vars(e) = cgen_split_vars!(e, Set{Symbol}())
+
+cgen_split_add(a, b) = a === 0 ? b : b === 0 ? a : Expr(:call, :+, a, b)
+cgen_split_mul(a, b) = (a === 0 || b === 0) ? 0 : a === 1 ? b : b === 1 ? a : Expr(:call, :*, a, b)
+
+# The coefficient of `v` in an expression that is affine in `v`, or nothing
+function cgen_split_coeff(e, v::Symbol)
+    e === v && return 1
+    e isa Expr || return 0
+    if e.head === :call && e.args[1] in (:+, :-, :*)
+        f = e.args[1]; a = e.args[2:end]
+        if f === :+ || (f === :- && length(a) == 2)
+            cs = Any[cgen_split_coeff(x, v) for x in a]
+            any(isnothing, cs) && return nothing
+            f === :+ && return foldl(cgen_split_add, cs)
+            return cgen_split_add(cs[1], cs[2] === 0 ? 0 : cgen_split_mul(-1, cs[2]))
+        elseif f === :- && length(a) == 1
+            c = cgen_split_coeff(a[1], v)
+            return c === nothing ? nothing : cgen_split_mul(-1, c)
+        elseif f === :*
+            dep = [x for x in a if v in cgen_split_vars(x)]
+            isempty(dep) && return 0
+            length(dep) == 1 || return nothing
+            c = cgen_split_coeff(dep[1], v)
+            c === nothing && return nothing
+            for x in a
+                x === dep[1] && continue
+                c = cgen_split_mul(c, x)
+            end
+            return c
+        end
+    end
+    return v in cgen_split_vars(e) ? nothing : 0
+end
+
+cgen_split_is_atomic(s) = cgen_atomic_site(s) !== nothing
+function cgen_split_is_store(s)
+    s isa Expr || return false
+    if s.head === :(=) && s.args[1] isa Expr && s.args[1].head === :ref && length(s.args[1].args) == 2 && s.args[1].args[1] isa Symbol
+        return cgen_dead_pure(s.args[1].args[2], true) && cgen_dead_pure(s.args[2], true)
+    end
+    site = cgen_atomic_site(s)
+    return site !== nothing && cgen_dead_pure(site.idx, true) && cgen_dead_pure(site.val, true)
+end
+cgen_split_is_scalar(s) = s isa Expr && s.head === :(=) && s.args[1] isa Symbol && cgen_dead_pure(s.args[2], true)
+
+# (var, lo, step, hi, body) of a flat counted loop whose statements are all scalar or store items, or nothing
+function cgen_split_loop(s)
+    (s isa Expr && s.head === :for && length(s.args) == 2 && s.args[1] isa Expr && s.args[1].head === :(=) && s.args[1].args[1] isa Symbol &&
+     s.args[2] isa Expr && s.args[2].head === :block) || return nothing
+    rng = s.args[1].args[2]
+    (rng isa Expr && rng.head === :call && rng.args[1] === :(:)) || return nothing
+    lo, st, hi = length(rng.args) == 3 ? (rng.args[2], 1, rng.args[3]) : length(rng.args) == 4 ? (rng.args[2], rng.args[3], rng.args[4]) : (nothing, nothing, nothing)
+    lo === nothing && return nothing
+    (st isa Integer && abs(st) == 1) || return nothing
+    body = Any[x for x in s.args[2].args if !(x isa LineNumberNode)]
+    all(x -> cgen_split_is_scalar(x) || cgen_split_is_store(x), body) || return nothing
+    return (var = s.args[1].args[1], lo = lo, step = Int(st), hi = hi, body = body)
+end
+
+# `s = s + t`, `s = t + s` or `s = s - t` with `s` not in t: (s, sign, t), or nothing
+function cgen_split_accum(st)
+    cgen_split_is_scalar(st) || return nothing
+    v = st.args[1]; r = st.args[2]
+    (r isa Expr && r.head === :call && length(r.args) == 3 && r.args[1] in (:+, :-)) || return nothing
+    a, b = r.args[2], r.args[3]
+    if a === v && !(v in cgen_split_vars(b))
+        return (v, r.args[1], b)
+    elseif r.args[1] === :+ && b === v && !(v in cgen_split_vars(a))
+        return (v, :+, a)
+    end
+    return nothing
+end
+
+# The split kernel of a plain kernel, or nothing: (kdef, name, nslots, cond)
+function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out())
+    parts = cgen_kernel_parts(kdef)
+    parts === nothing && return nothing
+    fargs = Symbol[parts.sig.args[2:end]...]
+    params = Set{Symbol}(fargs)
+    n_iter = parts.guard.args[1].args[3]
+    issubset(cgen_split_vars(n_iter), params) || return nothing
+    rest = Any[x for x in parts.rest if !(x isa LineNumberNode)]
+    whole = Expr(:block, rest...)
+    used = cgen_expr_symbols(whole)
+    for nm in (:__jx, :__ly, :__tidr, :__act, :__shr)
+        nm in used && return nothing
+    end
+    items = Tuple{Symbol,Any}[]
+    for s in rest
+        s isa Expr || return nothing
+        if cgen_split_is_scalar(s)
+            push!(items, (:S, s))
+        elseif cgen_split_is_store(s)
+            push!(items, (:W, s))
+        elseif s.head === :for
+            lp = cgen_split_loop(s)
+            lp === nothing && return nothing
+            issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing
+            push!(items, (any(cgen_split_is_store, lp.body) ? :A : :R, s))
+        else
+            return nothing
+        end
+    end
+    any(it -> it[1] in (:R, :A), items) || return nothing
+    # what each later item reads, to find a scalar that outlives its loop
+    reads_after(i) = (out = Set{Symbol}(); for k in (i + 1):length(items); cgen_dead_syms!(items[k][2], out); end; out)
+    # arrays: every plain-stored or atomically-updated array of an :A loop, with the stride the host must find nonzero
+    strides = Any[]
+    plain_sites = Dict{Symbol,Any}()
+    atomic_arrs = Set{Symbol}()
+    nslots = 0
+    trips = Any[]
+    out_items = Any[]
+    for (i, (kind, s)) in enumerate(items)
+        if kind === :W
+            site = cgen_atomic_site(s)
+            site === nothing || push!(atomic_arrs, site.arr)
+        elseif kind === :R || kind === :A
+            lp = cgen_split_loop(s)
+            push!(trips, cgen_trip_count(lp.lo, lp.step, lp.hi))
+            later = reads_after(i)
+            assigned = Symbol[st.args[1] for st in lp.body if cgen_split_is_scalar(st)]
+            if kind === :R
+                accs = Dict{Symbol,Any}()
+                for st in lp.body
+                    cgen_split_is_scalar(st) || return nothing
+                    a = cgen_split_accum(st)
+                    a === nothing || (count(x -> x === st.args[1], assigned) == 1 && (accs[st.args[1]] = a))
+                end
+                # every assigned scalar is an accumulator read by no other statement of the body, or a temporary defined before its first use and dead after the loop
+                defined = Set{Symbol}()
+                for st in lp.body
+                    v = st.args[1]
+                    if haskey(accs, v)
+                        for st2 in lp.body
+                            st2 === st && continue
+                            v in cgen_split_vars(st2.args[2]) && return nothing
+                        end
+                    else
+                        v in cgen_split_vars(st.args[2]) && return nothing
+                        (v in later) && return nothing
+                        push!(defined, v)
+                    end
+                    for r in cgen_split_vars(st.args[2])
+                        (r in assigned && !haskey(accs, r) && !(r in defined)) && return nothing
+                    end
+                end
+                isempty(accs) && return nothing
+                # the start value of an accumulator: the last scalar assignment before the loop must not be an integer literal
+                for (v, _) in accs
+                    k = findlast(it -> it[1] === :S && it[2].args[1] === v, items[1:i - 1])
+                    k === nothing && return nothing
+                    (items[k][2].args[2] isa Integer) && return nothing
+                end
+                nslots += length(accs)
+            else
+                defined = Set{Symbol}()
+                for st in lp.body
+                    if cgen_split_is_scalar(st)
+                        v = st.args[1]
+                        v in cgen_split_vars(st.args[2]) && return nothing
+                        (v in later) && return nothing
+                        push!(defined, v)
+                        for r in cgen_split_vars(st.args[2])
+                            (r in assigned && !(r in defined)) && return nothing
+                        end
+                    else
+                        for r in cgen_split_vars(cgen_atomic_site(st) !== nothing ? Expr(:tuple, cgen_atomic_site(st).idx, cgen_atomic_site(st).val) : Expr(:tuple, st.args[1].args[2], st.args[2]))
+                            (r in assigned && !(r in defined)) && return nothing
+                        end
+                        site = cgen_atomic_site(st)
+                        if site !== nothing
+                            push!(atomic_arrs, site.arr)
+                        else
+                            arr = st.args[1].args[1]; idx = st.args[1].args[2]
+                            haskey(plain_sites, arr) && plain_sites[arr] != (i, idx) && return nothing
+                            plain_sites[arr] = (i, idx)
+                            c = cgen_split_coeff(idx, lp.var)
+                            (c === nothing || c === 0) && return nothing
+                            issubset(cgen_split_vars(c), params) || return nothing
+                            push!(strides, c)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    # a plain-stored array of a loop appears nowhere else, and only at its own index; an atomically updated array is never read
+    for (arr, (i, idx)) in plain_sites
+        n_all = cgen_count_symbol(whole, arr)
+        lp = cgen_split_loop(items[i][2])
+        inside = sum(st -> cgen_count_symbol(st, arr), lp.body; init = 0)
+        n_all == inside || return nothing
+        arr in atomic_arrs && return nothing
+        # every access of the array in the loop sits at the stored index
+        function same_idx(e)
+            e isa Expr || return true
+            if e.head === :ref && e.args[1] === arr
+                return length(e.args) == 2 && e.args[2] == idx
+            end
+            return all(same_idx, e.args)
+        end
+        all(same_idx, lp.body) || return nothing
+    end
+    for arr in atomic_arrs
+        n_sites = 0
+        function count_sites(e)
+            e isa Expr || return
+            site = cgen_atomic_site(e)
+            if site !== nothing
+                site.arr === arr && (n_sites += 1)
+                return
+            end
+            foreach(count_sites, e.args)
+        end
+        count_sites(whole)
+        cgen_count_symbol(whole, arr) == n_sites || return nothing
+    end
+    # emit
+    jx, ly, act, shr = :__jx, :__ly, :__act, :__shr
+    body = Any[Expr(:(=), jx, Expr(:., Expr(:call, :threadIdx), QuoteNode(:x))),
+               Expr(:(=), ly, Expr(:., Expr(:call, :threadIdx), QuoteNode(:y))),
+               Expr(:(=), :__tidr, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, Expr(:., Expr(:call, :blockIdx), QuoteNode(:x)), 1), 32), jx)),
+               Expr(:(=), act, Expr(:call, :<=, :__tidr, n_iter)),
+               Expr(:(=), :__tid, Expr(:call, :min, :__tidr, n_iter))]
+    nslots > 0 && push!(body, Expr(:(=), shr, Expr(:call, :CuDynamicSharedArray, :Float64, 32 * L * nslots)))
+    lane_loop(lp, bodyexprs) = begin
+        first_ = lp.step == 1 ? Expr(:call, :+, lp.lo, Expr(:call, :-, ly, 1)) : Expr(:call, :-, lp.lo, Expr(:call, :-, ly, 1))
+        Expr(:for, Expr(:(=), lp.var, Expr(:call, :(:), first_, lp.step * L, lp.hi)), Expr(:block, bodyexprs...))
+    end
+    prev = nothing
+    slot = 0
+    group(k) = k === :W ? :w : k === :A ? :a : :rep
+    for (kind, s) in items
+        # a scalar statement that reads no array belongs to every group
+        if kind === :S && !cgen_expr_has_ref(s.args[2])
+            push!(body, s)
+            continue
+        end
+        g = group(kind)
+        prev !== nothing && g !== prev && push!(body, Expr(:call, :sync_threads))
+        prev = g
+        if kind === :S
+            push!(body, s)
+        elseif kind === :W
+            push!(body, Expr(:if, Expr(:&&, act, Expr(:call, :(==), ly, 1)), Expr(:block, s)))
+        elseif kind === :A
+            lp = cgen_split_loop(s)
+            push!(body, Expr(:if, act, Expr(:block, lane_loop(lp, lp.body))))
+        else
+            lp = cgen_split_loop(s)
+            accs = Any[]
+            newbody = Any[]
+            for st in lp.body
+                a = cgen_split_accum(st)
+                if a !== nothing && count(x -> cgen_split_is_scalar(x) && x.args[1] === st.args[1], lp.body) == 1 &&
+                   !any(st2 -> st2 !== st && st.args[1] in cgen_split_vars(st2.args[2]), lp.body)
+                    p = Symbol("__p_", a[1])
+                    push!(accs, (a[1], p))
+                    push!(newbody, Expr(:(=), p, Expr(:call, a[2], p, a[3])))
+                else
+                    push!(newbody, st)
+                end
+            end
+            for (v, p) in accs
+                push!(body, Expr(:(=), p, Expr(:call, :zero, v)))
+            end
+            push!(body, lane_loop(lp, newbody))
+            base0 = slot
+            for (k, (v, p)) in enumerate(accs)
+                push!(body, Expr(:(=), Expr(:ref, shr, Expr(:call, :+, (slot + k - 1) * 32 * L, Expr(:call, :*, Expr(:call, :-, ly, 1), 32), jx)), p))
+            end
+            push!(body, Expr(:call, :sync_threads))
+            for (k, (v, p)) in enumerate(accs)
+                terms = Any[Expr(:ref, shr, Expr(:call, :+, (slot + k - 1) * 32 * L + (l - 1) * 32, jx)) for l in 1:L]
+                total = foldl((x, y) -> Expr(:call, :+, x, y), terms)
+                push!(body, Expr(:(=), v, Expr(:call, :+, v, total)))
+            end
+            slot += length(accs)
+        end
+    end
+    push!(body, emit_return_nothing())
+    name = cgen_split_name(parts.sig.args[1])
+    kd = Expr(:function, Expr(:call, name, fargs...), Expr(:block, body...))
+    trips = unique(trips)
+    maxtrip = length(trips) == 1 ? trips[1] : Expr(:call, :max, trips...)
+    cond = Expr(:&&, Expr(:&&, Expr(:call, :>=, n_iter, 1), Expr(:call, :<=, n_iter, max_out)), Expr(:call, :>=, maxtrip, min_inner))
+    for c in unique(strides)
+        cond = Expr(:&&, cond, Expr(:call, :!=, c, 0))
+    end
+    return (kdef = kd, name = name, nslots = nslots, n_iter = n_iter, cond = cond, lanes = L)
+end
+
+# the kernels a launch statement starts, by name
+function cgen_split_launched!(e, launch_macro, out::Set{Symbol})
+    e isa Expr || return out
+    if e.head === :macrocall && e.args[1] === launch_macro && e.args[end] isa Expr && e.args[end].head === :call && e.args[end].args[1] isa Symbol
+        push!(out, e.args[end].args[1])
+        return out
+    end
+    for a in e.args
+        cgen_split_launched!(a, launch_macro, out)
+    end
+    return out
+end
+
+# kernel name without a private or coarsened suffix
+function cgen_split_base_name(nm::Symbol)
+    s = string(nm)
+    for suf in ("_p!", "_c!")
+        endswith(s, suf) && return Symbol(s[1:end-length(suf)], "!")
+    end
+    return nm
+end
+
+# A launch group: every path of the statement starts exactly one kernel, and does nothing else
+function cgen_split_pure_launch(e, launch_macro)
+    e isa Expr || return false
+    if e.head === :macrocall
+        return e.args[1] === launch_macro && e.args[end] isa Expr && e.args[end].head === :call
+    elseif e.head === :if && length(e.args) == 3
+        arms = Any[]
+        for arm in e.args[2:3]
+            arm isa Expr && arm.head === :block || return false
+            st = Any[x for x in arm.args if !(x isa LineNumberNode)]
+            length(st) == 1 || return false
+            push!(arms, st[1])
+        end
+        return all(a -> cgen_split_pure_launch(a, launch_macro), arms)
+    end
+    return false
+end
+
+# Adds the split twin of every kernel that has one and wraps its launch statement: the twin when its condition holds, the statement as it was otherwise.
+# Returns (host, kernels). With no twin the arguments come back as they are.
+function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out())
+    L >= 2 || return (host, kernels)
+    twins = Dict{Symbol,Any}()
+    for k in kernels
+        k.head === :function || continue
+        nm = k.args[1].args[1]
+        (cgen_is_coarse_variant(k) || endswith(string(nm), "_p!")) && continue
+        t = cgen_split_kernel(k, L; min_inner, max_out)
+        t === nothing || (twins[nm] = t)
+    end
+    isempty(twins) && return (host, kernels)
+    used = Set{Symbol}()
+    function walk(e)
+        e isa Expr || return e
+        if (e.head === :if || e.head === :macrocall) && cgen_split_pure_launch(e, backend.launch_macro)
+            names = cgen_split_launched!(e, backend.launch_macro, Set{Symbol}())
+            bases = Set{Symbol}(cgen_split_base_name(n) for n in names)
+            if length(bases) == 1 && first(bases) in keys(twins)
+                base = first(bases)
+                t = twins[base]
+                plain = cgen_split_first_call(e, backend.launch_macro, base)
+                plain === nothing && return e
+                call = Expr(:call, t.name, plain.args[2:end]...)
+                nblocks = Expr(:call, :max, 1, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), t.n_iter, 32))
+                kws = Any[Expr(:(=), backend.threads_kw, Expr(:tuple, 32, t.lanes)), Expr(:(=), backend.blocks_kw, nblocks)]
+                t.nslots > 0 && push!(kws, Expr(:(=), :shmem, 8 * 32 * t.lanes * t.nslots))
+                launch = Expr(:macrocall, backend.launch_macro, nothing, kws..., call)
+                push!(used, base)
+                # the block of 32 * L threads must fit the registers of the twin: read the limit from the compiled kernel, which the launch finds cached
+                probe = Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), call)
+                fits = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), probe), 32 * t.lanes)
+                return emit_if(Expr(:&&, t.cond, fits), Any[launch], Any[e])
+            end
+        end
+        return Expr(e.head, Any[walk(a) for a in e.args]...)
+    end
+    newhost = walk(host)
+    isempty(used) && return (host, kernels)
+    newk = copy(kernels)
+    for nm in sort(collect(used); by = string)
+        push!(newk, twins[nm].kdef)
+    end
+    return (newhost, newk)
+end
+
+function cgen_split_first_call(e, launch_macro, base::Symbol)
+    e isa Expr || return nothing
+    if e.head === :macrocall && e.args[1] === launch_macro && e.args[end] isa Expr && e.args[end].head === :call && e.args[end].args[1] === base
+        return e.args[end]
+    end
+    for a in e.args
+        r = cgen_split_first_call(a, launch_macro, base)
+        r === nothing || return r
+    end
+    return nothing
+end
+
 # Opt-in, applied only when the caller passes precision=T: converts every Float64 literal to T, leaving Int-typed
 # loop/index arithmetic untouched. Just a literal walk, no operand-forcing rewrite, since every array/scalar is caller-
 # supplied (skill-stade rule 8) -- precision is the caller's job. Caveat: a handful of Base operations return Float64
@@ -12563,7 +12982,7 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill), coarsen_occ = Float64(coarsen_occ))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
@@ -12575,15 +12994,18 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
     plan = cgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil), backend; reduction_threshold)
-    kernels = cgen_finish_kernels(plan.kernels; inbounds, dead_scalars)
-    p === Float64 && return (host = plan.host, kernels = kernels, helpers = plan.helpers)
-    return (host = cgen_convert_precision(plan.host, p),
+    host, kernels = plan.host, plan.kernels
+    dead_scalars && (kernels = Expr[cgen_dead_scalars(k, inbounds) for k in kernels])
+    backend.kernel_tag == "cuda" && split_reduce >= 2 && ((host, kernels) = cgen_split_apply(host, kernels, Int(split_reduce), backend; min_inner = Int(split_min_inner), max_out = Int(split_max_out)))
+    inbounds && (kernels = Expr[cgen_inbounds_wrap(k) for k in kernels])
+    p === Float64 && return (host = host, kernels = kernels, helpers = plan.helpers)
+    return (host = cgen_convert_precision(host, p),
             kernels = Expr[cgen_convert_precision(k, p) for k in kernels], helpers = plan.helpers)
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -12595,13 +13017,13 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
@@ -12611,8 +13033,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -13130,10 +13552,13 @@ end
 # Counts every `@atomic ...` site (backend.atomic_macro) anywhere within
 # a generated device kernel Expr, at any nesting depth -- used to scale
 # stade_validate_gpu_file's default tolerance (see its own comment).
+# A split-reduction partial sum (a store into `__shr`) counts as four sites: it adds its terms in another order than the CPU does, as an atomic does,
+# and over a long loop (unet's HVP, 22 split kernels, measured 4.6e-12 against 2.5e-14 per site at one site each).
 function val_count_atomic_sites(expr, atomic_macro)
     expr isa Expr || return 0
     n = (expr.head == :macrocall && !isempty(expr.args) && expr.args[1] == atomic_macro) ? 1 : 0
     n += (expr.head == :call && !isempty(expr.args) && expr.args[1] === cgen_warp_add_name()) ? 1 : 0
+    n += (expr.head == :(=) && expr.args[1] isa Expr && expr.args[1].head === :ref && expr.args[1].args[1] === :__shr) ? 4 : 0
     for a in expr.args
         n += val_count_atomic_sites(a, atomic_macro)
     end
@@ -13148,7 +13573,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -13162,13 +13587,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_min_inner = split_min_inner, split_max_out = split_max_out)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_min_inner = split_min_inner, split_max_out = split_max_out)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the
