@@ -16,7 +16,7 @@ function asnap_readbefore_hv(x, xb, w, wb, i_cell_to_node, m, mb, y, yb, i_ncell
             y[i_node] = y[i_node] + __cse_0 * __cse_0 * 0.3
         end
         for i_node = 1:i_nnode
-            __idx_m_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             m_stack_d[__idx_m_stack_0] = md[i_node]
             m_stack[__idx_m_stack_0] = m[i_node]
             md[i_node] = 0.0
@@ -25,8 +25,8 @@ function asnap_readbefore_hv(x, xb, w, wb, i_cell_to_node, m, mb, y, yb, i_ncell
         for i_cell = 1:i_ncell
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_1 = div(3 - 1, 1) + 1
-                __idx_m_stack_1 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) * ((div(i_ncell - 1, 1) + 1) * __icse_1) + (i_cell - 1) * __icse_1 + (i_loc - 1)) + 1)
+                __icse_1 = div(i_njac - 1, 1) + 1
+                __idx_m_stack_1 = max(0, __icse_1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_1) + 1)
                 __cse_2d = md[i_n]
                 __cse_2 = m[i_n]
                 m_stack_d[__idx_m_stack_1] = __cse_2d
@@ -38,7 +38,7 @@ function asnap_readbefore_hv(x, xb, w, wb, i_cell_to_node, m, mb, y, yb, i_ncell
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             __cse_3d = xd[i_node]
             __cse_3 = x[i_node]
             x_stack_d[__idx_x_stack_0] = __cse_3d
@@ -49,7 +49,7 @@ function asnap_readbefore_hv(x, xb, w, wb, i_cell_to_node, m, mb, y, yb, i_ncell
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             xd[i_node] = x_stack_d[__idx_x_stack_0]
             x[i_node] = x_stack[__idx_x_stack_0]
             mbd[i_node] = mbd[i_node] + 0.5 * xbd[i_node]
@@ -58,8 +58,8 @@ function asnap_readbefore_hv(x, xb, w, wb, i_cell_to_node, m, mb, y, yb, i_ncell
         for i_cell = i_ncell:-1:1
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_4 = div(3 - 1, 1) + 1
-                __idx_m_stack_0 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) * ((div(i_ncell - 1, 1) + 1) * __icse_4) + (i_cell - 1) * __icse_4 + (i_loc - 1)) + 1)
+                __icse_4 = div(i_njac - 1, 1) + 1
+                __idx_m_stack_0 = max(0, __icse_4) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_4) + 1)
                 md[i_n] = m_stack_d[__idx_m_stack_0]
                 m[i_n] = m_stack[__idx_m_stack_0]
                 __cse_5d = mbd[i_n]
@@ -73,7 +73,7 @@ function asnap_readbefore_hv(x, xb, w, wb, i_cell_to_node, m, mb, y, yb, i_ncell
             end
         end
         for i_node = i_nnode:-1:1
-            __idx_m_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             md[i_node] = m_stack_d[__idx_m_stack_0]
             m[i_node] = m_stack[__idx_m_stack_0]
             mbd[i_node] = 0.0

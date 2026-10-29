@@ -8,7 +8,7 @@ function idm_gather_rmw_hv(m, mb, x, xb, i_cell_to_node, loss, lossb, i_ncell, i
     for i_cell = 1:i_ncell
         for i_loc = 1:4
             i_node = i_cell_to_node[i_loc, i_cell]
-            __idx_m_stack_1 = ((i_cell - 1) * (div(4 - 1, 1) + 1) + (i_loc - 1)) + 1
+            __idx_m_stack_1 = ((i_cell - 1) + (i_loc - 1) * (div(i_ncell - 1, 1) + 1)) + 1
             __cse_0d = md[i_node]
             __cse_0 = m[i_node]
             m_stack_d[__idx_m_stack_1] = __cse_0d
@@ -37,7 +37,7 @@ function idm_gather_rmw_hv(m, mb, x, xb, i_cell_to_node, loss, lossb, i_ncell, i
     for i_cell = i_ncell:-1:1
         for i_loc = 4:-1:1
             i_node = i_cell_to_node[i_loc, i_cell]
-            __idx_m_stack_0 = ((i_cell - 1) * (div(4 - 1, 1) + 1) + (i_loc - 1)) + 1
+            __idx_m_stack_0 = ((i_cell - 1) + (i_loc - 1) * (div(i_ncell - 1, 1) + 1)) + 1
             md[i_node] = m_stack_d[__idx_m_stack_0]
             m[i_node] = m_stack[__idx_m_stack_0]
             __oldb_2d = mbd[i_node]

@@ -21,7 +21,7 @@ function ii_readnested_hv(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, xd, xbd,
         accd[i_i] = accd[i_i] + (__hcse_1 + __hcse_1)
         acc[i_i] = acc[i_i] + v * v
         for i_j = 1:i_m
-            __idx_v_stack_0 = ((i_i - 1) * (div(i_m - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_v_stack_0 = ((i_i - 1) + (i_j - 1) * (div(i_n - 1, 1) + 1)) + 1
             v_stack_d[__idx_v_stack_0] = vd
             v_stack[__idx_v_stack_0] = v
             __hcse_2 = y[i_j]
@@ -58,7 +58,7 @@ function ii_readnested_hv(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, xd, xbd,
             vb = vb + __cse_3
             vbd = vbd + __cse_3d
             vb = vb + __cse_3
-            __idx_v_stack_0 = ((i_i - 1) * (div(i_m - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_v_stack_0 = ((i_i - 1) + (i_j - 1) * (div(i_n - 1, 1) + 1)) + 1
             vd = v_stack_d[__idx_v_stack_0]
             v = v_stack[__idx_v_stack_0]
             __oldb_2d = vbd

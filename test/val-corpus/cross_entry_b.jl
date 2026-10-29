@@ -13,7 +13,7 @@ function cross_entry_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xv_stack)
         xv = x[t] * 0.5
         a = a + xv * xv
         for ci = 1:i_nc
-            __idx_xv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_xv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             xv_stack[__idx_xv_stack_0] = xv
             xv = x[(t + ci) - 1]
             a = a + xv * xv * w[ci]
@@ -42,7 +42,7 @@ function cross_entry_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xv_stack)
             xvb = xvb + __cse_2
             xvb = xvb + __cse_2
             wb[ci] = wb[ci] + (xv * xv) * ab
-            __idx_xv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_xv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             xv = xv_stack[__idx_xv_stack_0]
             __oldb_2 = xvb
             xvb = 0.0

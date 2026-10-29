@@ -7,7 +7,7 @@ end
 
 function while_if_inside_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossbd, ud, ubd, ad, abd, vd, vbd, whilecount_stack, __wcarry_i_k_stack, branch_stack)
     i_k = 1
-    __wcount_b0b2cd = 0
+    __wcount_d661fa = 0
     while i_k <= i_n
         push!(__wcarry_i_k_stack, i_k)
         if u[i_k] > 0.0
@@ -26,9 +26,9 @@ function while_if_inside_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossbd
             push!(branch_stack, 0)
         end
         i_k = i_k + 1
-        __wcount_b0b2cd = __wcount_b0b2cd + 1
+        __wcount_d661fa = __wcount_d661fa + 1
     end
-    push!(whilecount_stack, __wcount_b0b2cd)
+    push!(whilecount_stack, __wcount_d661fa)
     for i_x = 1:i_n
         __hcse_4 = v[i_x]
         lossd[1] = lossd[1] + (2__hcse_4) * vd[i_x]
@@ -40,8 +40,8 @@ function while_if_inside_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, lossbd
         vbd[i_x] = vbd[i_x] + (__hcse_5 * (2 * vd[i_x]) + __hcse_6 * lossbd[1])
         vb[i_x] = vb[i_x] + __hcse_6 * __hcse_5
     end
-    __wcount_b0b2cd = pop!(whilecount_stack)
-    for __witer_b0b2cd = 1:__wcount_b0b2cd
+    __wcount_d661fa = pop!(whilecount_stack)
+    for __witer_d661fa = 1:__wcount_d661fa
         i_k = pop!(__wcarry_i_k_stack)
         __branch = pop!(branch_stack)
         if __branch == 1

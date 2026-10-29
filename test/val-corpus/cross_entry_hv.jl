@@ -22,7 +22,7 @@ function cross_entry_hv(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xd, xbd, wd
         ad = ad + (__hcse_0 + __hcse_0)
         a = a + xv * xv
         for ci = 1:i_nc
-            __idx_xv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_xv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             xv_stack_d[__idx_xv_stack_0] = xvd
             xv_stack[__idx_xv_stack_0] = xv
             xvd = xd[(t + ci) - 1]
@@ -78,7 +78,7 @@ function cross_entry_hv(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xd, xbd, wd
             __hcse_9 = xv * xv
             wbd[ci] = wbd[ci] + (ab * (__hcse_8 + __hcse_8) + __hcse_9 * abd)
             wb[ci] = wb[ci] + __hcse_9 * ab
-            __idx_xv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_xv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             xvd = xv_stack_d[__idx_xv_stack_0]
             xv = xv_stack[__idx_xv_stack_0]
             __oldb_2d = xvbd

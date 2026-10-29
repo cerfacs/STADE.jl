@@ -27,7 +27,7 @@ function asnap_ii_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, i_nja
                 i_n = i_cell_to_node[i_loc, i_cell]
                 m[i_n] = m[i_n] + auxu * auxu * 0.1
             end
-            __idx_auxu_stack_3 = ((i_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1
+            __idx_auxu_stack_3 = ((i_ - 1) + (i_cell - 1) * (div(i_njac - 1, 1) + 1)) + 1
             auxu_stack[__idx_auxu_stack_3] = auxu
         end
         for i_node = 1:i_nnode
@@ -42,7 +42,7 @@ function asnap_ii_b(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, i_nja
             mb[i_node] = mb[i_node] + __cse_1
         end
         for i_cell = i_ncell:-1:1
-            __idx_auxu_stack_0 = ((i_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1
+            __idx_auxu_stack_0 = ((i_ - 1) + (i_cell - 1) * (div(i_njac - 1, 1) + 1)) + 1
             auxu = auxu_stack[__idx_auxu_stack_0]
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]

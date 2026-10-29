@@ -63,18 +63,18 @@ function early_stage_offset_hv(u, ub, rhs, rhsb, nu, num_levels, ud, ubd, rhsd, 
             leftd = 0.0
             left = 0.0
             if i_j > 1
-                __idx_branch_stack_0 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_branch_stack_0 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 1
                 leftd = ud[i_j - 1, 1]
                 left = u[i_j - 1, 1]
             else
-                __idx_branch_stack_0 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_branch_stack_0 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 0
             end
             __hcse_0 = rhs[i_j, 1] + left
             ud[i_j, 1] = (0.5left) * (rhsd[i_j, 1] + leftd) + (0.5__hcse_0) * leftd
             u[i_j, 1] = 0.5 * __hcse_0 * left
-            __idx_left_stack_3 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_left_stack_3 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
             left_stack_d[__idx_left_stack_3] = leftd
             left_stack[__idx_left_stack_3] = left
         end
@@ -146,7 +146,7 @@ function early_stage_offset_hv(u, ub, rhs, rhsb, nu, num_levels, ud, ubd, rhsd, 
         __idx_tripcount_stack_0 = (i_k - 1) + 1
         nc = tripcount_stack[__idx_tripcount_stack_0]
         for i_j = nc:-1:1
-            __icse_2 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+            __icse_2 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
             __idx_left_stack_0 = __icse_2
             leftd = left_stack_d[__idx_left_stack_0]
             left = left_stack[__idx_left_stack_0]

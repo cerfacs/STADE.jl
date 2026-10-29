@@ -23,7 +23,7 @@ function cross_readbefore_hv(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xd, xb
             __hcse_1 = (xv * __hcse_0) * xvd
             ad = ad + ((__hcse_1 + __hcse_1) + (xv * xv) * wd[ci])
             a = a + xv * xv * __hcse_0
-            __idx_xv_stack_1 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_xv_stack_1 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             xv_stack_d[__idx_xv_stack_1] = xvd
             xv_stack[__idx_xv_stack_1] = xv
             xvd = xd[(t + ci) - 1]
@@ -63,7 +63,7 @@ function cross_readbefore_hv(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xd, xb
         abd = abd + __oldb_0d
         ab = ab + __oldb_0
         for ci = i_nc:-1:1
-            __idx_xv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_xv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             xvd = xv_stack_d[__idx_xv_stack_0]
             xv = xv_stack[__idx_xv_stack_0]
             __oldb_2d = xvbd

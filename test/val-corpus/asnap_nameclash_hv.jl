@@ -18,7 +18,7 @@ function asnap_nameclash_hv(x, xb, w, wb, i_cell_to_node, m, mb, m_snap, m_snapb
             m_snap_snap_stack[__sbase_m_snap + __sk_m_snap] = m_snap[__sk_m_snap]
         end
         for i_node = 1:i_nnode
-            __idx_m_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             m_stack_d[__idx_m_stack_0] = md[i_node]
             m_stack[__idx_m_stack_0] = m[i_node]
             md[i_node] = 0.0
@@ -29,8 +29,8 @@ function asnap_nameclash_hv(x, xb, w, wb, i_cell_to_node, m, mb, m_snap, m_snapb
         for i_cell = 1:i_ncell
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_0 = div(3 - 1, 1) + 1
-                __idx_m_stack_1 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) * ((div(i_ncell - 1, 1) + 1) * __icse_0) + (i_cell - 1) * __icse_0 + (i_loc - 1)) + 1)
+                __icse_0 = div(i_njac - 1, 1) + 1
+                __idx_m_stack_1 = max(0, __icse_0) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_0) + 1)
                 __cse_1d = md[i_n]
                 __cse_1 = m[i_n]
                 m_stack_d[__idx_m_stack_1] = __cse_1d
@@ -45,7 +45,7 @@ function asnap_nameclash_hv(x, xb, w, wb, i_cell_to_node, m, mb, m_snap, m_snapb
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             __cse_3d = xd[i_node]
             __cse_3 = x[i_node]
             x_stack_d[__idx_x_stack_0] = __cse_3d
@@ -62,7 +62,7 @@ function asnap_nameclash_hv(x, xb, w, wb, i_cell_to_node, m, mb, m_snap, m_snapb
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             xd[i_node] = x_stack_d[__idx_x_stack_0]
             x[i_node] = x_stack[__idx_x_stack_0]
             __cse_6d = xbd[i_node]
@@ -87,8 +87,8 @@ function asnap_nameclash_hv(x, xb, w, wb, i_cell_to_node, m, mb, m_snap, m_snapb
                 i_n = i_cell_to_node[i_loc, i_cell]
                 wbd[i_cell] = wbd[i_cell] + 0.05 * m_snapbd[i_n]
                 wb[i_cell] = wb[i_cell] + 0.05 * m_snapb[i_n]
-                __icse_9 = div(3 - 1, 1) + 1
-                __idx_m_stack_0 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) * ((div(i_ncell - 1, 1) + 1) * __icse_9) + (i_cell - 1) * __icse_9 + (i_loc - 1)) + 1)
+                __icse_9 = div(i_njac - 1, 1) + 1
+                __idx_m_stack_0 = max(0, __icse_9) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_9) + 1)
                 md[i_n] = m_stack_d[__idx_m_stack_0]
                 m[i_n] = m_stack[__idx_m_stack_0]
                 __cse_10d = mbd[i_n]
@@ -104,7 +104,7 @@ function asnap_nameclash_hv(x, xb, w, wb, i_cell_to_node, m, mb, m_snap, m_snapb
         for i_node = i_nnode:-1:1
             m_snapbd[i_node] = 0.0
             m_snapb[i_node] = 0.0
-            __idx_m_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             md[i_node] = m_stack_d[__idx_m_stack_0]
             m[i_node] = m_stack[__idx_m_stack_0]
             mbd[i_node] = 0.0

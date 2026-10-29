@@ -13,7 +13,7 @@ function red_escape_hv(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, xd, xbd, yd
     s = 0.0
     for i_i = 1:i_n
         for i_j = 1:i_m
-            __idx_s_stack_0 = ((i_i - 1) * (div(i_m - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_s_stack_0 = ((i_i - 1) + (i_j - 1) * (div(i_n - 1, 1) + 1)) + 1
             s_stack_d[__idx_s_stack_0] = sd
             s_stack[__idx_s_stack_0] = s
             __hcse_0 = y[i_i]
@@ -82,7 +82,7 @@ function red_escape_hv(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, xd, xbd, yd
         sbd = sbd + __cse_5d
         sb = sb + __cse_5
         for i_j = i_m:-1:1
-            __idx_s_stack_0 = ((i_i - 1) * (div(i_m - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_s_stack_0 = ((i_i - 1) + (i_j - 1) * (div(i_n - 1, 1) + 1)) + 1
             sd = s_stack_d[__idx_s_stack_0]
             s = s_stack[__idx_s_stack_0]
             __hcse_12 = y[i_i]

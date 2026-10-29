@@ -7,7 +7,7 @@ end
 
 function while_if_inside_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_stack, __wcarry_i_k_stack, branch_stack)
     i_k = 1
-    __wcount_51bebb = 0
+    __wcount_83ac30 = 0
     while i_k <= i_n
         push!(__wcarry_i_k_stack, i_k)
         if u[i_k] > 0.0
@@ -19,17 +19,17 @@ function while_if_inside_b(loss, lossb, u, ub, a, ab, v, vb, i_n, whilecount_sta
             push!(branch_stack, 0)
         end
         i_k = i_k + 1
-        __wcount_51bebb = __wcount_51bebb + 1
+        __wcount_83ac30 = __wcount_83ac30 + 1
     end
-    push!(whilecount_stack, __wcount_51bebb)
+    push!(whilecount_stack, __wcount_83ac30)
     for i_x = 1:i_n
         loss[1] = loss[1] + v[i_x] ^ 2
     end
     for i_x = i_n:-1:1
         vb[i_x] = vb[i_x] + (2 * v[i_x]) * lossb[1]
     end
-    __wcount_51bebb = pop!(whilecount_stack)
-    for __witer_51bebb = 1:__wcount_51bebb
+    __wcount_83ac30 = pop!(whilecount_stack)
+    for __witer_83ac30 = 1:__wcount_83ac30
         i_k = pop!(__wcarry_i_k_stack)
         __branch = pop!(branch_stack)
         if __branch == 1

@@ -14,7 +14,7 @@ function while_active_cond_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, loss
     sd = 0.0
     s = 1.0
     i_k = 1
-    __wcount_3353a8 = 0
+    __wcount_33f279 = 0
     while s > 0.05 && i_k <= i_n
         push!(__wcarry_i_k_stack, i_k)
         push!(s_stack_d, sd)
@@ -29,9 +29,9 @@ function while_active_cond_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, loss
         vd[i_k] = __hcse_2 * sd + s * ud[i_k]
         v[i_k] = s * __hcse_2
         i_k = i_k + 1
-        __wcount_3353a8 = __wcount_3353a8 + 1
+        __wcount_33f279 = __wcount_33f279 + 1
     end
-    push!(whilecount_stack, __wcount_3353a8)
+    push!(whilecount_stack, __wcount_33f279)
     for i_x = 1:i_n
         __hcse_3 = v[i_x]
         lossd[1] = lossd[1] + (2__hcse_3) * vd[i_x]
@@ -47,8 +47,8 @@ function while_active_cond_hv(loss, lossb, u, ub, a, ab, v, vb, i_n, lossd, loss
         vbd[i_x] = vbd[i_x] + (__hcse_4 * (2 * vd[i_x]) + __hcse_5 * lossbd[1])
         vb[i_x] = vb[i_x] + __hcse_5 * __hcse_4
     end
-    __wcount_3353a8 = pop!(whilecount_stack)
-    for __witer_3353a8 = 1:__wcount_3353a8
+    __wcount_33f279 = pop!(whilecount_stack)
+    for __witer_33f279 = 1:__wcount_33f279
         i_k = pop!(__wcarry_i_k_stack)
         __oldb_0d = vbd[i_k]
         __oldb_0 = vb[i_k]

@@ -7,7 +7,7 @@ function asnap_slice_b(x, xb, w, wb, dst, agg, aggb, y, yb, i_nedge, i_nnode, i_
     for e = 1:i_nedge
         d = dst[e]
         for f = 1:i_nfeat
-            __idx_agg_stack_0 = ((e - 1) * (div(i_nfeat - 1, 1) + 1) + (f - 1)) + 1
+            __idx_agg_stack_0 = ((e - 1) + (f - 1) * (div(i_nedge - 1, 1) + 1)) + 1
             __cse_0 = agg[(d - 1) * i_nfeat + f]
             agg_stack[__idx_agg_stack_0] = __cse_0
             agg[(d - 1) * i_nfeat + f] = __cse_0 + x[(e - 1) * i_nfeat + f] * w[f]
@@ -27,7 +27,7 @@ function asnap_slice_b(x, xb, w, wb, dst, agg, aggb, y, yb, i_nedge, i_nnode, i_
             aggb[(d - 1) * i_nfeat + f] = aggb[(d - 1) * i_nfeat + f] + __cse_2
         end
         for f = i_nfeat:-1:1
-            __idx_agg_stack_0 = ((e - 1) * (div(i_nfeat - 1, 1) + 1) + (f - 1)) + 1
+            __idx_agg_stack_0 = ((e - 1) + (f - 1) * (div(i_nedge - 1, 1) + 1)) + 1
             agg[(d - 1) * i_nfeat + f] = agg_stack[__idx_agg_stack_0]
             __cse_3 = aggb[(d - 1) * i_nfeat + f]
             xb[(e - 1) * i_nfeat + f] = xb[(e - 1) * i_nfeat + f] + w[f] * __cse_3

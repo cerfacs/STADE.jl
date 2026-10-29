@@ -24,15 +24,17 @@ function if_scalar_then_loop_if_hv(u, ub, x, xb, y, yb, rhs, rhsb, i_n, ud, ubd,
         end
         for j = 1:2
             if j > 1
-                __idx_branch_stack_0 = max(0, div(i_n - 1, 1) + 1) + (((i - 1) * (div(2 - 1, 1) + 1) + (j - 1)) + 1)
+                __icse_0 = div(i_n - 1, 1) + 1
+                __idx_branch_stack_0 = max(0, __icse_0) + (((i - 1) + (j - 1) * __icse_0) + 1)
                 branch_stack[__idx_branch_stack_0] = 1
-                __cse_0d = xd[j]
-                __cse_0 = x[j]
-                __hcse_0 = __cse_0 * __cse_0d
+                __cse_1d = xd[j]
+                __cse_1 = x[j]
+                __hcse_0 = __cse_1 * __cse_1d
                 yd[i] = yd[i] + (__hcse_0 + __hcse_0)
-                y[i] = y[i] + __cse_0 * __cse_0
+                y[i] = y[i] + __cse_1 * __cse_1
             else
-                __idx_branch_stack_0 = max(0, div(i_n - 1, 1) + 1) + (((i - 1) * (div(2 - 1, 1) + 1) + (j - 1)) + 1)
+                __icse_2 = div(i_n - 1, 1) + 1
+                __idx_branch_stack_0 = max(0, __icse_2) + (((i - 1) + (j - 1) * __icse_2) + 1)
                 branch_stack[__idx_branch_stack_0] = 0
             end
         end
@@ -48,32 +50,33 @@ function if_scalar_then_loop_if_hv(u, ub, x, xb, y, yb, rhs, rhsb, i_n, ud, ubd,
         __idx_left_stack_0 = (i - 1) + 1
         leftd = left_stack_d[__idx_left_stack_0]
         left = left_stack[__idx_left_stack_0]
-        __cse_1d = ubd[i]
-        __cse_1 = ub[i]
+        __cse_3d = ubd[i]
+        __cse_3 = ub[i]
         __hcse_3 = left * leftd
         __hcse_4 = left * left
-        rhsbd[i] = rhsbd[i] + (__cse_1 * (__hcse_3 + __hcse_3) + __hcse_4 * __cse_1d)
-        rhsb[i] = rhsb[i] + __hcse_4 * __cse_1
+        rhsbd[i] = rhsbd[i] + (__cse_3 * (__hcse_3 + __hcse_3) + __hcse_4 * __cse_3d)
+        rhsb[i] = rhsb[i] + __hcse_4 * __cse_3
         __hcse_5 = rhs[i]
         __hcse_6 = __hcse_5 * left
-        __cse_2d = __cse_1 * (left * rhsd[i] + __hcse_5 * leftd) + __hcse_6 * __cse_1d
-        __cse_2 = __hcse_6 * __cse_1
-        leftbd = leftbd + __cse_2d
-        leftb = leftb + __cse_2
-        leftbd = leftbd + __cse_2d
-        leftb = leftb + __cse_2
+        __cse_4d = __cse_3 * (left * rhsd[i] + __hcse_5 * leftd) + __hcse_6 * __cse_3d
+        __cse_4 = __hcse_6 * __cse_3
+        leftbd = leftbd + __cse_4d
+        leftb = leftb + __cse_4
+        leftbd = leftbd + __cse_4d
+        leftb = leftb + __cse_4
         for j = 2:-1:1
-            __idx_branch_stack_0 = max(0, div(i_n - 1, 1) + 1) + (((i - 1) * (div(2 - 1, 1) + 1) + (j - 1)) + 1)
+            __icse_5 = div(i_n - 1, 1) + 1
+            __idx_branch_stack_0 = max(0, __icse_5) + (((i - 1) + (j - 1) * __icse_5) + 1)
             __branch = branch_stack[__idx_branch_stack_0]
             if __branch == 1
                 __hcse_7 = yb[i]
                 __hcse_8 = x[j]
-                __cse_3d = __hcse_7 * xd[j] + __hcse_8 * ybd[i]
-                __cse_3 = __hcse_8 * __hcse_7
-                xbd[j] = xbd[j] + __cse_3d
-                xb[j] = xb[j] + __cse_3
-                xbd[j] = xbd[j] + __cse_3d
-                xb[j] = xb[j] + __cse_3
+                __cse_6d = __hcse_7 * xd[j] + __hcse_8 * ybd[i]
+                __cse_6 = __hcse_8 * __hcse_7
+                xbd[j] = xbd[j] + __cse_6d
+                xb[j] = xb[j] + __cse_6
+                xbd[j] = xbd[j] + __cse_6d
+                xb[j] = xb[j] + __cse_6
             end
         end
         __idx_branch_stack_6 = (i - 1) + 1

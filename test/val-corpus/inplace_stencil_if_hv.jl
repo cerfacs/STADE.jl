@@ -21,30 +21,30 @@ function inplace_stencil_if_hv(u, ub, rhs, rhsb, i_nu, i_n, ud, ubd, rhsd, rhsbd
             leftd = 0.0
             left = 0.0
             if i_j > 1
-                __idx_branch_stack_0 = ((i_k - 1) * (div(i_n - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_branch_stack_0 = ((i_k - 1) + (i_j - 1) * (div(i_nu - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 1
                 leftd = ud[i_j - 1]
                 left = u[i_j - 1]
             else
-                __idx_branch_stack_0 = ((i_k - 1) * (div(i_n - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_branch_stack_0 = ((i_k - 1) + (i_j - 1) * (div(i_nu - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 0
             end
             rightd = 0.0
             right = 0.0
             if i_j < i_n
-                __icse_0 = div(i_n - 1, 1) + 1
-                __idx_branch_stack_0 = max(0, div(i_nu - 1, 1) + 1) * max(0, __icse_0) + (((i_k - 1) * __icse_0 + (i_j - 1)) + 1)
+                __icse_0 = div(i_nu - 1, 1) + 1
+                __idx_branch_stack_0 = max(0, __icse_0) * max(0, div(i_n - 1, 1) + 1) + (((i_k - 1) + (i_j - 1) * __icse_0) + 1)
                 branch_stack[__idx_branch_stack_0] = 1
                 rightd = ud[i_j + 1]
                 right = u[i_j + 1]
             else
-                __icse_1 = div(i_n - 1, 1) + 1
-                __idx_branch_stack_0 = max(0, div(i_nu - 1, 1) + 1) * max(0, __icse_1) + (((i_k - 1) * __icse_1 + (i_j - 1)) + 1)
+                __icse_1 = div(i_nu - 1, 1) + 1
+                __idx_branch_stack_0 = max(0, __icse_1) * max(0, div(i_n - 1, 1) + 1) + (((i_k - 1) + (i_j - 1) * __icse_1) + 1)
                 branch_stack[__idx_branch_stack_0] = 0
             end
             ud[i_j] = 0.5 * ((rhsd[i_j] + (right * leftd + left * rightd)) + leftd)
             u[i_j] = 0.5 * (rhs[i_j] + left * right + left)
-            __icse_2 = ((i_k - 1) * (div(i_n - 1, 1) + 1) + (i_j - 1)) + 1
+            __icse_2 = ((i_k - 1) + (i_j - 1) * (div(i_nu - 1, 1) + 1)) + 1
             __idx_left_stack_5 = __icse_2
             left_stack_d[__idx_left_stack_5] = leftd
             left_stack[__idx_left_stack_5] = left
@@ -55,8 +55,8 @@ function inplace_stencil_if_hv(u, ub, rhs, rhsb, i_nu, i_n, ud, ubd, rhsd, rhsbd
     end
     for i_k = i_nu:-1:1
         for i_j = i_n:-1:1
-            __icse_3 = div(i_n - 1, 1) + 1
-            __icse_4 = ((i_k - 1) * __icse_3 + (i_j - 1)) + 1
+            __icse_3 = div(i_nu - 1, 1) + 1
+            __icse_4 = ((i_k - 1) + (i_j - 1) * __icse_3) + 1
             __idx_left_stack_0 = __icse_4
             leftd = left_stack_d[__idx_left_stack_0]
             left = left_stack[__idx_left_stack_0]
@@ -77,7 +77,7 @@ function inplace_stencil_if_hv(u, ub, rhs, rhsb, i_nu, i_n, ud, ubd, rhsd, rhsbd
             rightb = rightb + left * __cse_5
             leftbd = leftbd + __cse_5d
             leftb = leftb + __cse_5
-            __idx_branch_stack_10 = max(0, div(i_nu - 1, 1) + 1) * max(0, __icse_3) + __icse_4
+            __idx_branch_stack_10 = max(0, __icse_3) * max(0, div(i_n - 1, 1) + 1) + __icse_4
             __branch = branch_stack[__idx_branch_stack_10]
             if __branch == 1
                 __oldb_0d = rightbd
@@ -89,7 +89,7 @@ function inplace_stencil_if_hv(u, ub, rhs, rhsb, i_nu, i_n, ud, ubd, rhsd, rhsbd
             end
             rightbd = 0.0
             rightb = 0.0
-            __idx_branch_stack_14 = ((i_k - 1) * (div(i_n - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_branch_stack_14 = ((i_k - 1) + (i_j - 1) * (div(i_nu - 1, 1) + 1)) + 1
             __branch = branch_stack[__idx_branch_stack_14]
             if __branch == 1
                 __oldb_0d = leftbd

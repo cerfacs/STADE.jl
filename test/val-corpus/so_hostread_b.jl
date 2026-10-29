@@ -13,7 +13,7 @@ function so_hostread_b(x, xb, w, wb, y, yb, q, qb, loss, lossb, i_n, i_nc, wv_st
     for t = 1:i_n
         a = 0.0
         for ci = 1:i_nc
-            __idx_wv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_wv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             wv_stack[__idx_wv_stack_0] = wv
             wv = w[(ci - 1) * 3 + 1]
             a = a + x[t] * wv
@@ -64,7 +64,7 @@ function so_hostread_b(x, xb, w, wb, y, yb, q, qb, loss, lossb, i_n, i_nc, wv_st
             wb[(ci - 1) * 3 + 2] = wb[(ci - 1) * 3 + 2] + __oldb_1
             xb[t] = xb[t] + wv * ab
             wvb = wvb + x[t] * ab
-            __idx_wv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_wv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             wv = wv_stack[__idx_wv_stack_0]
             __oldb_2 = wvb
             wvb = 0.0

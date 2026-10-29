@@ -6,7 +6,7 @@ end
 function advection_multi_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_nnode, du_stack)
     for i_ = 1:i_nstep
         for i_x_advection_diff_c1 = 2:i_nnode
-            __idx_du_stack_0 = ((i_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x_advection_diff_c1 - 2)) + 1
+            __idx_du_stack_0 = ((i_ - 1) + (i_x_advection_diff_c1 - 2) * (div(i_nstep - 1, 1) + 1)) + 1
             du_stack[__idx_du_stack_0] = du[i_x_advection_diff_c1]
             du[i_x_advection_diff_c1] = u[i_x_advection_diff_c1] - u[i_x_advection_diff_c1 - 1]
         end
@@ -25,7 +25,7 @@ function advection_multi_b(u, ub, du, dub, c, cb, dx, dxb, dt, dtb, i_nstep, i_n
             dxb = dxb + -((c * dt * __cse_0) / dx ^ 2) * __cse_1
         end
         for i_x_advection_diff_c1 = i_nnode:-1:2
-            __idx_du_stack_0 = ((i_ - 1) * (div(i_nnode - 2, 1) + 1) + (i_x_advection_diff_c1 - 2)) + 1
+            __idx_du_stack_0 = ((i_ - 1) + (i_x_advection_diff_c1 - 2) * (div(i_nstep - 1, 1) + 1)) + 1
             du[i_x_advection_diff_c1] = du_stack[__idx_du_stack_0]
             __oldb_2 = dub[i_x_advection_diff_c1]
             dub[i_x_advection_diff_c1] = 0.0

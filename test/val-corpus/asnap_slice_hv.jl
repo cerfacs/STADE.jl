@@ -8,7 +8,7 @@ function asnap_slice_hv(x, xb, w, wb, dst, agg, aggb, y, yb, i_nedge, i_nnode, i
     for e = 1:i_nedge
         d = dst[e]
         for f = 1:i_nfeat
-            __idx_agg_stack_0 = ((e - 1) * (div(i_nfeat - 1, 1) + 1) + (f - 1)) + 1
+            __idx_agg_stack_0 = ((e - 1) + (f - 1) * (div(i_nedge - 1, 1) + 1)) + 1
             __cse_0d = aggd[(d - 1) * i_nfeat + f]
             __cse_0 = agg[(d - 1) * i_nfeat + f]
             agg_stack_d[__idx_agg_stack_0] = __cse_0d
@@ -42,7 +42,7 @@ function asnap_slice_hv(x, xb, w, wb, dst, agg, aggb, y, yb, i_nedge, i_nnode, i
             aggb[(d - 1) * i_nfeat + f] = aggb[(d - 1) * i_nfeat + f] + __cse_2
         end
         for f = i_nfeat:-1:1
-            __idx_agg_stack_0 = ((e - 1) * (div(i_nfeat - 1, 1) + 1) + (f - 1)) + 1
+            __idx_agg_stack_0 = ((e - 1) + (f - 1) * (div(i_nedge - 1, 1) + 1)) + 1
             aggd[(d - 1) * i_nfeat + f] = agg_stack_d[__idx_agg_stack_0]
             agg[(d - 1) * i_nfeat + f] = agg_stack[__idx_agg_stack_0]
             __cse_3d = aggbd[(d - 1) * i_nfeat + f]

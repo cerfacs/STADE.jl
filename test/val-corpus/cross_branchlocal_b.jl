@@ -15,7 +15,7 @@ function cross_branchlocal_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, branch
         a = 0.0
         for ci = 1:i_nc
             if x[(t + ci) - 1] > 0.5
-                __icse_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+                __icse_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
                 __idx_branch_stack_0 = __icse_0
                 branch_stack[__idx_branch_stack_0] = 1
                 __idx_xv_stack_0 = __icse_0
@@ -23,11 +23,11 @@ function cross_branchlocal_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, branch
                 xv = x[(t + ci) - 1] * 2.0
                 a = a + xv * xv * w[ci]
             else
-                __idx_branch_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+                __idx_branch_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 0
             end
-            __icse_1 = div(i_nc - 1, 1) + 1
-            __idx_xv_stack_1 = max(0, div(i_n - 1, 1) + 1) * max(0, __icse_1) + (((t - 1) * __icse_1 + (ci - 1)) + 1)
+            __icse_1 = div(i_n - 1, 1) + 1
+            __idx_xv_stack_1 = max(0, __icse_1) * max(0, div(i_nc - 1, 1) + 1) + (((t - 1) + (ci - 1) * __icse_1) + 1)
             xv_stack[__idx_xv_stack_1] = xv
         end
         z[t] = a
@@ -38,10 +38,10 @@ function cross_branchlocal_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, branch
     for t = 1:i_n
         b = 0.0
         for ci = 1:i_nc
-            __icse_3 = max(0, div(i_n - 1, 1) + 1)
-            __icse_4 = div(i_nc - 1, 1) + 1
-            __icse_5 = __icse_3 * max(0, __icse_4)
-            __idx_xv_stack_0 = ((__icse_5 + __icse_5) + __icse_3) + (((t - 1) * __icse_4 + (ci - 1)) + 1)
+            __icse_3 = div(i_n - 1, 1) + 1
+            __icse_4 = max(0, __icse_3)
+            __icse_5 = __icse_4 * max(0, div(i_nc - 1, 1) + 1)
+            __idx_xv_stack_0 = ((__icse_5 + __icse_5) + __icse_4) + (((t - 1) + (ci - 1) * __icse_3) + 1)
             xv_stack[__idx_xv_stack_0] = xv
             xv = x[(t + ci) - 1]
             b = b + xv * xv * w[ci]
@@ -81,10 +81,10 @@ function cross_branchlocal_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, branch
             xvb = xvb + __cse_15
             xvb = xvb + __cse_15
             wb[ci] = wb[ci] + (xv * xv) * bb
-            __icse_16 = max(0, div(i_n - 1, 1) + 1)
-            __icse_17 = div(i_nc - 1, 1) + 1
-            __icse_18 = __icse_16 * max(0, __icse_17)
-            __idx_xv_stack_0 = ((__icse_18 + __icse_18) + __icse_16) + (((t - 1) * __icse_17 + (ci - 1)) + 1)
+            __icse_16 = div(i_n - 1, 1) + 1
+            __icse_17 = max(0, __icse_16)
+            __icse_18 = __icse_17 * max(0, div(i_nc - 1, 1) + 1)
+            __idx_xv_stack_0 = ((__icse_18 + __icse_18) + __icse_17) + (((t - 1) + (ci - 1) * __icse_16) + 1)
             xv = xv_stack[__idx_xv_stack_0]
             __oldb_2 = xvb
             xvb = 0.0
@@ -100,9 +100,9 @@ function cross_branchlocal_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, branch
         zb[t] = 0.0
         ab = ab + __oldb_0
         for ci = i_nc:-1:1
-            __icse_20 = div(i_nc - 1, 1) + 1
-            __icse_21 = ((t - 1) * __icse_20 + (ci - 1)) + 1
-            __idx_xv_stack_0 = max(0, div(i_n - 1, 1) + 1) * max(0, __icse_20) + __icse_21
+            __icse_20 = div(i_n - 1, 1) + 1
+            __icse_21 = ((t - 1) + (ci - 1) * __icse_20) + 1
+            __idx_xv_stack_0 = max(0, __icse_20) * max(0, div(i_nc - 1, 1) + 1) + __icse_21
             xv = xv_stack[__idx_xv_stack_0]
             __idx_branch_stack_2 = __icse_21
             __branch = branch_stack[__idx_branch_stack_2]
@@ -111,7 +111,7 @@ function cross_branchlocal_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, branch
                 xvb = xvb + __cse_22
                 xvb = xvb + __cse_22
                 wb[ci] = wb[ci] + (xv * xv) * ab
-                __idx_xv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+                __idx_xv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
                 xv = xv_stack[__idx_xv_stack_0]
                 __oldb_2 = xvb
                 xvb = 0.0

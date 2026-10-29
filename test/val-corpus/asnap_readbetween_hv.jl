@@ -9,7 +9,7 @@ function asnap_readbetween_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nn
     x_stack_d = Vector{Float64}(undef, length(x_stack))
     for i_ = 1:i_njac
         for i_node = 1:i_nnode
-            __idx_m_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             m_stack_d[__idx_m_stack_0] = md[i_node]
             m_stack[__idx_m_stack_0] = m[i_node]
             md[i_node] = 0.0
@@ -18,8 +18,8 @@ function asnap_readbetween_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nn
         for i_cell = 1:i_ncell
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_0 = div(3 - 1, 1) + 1
-                __idx_m_stack_1 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) * ((div(i_ncell - 1, 1) + 1) * __icse_0) + (i_cell - 1) * __icse_0 + (i_loc - 1)) + 1)
+                __icse_0 = div(i_njac - 1, 1) + 1
+                __idx_m_stack_1 = max(0, __icse_0) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_0) + 1)
                 __cse_1d = md[i_n]
                 __cse_1 = m[i_n]
                 m_stack_d[__idx_m_stack_1] = __cse_1d
@@ -29,7 +29,7 @@ function asnap_readbetween_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nn
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             __cse_2d = xd[i_node]
             __cse_2 = x[i_node]
             x_stack_d[__idx_x_stack_0] = __cse_2d
@@ -43,10 +43,10 @@ function asnap_readbetween_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nn
         for i_cell = 1:i_ncell
             for i_loc = 1:3
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_4 = max(0, div(i_njac - 1, 1) + 1)
-                __icse_5 = div(i_ncell - 1, 1) + 1
+                __icse_4 = div(i_njac - 1, 1) + 1
+                __icse_5 = max(0, __icse_4)
                 __icse_6 = div(3 - 1, 1) + 1
-                __idx_m_stack_1 = (__icse_4 * max(0, div(i_nnode - 1, 1) + 1) + __icse_4 * max(0, __icse_5) * max(0, __icse_6)) + (((i_ - 1) * (__icse_5 * __icse_6) + (i_cell - 1) * __icse_6 + (i_loc - 1)) + 1)
+                __idx_m_stack_1 = (__icse_5 * max(0, div(i_nnode - 1, 1) + 1) + __icse_5 * max(0, div(i_ncell - 1, 1) + 1) * max(0, __icse_6)) + (((i_ - 1) + ((i_cell - 1) * __icse_6 + (i_loc - 1)) * __icse_4) + 1)
                 __cse_7d = md[i_n]
                 __cse_7 = m[i_n]
                 m_stack_d[__idx_m_stack_1] = __cse_7d
@@ -60,10 +60,10 @@ function asnap_readbetween_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nn
         for i_cell = i_ncell:-1:1
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_8 = max(0, div(i_njac - 1, 1) + 1)
-                __icse_9 = div(i_ncell - 1, 1) + 1
+                __icse_8 = div(i_njac - 1, 1) + 1
+                __icse_9 = max(0, __icse_8)
                 __icse_10 = div(3 - 1, 1) + 1
-                __idx_m_stack_0 = (__icse_8 * max(0, div(i_nnode - 1, 1) + 1) + __icse_8 * max(0, __icse_9) * max(0, __icse_10)) + (((i_ - 1) * (__icse_9 * __icse_10) + (i_cell - 1) * __icse_10 + (i_loc - 1)) + 1)
+                __idx_m_stack_0 = (__icse_9 * max(0, div(i_nnode - 1, 1) + 1) + __icse_9 * max(0, div(i_ncell - 1, 1) + 1) * max(0, __icse_10)) + (((i_ - 1) + ((i_cell - 1) * __icse_10 + (i_loc - 1)) * __icse_8) + 1)
                 md[i_n] = m_stack_d[__idx_m_stack_0]
                 m[i_n] = m_stack[__idx_m_stack_0]
                 xbd[i_n] = xbd[i_n] + 0.05 * mbd[i_n]
@@ -71,7 +71,7 @@ function asnap_readbetween_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nn
             end
         end
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             xd[i_node] = x_stack_d[__idx_x_stack_0]
             x[i_node] = x_stack[__idx_x_stack_0]
             __hcse_1 = xb[i_node]
@@ -86,8 +86,8 @@ function asnap_readbetween_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nn
         for i_cell = i_ncell:-1:1
             for i_loc = 3:-1:1
                 i_n = i_cell_to_node[i_loc, i_cell]
-                __icse_12 = div(3 - 1, 1) + 1
-                __idx_m_stack_0 = max(0, div(i_njac - 1, 1) + 1) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) * ((div(i_ncell - 1, 1) + 1) * __icse_12) + (i_cell - 1) * __icse_12 + (i_loc - 1)) + 1)
+                __icse_12 = div(i_njac - 1, 1) + 1
+                __idx_m_stack_0 = max(0, __icse_12) * max(0, div(i_nnode - 1, 1) + 1) + (((i_ - 1) + ((i_cell - 1) * (div(3 - 1, 1) + 1) + (i_loc - 1)) * __icse_12) + 1)
                 md[i_n] = m_stack_d[__idx_m_stack_0]
                 m[i_n] = m_stack[__idx_m_stack_0]
                 wbd[i_cell] = wbd[i_cell] + 0.1 * mbd[i_n]
@@ -95,7 +95,7 @@ function asnap_readbetween_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nn
             end
         end
         for i_node = i_nnode:-1:1
-            __idx_m_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_m_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             md[i_node] = m_stack_d[__idx_m_stack_0]
             m[i_node] = m_stack[__idx_m_stack_0]
             mbd[i_node] = 0.0

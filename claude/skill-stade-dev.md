@@ -100,6 +100,18 @@ This is what makes GPU codegen possible at all: a shared stack pointer
 has no meaning once a loop splits across threads, and a running counter
 is no substitute either, since a launch guarantees no visit order.
 
+Slot order within a site is **element-major**: the outermost loop frame is
+the fastest-varying digit (`agen_local_position`), because the GPU thread
+is the outermost iteration and adjacent threads must touch adjacent slots.
+Any new formula must stay a bijection onto `1:multiplicity` and keep that
+order; `test/validate_layout_bijection.jl` measures both. Measured on a V100:
+the U-Net adjoint is 7.7 to 9.8 times faster, and the 11 other benchmark
+kernels did not change. **Known limit:** a site whose outermost frame is a
+sequential loop with the thread inside (time or level loops inside a
+kernel) gets a stride of `trip(outermost)` between adjacent threads, which is
+2.6 to 47 times slower on stores. The layout stage cannot see which frame
+becomes the thread. Do not claim "no regression" for that shape.
+
 **Tier A**: index computable in closed form from kernel arguments and
 the site's own loop nest. Push/pop sites are matched by a *structural*
 key, `agen_site_key(body, idx[, bv])`, never a running counter —

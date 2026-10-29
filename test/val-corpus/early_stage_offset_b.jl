@@ -55,15 +55,15 @@ function early_stage_offset_b(u, ub, rhs, rhsb, nu, num_levels, tripcount_stack,
         for i_j = 1:nc
             left = 0.0
             if i_j > 1
-                __idx_branch_stack_0 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_branch_stack_0 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 1
                 left = u[i_j - 1, 1]
             else
-                __idx_branch_stack_0 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_branch_stack_0 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 0
             end
             u[i_j, 1] = 0.5 * (rhs[i_j, 1] + left) * left
-            __idx_left_stack_3 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_left_stack_3 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
             left_stack[__idx_left_stack_3] = left
         end
     end
@@ -117,7 +117,7 @@ function early_stage_offset_b(u, ub, rhs, rhsb, nu, num_levels, tripcount_stack,
         __idx_tripcount_stack_0 = (i_k - 1) + 1
         nc = tripcount_stack[__idx_tripcount_stack_0]
         for i_j = nc:-1:1
-            __icse_2 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+            __icse_2 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
             __idx_left_stack_0 = __icse_2
             left = left_stack[__idx_left_stack_0]
             __oldb_0 = ub[i_j, 1]

@@ -36,7 +36,7 @@ function asnap_outside_hv(x, xb, y, yb, w, wb, i_cell_to_node, m, mb, i_ncell, i
             end
         end
         for i_node = 1:i_nnode
-            __idx_x_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             __cse_1d = xd[i_node]
             __cse_1 = x[i_node]
             x_stack_d[__idx_x_stack_0] = __cse_1d
@@ -67,7 +67,7 @@ function asnap_outside_hv(x, xb, y, yb, w, wb, i_cell_to_node, m, mb, i_ncell, i
     end
     for i_ = i_njac:-1:1
         for i_node = i_nnode:-1:1
-            __idx_x_stack_0 = ((i_ - 1) * (div(i_nnode - 1, 1) + 1) + (i_node - 1)) + 1
+            __idx_x_stack_0 = ((i_ - 1) + (i_node - 1) * (div(i_njac - 1, 1) + 1)) + 1
             xd[i_node] = x_stack_d[__idx_x_stack_0]
             x[i_node] = x_stack[__idx_x_stack_0]
             __hcse_7 = xb[i_node]

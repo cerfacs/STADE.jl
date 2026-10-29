@@ -37,7 +37,7 @@ function asnap_ii_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, i_nj
                 md[i_n] = md[i_n] + (__hcse_0 + __hcse_0)
                 m[i_n] = m[i_n] + auxu * auxu * 0.1
             end
-            __idx_auxu_stack_3 = ((i_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1
+            __idx_auxu_stack_3 = ((i_ - 1) + (i_cell - 1) * (div(i_njac - 1, 1) + 1)) + 1
             auxu_stack_d[__idx_auxu_stack_3] = auxud
             auxu_stack[__idx_auxu_stack_3] = auxu
         end
@@ -61,7 +61,7 @@ function asnap_ii_hv(x, xb, w, wb, i_cell_to_node, m, mb, i_ncell, i_nnode, i_nj
             mb[i_node] = mb[i_node] + __cse_1
         end
         for i_cell = i_ncell:-1:1
-            __idx_auxu_stack_0 = ((i_ - 1) * (div(i_ncell - 1, 1) + 1) + (i_cell - 1)) + 1
+            __idx_auxu_stack_0 = ((i_ - 1) + (i_cell - 1) * (div(i_njac - 1, 1) + 1)) + 1
             auxud = auxu_stack_d[__idx_auxu_stack_0]
             auxu = auxu_stack[__idx_auxu_stack_0]
             for i_loc = 3:-1:1

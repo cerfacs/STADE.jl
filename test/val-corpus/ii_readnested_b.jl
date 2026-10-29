@@ -12,7 +12,7 @@ function ii_readnested_b(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, v_stack)
         v = __cse_0 * __cse_0
         acc[i_i] = acc[i_i] + v * v
         for i_j = 1:i_m
-            __idx_v_stack_0 = ((i_i - 1) * (div(i_m - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_v_stack_0 = ((i_i - 1) + (i_j - 1) * (div(i_n - 1, 1) + 1)) + 1
             v_stack[__idx_v_stack_0] = v
             v = x[i_i] * y[i_j]
             out[i_i] = out[i_i] + v * v
@@ -33,7 +33,7 @@ function ii_readnested_b(x, xb, y, yb, i_n, i_m, out, outb, acc, accb, v_stack)
             __cse_3 = v * outb[i_i]
             vb = vb + __cse_3
             vb = vb + __cse_3
-            __idx_v_stack_0 = ((i_i - 1) * (div(i_m - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_v_stack_0 = ((i_i - 1) + (i_j - 1) * (div(i_n - 1, 1) + 1)) + 1
             v = v_stack[__idx_v_stack_0]
             __oldb_2 = vb
             vb = 0.0

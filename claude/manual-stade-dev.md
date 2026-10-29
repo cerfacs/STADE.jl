@@ -1221,10 +1221,20 @@ what makes a two-flag public surface defensible for this much machinery.
 
 A site's index is `base_offset + local_position`.
 
-- `agen_local_position` gives the 1-based row-major position within the
-  site's own loop nest. For a nest of depth `d` it sums
-  `position_in_frame * stride_of_frame` over all frames and adds one
-  global `+1`.
+- `agen_local_position` gives the 1-based position within the site's own
+  loop nest, with the outermost frame as the fastest-varying digit
+  (element-major, since v0.4.23). Let `p_i` be the 0-based position in
+  frame `i` and `T_1` the trip count of the outermost frame. The position
+  is `p_1 + T_1 * (sum over i >= 2 of p_i * stride_i) + 1`. The mapping
+  is a bijection onto `1:multiplicity`, so sizes and offsets did not change.
+  Before v0.4.23 the order was row-major with the outermost frame slowest.
+  On the GPU the outermost loop is normally the thread, so adjacent
+  threads now touch adjacent slots. **Limit:** if the outermost frame is a
+  sequential loop and the thread is an inner frame, adjacent threads are
+  `T_1` slots apart. A V100 microbenchmark gives stores 2.6 to 47 times and
+  loads 1.3 to 6.7 times slower than v0.4.22 in that case. The fix needs
+  the layout stage to know which frame the GPU stage turns into the
+  thread. It does not know this today.
 - `agen_stride(loop_ctx, i)` is the product of trip counts of every frame
   strictly more nested than frame `i`.
 - `agen_local_multiplicity` is the product of all frames' trip counts, so
@@ -2239,12 +2249,12 @@ pre-sized vectors with closed-form indices. Only indexed mode is a GPU
 target.
 
 **Local position**
-The 1-based row-major offset of one occurrence within its own loop nest,
-built by `agen_local_position`.
+The 1-based offset of one occurrence within its own loop nest, built by
+`agen_local_position`. The outermost frame is the fastest-varying digit.
 
 **Stride**
 The product of trip counts of every loop frame more nested than a given
-frame. It is that frame's row-major stride.
+frame. It is that frame's stride among the inner frames.
 
 **Local multiplicity**
 The product of all enclosing frames' trip counts, so the total number of

@@ -13,7 +13,7 @@ function cross_readbefore_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xv_stac
         xv = x[t] * 0.5
         for ci = 1:i_nc
             a = a + xv * xv * w[ci]
-            __idx_xv_stack_1 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_xv_stack_1 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             xv_stack[__idx_xv_stack_1] = xv
             xv = x[(t + ci) - 1]
         end
@@ -37,7 +37,7 @@ function cross_readbefore_b(x, xb, w, wb, z, zb, loss, lossb, i_n, i_nc, xv_stac
         zb[t] = 0.0
         ab = ab + __oldb_0
         for ci = i_nc:-1:1
-            __idx_xv_stack_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __idx_xv_stack_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             xv = xv_stack[__idx_xv_stack_0]
             __oldb_2 = xvb
             xvb = 0.0

@@ -120,29 +120,29 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
             leftd = 0.0
             left = 0.0
             if i_j > 1
-                __idx_branch_stack_0 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_branch_stack_0 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 1
                 leftd = ud[i_j - 1, 1]
                 left = u[i_j - 1, 1]
             else
-                __idx_branch_stack_0 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+                __idx_branch_stack_0 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
                 branch_stack[__idx_branch_stack_0] = 0
             end
             rightd = 0.0
             right = 0.0
             if i_j < nc
-                __idx_branch_stack_0 = __mult_1 + (((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_branch_stack_0 = __mult_1 + (((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1)
                 branch_stack[__idx_branch_stack_0] = 1
                 rightd = ud[i_j + 1, 1]
                 right = u[i_j + 1, 1]
             else
-                __idx_branch_stack_0 = __mult_1 + (((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_branch_stack_0 = __mult_1 + (((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1)
                 branch_stack[__idx_branch_stack_0] = 0
             end
             __hcse_1 = rhs[i_j, 1]
             ud[i_j, 1] = 0.5 * (((__hcse_1 * hl2d + hl2 * rhsd[i_j, 1]) + leftd) + rightd)
             u[i_j, 1] = 0.5 * (hl2 * __hcse_1 + left + right)
-            __icse_0 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+            __icse_0 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
             __idx_left_stack_5 = __icse_0
             left_stack_d[__idx_left_stack_5] = leftd
             left_stack[__idx_left_stack_5] = left
@@ -217,34 +217,34 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 left = 0.0
                 if i_j > 1
                     __icse_2 = max(0, div((val_ncoarse_1[(i_level - 2) + 1] + 1) - 1, 1) + 1)
-                    __idx_branch_stack_1_0 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + (__icse_2 + __icse_2)) + (((i_k - 1) * (div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                    __idx_branch_stack_1_0 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + (__icse_2 + __icse_2)) + (((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1)
                     branch_stack[__idx_branch_stack_1_0] = 1
                     leftd = ud[i_j - 1, i_level]
                     left = u[i_j - 1, i_level]
                 else
                     __icse_3 = max(0, div((val_ncoarse_1[(i_level - 2) + 1] + 1) - 1, 1) + 1)
-                    __idx_branch_stack_1_0 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + (__icse_3 + __icse_3)) + (((i_k - 1) * (div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                    __idx_branch_stack_1_0 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + (__icse_3 + __icse_3)) + (((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1)
                     branch_stack[__idx_branch_stack_1_0] = 0
                 end
                 rightd = 0.0
                 right = 0.0
                 if i_j < nc
                     __icse_4 = max(0, div((val_ncoarse_1[(i_level - 2) + 1] + 1) - 1, 1) + 1)
-                    __icse_5 = div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1
-                    __idx_branch_stack_1_0 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + ((__icse_4 + __icse_4) + max(0, div(nu - 1, 1) + 1) * max(0, __icse_5))) + (((i_k - 1) * __icse_5 + (i_j - 1)) + 1)
+                    __icse_5 = div(nu - 1, 1) + 1
+                    __idx_branch_stack_1_0 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + ((__icse_4 + __icse_4) + max(0, __icse_5) * max(0, div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1))) + (((i_k - 1) + (i_j - 1) * __icse_5) + 1)
                     branch_stack[__idx_branch_stack_1_0] = 1
                     rightd = ud[i_j + 1, i_level]
                     right = u[i_j + 1, i_level]
                 else
                     __icse_6 = max(0, div((val_ncoarse_1[(i_level - 2) + 1] + 1) - 1, 1) + 1)
-                    __icse_7 = div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1
-                    __idx_branch_stack_1_0 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + ((__icse_6 + __icse_6) + max(0, div(nu - 1, 1) + 1) * max(0, __icse_7))) + (((i_k - 1) * __icse_7 + (i_j - 1)) + 1)
+                    __icse_7 = div(nu - 1, 1) + 1
+                    __idx_branch_stack_1_0 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + ((__icse_6 + __icse_6) + max(0, __icse_7) * max(0, div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1))) + (((i_k - 1) + (i_j - 1) * __icse_7) + 1)
                     branch_stack[__idx_branch_stack_1_0] = 0
                 end
                 __hcse_3 = rhs[i_j, i_level]
                 ud[i_j, i_level] = 0.5 * (((__hcse_3 * hl2d + hl2 * rhsd[i_j, i_level]) + leftd) + rightd)
                 u[i_j, i_level] = 0.5 * (hl2 * __hcse_3 + left + right)
-                __icse_8 = ((i_k - 1) * (div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1) + (i_j - 1)) + 1
+                __icse_8 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
                 __idx_left_stack_1_5 = (__mult_3 + prefix_left_stack_1[(i_level - 2) + 1]) + __icse_8
                 left_stack_d[__idx_left_stack_1_5] = leftd
                 left_stack[__idx_left_stack_1_5] = left
@@ -273,8 +273,8 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
             __idx_tripcount_stack_1_0 = ((max(0, div(nu - 1, 1) + 1) + prefix_tripcount_stack_1[(i_level - 2) + 1]) + (1 + 1)) + ((i_k - 1) + 1)
             nc = tripcount_stack[__idx_tripcount_stack_1_0]
             for i_j = nc:-1:1
-                __icse_9 = div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1
-                __icse_10 = ((i_k - 1) * __icse_9 + (i_j - 1)) + 1
+                __icse_9 = div(nu - 1, 1) + 1
+                __icse_10 = ((i_k - 1) + (i_j - 1) * __icse_9) + 1
                 __idx_left_stack_1_0 = (__mult_3 + prefix_left_stack_1[(i_level - 2) + 1]) + __icse_10
                 leftd = left_stack_d[__idx_left_stack_1_0]
                 left = left_stack[__idx_left_stack_1_0]
@@ -297,7 +297,7 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 rightbd = rightbd + __cse_11d
                 rightb = rightb + __cse_11
                 __icse_12 = max(0, div((val_ncoarse_1[(i_level - 2) + 1] + 1) - 1, 1) + 1)
-                __idx_branch_stack_1_10 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + ((__icse_12 + __icse_12) + max(0, div(nu - 1, 1) + 1) * max(0, __icse_9))) + __icse_10
+                __idx_branch_stack_1_10 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + ((__icse_12 + __icse_12) + max(0, __icse_9) * max(0, div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1))) + __icse_10
                 __branch = branch_stack[__idx_branch_stack_1_10]
                 if __branch == 1
                     __oldb_0d = rightbd
@@ -310,7 +310,7 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
                 rightbd = 0.0
                 rightb = 0.0
                 __icse_13 = max(0, div((val_ncoarse_1[(i_level - 2) + 1] + 1) - 1, 1) + 1)
-                __idx_branch_stack_1_14 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + (__icse_13 + __icse_13)) + (((i_k - 1) * (div(val_nc_1[(i_level - 2) + 1] - 1, 1) + 1) + (i_j - 1)) + 1)
+                __idx_branch_stack_1_14 = (((__mult_1 + __mult_2) + prefix_branch_stack_1[(i_level - 2) + 1]) + (__icse_13 + __icse_13)) + (((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1)
                 __branch = branch_stack[__idx_branch_stack_1_14]
                 if __branch == 1
                     __oldb_0d = leftbd
@@ -408,7 +408,7 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
         __idx_tripcount_stack_0 = (i_k - 1) + 1
         nc = tripcount_stack[__idx_tripcount_stack_0]
         for i_j = nc:-1:1
-            __icse_17 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+            __icse_17 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
             __idx_left_stack_0 = __icse_17
             leftd = left_stack_d[__idx_left_stack_0]
             left = left_stack[__idx_left_stack_0]
@@ -442,7 +442,7 @@ function cascadic_mg_prolong_hv(u, ub, rhs, rhsb, h_coarse, h_coarseb, nu, num_l
             end
             rightbd = 0.0
             rightb = 0.0
-            __idx_branch_stack_14 = ((i_k - 1) * (div(nc - 1, 1) + 1) + (i_j - 1)) + 1
+            __idx_branch_stack_14 = ((i_k - 1) + (i_j - 1) * (div(nu - 1, 1) + 1)) + 1
             __branch = branch_stack[__idx_branch_stack_14]
             if __branch == 1
                 __oldb_0d = leftbd

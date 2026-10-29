@@ -25,7 +25,7 @@ function so_inner_hv(x, xb, w, wb, q, qb, y, yb, loss, lossb, i_n, i_nc, xd, xbd
     run = 0.0
     for t = 1:i_n
         for ci = 1:i_nc
-            __icse_0 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __icse_0 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             __idx_xv_stack_0 = __icse_0
             xv_stack_d[__idx_xv_stack_0] = xvd
             xv_stack[__idx_xv_stack_0] = xv
@@ -176,7 +176,7 @@ function so_inner_hv(x, xb, w, wb, q, qb, y, yb, loss, lossb, i_n, i_nc, xd, xbd
             xvb = xvb + wv * __oldb_0
             wvbd = wvbd + (__oldb_0 * xvd + xv * __oldb_0d)
             wvb = wvb + xv * __oldb_0
-            __icse_14 = ((t - 1) * (div(i_nc - 1, 1) + 1) + (ci - 1)) + 1
+            __icse_14 = ((t - 1) + (ci - 1) * (div(i_n - 1, 1) + 1)) + 1
             __idx_wv_stack_0 = __icse_14
             wvd = wv_stack_d[__idx_wv_stack_0]
             wv = wv_stack[__idx_wv_stack_0]
