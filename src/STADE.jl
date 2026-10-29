@@ -12613,9 +12613,10 @@ end
 # tripping an unrelated error -- and, when self_check is on, against a combination that runs cleanly but is
 # semantically degenerate. No general way to detect that up front; instead a tangent-vs-FD check runs against
 # the candidate, discarding and redrawing the whole triple if it fails.
+# attempts is 256: a kernel whose integer draws are often unusable (transformer, 3 to 6) needs more than 16 redraws on some seeds, and which seeds is not stable across Julia versions
 function val_generate_baseline(kernel, primal_expr::Expr;
                                 scale::Float64 = 1.0, int_lo::Int = 3, int_hi::Int = 5,
-                                grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 16,
+                                grow_start::Int = 4, grow_max::Int = 512, attempts::Int = 256,
                                 self_check::Bool = true, self_check_trials::Int = 2,
                                 self_check_epsilon::Float64 = 1e-6, self_check_rtol::Float64 = 1e-3,
                                 max_output_magnitude::Float64 = 1e6,

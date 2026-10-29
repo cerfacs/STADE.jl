@@ -2620,6 +2620,8 @@ is that of v0.4.34. The plan's target (adjoint at most 100 ms at d1024) is misse
 
 *Measured* (v0.4.41, V100): `transformer_block` HVP, median of 30 runs: d512_T512 22.3 ms, d1024_T1024 0.125 s, d2048_T1024 0.410 s (0.359 s and 1.54 s in v0.4.40 at the last two). The largest kernels at d1024_T1024 are `hv_11_t` 11.7 ms, `hv_10_t` 9.8 ms, `hv_13_f_t` 9.6 ms and `hv_3_t` 7.4 ms. Parity on the V100 (twins forced at small sizes, each run counts the launches of its twins and the changed elements): `transformer_block` HVP at three sizes, `mpnn_gather` HVP and adjoint at two sizes each, and the corpus `transformer` HVP (540 twin launches, 108 of them forward kernels, 10,709 changed elements).
 
+*Baseline redraws* (v0.4.42). `val_generate_baseline` draws integer arguments, grows the array sizes and runs a tangent self-check, and redraws the whole triple when any step fails; `attempts` (default 256) bounds the redraws. A kernel with a low acceptance needs many: `transformer` accepts about 6% of the draws in the range 3 to 6, so 16 redraws failed on 21 of 60 seeds, and which seeds fail depends on the Julia version (the random stream consumed by a failed attempt differs between 1.10 and 1.11). `test/validate_baseline_attempts.jl` keeps two such seeds. A kernel that fails after 256 redraws has a real incoherence in its integer arguments, not bad luck.
+
 **Gather form of affine stencil adjoints** (`gather_stencil`)
 All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The
 adjoint of `y[i] = f(x[i-1], x[i], x[i+1])` scatters: iteration `i` adds to

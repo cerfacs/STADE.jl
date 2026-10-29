@@ -459,6 +459,8 @@ The adjoint contraction (v0.4.40) also tiles the HVP: an atomic statement may ad
 
 The forward loops of an HVP are tiled too (v0.4.41): a loop may have up to two accumulators `s = s + P`, each `P` one product or the sum of two products of array elements, with the operand reads shared through scalar temporaries, and the forward stage of an adjoint group may store two scalars (`__cf_s`, `__cf_s2`). One accumulator and one product give the text of v0.4.40. A twin of two accumulators or two products also needs `N` at least `min(contraction, 64)`; below that the plain kernel runs (V100, `mpnn_gather` at N = 16: the twin was 21 to 27% slower).
 
+The baseline generator redraws up to 256 times (v0.4.42): a kernel with a low acceptance of integer draws needs more than 16, and which seeds fail depends on the Julia version. A failure after 256 redraws is a real incoherence in the kernel's integer arguments.
+
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
 no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded
