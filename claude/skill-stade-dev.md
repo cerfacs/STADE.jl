@@ -309,7 +309,7 @@ cancels, so it complements rather than replaces.
 `stade_gpu` ingests **already-generated** code; its only keywords are
 `precision`, `reduction_threshold`, `hoist_atomics`, `gather_stencil` (all backends) and the CUDA-only `warp_atomics`,
 `sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly), plus the CUDA-only opt-in
-`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). Every backend also takes `inbounds` and `dead_scalars` (default on; both `false` is the exact v0.4.31 text). **Only `keep_push_pop=false` output is
+`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). Every backend also takes `inbounds` and `dead_scalars` (default on; both `false` is the exact v0.4.31 text). CUDA also takes `split_reduce` (lanes per output, default 16; 0 off), `split_min_inner` and `split_max_out`. **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
@@ -430,6 +430,15 @@ a silent wrong access, so debug with `inbounds = false`, and a validator that in
 mutant that cannot change any output (the first guess of the loop fixpoint) cannot be sabotage-tested; say so, do not hide it.
 A sabotage harness must keep the modified source: guard the include in the test file with `isdefined(Main, :STADE) ||`, or every
 mutant runs against the original and "NOT CAUGHT" means nothing.
+
+`split_reduce = L` (CUDA) emits a twin `<name>_s!` of a one-thread-per-output kernel whose inner loops accumulate (`s = s + t`) or update arrays: a block of
+32 outputs x L lanes, lane-partitioned loops, partial sums in dynamic shared memory summed in the same order by every lane, stores on lane 1 or lane-partitioned,
+`sync_threads()` between groups of items that read what another wrote. Compare a split result with the CPU Float64 result only up to that result's own error: `validate_ownership` falls back to the BigFloat truth (at most 20 times the CPU error, or 1e-10) for a draw that fails the tolerance, and `validate_inbounds` builds its plans with `split_reduce = 0`. The host launches it only when the outputs are in `1:split_max_out`, the inner trip count is at
+least `split_min_inner`, the strides are nonzero and the block fits `CUDA.maxthreads` of the compiled twin. Read the guards before changing anything: an accumulator that
+another statement reads, an integer start, a temporary live after the loop, a plain-stored array seen outside its loop or at two indices, and an atomically updated array that is read
+each make the lanes disagree. Forced onto kernels with large outputs or short inner loops the twin is slower (the transformer lost 25%); the limits are measured, not derived. One guard
+(the plain-stored array appears nowhere outside its loop) cannot be sabotage-tested: every shape that reaches it is already refused by the plain-write gate, so say it is a second
+line of defense. Validators that inspect text pass `split_reduce = 0`.
 
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,

@@ -184,6 +184,47 @@ function gval_compare(cpu_tracked::Dict, dev_tracked::Dict, dev_to_host, pre::Di
     return m, changed
 end
 
+# BigFloat truth of one trial, for a comparison that the CPU Float64 result cannot decide. The CPU result is itself off the exact value (by 1e-11 on an
+# ill-conditioned HVP), so a device result that re-orders a sum can differ from it by more than the tolerance and still be closer to the exact value. The
+# same CPU code is run in BigFloat (192 bits) on the same inputs. Returns (cpu, dev, ok): the worst relative error of the CPU and of the device result
+# against it, and whether the run was possible.
+function gval_truth_trial(kernel, int_args, values, seed, gen_out, cpu_gen_expr, mode, dvals, dsd, stack_arg_names,
+                          cpu_tracked, dev_tracked, dev_to_host, ret_cpu, ret_dev, n_ret)
+    setprecision(BigFloat, 192)
+    sig = kernel.sig
+    for ex in (gen_out.initstacks, cpu_gen_expr)
+        nm = string(ex.args[1].args[1])
+        isdefined(Main, Symbol(nm * "_big")) && continue
+        txt = replace(replace(STADE.io_expr_to_source(ex), "function $(nm)(" => "function $(nm)_big("), "Float64" => "BigFloat")
+        Core.eval(Main, Meta.parse("begin\n" * txt * "\nend"))
+    end
+    tobig(x) = x isa AbstractArray{Float64} ? BigFloat.(x) : (x isa Float64 ? BigFloat(x) : x)
+    big_args, big_tracked = gval_build_call(sig, int_args, values, seed, tobig; mode, dvalues = dvals, dseed = dsd)
+    big_args = Any[tobig(x) for x in big_args]
+    init_big = Core.eval(Main, Symbol(string(gen_out.initstacks.args[1].args[1]) * "_big"))
+    gen_big = Core.eval(Main, Symbol(string(cpu_gen_expr.args[1].args[1]) * "_big"))
+    stacks_big = gval_live_init_stacks(init_big, gval_stack_extra(stack_arg_names, int_args, values, tobig))
+    ret_big = try Base.invokelatest(gen_big, big_args..., stacks_big...) catch; return (0.0, 0.0, false) end
+    rel(t, a) = (m0 = 0.0; for i in eachindex(t); d = Float64(abs(t[i] - a[i])) / max(Float64(abs(t[i])), abs(Float64(a[i])), 1.0); d > m0 && (m0 = d); end; m0)
+    ec = 0.0; ed = 0.0
+    for (a, ct) in cpu_tracked
+        ct.kind == :array_float || continue
+        bt = big_tracked[a]; dt = dev_tracked[a]
+        for f in (:val, :sh, :tan, :shtan)
+            hasproperty(ct, f) || continue
+            ec = max(ec, rel(getproperty(bt, f), getproperty(ct, f)))
+            ed = max(ed, rel(getproperty(bt, f), dev_to_host(getproperty(dt, f))))
+        end
+    end
+    if n_ret > 0
+        rb = n_ret == 1 ? (ret_big,) : ret_big; rc = n_ret == 1 ? (ret_cpu,) : ret_cpu; rd = n_ret == 1 ? (ret_dev,) : ret_dev
+        for i in 1:n_ret
+            ec = max(ec, gval_relerr_scalar(Float64(rb[i]), Float64(rc[i]))); ed = max(ed, gval_relerr_scalar(Float64(rb[i]), Float64(rd[i])))
+        end
+    end
+    return (ec, ed, true)
+end
+
 # Runs `trials` reverse-mode seeds through both the CPU adjoint and one
 # device plan (CUDA's or JACC's, whichever (wrap, dev_to_host,
 # atomic_macro) triple is passed in), evaluating every kernel and host
@@ -195,7 +236,7 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
                              gen_out, plan_init, plan_gen, stack_arg_names::Vector{Symbol},
                              wrap, dev_to_host, atomic_macro;
                              mode::Symbol = :adjoint,
-                             tan_seeds::Vector = Any[], shtan_seeds::Vector = Any[])
+                             tan_seeds::Vector = Any[], shtan_seeds::Vector = Any[], truth::Bool = false)
     cpu_gen_expr = mode == :hvp ? gen_out.hvp : gen_out.adjoint
     for h in vcat(get(plan_init, :helpers, Expr[]), get(plan_gen, :helpers, Expr[]))
         Core.eval(Main, h)
@@ -237,6 +278,7 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
 
     max_err = 0.0
     n_changed = 0
+    tr_cpu = 0.0; tr_dev = 0.0; tr_ran = truth
     for (i_seed, seed) in enumerate(seeds)
         dvals = mode == :hvp ? tan_seeds[i_seed] : Dict{Symbol,Any}()
         dsd   = mode == :hvp ? shtan_seeds[i_seed] : Dict{Symbol,Any}()
@@ -255,6 +297,10 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
                                for (a, ct) in cpu_tracked)
         ret_cpu = Base.invokelatest(cpu_gen_fn, cpu_args..., stacks_cpu...)
         ret_dev = Base.invokelatest(dev_gen_fn, dev_args..., stacks_dev...)
+        if truth && tr_ran
+            ec, ed, okb = gval_truth_trial(kernel, int_args, values, seed, gen_out, cpu_gen_expr, mode, dvals, dsd, stack_arg_names, cpu_tracked, dev_tracked, dev_to_host, ret_cpu, ret_dev, n_ret)
+            okb ? ((tr_cpu = max(tr_cpu, ec)); (tr_dev = max(tr_dev, ed))) : (tr_ran = false)
+        end
 
         m, n = gval_compare(cpu_tracked, dev_tracked, dev_to_host, pre)
         n_changed += n
@@ -267,8 +313,10 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
         end
         max_err = max(max_err, m)
     end
+    # the verdict of the BigFloat truth, as in the scripts of the GPU validators: at most 20 times the CPU error, or 1e-10, and never below rtol
+    truth_ok = truth && tr_ran && n_changed > 0 && tr_dev <= max(rtol, 20 * tr_cpu, 1.0e-10)
     return (ok = max_err <= rtol && n_changed > 0, max_rel_err = max_err, rtol = rtol,
-            elements_changed = n_changed, vacuous = n_changed == 0)
+            elements_changed = n_changed, vacuous = n_changed == 0, truth_ok = truth_ok, tr_cpu = tr_cpu, tr_dev = tr_dev)
 end
 
 # ---- top-level driver ------------------------------------------------

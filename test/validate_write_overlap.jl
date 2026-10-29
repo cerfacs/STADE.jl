@@ -209,7 +209,7 @@ end
 # `gather` = false keeps the scatter loops as they are, which is what the atomic-repair checks are about; `gather` = true is the default of stade_gpu
 function val_overlap_backends(; gather::Bool = false)
     cuda = STADE.cgen_backend_cuda()
-    return [("cuda", e -> STADE.stade_gpu(e, cuda; warp_atomics = false, gather_stencil = gather, inbounds = false, dead_scalars = false).kernels,
+    return [("cuda", e -> STADE.stade_gpu(e, cuda; warp_atomics = false, gather_stencil = gather, inbounds = false, dead_scalars = false, split_reduce = 0).kernels,
              Any[cuda.atomic_macro]),
             ("jacc", e -> STADE.stade_jacc(e; gather_stencil = gather, inbounds = false, dead_scalars = false).kernels,
              Any[Expr(:., :Atomix, QuoteNode(Symbol("@atomic")))])]

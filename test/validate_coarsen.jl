@@ -219,7 +219,7 @@ crs_jammed(k) = occursin("__jmb", crs_src(k))
 crs_plain(ks) = [k for k in ks if !STADE.cgen_is_coarse_variant(k)]
 crs_same_list(a, b) = length(a) == length(b) && all(crs_src(x) == crs_src(y) for (x, y) in zip(a, b))
 crs_merged(k) = length(collect(eachmatch(r"__jmi\d+_2 == __jmi\d+_1", crs_src(k))))
-crs_plan(e; kw...) = STADE.stade_gpu(e, STADE.cgen_backend_cuda(); kw..., inbounds = false, dead_scalars = false)
+crs_plan(e; kw...) = STADE.stade_gpu(e, STADE.cgen_backend_cuda(); kw..., inbounds = false, dead_scalars = false, split_reduce = 0)
 
 # runs the plan on the shim and the original kernel on the CPU; returns (largest relative difference, flagged elements, elements changed)
 function crs_exec(src::String, fname::String, args::Vector, K::Int, order::Symbol; cmin::Int = 0, occ::Real = 0.6, regs = nothing)

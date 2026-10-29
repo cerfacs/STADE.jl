@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6, inbounds=true, dead_scalars=true)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6, inbounds=true, dead_scalars=true, split_reduce=16, split_min_inner=256, split_max_out=32768)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2502,6 +2502,43 @@ Measured on a V100: geometric mean 1.18 (primal) and 1.06 (adjoint) over 39 case
 (`ufv_scatter_step` 4e6 adjoint 0.83, 1e6 adjoint 0.94; `transformer_block` d512 primal 0.94); the cause is not known.
 `test/validate_inbounds.jl` (19 sources, corpus pass, 11 sabotage cases) tests both passes. The text-inspecting validators pass
 `inbounds = false, dead_scalars = false`; `validate_ownership` runs with `OWN_FINISH=checked` (default: dead on, `@inbounds` off), `full` or `off`.
+
+**Split reduction** (`split_reduce`, `split_min_inner`, `split_max_out`)
+CUDA only (the keywords are accepted, and ignored, by the other backends' `stade_gpu` calls). `split_reduce = L` (default 16; 0 or 1 is off) builds a
+second kernel `<name>_s!` beside a plain kernel that has the shape below, and the host launches it instead of the plain kernel when a test holds.
+The motivating case is the weight gradient of a dense layer: one thread per output, each running a long inner loop over the input, which uses
+a V100 at a few percent. The twin gives each output `L` lanes: a block of `32 x L` threads, 32 outputs on `threadIdx().x` and the lanes on
+`threadIdx().y`. `split_reduce = 0` gives exactly the text without it (with `inbounds = false, dead_scalars = false` also exactly v0.4.31: 700 of 700
+plans hash-identical; with the finishing passes at their defaults, exactly v0.4.32).
+
+*Shape.* The kernel is one thread per output (`if __tid > n_iter` guard) whose body is a list of items: a scalar assignment; an *accumulate-only loop*
+whose body is scalar assignments, at least one an accumulator `s = s + t`, `s = t + s` or `s = s - t`; a top-level store or atomic add; or a *loop with
+stores* whose body is scalar assignments and stores or atomic adds. Anything else (a branch in a loop, a carried scalar that is not a sum, a bound
+that depends on the output) leaves the kernel without a twin.
+
+*Mechanism.* In an accumulate-only loop each lane takes iterations `lo + (ly-1), lo + (ly-1) + step*L, ...` and sums its own partial; the partials go to
+dynamic shared memory (`CuDynamicSharedArray`, `8 * 32 * L * nslots` bytes), a barrier follows, and every lane adds the `L` partials in the same order,
+so all lanes hold the same total. A top-level store runs on lane 1 only. A loop with stores is partitioned over the lanes the same way (each lane stores
+at its own iterations, atomic adds go through unchanged). A barrier (`sync_threads()`) separates a group of items that read what another group wrote. Threads past
+`n_iter` are clamped to `n_iter` so that every load stays in bounds and every thread reaches every barrier; their stores are guarded. The sum is formed
+in another order, so the last bits differ.
+
+*Soundness conditions* (each refused case is a unit of `test/validate_split.jl`): an accumulator is read by no other statement of its loop and starts from a
+non-integer scalar assigned before the loop; a temporary is defined before use and dead after the loop; an array stored in a loop appears nowhere else,
+only at one index, affine in the loop variable with a stride that is a kernel argument, which the host tests to be nonzero; an array that gets atomic adds is never read.
+
+*Launch test* (the plain kernel runs otherwise): the number of outputs is in `1:split_max_out` (default 32768), the longest inner trip count is at
+least `split_min_inner` (default 256), every stride is nonzero, and the block of `32 x L` threads fits the register limit of the compiled twin
+(`CUDA.maxthreads` of a `launch = false` build, read before the launch; `L = 32` does not fit `mlp3`: 72 registers).
+
+*Measured* on a V100 (adjoint, `fuse_ii_loops = true`, medians): `mlp3` primal and adjoint 14 and 10.9 times faster at 3M parameters (0.891 to 0.0635 ms, 3.27 to 0.301 ms), 11.9 and 9.0 at 13M, 5.9 and 4.65 at 79M (4.32 to 0.734 ms, 16.27 to 3.50 ms). Lanes 4, 8, 16 at 79M: adjoint 5.24, 3.70, 3.50 ms. `mpnn_gather`, `unet2` and `transformer_block` are unchanged within 2% with the
+defaults. With the twin forced on every launch (`split_min_inner = 0`, `split_max_out = 10^9`) they are slower (transformer d1024 adjoint 427 to 552 ms at 16 lanes,
+`mpnn_gather` 4.0 to 5.9 ms at 4 lanes; 16 lanes do not fit `mpnn_gather`), which is why the two limits exist; with `split_max_out` unlimited and the default `split_min_inner` the transformer
+is 25% slower, with `split_max_out = 32768` it is not. `test/validate_split.jl` (17 sources, 8 that split and 9 that must not, 2 register-limit checks, 15 sabotage cases) and `OWN_SPLIT=L` for `validate_ownership` (forces
+the twin on, `split_min_inner = 0`) test the transformation on the CPU shim, which models the blocks of `32 x L` threads, the barriers and the dynamic shared memory
+and reports a conflict between threads no barrier orders.
+
+*Comparison with the CPU in `validate_ownership`.* The twin changes the order of a sum, so a result can differ from the CPU Float64 result by more than the tolerance of the draw while being closer to the exact value (the `unet` HVP at `OWN_SPLIT=16`: 7.7e-12 from the CPU result, tolerance 5.6e-12; the CPU result is 9.5e-12 from the BigFloat value and the twin 1.8e-12). A draw that fails the tolerance is therefore run again against the BigFloat truth (`gval_check_backend(...; truth = true)`, 192 bits), with the rule of the GPU validators: at most 20 times the CPU error, or 1e-10, and never below the tolerance. The row says when it passed this way. A device result perturbed by 1e-7 still fails. `validate_inbounds` generates both of its plans with `split_reduce = 0`: the dead-scalar pass lets one more kernel split, and the pass under test is not the split.
 
 **Gather form of affine stencil adjoints** (`gather_stencil`)
 All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The

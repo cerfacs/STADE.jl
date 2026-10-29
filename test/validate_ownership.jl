@@ -81,7 +81,16 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
         tans  = mode == :hvp ? [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
         shts  = mode == :hvp ? [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
         fin = get(ENV, "OWN_FINISH", "checked")   # checked: bounds checks on, dead scalar updates dropped; full: @inbounds too; off: neither
-        fkw = (inbounds = fin == "full", dead_scalars = fin != "off")
+        # OWN_SPLIT=L forces the split-reduction twins (L lanes) on every launch that has one
+        spl = parse(Int, get(ENV, "OWN_SPLIT", "0"))
+        fkw = (inbounds = fin == "full", dead_scalars = fin != "off", split_reduce = spl, split_min_inner = 0, split_max_out = 10^9)
+        # OWN_DYADIC=1 rounds every float input to a multiple of 2^-10: a kernel built from +, - and * then adds exactly in any order, so a
+        # run that re-partitions a sum must agree with the CPU bit for bit (an error of 0.0 is expected there)
+        if get(ENV, "OWN_DYADIC", "0") == "1"
+            dy(v) = v isa Float64 ? round(v * 1024) / 1024 : v isa AbstractArray{Float64} ? round.(v .* 1024) ./ 1024 : v
+            for (k, v) in baseline.values; baseline.values[k] = dy(v); end
+            for sd in Iterators.flatten((seeds, tans, shts)); for (k, v) in sd; sd[k] = dy(v); end; end
+        end
         pinit = STADE.stade_gpu(gen.initstacks, backend; warp_atomics = false, shared_private = false, coarsen, coarsen_min = 0, coarsen_fill = 0, fkw...)
         pgen  = STADE.stade_gpu(gexpr, backend; warp_atomics = false, shared_private = false, coarsen, coarsen_min = 0, coarsen_fill = 0, fkw...)
         res = Dict{Symbol,Any}()
@@ -92,11 +101,22 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
             res[order] = Base.invokelatest(Main.gval_check_backend, kernel, baseline.int_args, baseline.values, seeds,
                                            gen, pinit, pgen, stack_names, Main.CUDA.TArray, Array, backend.atomic_macro;
                                            mode, tan_seeds = tans, shtan_seeds = shts)
+            # A comparison with the CPU Float64 result fails when that result is the less accurate one (an ill-conditioned HVP, a re-ordered sum). Then the same
+            # draw is judged against the BigFloat truth, by the rule of the GPU validators: at most 20 times the CPU error, or 1e-10.
+            if !res[order].ok && !res[order].vacuous
+                rt = Base.invokelatest(Main.gval_check_backend, kernel, baseline.int_args, baseline.values, seeds,
+                                       gen, pinit, pgen, stack_names, Main.CUDA.TArray, Array, backend.atomic_macro;
+                                       mode, tan_seeds = tans, shtan_seeds = shts, truth = true)
+                res[order] = merge(res[order], (truth_ok = rt.truth_ok, tr_cpu = rt.tr_cpu, tr_dev = rt.tr_dev))
+            end
             order == orders[1] && (viol = unique(copy(Main.CUDA.VIOLATIONS)))
         end
         Main.CUDA.ORDER[] = :ascending
-        return (parity = res[orders[1]].ok, shuffled_parity = all(o -> res[o].ok || (!res[o].vacuous && res[o].max_rel_err <= order_rtol), orders),
-                errs = Tuple(res[o].max_rel_err for o in orders), rtol = res[orders[1]].rtol,
+        good(o) = res[o].ok || get(res[o], :truth_ok, false)
+        by_truth = any(o -> !res[o].ok && get(res[o], :truth_ok, false), orders)
+        return (parity = good(orders[1]), shuffled_parity = all(o -> good(o) || (!res[o].vacuous && res[o].max_rel_err <= order_rtol), orders),
+                errs = Tuple(res[o].max_rel_err for o in orders), rtol = res[orders[1]].rtol, by_truth = by_truth,
+                truth = Tuple(get(res[o], :tr_dev, NaN) for o in orders), truth_cpu = Tuple(get(res[o], :tr_cpu, NaN) for o in orders),
                 vacuous = res[orders[1]].vacuous, violations = viol, error = "")
     end
 
@@ -112,7 +132,7 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
             row = try
                 one_draw(name, mode, path)
             catch e
-                (parity = false, shuffled_parity = false, errs = (NaN,), rtol = NaN, vacuous = false, violations = NamedTuple[],
+                (parity = false, shuffled_parity = false, errs = (NaN,), rtol = NaN, by_truth = false, truth = (NaN,), truth_cpu = (NaN,), vacuous = false, violations = NamedTuple[],
                  error = first(split(sprint(showerror, e), "\n")))
             end
             (!isempty(row.violations) || !isempty(row.error)) && break
@@ -129,8 +149,8 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
         isknown = haskey(known, r.kernel)
         ok = isempty(r.error) && (expect ? flagged : (isknown || !flagged) && (isknown || (r.parity && r.shuffled_parity)))
         ok || (bad += 1)
-        if verbose && (!ok || flagged || !r.shuffled_parity)
-            tag = !ok ? " *** NOT OK ***" : expect ? " ok (expected flag)" : isknown ? " known: " * known[r.kernel] : " ok"
+        if verbose && (!ok || flagged || !r.shuffled_parity || r.by_truth)
+            tag = !ok ? " *** NOT OK ***" : expect ? " ok (expected flag)" : isknown ? " known: " * known[r.kernel] : r.by_truth ? " ok (by the BigFloat truth: device error " * string(r.truth) * ", CPU error " * string(r.truth_cpu) * ")" : " ok"
             println(rpad("$(r.kernel) [$(r.mode)]", 36), tag,
                     isempty(r.error) ? "" : "  error: " * r.error,
                     "  parity ascending=", r.parity, " all orders=", r.shuffled_parity,
@@ -143,6 +163,8 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
     end
     coarsen > 1 && isdefined(Main.CUDA, :LAUNCHED) &&
         println("coarsened kernel launches: ", count(n -> endswith(n, "_c!"), Main.CUDA.LAUNCHED), " of ", length(Main.CUDA.LAUNCHED))
+    parse(Int, get(ENV, "OWN_SPLIT", "0")) > 0 && isdefined(Main.CUDA, :LAUNCHED) &&
+        println("split twin launches over the run: ", count(n -> endswith(n, "_s!"), Main.CUDA.LAUNCHED), " of ", length(Main.CUDA.LAUNCHED))
     println(length(rows) - bad, "/", length(rows), " ownership checks passed",
             bad == 0 ? "" : "   *** $bad NOT OK ***")
     return (rows = rows, bad = bad)

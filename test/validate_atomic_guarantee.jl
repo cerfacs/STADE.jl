@@ -110,7 +110,7 @@ function validate_atomic_guarantee(dir::String = joinpath(@__DIR__, "val-corpus"
         try
             pe = STADE.io_read_corpus_entry(joinpath(dir, name * ".jl"))
             gen = mode == :hvp ? STADE.stade_hvp(pe; keep_push_pop = false) : STADE.stade_adjoint(pe; keep_push_pop = false)
-            plan = STADE.stade_gpu(mode == :hvp ? gen.hvp : gen.adjoint, backend; inbounds = false, dead_scalars = false)
+            plan = STADE.stade_gpu(mode == :hvp ? gen.hvp : gen.adjoint, backend; inbounds = false, dead_scalars = false, split_reduce = 0)
             for k in plan.kernels
                 kernels_seen += 1
                 sites = Dict{Symbol,Vector{NamedTuple}}()

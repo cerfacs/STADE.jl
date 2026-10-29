@@ -184,7 +184,7 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
             gen = mode == :hvp ? STADE.stade_hvp(primal; keep_push_pop = false, fuse_ii_loops = true) :
                                  STADE.stade_adjoint(primal; keep_push_pop = false, fuse_ii_loops = true)
             expr = mode == :hvp ? gen.hvp : gen.adjoint
-            cu = STADE.stade_gpu(expr, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, shared_private = false)
+            cu = STADE.stade_gpu(expr, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, split_reduce = 0, shared_private = false)
             ja = STADE.stade_jacc(expr; inbounds = false, dead_scalars = false)
 
             problems = String[]
