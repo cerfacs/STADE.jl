@@ -40,6 +40,7 @@ const ST = State(0, 0, 0, 0, Dict{Tuple{Int,Int},NTuple{3,Set{Int}}}())
 const VIOLATIONS = NamedTuple[]
 const NEXTID = Ref(0)
 const LAUNCHES = Ref(0)
+const LAUNCHED = String[]   # name of every kernel launched, in order
 # Order in which one launch runs its logical threads: :ascending, :descending or :shuffled. A kernel whose
 # result depends on it has a race; one that passes under all three is only known to be order-insensitive here.
 const ORDER = Ref(:ascending)
@@ -122,6 +123,7 @@ end
 function launch(f, args::Tuple, th::Integer, bl::Integer)
     empty!(ST.log)
     LAUNCHES[] += 1
+    push!(LAUNCHED, string(nameof(f)))
     tids = collect(1:(th * bl))
     ORDER[] == :descending && reverse!(tids)
     ORDER[] == :shuffled && Random.shuffle!(RNG[], tids)

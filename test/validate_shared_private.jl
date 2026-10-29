@@ -190,7 +190,7 @@ function validate_shared_private(dir::String = joinpath(@__DIR__, "val-corpus");
             ("worth test in the launch", "push!(conds, Expr(:call, :>=, n_iter, Expr(:call, :*, ratio, Expr(:call, :length, a))))", "push!(conds, true)"),
             ("block test for a straight-line array", "a in straight && push!(conds,", "false && push!(conds,"),
             ("budget in the launch", "fits = Expr(:call, :<=, pn, cgen_private_max_bytes())", "fits = true"),
-            ("the else branch is the original kernel", "emit_if(cond, Any[private], Any[plain])", "emit_if(cond, Any[private], Any[private])"),
+            ("the else branch is the original kernel", "emit_if(cond, Any[private], plain_stmts)", "emit_if(cond, Any[private], Any[private])"),
             ("offsets rounded to 8 bytes", "Expr(:call, :*, 8, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), Expr(:call, :*, Expr(:call, :length, a), Expr(:call, :sizeof, Expr(:call, :eltype, a))), 8))", "Expr(:call, :*, Expr(:call, :length, a), Expr(:call, :sizeof, Expr(:call, :eltype, a)))"),
             ("a loop counts as under-loop", "                under_loop(e.args[2].args, true) && return true", "                under_loop(e.args[2].args, false) && return true"),
         ]

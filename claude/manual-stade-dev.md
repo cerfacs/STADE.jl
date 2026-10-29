@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=true, shared_private=true)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, hoist_atomics=true, gather_stencil=true, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2508,6 +2508,50 @@ sabotage-tests each guard and refusal. `test/validate_write_overlap.jl` checks t
 property a gathered kernel has in place of atomics: exactly one plain write to the
 receiving array, at the thread's own index, and no access at any other index; its
 checks of the atomic repair of a scatter run with `gather_stencil = false`.
+
+**Coarsened kernel variant** (`coarsen`, `coarsen_min`, `coarsen_fill`)
+CUDA only, opt-in (`coarsen = 1`, the default, emits exactly the v0.4.28 code; 700 CUDA and
+JACC plans hash identical). With `coarsen = K` (2 to 4) a kernel whose atomic adds can
+be merged also gets a *variant* `<name>_c!` beside the plain kernel; the host launches
+the variant only when a run-time test passes, so the plain kernel is never edited. In the
+variant one thread runs K iterations of the offloaded loop, 32 apart (the lanes of a warp
+still read consecutive elements), and the copies are jammed: an inner `for` or `if`
+whose header or condition does not mention a per-copy scalar becomes one shared loop or
+branch, and an atomic add whose address is thread-invariant (`:inv`) or depends on the
+thread only through a division by a thread-invariant value above 32 (`:key`) is summed
+over the copies in registers and issued once when the K addresses agree at run time
+(one add per copy when they do not). Anything else is replicated per copy. The last warp
+group, where a lane may hold fewer than K iterations, runs its iterations one at a time
+through the original body. Only the order of a sum changes. The body is refused (no
+variant) for: a `return`, a name starting with `__jm`, a scalar that is also a loop
+variable, called as a function, a kernel argument, or read before it is assigned, a body
+over 4000 nodes, and a body with no mergeable site under a loop. The host test is
+`D >= coarsen_min && n_iter >= coarsen_fill`: `D` is the number of threads that add to one
+address (the trip count for an `:inv` site, the divisor for a `:key` site, written in
+kernel arguments with the body's invariant scalars substituted; a site whose count
+cannot be written that way contributes nothing; several sites take the maximum), and
+`n_iter` is the plain trip count. A launch that privatizes (`shared_private`) keeps the
+private kernel first. `coarsen_min = 0` turns every test off and builds a variant
+wherever one can be built (the validators use it). Evidence (Tesla V100, adjoints,
+`fuse_ii_loops = true`): `unet2` takes 45.66, 46.94 and 54.00 ms at c16_n256, c64_n64 and
+c128_n32 without the variant and 37.32, 39.34 and 44.51 ms with `coarsen = 2` and the
+default thresholds (-18%, -16%, -18%); the per-kernel profile shows what the thresholds
+are for: a backward kernel with `D = 64` and 32768 threads got 21% slower, one with
+12288 threads 30% slower, and every kernel with `D >= 256` and at least 65536 threads got
+15 to 35% faster. `mlp3` (2048 threads) and `mpnn_gather` (`D = 16`) build a variant that
+the tests decline (times identical to the plain kernel); forced, they take +28% and
++112%. **The transformer is a known regression**: with the default thresholds its
+backward kernels with `D` of 512 to 2048 and over 260000 threads still take the variant
+and the adjoint goes from 38.26 to 44.60 ms (+17%; forced, +17.6%). Merged share of
+atomic sites, register count and body size were each tried as a separator and do not
+tell these kernels from unet2's; the cause is not known, which is why the default is
+off. A K of 3 was slower than 2 in the spike (register pressure). A plain owner-computes
+rewrite (one thread per received element) also lost. `test/validate_coarsen.jl`: unit
+kernels, shim execution at K = 2, 3, 4 in two thread orders with zero-trip and ragged
+sizes, "forced launches only variants, unreachable threshold launches only plain
+kernels", corpus byte-identity of every plain kernel, and sabotage of every guard, the
+merge and the selector. `validate_ownership` runs with `OWN_COARSEN=2` (forced variants
+of every corpus plan against the CPU adjoint).
 
 **Block-private accumulators** (`shared_private`)
 CUDA only (default on; `false` restores the old output exactly, an integer sets

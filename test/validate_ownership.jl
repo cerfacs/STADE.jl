@@ -6,7 +6,7 @@ using Random
 own_known() = Dict{String,String}()
 
 """
-    validate_ownership(dir="val-corpus"; only=nothing, int_lo=3, int_hi=6)
+    validate_ownership(dir="val-corpus"; only=nothing, int_lo=3, int_hi=6, coarsen=1)
 
 CPU check of the one assumption STADE's GPU code generator makes without proof:
 that a plain (non-atomic) array write inside a kernel is disjoint across threads.
@@ -42,6 +42,7 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
                             known::Dict{String,String} = own_known(),
                             shim::String = get(ENV, "OWN_SHIM", joinpath(@__DIR__, "ownership_shim.jl")),
                             expected_flagged::Vector{String} = ["idm_dup_write"],
+                            coarsen::Int = 1,
                             verbose::Bool = true)
     include(shim)
     Core.eval(Main, :(using .CUDA))
@@ -79,8 +80,8 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
         seeds = [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials]
         tans  = mode == :hvp ? [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
         shts  = mode == :hvp ? [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]
-        pinit = STADE.stade_gpu(gen.initstacks, backend; warp_atomics = false, shared_private = false)
-        pgen  = STADE.stade_gpu(gexpr, backend; warp_atomics = false, shared_private = false)
+        pinit = STADE.stade_gpu(gen.initstacks, backend; warp_atomics = false, shared_private = false, coarsen, coarsen_min = 0, coarsen_fill = 0)
+        pgen  = STADE.stade_gpu(gexpr, backend; warp_atomics = false, shared_private = false, coarsen, coarsen_min = 0, coarsen_fill = 0)
         res = Dict{Symbol,Any}()
         viol = NamedTuple[]
         for order in orders
@@ -138,6 +139,8 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
             end
         end
     end
+    coarsen > 1 && isdefined(Main.CUDA, :LAUNCHED) &&
+        println("coarsened kernel launches: ", count(n -> endswith(n, "_c!"), Main.CUDA.LAUNCHED), " of ", length(Main.CUDA.LAUNCHED))
     println(length(rows) - bad, "/", length(rows), " ownership checks passed",
             bad == 0 ? "" : "   *** $bad NOT OK ***")
     return (rows = rows, bad = bad)
@@ -145,5 +148,5 @@ end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     only = length(ARGS) > 0 ? ARGS : nothing
-    exit(validate_ownership(; only = only).bad == 0 ? 0 : 1)
+    exit(validate_ownership(; only = only, coarsen = parse(Int, get(ENV, "OWN_COARSEN", "1"))).bad == 0 ? 0 : 1)
 end

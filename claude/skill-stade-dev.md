@@ -308,7 +308,8 @@ cancels, so it complements rather than replaces.
 
 `stade_gpu` ingests **already-generated** code; its only keywords are
 `precision`, `reduction_threshold`, `hoist_atomics`, `gather_stencil` (all backends) and the CUDA-only `warp_atomics`,
-`sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly). **Only `keep_push_pop=false` output is
+`sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly), plus the CUDA-only opt-in
+`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it). **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
@@ -421,6 +422,17 @@ unchanged. `test/validate_gather_stencil.jl` sabotage-tests each of these. A gat
 kernel has no atomic, so `validate_write_overlap` checks the property instead (one plain
 write at the thread's own index, no other access of that array); its atomic-repair checks
 run with `gather_stencil = false`, which is the exact rollback.
+
+`coarsen = K` (CUDA, opt-in) emits a second kernel `<name>_c!` beside the plain one, in which a
+thread runs K iterations 32 apart and sums the atomic adds of the copies in registers when their
+addresses agree (thread-invariant, or a division of the thread index by a divisor above 32); the host
+launches it only when `D >= coarsen_min` (threads per address) and the trip count is at least
+`coarsen_fill`, and a private kernel (`shared_private`) wins over it. The plain kernel is never edited,
+which is what keeps `coarsen = 1` byte-identical. Launch indices skip variants (`cgen_kernel_count`),
+a variant is never privatized, and the validators force it with `coarsen_min = 0`. Measured on a V100
+it wins on `unet2` (-16 to -18%) and loses on the transformer (+17%) for a reason not found, so it stays
+opt-in; a candidate separator (merged share of atomic sites) was tried and did not separate them, so do
+not add it back without new data. `test/validate_coarsen.jl` sabotage-tests each guard and the selector.
 
 ## Self-check before returning STADE code
 
