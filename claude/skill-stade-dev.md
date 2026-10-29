@@ -445,6 +445,8 @@ threads, 4 x 4 outputs per thread, 16-wide steps through shared memory, the stat
 launches it when `M`, `N`, `K` are at least `n`, `N > 0`, the loop covers whole rows and the block fits `CUDA.maxthreads`. Below 256 the twin was slower on the V100, so the default is 256. A guard that STADE's own gates make unreachable from
 source needs a direct test on hand-written kernel text (`con_kernel`); a guard that no test fails when it is removed is a guard you do not have. Validators that inspect text pass `contraction = 0`.
 
+`contraction` also tiles the adjoint of such a product (v0.4.35): the plain adjoint kernel stores its seed `gs` in a scratch array `__ct_g` and skips the loop of atomic adds; one tiled kernel per atomic statement reads `__ct_g` and adds into its target with one atomic add per element; a recomputed forward product gets a stage `<name>_f_t!` and a second scratch array `__cf_s`. The host takes the twin branch only if every kernel of the group passes the launch test. A product whose loop holds anything but atomic adds and scalars is refused. An HVP is not tiled.
+
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
 no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded

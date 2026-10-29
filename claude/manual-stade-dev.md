@@ -2548,7 +2548,8 @@ reads a 64 x 16 piece of the left operand and a 16 x 64 piece of the right opera
 runs the statements before the loop (the start value of the sum) and after it (activation, residual, stores) once per output element, on the same text as the plain kernel.
 `contraction = 0` gives exactly the text without it (with `split_reduce = 0` also exactly v0.4.33).
 
-*Shape.* After the thread guard: `idx = 1 + (__tid - 1)`; scalar statements, among them the decode of the flat index into a column `o = mod(idx - 1, N) + 1` and a row `t = div(idx - 1, N) + 1`; the start value of the sum, a scalar assigned once before the loop; ONE flat loop over a step of +1 whose body is the one accumulation `acc = acc + A[ia] * B[ib]`
+*Shape.* After the thread guard: `idx = 1 + (__tid - 1)`; scalar statements, among them the decode of the flat index into a column `o = mod(idx - 1, N) + 1` and a row `t = div(idx - 1, N) + 1` (also through a
+variable that holds `idx - 1`, assigned once); the start value of the sum, a scalar assigned once before the loop; ONE flat loop over a step of +1 whose body is the one accumulation `acc = acc + A[ia] * B[ib]`
 (`+`, `-`, either order of the factors; the factors are plain array references); then scalar statements and plain stores. `ia` reads only kernel parameters, the row and the loop variable; `ib` only parameters,
 the column and the loop variable; the loop bounds are parameters; neither operand array is stored in the kernel; the loop variable, the column and the row are not read or assigned elsewhere.
 
@@ -2562,6 +2563,34 @@ tiles would not compute), and the block of 256 threads fits the register limit o
 d64 0.56, d32 0.78, `small` 0.86, `tiny` 0.79), so the default is 256. The adjoint of the same kernel is unchanged (ratio 1.00 to 1.02); `unet2` has one kernel that matches (the output convolution), and with the twin forced (`contraction = 1`) its primal changes by at most 1% at the three bench sizes (0.99 to 1.00 times; `small` 0.93 and `tiny` 0.88); at the default it never launches it there (the channel count is below 256). `test/validate_contraction.jl`
 (8 sources that must tile, 15 that must not, direct recognizer cases for guards that STADE's own gates make unreachable from source, threshold, zero-length and register-limit checks, and sabotage cases, each of which one case must catch)
 and `OWN_CONTRACT=n` for `validate_ownership` (forces the twin on every launch that has one, with `n` as the smallest side) test the transformation on the CPU shim, which models 2D grids and blocks.
+
+**Adjoint of a product** (`contraction`, from v0.4.35)
+The same keyword and the same launch thresholds as the forward twin. The adjoint kernel of `out[t, o] = b[o] + sum_c x[t, c] * w[c, o]` is one thread per output element `(t, o)` that holds the seed of
+the element in a scalar `g` and scatters it, in a loop over `c`, into the two input adjoints with atomic adds (`xb[ix] += w[iw] * g`, `wb[ix2] += x[iw2] * g`). Each of the two is a matrix
+product in the other direction (`xb[t, c] += sum_o g[t, o] * w[c, o]`). The plain kernel, the twin and a launch test are emitted as follows.
+
+*Forward kernels inside an adjoint plan.* The forward sweep of an adjoint plan holds the forward kernels again (`b_3!`, `b_7!`, ...), and the common-subexpression pass has replaced `idx - 1` in them by a variable (`__icse_2 = idx - 1`). From v0.4.35 the forward recognizer accepts a decode through such a variable (assigned once; a variable that is changed between the two decodes is refused), so these kernels get the forward twin as well. In the adjoint of `transformer_block` that is 4 forward products (`b_3`, `b_7`, `b_10`, `b_11`) next to 4 adjoint products (`b_12`, `b_13`, `b_16`, `b_20`: 9 tiled kernels, one of them a forward stage).
+
+*Kernels.* (1) `<name>_a!`: the plain kernel with the loop of atomic adds replaced by a store of `g` into a scratch array `__ct_g` at the thread's own flat index (the zeroing of the seed, the bias
+adjoint and every other statement stay). (2) `<name>_t1!`, `<name>_t2!`, ...: one tiled kernel per atomic statement, the tile of the forward twin (64 x 64 outputs per block of 16 x 16 threads, 16512 bytes of shared
+memory), which reads `__ct_g` and the operand array, forms the sum and adds it into its target with ONE atomic add per output element, so no proof is needed that the targets of different elements are distinct.
+(3) When the plain kernel recomputes the forward product before the loop of adds (the value that its epilogue differentiates, for example a `tanh`), a forward stage `<name>_f_t!` computes that sum with a
+tiled kernel, stores it in a second scratch array `__cf_s`, and the first kernel reads it in place of the loop. The sum over the other index is formed in tile order, so the last bits differ from the plain kernel.
+
+*Shape.* After the thread guard: `idx = 1 + (__tid - 1)` (or `idx = X + (__tid - 1) * -1` for a reversed loop with `X` the thread count); statements that are scalar assignments or stores, among them
+the decode of the flat index into a column `o = mod(idx - 1, N) + 1` and a row `t = div(idx - 1, N) + 1` (also through a variable that holds `idx - 1`, assigned once, and repeated once for a recomputed
+forward value if every repeat names the same variable and the same size `N`, which is a kernel parameter); ONE flat loop whose body is atomic adds `arr[ix] += F[iw] * g` and scalar temporaries (common subexpressions of
+operand reads, inlined in order into the later statements, and read or assigned nowhere outside the loop); `g` is a thread-local scalar assigned before the loop. `ix` may read parameters, `c` and one of `t`, `o`; `iw`
+parameters, `c` and the other. The operand arrays `F` are never stored and the target arrays never read in the kernel. A kernel that does not fit any of this keeps the plain kernel.
+
+*Launch.* The twin branch of the host allocates the scratch arrays with `CUDA.zeros(Float64, count)` on every call (the device memory pool serves them), runs the kernels in the order above, and the plain kernel
+runs otherwise. The branch is taken when every tiled kernel of the group passes the thresholds of the forward twin (`M`, `N`, `K` at least `contraction`, whole rows, the block of 256 threads fits `CUDA.maxthreads` of
+a `launch = false` build with the scratch array replaced by an array of the same type and rank): one kernel of the group below the threshold sends the whole group to the plain kernel.
+
+*Not covered.* The HVP is not tiled: its text is hash-identical to v0.4.34. `mpnn_gather` has two loops of atomic adds in its adjoint kernel and only the first is tiled (the second keeps the plain atomic loop).
+
+*Measured* on a V100 (`transformer_block`, adjoint, medians, `contraction = 0` against the default): d1024 426.8 to 103.9 ms (4.11 times), d512 36.3 to 15.8 ms (2.30), d256 5.67 to 3.86 ms (1.47); the primal
+is that of v0.4.34. The plan's target (adjoint at most 100 ms at d1024) is missed by 4%. The adjoint is now 5.95 times the JAX time (17.46 ms; 24.4 times before). `test/validate_adjoint_contraction.jl` (sources that must tile and sources that must not, direct recognizer cases, threshold and register-limit checks, sabotage cases) and `OWN_CONTRACT=n` (which also forces the adjoint twins on the CPU shim) test the transformation.
 
 **Gather form of affine stencil adjoints** (`gather_stencil`)
 All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The

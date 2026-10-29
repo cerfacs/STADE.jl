@@ -306,14 +306,13 @@ const CON_CASES = [
 
 # The recognizer on hand-written kernel text, for the guards that STADE's own gates make unreachable from source: a store into an operand array, and a parameter that has the
 # loop variable's name. Each variant must be refused, the control must not.
-con_kernel(pre, post; extra = "", first = "idx = 1 + (__tid - 1)") = Meta.parse("""function cuda_kernel_dir!(x, w, y, m, n, k, c$extra)
+con_kernel(pre, post; extra = "", first = "idx = 1 + (__tid - 1)", dec = "o = mod(idx - 1, n) + 1\n    t = div(idx - 1, n) + 1") = Meta.parse("""function cuda_kernel_dir!(x, w, y, m, n, k, c$extra)
     __tid = ((blockIdx()).x - 1) * (blockDim()).x + (threadIdx()).x
     if __tid > div(m * n - 1, 1) + 1
         return nothing
     end
     $first
-    o = mod(idx - 1, n) + 1
-    t = div(idx - 1, n) + 1
+    $dec
     $pre
     for c = 1:k
         s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
@@ -331,11 +330,13 @@ const CON_DIRECT = [
     ("the row is changed in the epilogue", "s = 0.0", "t = t + 1\n    y[idx] = s", false),
     ("an atomic store in the epilogue", "s = 0.0", "CUDA.@atomic y[idx] += s", false),
     ("the flat index is not the thread index", "s = 0.0", "y[idx] = s", false),
+    ("a decode through a held index", "s = 0.0", "y[idx] = s", true, "h0 = idx - 1\n    o = mod(h0, n) + 1\n    t = div(h0, n) + 1"),
+    ("the held index is changed between the decodes", "s = 0.0", "y[idx] = s", false, "h0 = idx - 1\n    o = mod(h0, n) + 1\n    h0 = h0 + 1\n    t = div(h0, n) + 1"),
 ]
 function con_direct_checks()
     bad = 0
-    for (name, pre, post, must) in CON_DIRECT
-        kd = con_kernel(pre, post; first = startswith(name, "the flat index") ? "idx = 2 + (__tid - 1)" : "idx = 1 + (__tid - 1)")
+    for (name, pre, post, must, dec...) in CON_DIRECT
+        kd = con_kernel(pre, post; first = startswith(name, "the flat index") ? "idx = 2 + (__tid - 1)" : "idx = 1 + (__tid - 1)", dec = isempty(dec) ? "o = mod(idx - 1, n) + 1\n    t = div(idx - 1, n) + 1" : dec[1])
         t = try STADE.cgen_contraction_kernel(kd) catch e; e end
         ok = must ? (t isa NamedTuple) : t === nothing
         println(rpad(ok ? "ok" : "FAIL", 6), "direct, $name: ", must ? "a twin is built" : "refused")
@@ -435,7 +436,7 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the column of a load is not bounded", "Expr(:&&, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K))", "call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)"),
             ("the inner index of a load is not bounded", "Expr(:&&, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K))", "call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M)"),
             ("the outputs are not bounded", "Expr(:if, Expr(:&&, call(:<, :__ct_row, :__ct_M), call(:<, :__ct_col, :__ct_N)), Expr(:block, inner...))", "Expr(:if, true, Expr(:block, inner...))"),
-            ("the loop start is ignored", "push!(loadA, asg(cv, cadd(cadd(:__ct_lo, :__ct_k0), :__ct_kk)))", "push!(loadA, asg(cv, cadd(cadd(1, :__ct_k0), :__ct_kk)))"),
+            ("the loop start is ignored", "push!(loadA, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))", "push!(loadA, asg(d.kvar, cadd(cadd(1, :__ct_k0), :__ct_kk)))"),
             ("a descending loop is accepted", "(lp !== nothing && lp.step == 1 && length(lp.body) == 1) || return nothing", "(lp !== nothing && length(lp.body) == 1) || return nothing"),
             ("operands that depend on the wrong index are accepted", "issubset(va, union(params, Set([tv, cv]))) && issubset(vb, union(params, Set([ov, cv]))) || return nothing", "true"),
             ("an operand of the product that is stored is accepted", "(fa.arr in stored || fb.arr in stored) && return nothing", "false && return nothing"),
@@ -446,10 +447,11 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("a product test is dropped", "(term isa Expr && term.head === :call && term.args[1] === :* && length(term.args) == 3) || return nothing", "true"),
             ("a factor that is not an array element is accepted", "(f isa Expr && f.head === :ref && length(f.args) == 2 && f.args[1] isa Symbol) || return nothing", "true"),
             ("the column or row may be reassigned", "        count(st -> st isa Expr && st.head === :(=) && st.args[1] === v, Any[pre_rest..., post...]) == 1 || return nothing\n", ""),
+            ("a held index may be changed", "        st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])", "        st.args[2] == Expr(:call, :-, idxv, 1) && push!(holds, st.args[1])"),
             ("the flat index may be offset", "(first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol && first_st.args[2] == :(1 + (__tid - 1))) || return nothing", "(first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol) || return nothing"),
-            ("the register limit is not checked", "fits = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), probe), 256)", "fits = true"),
-            ("the whole-rows test is dropped", "    cond = Expr(:&&, cond, call(:(==), call(:mod, n_iter_total(n_iter), N), 0))\n", ""),
-            ("the size test is dropped", "cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, N, cmin), call(:>=, Mh, cmin)), call(:>=, Kh, cmin)), call(:>, N, 0))", "cond = call(:>, N, 0)"),
+            ("the register limit is not checked", "    fits(t, call) = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), call)), 256)", "    fits(t, call) = true"),
+            ("the whole-rows test is dropped", "Mh = Mh, Nh = N, Kh = K, extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0))", "Mh = Mh, Nh = N, Kh = K, extra = nothing)"),
+            ("the size test is dropped", "cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, cmin), call(:>=, d.Mh, cmin)), call(:>=, d.Kh, cmin)), call(:>, d.Nh, 0))", "cond = call(:>, d.Nh, 0)"),
             ("the launch asks for too little shared memory", "shmem = 8 * ((TM + 1) * TK + TM * TK))", "shmem = 8 * ((TM + 1) * TK + TM * TK) - 8)"),
         ]
         mktempdir() do tmp

@@ -156,12 +156,13 @@ macro cuda(args...)
         (o.args[1] == :launch && o.args[2] === false) ? (probe = true) :
         error("CUDA shim: unsupported @cuda option: $(o.args[1])")
     end
-    probe && return Expr(:call, GlobalRef(@__MODULE__, :probe), esc(call.args[1]))
+    # the arguments are evaluated, as the real macro does to learn their types: an undefined name fails here too
+    probe && return Expr(:call, GlobalRef(@__MODULE__, :probe), esc(call.args[1]), map(esc, call.args[2:end])...)
     return Expr(:call, GlobalRef(@__MODULE__, :launch), esc(call.args[1]),
                 Expr(:tuple, map(esc, call.args[2:end])...), esc(th), esc(bl), esc(sh))
 end
 
-function probe(f)
+function probe(f, args...)
     push!(PROBES, string(nameof(f)))
     return FakeKernel(string(nameof(f)))
 end
