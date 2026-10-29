@@ -11114,15 +11114,26 @@ end
 
 # Adds the split twin of every kernel that has one and wraps its launch statement: the twin when its condition holds, the statement as it was otherwise.
 # Returns (host, kernels). With no twin the arguments come back as they are.
-function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out())
+# fallback: a second twin with that many lanes (v0.4.43), launched when the block of L lanes does not fit the registers of the first and the smaller block does
+function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out(), fallback::Int = 0)
     L >= 2 || return (host, kernels)
     twins = Dict{Symbol,Any}()
+    twins2 = Dict{Symbol,Any}()
     for k in kernels
         k.head === :function || continue
         nm = k.args[1].args[1]
         (cgen_is_coarse_variant(k) || endswith(string(nm), "_p!")) && continue
         t = cgen_split_kernel(k, L; min_inner, max_out)
         t === nothing || (twins[nm] = t)
+        if t !== nothing && fallback >= 2 && fallback < L
+            t2 = cgen_split_kernel(k, fallback; min_inner, max_out)
+            if t2 !== nothing
+                sn = string(t2.name)
+                n2 = Symbol(endswith(sn, "!") ? sn[1:end-1] * string(fallback) * "!" : sn * string(fallback))
+                t2.kdef.args[1].args[1] = n2
+                twins2[nm] = merge(t2, (name = n2,))
+            end
+        end
     end
     isempty(twins) && return (host, kernels)
     used = Set{Symbol}()
@@ -11136,16 +11147,25 @@ function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; mi
                 t = twins[base]
                 plain = cgen_split_first_call(e, backend.launch_macro, base)
                 plain === nothing && return e
-                call = Expr(:call, t.name, plain.args[2:end]...)
-                nblocks = Expr(:call, :max, 1, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), t.n_iter, 32))
-                kws = Any[Expr(:(=), backend.threads_kw, Expr(:tuple, 32, t.lanes)), Expr(:(=), backend.blocks_kw, nblocks)]
-                t.nslots > 0 && push!(kws, Expr(:(=), :shmem, 8 * 32 * t.lanes * t.nslots))
-                launch = Expr(:macrocall, backend.launch_macro, nothing, kws..., call)
+                function twin_launch(tw)
+                    tcall = Expr(:call, tw.name, plain.args[2:end]...)
+                    tnb = Expr(:call, :max, 1, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), tw.n_iter, 32))
+                    tkws = Any[Expr(:(=), backend.threads_kw, Expr(:tuple, 32, tw.lanes)), Expr(:(=), backend.blocks_kw, tnb)]
+                    tw.nslots > 0 && push!(tkws, Expr(:(=), :shmem, 8 * 32 * tw.lanes * tw.nslots))
+                    lnch = Expr(:macrocall, backend.launch_macro, nothing, tkws..., tcall)
+                    # the block of 32 * L threads must fit the registers of the twin: read the limit from the compiled kernel, which the launch finds cached
+                    tprobe = Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), tcall)
+                    fts = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), tprobe), 32 * tw.lanes)
+                    return (lnch, fts)
+                end
                 push!(used, base)
-                # the block of 32 * L threads must fit the registers of the twin: read the limit from the compiled kernel, which the launch finds cached
-                probe = Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), :launch, false), call)
-                fits = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), probe), 32 * t.lanes)
-                return emit_if(Expr(:&&, t.cond, fits), Any[launch], Any[e])
+                launch, fits = twin_launch(t)
+                other = Any[e]
+                if haskey(twins2, base)
+                    launch2, fits2 = twin_launch(twins2[base])
+                    other = Any[emit_if(Expr(:&&, t.cond, fits2), Any[launch2], Any[e])]
+                end
+                return emit_if(Expr(:&&, t.cond, fits), Any[launch], other)
             end
         end
         return Expr(e.head, Any[walk(a) for a in e.args]...)
@@ -11155,6 +11175,7 @@ function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; mi
     newk = copy(kernels)
     for nm in sort(collect(used); by = string)
         push!(newk, twins[nm].kdef)
+        haskey(twins2, nm) && push!(newk, twins2[nm].kdef)
     end
     return (newhost, newk)
 end
@@ -14102,7 +14123,7 @@ end
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill), coarsen_occ = Float64(coarsen_occ))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
@@ -14118,7 +14139,7 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
     dead_scalars && (kernels = Expr[cgen_dead_scalars(k, inbounds) for k in kernels])
     backend.kernel_tag == "cuda" && dead_scalars && reuse_stored >= 1 && ((host, kernels) = cgen_reuse_stored(host, kernels, backend; inbounds))
     backend.kernel_tag == "cuda" && contraction >= 1 && ((host, kernels) = cgen_contraction_apply(host, kernels, backend; cmin = Int(contraction)))
-    backend.kernel_tag == "cuda" && split_reduce >= 2 && ((host, kernels) = cgen_split_apply(host, kernels, Int(split_reduce), backend; min_inner = Int(split_min_inner), max_out = Int(split_max_out)))
+    backend.kernel_tag == "cuda" && split_reduce >= 2 && ((host, kernels) = cgen_split_apply(host, kernels, Int(split_reduce), backend; min_inner = Int(split_min_inner), max_out = Int(split_max_out), fallback = Int(split_fallback)))
     inbounds && (kernels = Expr[cgen_inbounds_wrap(k) for k in kernels])
     p === Float64 && return (host = host, kernels = kernels, helpers = plan.helpers)
     return (host = cgen_convert_precision(host, p),
@@ -14126,8 +14147,8 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction, reuse_stored)
+           sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -14139,13 +14160,13 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     helpers = Expr[]
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction, reuse_stored)
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         isempty(helpers) && append!(helpers, plan.helpers)
@@ -14155,8 +14176,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_min_inner, split_max_out, contraction, reuse_stored)
+                sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT, inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -14695,7 +14716,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = CGEN_REDUCTION_THRESHOLD_DEFAULT,
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -14709,13 +14730,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored)
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     # the HVP's two extra per-trial directions -- drawn the same way as the

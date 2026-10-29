@@ -461,6 +461,8 @@ The forward loops of an HVP are tiled too (v0.4.41): a loop may have up to two a
 
 The baseline generator redraws up to 256 times (v0.4.42): a kernel with a low acceptance of integer draws needs more than 16, and which seeds fail depends on the Julia version. A failure after 256 redraws is a real incoherence in the kernel's integer arguments.
 
+The split twin has a fallback of fewer lanes (v0.4.43, keyword `split_fallback`, default 8): when a block of 32 x 16 threads does not fit the registers, the launch uses a twin of 8 lanes before the plain kernel. `split_fallback = 0` is the v0.4.42 text.
+
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
 no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded

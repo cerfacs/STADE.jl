@@ -447,15 +447,15 @@ function spl_init!()
 end
 
 # builds the plan, evaluates its functions into Main, runs the host function; returns (outputs, kernels launched, conflicts, plan)
-function spl_run(src::String, entry::Symbol, args, split::Int; maxt = nothing)
+function spl_run(src::String, entry::Symbol, args, split::Int; maxt = nothing, fallback::Int = 0)
     spl_init!()
-    return Base.invokelatest(spl_run_body, src, entry, args, split, maxt)
+    return Base.invokelatest(spl_run_body, src, entry, args, split, maxt, fallback)
 end
-function spl_run_body(src::String, entry::Symbol, args, split::Int, maxt)
+function spl_run_body(src::String, entry::Symbol, args, split::Int, maxt, fallback::Int)
     Main.CUDA.MAXT[] = maxt === nothing ? (name -> 1024) : maxt
     cuda = STADE.cgen_backend_cuda()
     plan = STADE.stade_gpu(Meta.parse(src), cuda; warp_atomics = false, shared_private = false, inbounds = false,
-                           split_reduce = split, split_min_inner = 0, split_max_out = 10^9, contraction = 0)
+                           split_reduce = split, split_fallback = fallback, split_min_inner = 0, split_max_out = 10^9, contraction = 0)
     for k in plan.kernels; Core.eval(Main, k); end
     Core.eval(Main, plan.host)
     host = plan.host.args[1].args[1]
@@ -516,6 +516,28 @@ function spl_unit_checks()
     catch e
         check(false, "register limit: error " * first(split(sprint(showerror, e), "\n")))
     end
+    # v0.4.43: a second twin with fewer lanes runs when the block of the first does not fit
+    try
+        name, src, entry, mk, _ = SPL_CASES[1]
+        args = mk(1)
+        base = spl_run(src, entry, args, 0)
+        same(r) = all(x == y || maximum(abs.(x .- y) ./ max.(abs.(x), abs.(y), 1.0)) <= 1e-12 for (x, y) in zip(r.outs, base.outs) if x isa AbstractArray)
+        tw16(n) = endswith(n, "_s!")
+        tw8(n) = endswith(n, "_s8!")
+        lim16 = nm -> (tw16(nm) || tw8(nm)) ? 256 : 1024   # 512 threads do not fit, 256 do
+        a = spl_run(src, entry, args, 16; maxt = lim16, fallback = 8)
+        check(any(tw8, a.launched) && !any(tw16, a.launched) && same(a) && isempty(a.conflicts), "$name: 16 lanes do not fit, the twin of 8 lanes runs")
+        a = spl_run(src, entry, args, 16; maxt = lim16, fallback = 0)
+        check(!any(tw8, a.launched) && !any(tw16, a.launched) && same(a), "$name: fallback off, 16 lanes do not fit: the plain kernel")
+        a = spl_run(src, entry, args, 16; maxt = nm -> (tw16(nm) || tw8(nm)) ? 128 : 1024, fallback = 8)
+        check(!any(tw8, a.launched) && !any(tw16, a.launched) && same(a), "$name: neither twin fits: the plain kernel")
+        a = spl_run(src, entry, args, 16; fallback = 8)
+        check(any(tw16, a.launched) && !any(tw8, a.launched) && same(a), "$name: 16 lanes fit, the twin of 16 lanes runs")
+        a = spl_run(src, entry, args, 4; maxt = nm -> tw16(nm) ? 64 : 1024, fallback = 8)
+        check(!any(tw8, a.launched), "$name: a fallback of at least the lanes gives no second twin")
+    catch e
+        check(false, "fallback: error " * first(split(sprint(showerror, e), "\n")))
+    end
     return bad
 end
 
@@ -575,7 +597,10 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("a loop temporary may be read after the loop", "                        v in cgen_split_vars(st.args[2]) && return nothing\n                        (v in later) && return nothing\n                        push!(defined, v)\n                    end\n                    for r in cgen_split_vars(st.args[2])\n                        (r in assigned && !haskey(accs, r) && !(r in defined)) && return nothing", "                        v in cgen_split_vars(st.args[2]) && return nothing\n                        push!(defined, v)\n                    end\n                    for r in cgen_split_vars(st.args[2])\n                        (r in assigned && !haskey(accs, r) && !(r in defined)) && return nothing"),
             ("an integer start is accepted", "(items[k][2].args[2] isa Integer) && return false", "false && return false"),
             ("an inner bound computed in the kernel is accepted", "lp === nothing && return nothing\n            issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing", "lp === nothing && return nothing\n            true"),
-            ("the register limit is not checked", "fits = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), probe), 32 * t.lanes)", "fits = true"),
+            ("the register limit is not checked", "fts = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), tprobe), 32 * tw.lanes)", "fts = true"),
+            ("the fallback twin is never launched", "other = Any[emit_if(Expr(:&&, t.cond, fits2), Any[launch2], Any[e])]", "other = Any[e]"),
+            ("the register limit of the fallback twin is not checked", "emit_if(Expr(:&&, t.cond, fits2), Any[launch2], Any[e])", "emit_if(Expr(:&&, t.cond, true), Any[launch2], Any[e])"),
+            ("the fallback twin is built with the lanes of the first", "t2 = cgen_split_kernel(k, fallback; min_inner, max_out)", "t2 = cgen_split_kernel(k, L; min_inner, max_out)"),
             ("the clamp of the thread index is dropped", "Expr(:(=), :__tid, Expr(:call, :min, :__tidr, n_iter))]", "Expr(:(=), :__tid, :__tidr)]"),
             # ---- v0.4.39: accumulators in a storing loop ----
             ("a storing loop: an accumulator may feed a scalar statement", "                            v in cgen_split_vars(s2.args[2]) && return nothing\n                        else", "                            false && return nothing\n                        else"),
