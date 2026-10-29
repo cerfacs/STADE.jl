@@ -10796,6 +10796,25 @@ function cgen_split_accum(st)
     return nothing
 end
 
+# The accumulators of a loop body that the lanes sum in partial sums, and the body with their statements on the partials.
+# A scalar is one when every statement that assigns it is an accumulate statement and no other statement reads it.
+function cgen_split_partials(lp)
+    accs = Tuple{Symbol,Symbol}[]
+    newbody = Any[]
+    for st in lp.body
+        a = cgen_split_accum(st)
+        if a !== nothing && all(s2 -> !cgen_split_is_scalar(s2) || s2.args[1] !== a[1] || cgen_split_accum(s2) !== nothing, lp.body) &&
+           !any(s2 -> !(cgen_split_is_scalar(s2) && s2.args[1] === a[1]) && a[1] in cgen_split_vars(s2), lp.body)
+            p = Symbol("__p_", a[1])
+            any(x -> x[1] === a[1], accs) || push!(accs, (a[1], p))
+            push!(newbody, Expr(:(=), p, Expr(:call, a[2], p, a[3])))
+        else
+            push!(newbody, st)
+        end
+    end
+    return accs, newbody
+end
+
 # The split kernel of a plain kernel, or nothing: (kdef, name, nslots, cond)
 function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out())
     parts = cgen_kernel_parts(kdef)
@@ -10836,6 +10855,15 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
     nslots = 0
     trips = Any[]
     out_items = Any[]
+    # the start value of an accumulator: the last scalar assignment before the loop must exist and must not be an integer literal
+    function start_ok(i, vs)
+        for v in vs
+            k = findlast(it -> it[1] === :S && it[2].args[1] === v, items[1:i - 1])
+            k === nothing && return false
+            (items[k][2].args[2] isa Integer) && return false
+        end
+        return true
+    end
     for (i, (kind, s)) in enumerate(items)
         if kind === :W
             site = cgen_atomic_site(s)
@@ -10871,35 +10899,63 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
                     end
                 end
                 isempty(accs) && return nothing
-                # the start value of an accumulator: the last scalar assignment before the loop must not be an integer literal
-                for (v, _) in accs
-                    k = findlast(it -> it[1] === :S && it[2].args[1] === v, items[1:i - 1])
-                    k === nothing && return nothing
-                    (items[k][2].args[2] isa Integer) && return nothing
-                end
+                start_ok(i, keys(accs)) || return nothing
                 nslots += length(accs)
             else
+                # accumulators of a storing loop: scalars every assignment of which is an accumulate statement
+                accv = Set{Symbol}()
+                for st in lp.body
+                    a = cgen_split_accum(st)
+                    a === nothing && continue
+                    all(s2 -> !cgen_split_is_scalar(s2) || s2.args[1] !== a[1] || cgen_split_accum(s2) !== nothing, lp.body) && push!(accv, a[1])
+                end
+                # no statement but the accumulator's own accumulate statements reads it: not a scalar statement, not a store
+                for v in accv
+                    for s2 in lp.body
+                        if cgen_split_is_scalar(s2)
+                            s2.args[1] === v && continue
+                            v in cgen_split_vars(s2.args[2]) && return nothing
+                        else
+                            v in cgen_split_vars(s2) && return nothing
+                        end
+                    end
+                end
+                start_ok(i, accv) || return nothing
+                nslots += length(accv)
                 defined = Set{Symbol}()
                 for st in lp.body
                     if cgen_split_is_scalar(st)
                         v = st.args[1]
-                        v in cgen_split_vars(st.args[2]) && return nothing
-                        (v in later) && return nothing
-                        push!(defined, v)
-                        for r in cgen_split_vars(st.args[2])
-                            (r in assigned && !(r in defined)) && return nothing
+                        if v in accv
+                            reads = cgen_split_vars(cgen_split_accum(st)[3])
+                        else
+                            v in cgen_split_vars(st.args[2]) && return nothing
+                            (v in later) && return nothing
+                            push!(defined, v)
+                            reads = cgen_split_vars(st.args[2])
+                        end
+                        for r in reads
+                            (r in assigned && !(r in defined) && !(r in accv)) && return nothing
                         end
                     else
                         for r in cgen_split_vars(cgen_atomic_site(st) !== nothing ? Expr(:tuple, cgen_atomic_site(st).idx, cgen_atomic_site(st).val) : Expr(:tuple, st.args[1].args[2], st.args[2]))
-                            (r in assigned && !(r in defined)) && return nothing
+                            (r in assigned && !(r in defined) && !(r in accv)) && return nothing
                         end
                         site = cgen_atomic_site(st)
                         if site !== nothing
                             push!(atomic_arrs, site.arr)
                         else
                             arr = st.args[1].args[1]; idx = st.args[1].args[2]
-                            haskey(plain_sites, arr) && plain_sites[arr] != (i, idx) && return nothing
-                            plain_sites[arr] = (i, idx)
+                            # one array may be stored by several loops only at one index, from one start and step: a lane then owns the same elements in each
+                            canon = cgen_reuse_subst(idx, Dict{Symbol,Any}(lp.var => :__lv))
+                            if haskey(plain_sites, arr)
+                                (i0, canon0, lo0, step0) = plain_sites[arr][1]
+                                canon0 == canon || return nothing
+                                (i0 == i || (lo0 == lp.lo && step0 == lp.step)) || return nothing
+                                push!(plain_sites[arr], (i, canon, lp.lo, lp.step))
+                            else
+                                plain_sites[arr] = Any[(i, canon, lp.lo, lp.step)]
+                            end
                             c = cgen_split_coeff(idx, lp.var)
                             (c === nothing || c === 0) && return nothing
                             issubset(cgen_split_vars(c), params) || return nothing
@@ -10910,22 +10966,26 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
             end
         end
     end
-    # a plain-stored array of a loop appears nowhere else, and only at its own index; an atomically updated array is never read
-    for (arr, (i, idx)) in plain_sites
+    # a plain-stored array appears nowhere but in the loops that store it, and there only at the stored index; an atomically updated array is never read
+    for (arr, sites) in plain_sites
         n_all = cgen_count_symbol(whole, arr)
-        lp = cgen_split_loop(items[i][2])
-        inside = sum(st -> cgen_count_symbol(st, arr), lp.body; init = 0)
+        loops = sort(unique(Int[x[1] for x in sites]))
+        inside = sum(i -> sum(st -> cgen_count_symbol(st, arr), cgen_split_loop(items[i][2]).body; init = 0), loops; init = 0)
         n_all == inside || return nothing
         arr in atomic_arrs && return nothing
-        # every access of the array in the loop sits at the stored index
-        function same_idx(e)
-            e isa Expr || return true
-            if e.head === :ref && e.args[1] === arr
-                return length(e.args) == 2 && e.args[2] == idx
+        # every access of the array in a loop sits at the index that loop stores
+        for i in loops
+            lp = cgen_split_loop(items[i][2])
+            idx = first(st.args[1].args[2] for st in lp.body if cgen_split_is_store(st) && cgen_atomic_site(st) === nothing && st.args[1].args[1] === arr)
+            function same_idx(e)
+                e isa Expr || return true
+                if e.head === :ref && e.args[1] === arr
+                    return length(e.args) == 2 && e.args[2] == idx
+                end
+                return all(same_idx, e.args)
             end
-            return all(same_idx, e.args)
+            all(same_idx, lp.body) || return nothing
         end
-        all(same_idx, lp.body) || return nothing
     end
     for arr in atomic_arrs
         n_sites = 0
@@ -10955,6 +11015,19 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
     end
     prev = nothing
     slot = 0
+    # each lane writes its partial sums to the shared array; after a barrier every lane adds the L partials in the same fixed order
+    function finish_partials(accs)
+        for (k, (v, p)) in enumerate(accs)
+            push!(body, Expr(:(=), Expr(:ref, shr, Expr(:call, :+, (slot + k - 1) * 32 * L, Expr(:call, :*, Expr(:call, :-, ly, 1), 32), jx)), p))
+        end
+        push!(body, Expr(:call, :sync_threads))
+        for (k, (v, p)) in enumerate(accs)
+            terms = Any[Expr(:ref, shr, Expr(:call, :+, (slot + k - 1) * 32 * L + (l - 1) * 32, jx)) for l in 1:L]
+            total = foldl((x, y) -> Expr(:call, :+, x, y), terms)
+            push!(body, Expr(:(=), v, Expr(:call, :+, v, total)))
+        end
+        slot += length(accs)
+    end
     group(k) = k === :W ? :w : k === :A ? :a : :rep
     for (kind, s) in items
         # a scalar statement that reads no array belongs to every group
@@ -10971,37 +11044,20 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
             push!(body, Expr(:if, Expr(:&&, act, Expr(:call, :(==), ly, 1)), Expr(:block, s)))
         elseif kind === :A
             lp = cgen_split_loop(s)
-            push!(body, Expr(:if, act, Expr(:block, lane_loop(lp, lp.body))))
+            accs, newbody = cgen_split_partials(lp)
+            for (v, p) in accs
+                push!(body, Expr(:(=), p, Expr(:call, :zero, v)))
+            end
+            push!(body, Expr(:if, act, Expr(:block, lane_loop(lp, newbody))))
+            isempty(accs) || finish_partials(accs)
         else
             lp = cgen_split_loop(s)
-            accs = Any[]
-            newbody = Any[]
-            for st in lp.body
-                a = cgen_split_accum(st)
-                if a !== nothing && count(x -> cgen_split_is_scalar(x) && x.args[1] === st.args[1], lp.body) == 1 &&
-                   !any(st2 -> st2 !== st && st.args[1] in cgen_split_vars(st2.args[2]), lp.body)
-                    p = Symbol("__p_", a[1])
-                    push!(accs, (a[1], p))
-                    push!(newbody, Expr(:(=), p, Expr(:call, a[2], p, a[3])))
-                else
-                    push!(newbody, st)
-                end
-            end
+            accs, newbody = cgen_split_partials(lp)
             for (v, p) in accs
                 push!(body, Expr(:(=), p, Expr(:call, :zero, v)))
             end
             push!(body, lane_loop(lp, newbody))
-            base0 = slot
-            for (k, (v, p)) in enumerate(accs)
-                push!(body, Expr(:(=), Expr(:ref, shr, Expr(:call, :+, (slot + k - 1) * 32 * L, Expr(:call, :*, Expr(:call, :-, ly, 1), 32), jx)), p))
-            end
-            push!(body, Expr(:call, :sync_threads))
-            for (k, (v, p)) in enumerate(accs)
-                terms = Any[Expr(:ref, shr, Expr(:call, :+, (slot + k - 1) * 32 * L + (l - 1) * 32, jx)) for l in 1:L]
-                total = foldl((x, y) -> Expr(:call, :+, x, y), terms)
-                push!(body, Expr(:(=), v, Expr(:call, :+, v, total)))
-            end
-            slot += length(accs)
+            finish_partials(accs)
         end
     end
     push!(body, emit_return_nothing())

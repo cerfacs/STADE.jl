@@ -73,8 +73,10 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
         kernel = STADE.parse_kernel(primal)
         baseline = STADE.io_read_baseline_yaml(yp)
         STADE.val_coerce_int_arrays!(kernel, baseline.values)
-        gen = mode == :hvp ? STADE.stade_hvp(primal; keep_push_pop = false) :
-                             STADE.stade_adjoint(primal; keep_push_pop = false)
+        # OWN_FUSE=1 generates with fuse_ii_loops = true, the setting of the benchmark kernels
+        fuse = get(ENV, "OWN_FUSE", "0") == "1"
+        gen = mode == :hvp ? STADE.stade_hvp(primal; keep_push_pop = false, fuse_ii_loops = fuse) :
+                             STADE.stade_adjoint(primal; keep_push_pop = false, fuse_ii_loops = fuse)
         gexpr = mode == :hvp ? gen.hvp : gen.adjoint
         stack_names = Symbol[a for a in gen.initstacks.args[1].args[2:end]]
         seeds = [STADE.val_random_values_like(kernel, baseline.values) for _ in 1:trials]
