@@ -2161,6 +2161,99 @@ function act_expr_active(expr, active_map::Dict{Symbol,Bool})
 end
 
 
+# ==================== norm_* (kernel-to-kernel normalisation) ==========
+
+# ---- dead loop-entry scalars ----
+# A scalar assigned only inside a nested block of `body`, written there before anything reads it, carries a value from the previous iteration that nothing uses --
+# the adjoint's pre-write snapshot then reads that value, making the loop look loop-carried to cgen_use_before_def and blocking the split. ttgc's second cell nest
+# is the case in point: `vere` is assigned every i_loc iteration before use, but without a reset the cell loop stays on the host. Writing `var = 0.0` at the top
+# of `body` states that kill. Suppressing the snapshot instead does NOT work: cgen_use_before_def refuses regardless.
+function norm_dead_entry_vars(body, kinds, value_needed)
+    locals = agen_collect_reassigned(body, true)
+    return sort(collect(v for v in intersect(locals, value_needed)
+                        if get(kinds, v, :none) == :scalar_float &&
+                           !agen_has_top_level_write(body, v) &&
+                           norm_first_touch(body, v) === :write); by = string)
+end
+
+# :read, :write or :none -- what happens to `v` FIRST along every path through `body`. A write
+# only counts when it is GUARANTEED: both arms of an `:if`, or a loop whose literal bounds prove
+# at least one iteration. Anything weaker and the entry value can survive to a later read, so the
+# conservative answer is to keep scanning rather than claim a kill.
+function norm_first_touch(body, v)
+    for st in body
+        if st.kind == :assign
+            # any occurrence is a read here, linear or not: the primal executes it and sees the entry value
+            reads = Set{Symbol}()
+            agen_collect_expr_vars!(st.rhs, reads)
+            if st.lhs isa Expr
+                for a in st.lhs.args[2:end]
+                    agen_collect_expr_vars!(a, reads)
+                end
+            end
+            v in reads && return :read
+            st.lhs isa Symbol && st.lhs == v && return :write
+        elseif st.kind == :for
+            t = norm_first_touch(st.body, v)
+            t === :read && return :read
+            if t === :write && st.lo isa Number && st.hi isa Number && st.step isa Number
+                (st.step > 0 ? st.hi >= st.lo : st.hi <= st.lo) && return :write
+            end
+        elseif st.kind == :while
+            # the condition runs first and the body may not run at all
+            reads = Set{Symbol}()
+            agen_collect_expr_vars!(st.cond, reads)
+            v in reads && return :read
+            norm_first_touch(st.body, v) === :read && return :read
+        elseif st.kind == :if
+            reads = Set{Symbol}()
+            agen_collect_expr_vars!(st.cond, reads)
+            v in reads && return :read
+            tt = norm_first_touch(st.then, v)
+            te = norm_first_touch(st.els, v)
+            (tt === :read || te === :read) && return :read
+            (tt === :write && te === :write) && return :write
+        end
+    end
+    return :none
+end
+
+# Rewrites `kernel` with those resets inserted, innermost bodies included. Applied once, before
+# any analysis runs, so every stage downstream -- TBR, snapshot layout, lin_plan, cgen_ -- sees
+# one consistent kernel. The finite-difference oracles still evaluate the ORIGINAL primal, so a
+# reset inserted where the entry value was in fact live shows up as a gradient mismatch.
+function norm_insert_dead_entry_resets(kernel)
+    kinds = kernel.sig.kinds
+    value_needed = agen_value_needed_vars(kernel)
+    return merge(kernel, (body = norm_reset_body(kernel.body, kinds, value_needed),))
+end
+
+function norm_reset_body(body, kinds, value_needed)
+    out = NamedTuple[]
+    for st in body
+        if st.kind == :for
+            inner = norm_reset_body(st.body, kinds, value_needed)
+            for v in reverse(norm_dead_entry_vars(st.body, kinds, value_needed))
+                pushfirst!(inner, (kind = :assign, lhs = v, rhs = 0.0))
+            end
+            push!(out, merge(st, (body = inner,)))
+        elseif st.kind == :while
+            inner = norm_reset_body(st.body, kinds, value_needed)
+            for v in reverse(norm_dead_entry_vars(st.body, kinds, value_needed))
+                pushfirst!(inner, (kind = :assign, lhs = v, rhs = 0.0))
+            end
+            push!(out, merge(st, (body = inner,)))
+        elseif st.kind == :if
+            push!(out, merge(st, (then = norm_reset_body(st.then, kinds, value_needed),
+                                  els = norm_reset_body(st.els, kinds, value_needed))))
+        else
+            push!(out, st)
+        end
+    end
+    return out
+end
+
+
 # ==================== snap_* ===================================
 # Push/pop site analysis (the TBR-equivalent): decides, per write, whether the reverse sweep needs a snapshot,
 # numbered forward and popped in exact reverse. :array/:value marks a write whose old value is needed (see
@@ -2506,17 +2599,16 @@ end
 # Without the intersection with what the body writes, a read-only parameter
 # counts as carried however early it is read. This is the opposite mistake.
 #
-# This helper is shared. snap_while_carried_ints calls it. The caller filters
-# the result by kind.
-function carry_carried_vars(body::Vector{NamedTuple})
+# snap_while_carried_ints is its only caller and filters the result by kind.
+function snap_carried_vars(body::Vector{NamedTuple})
     out = Set{Symbol}()
-    carry_walk!(body, out, Set{Symbol}())
+    snap_carried_walk!(body, out, Set{Symbol}())
     written = Set{Symbol}()
     parse_collect_written!(body, written)
     return intersect(out, written)
 end
 
-function carry_walk!(body::Vector{NamedTuple}, out::Set{Symbol}, defined::Set{Symbol})
+function snap_carried_walk!(body::Vector{NamedTuple}, out::Set{Symbol}, defined::Set{Symbol})
     for stmt in body
         if stmt.kind == :assign
             rd = Set{Symbol}()
@@ -2527,23 +2619,23 @@ function carry_walk!(body::Vector{NamedTuple}, out::Set{Symbol}, defined::Set{Sy
             for v in rd; v in defined || push!(out, v); end
             stmt.lhs isa Symbol && push!(defined, stmt.lhs)
         elseif stmt.kind == :for
-            carry_walk!(stmt.body, out, union(defined, Set([stmt.var])))
+            snap_carried_walk!(stmt.body, out, union(defined, Set([stmt.var])))
         elseif stmt.kind == :while
             rd = Set{Symbol}(); parse_collect_expr_vars!(stmt.cond, rd)
             for v in rd; v in defined || push!(out, v); end
-            carry_walk!(stmt.body, out, copy(defined))
+            snap_carried_walk!(stmt.body, out, copy(defined))
         elseif stmt.kind == :if
             rd = Set{Symbol}(); parse_collect_expr_vars!(stmt.cond, rd)
             for v in rd; v in defined || push!(out, v); end
-            carry_walk!(stmt.then, out, copy(defined))
-            carry_walk!(stmt.els, out, copy(defined))
+            snap_carried_walk!(stmt.then, out, copy(defined))
+            snap_carried_walk!(stmt.els, out, copy(defined))
         end
     end
     return nothing
 end
 
 function snap_while_carried_ints(body, kinds, itbr = Set{Symbol}())
-    return Set(v for v in carry_carried_vars(body)
+    return Set(v for v in snap_carried_vars(body)
                if get(kinds, v, :none) == :scalar_int && !(v in itbr))
 end
 
@@ -8438,75 +8530,6 @@ end
 cgen_reduction_range(lo, step, hi) =
     step == 1 ? Expr(:call, :(:), lo, hi) : Expr(:call, :(:), lo, step, hi)
 
-# JACC: no confirmed BLAS-level acceleration to special-case, so every matched shape goes through the
-# same `JACC.@parallel_reduce range=N f(args...)` primitive, replacing the `@parallel_for` +
-# `Atomix.@atomic` kernel it would otherwise get.
-#
-# JACC's convention is a closure whose first parameter is the POSITION in `1:range`, not the loop's own
-# value. The two coincide only for a loop that starts at 1 with step 1. The comment that used to sit here
-# claimed they always coincide, and the closure therefore left `arr[loopvar]` as written -- so every
-# reduction whose loop had another lower bound, a stride, or a descending direction silently summed
-# elements `1 .. trip_count` instead of the ones the loop actually visited. Measured on a Tesla V100 with
-# reduction_threshold = 0: `2:i_n` at n = 100 returned 90.974668 against CUDA's exact 90.616806, and
-# `3:3:i_n` was out by 45%. A wrong value, never an error. Nothing saw it because the reduce branch needs
-# n_iter >= cgen_reduction_threshold_default() and corpus integers are drawn from 3..5 -- the same
-# invisibility that hid the cross-thread write-overlap race.
-#
-# The position is therefore mapped back to the loop's value, `lo + (k - 1) * step`, and substituted into
-# the term's array indices. cgen_idiomatic_scalar_reduction has already proven that every :ref in `term`
-# is indexed by exactly `loopvar` and that `loopvar` appears nowhere else, so that rewrite is total. A
-# negative step needs no special case: `i_n:-1:3` maps k = 1 to i_n and counts down, which is the order
-# the loop ran in.
-#
-# `lo == 1 && step == 1` keeps the original closure verbatim, because the mapping is the identity there
-# and dotprod, matvec_loss and every `1:n` loss wrapper must stay byte-identical.
-function jgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Symbol, lo, step, n_iter)
-    if lo == 1 && step == 1
-        closure = Expr(:->, Expr(:tuple, loopvar, arrs...), term)
-    else
-        k = :__jgen_k
-        shift = Expr(:call, :-, k, 1)
-        pos = step == 1 ? Expr(:call, :+, lo, shift) :
-                          Expr(:call, :+, lo, Expr(:call, :*, shift, step))
-        closure = Expr(:->, Expr(:tuple, k, arrs...), jgen_substitute_loop_index(term, loopvar, pos))
-    end
-    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_reduce"))), nothing,
-                Expr(:(=), :range, n_iter), Expr(:call, closure, arrs...))
-end
-
-# Rewrites `arr[loopvar]` to `arr[idx]` everywhere in `e`. Narrower than substituting the bare symbol on
-# purpose: cgen_idiomatic_scalar_reduction accepts a term only when loopvar occurs nowhere except as a
-# sole :ref index, so any other thing wearing that name is not this loop's variable.
-function jgen_substitute_loop_index(e, loopvar::Symbol, idx)
-    e isa Expr || return e
-    if e.head == :ref && length(e.args) == 2 && e.args[2] === loopvar
-        return Expr(:ref, e.args[1], idx)
-    end
-    return Expr(e.head, Any[jgen_substitute_loop_index(a, loopvar, idx) for a in e.args]...)
-end
-
-# ---- JACC idiomatic-reduction write-back ---
-# `target` (an `arr[idx...]` ref) must never be read or written from the host once `arr` may be a JACC device array. This accumulates `target
-# += value` inside a trivial one-thread device kernel instead, reusing the `Atomix.@atomic target += ...` shape jgen_device_assign already
-# emits for reduce_vars. `__jgen_redval` is a synthetic parameter for the reduction result, passed through as a `CuArray{Float64,1}` --
-# `JACC.@parallel_reduce` already returns one directly, not a host Float64 -- and read via `[1]` on-device, like any other boxed scalar.
-function jgen_reduction_writeback_kernel(owner::Symbol, idx::Int, target::Expr, wfargs::Vector{Symbol})
-    jidx = :__jacc_i   # unused (range=1), but every JACC kernel takes the index as its first param -- see jgen_kernel_def's comment
-    redval = :__jgen_redval
-    body = Any[
-        Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
-             Expr(:(+=), target, Expr(:ref, redval, 1))),
-        emit_return_nothing(),
-    ]
-    return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, wfargs..., redval), Expr(:block, body...))
-end
-
-function jgen_reduction_writeback_launch(owner::Symbol, idx::Int, wfargs::Vector{Symbol}, value)
-    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_for"))), nothing,
-                Expr(:(=), :range, 1),
-                Expr(:call, jgen_kernel_fname(owner, idx), wfargs..., value))
-end
-
 
 # True iff `e` contains an `Expr(:ref, ...)` anywhere -- an element-wise array index -- at
 # any depth. Used by cgen_body to spot host-side statements that touch what may be a device
@@ -12701,6 +12724,76 @@ function jgen_preamble()
 end
 
 
+# JACC: no confirmed BLAS-level acceleration to special-case, so every matched shape goes through the
+# same `JACC.@parallel_reduce range=N f(args...)` primitive, replacing the `@parallel_for` +
+# `Atomix.@atomic` kernel it would otherwise get.
+#
+# JACC's convention is a closure whose first parameter is the POSITION in `1:range`, not the loop's own
+# value. The two coincide only for a loop that starts at 1 with step 1. The comment that used to sit here
+# claimed they always coincide, and the closure therefore left `arr[loopvar]` as written -- so every
+# reduction whose loop had another lower bound, a stride, or a descending direction silently summed
+# elements `1 .. trip_count` instead of the ones the loop actually visited. Measured on a Tesla V100 with
+# reduction_threshold = 0: `2:i_n` at n = 100 returned 90.974668 against CUDA's exact 90.616806, and
+# `3:3:i_n` was out by 45%. A wrong value, never an error. Nothing saw it because the reduce branch needs
+# n_iter >= cgen_reduction_threshold_default() and corpus integers are drawn from 3..5 -- the same
+# invisibility that hid the cross-thread write-overlap race.
+#
+# The position is therefore mapped back to the loop's value, `lo + (k - 1) * step`, and substituted into
+# the term's array indices. cgen_idiomatic_scalar_reduction has already proven that every :ref in `term`
+# is indexed by exactly `loopvar` and that `loopvar` appears nowhere else, so that rewrite is total. A
+# negative step needs no special case: `i_n:-1:3` maps k = 1 to i_n and counts down, which is the order
+# the loop ran in.
+#
+# `lo == 1 && step == 1` keeps the original closure verbatim, because the mapping is the identity there
+# and dotprod, matvec_loss and every `1:n` loss wrapper must stay byte-identical.
+function jgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Symbol, lo, step, n_iter)
+    if lo == 1 && step == 1
+        closure = Expr(:->, Expr(:tuple, loopvar, arrs...), term)
+    else
+        k = :__jgen_k
+        shift = Expr(:call, :-, k, 1)
+        pos = step == 1 ? Expr(:call, :+, lo, shift) :
+                          Expr(:call, :+, lo, Expr(:call, :*, shift, step))
+        closure = Expr(:->, Expr(:tuple, k, arrs...), jgen_substitute_loop_index(term, loopvar, pos))
+    end
+    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_reduce"))), nothing,
+                Expr(:(=), :range, n_iter), Expr(:call, closure, arrs...))
+end
+
+# Rewrites `arr[loopvar]` to `arr[idx]` everywhere in `e`. Narrower than substituting the bare symbol on
+# purpose: cgen_idiomatic_scalar_reduction accepts a term only when loopvar occurs nowhere except as a
+# sole :ref index, so any other thing wearing that name is not this loop's variable.
+function jgen_substitute_loop_index(e, loopvar::Symbol, idx)
+    e isa Expr || return e
+    if e.head == :ref && length(e.args) == 2 && e.args[2] === loopvar
+        return Expr(:ref, e.args[1], idx)
+    end
+    return Expr(e.head, Any[jgen_substitute_loop_index(a, loopvar, idx) for a in e.args]...)
+end
+
+# ---- JACC idiomatic-reduction write-back ---
+# `target` (an `arr[idx...]` ref) must never be read or written from the host once `arr` may be a JACC device array. This accumulates `target
+# += value` inside a trivial one-thread device kernel instead, reusing the `Atomix.@atomic target += ...` shape jgen_device_assign already
+# emits for reduce_vars. `__jgen_redval` is a synthetic parameter for the reduction result, passed through as a `CuArray{Float64,1}` --
+# `JACC.@parallel_reduce` already returns one directly, not a host Float64 -- and read via `[1]` on-device, like any other boxed scalar.
+function jgen_reduction_writeback_kernel(owner::Symbol, idx::Int, target::Expr, wfargs::Vector{Symbol})
+    jidx = :__jacc_i   # unused (range=1), but every JACC kernel takes the index as its first param -- see jgen_kernel_def's comment
+    redval = :__jgen_redval
+    body = Any[
+        Expr(:macrocall, Expr(:., :Atomix, QuoteNode(Symbol("@atomic"))), nothing,
+             Expr(:(+=), target, Expr(:ref, redval, 1))),
+        emit_return_nothing(),
+    ]
+    return Expr(:function, Expr(:call, jgen_kernel_fname(owner, idx), jidx, wfargs..., redval), Expr(:block, body...))
+end
+
+function jgen_reduction_writeback_launch(owner::Symbol, idx::Int, wfargs::Vector{Symbol}, value)
+    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_for"))), nothing,
+                Expr(:(=), :range, 1),
+                Expr(:call, jgen_kernel_fname(owner, idx), wfargs..., value))
+end
+
+
 # ==================== val_* =======================================
 # Correctness oracle: <y, J*x> == <J'*y, x>, checked against random
 # seed vectors.
@@ -13471,6 +13564,21 @@ function val_validate_hvp(kernel, primal_expr::Expr, adjoint_out, hvp_out, basel
 end
 
 
+# io_read_baseline_yaml is kernel-agnostic (plain text in, numbers out) so it has no way to know
+# which `values:` entries are really array_int args rather than array_float ones -- everything
+# comes back parsed as Float64. Any caller with `kernel` in scope must coerce those entries back
+# to Int before using them as array indices (round rather than raw Int(...) truncation, for
+# exact-integer-valued Float64->Int robustness).
+function val_coerce_int_arrays!(kernel, values::Dict)
+    for a in kernel.sig.args
+        if kernel.sig.kinds[a] == :array_int && haskey(values, a)
+            values[a] = round.(Int, values[a])
+        end
+    end
+    return values
+end
+
+
 # ==================== bgen_* (data-parallel epilogue) =============
 # Every rank runs the unmodified single-sample kernel on its own
 # samples. This stage derives which buffers must be summed across ranks
@@ -14030,39 +14138,6 @@ function bgen_preamble(kernel, roles, per_sample, reduced, mode)
     return join(lines, "\n") * "\n\nusing MPI\n"
 end
 
-# Six functions. Each keeps its one-line contract as a comment above it. The
-# generated file is read by whoever writes the training loop, and a role
-# table with no statement of what to call when is half a plan.
-function stade_batch_file(in_path::String, out_path::String;
-                          per_sample::Vector{Symbol}, mode::Symbol,
-                          reduced::Vector{Symbol} = Symbol[])
-    primal = io_read_corpus_entry(in_path)
-    r = stade_batch(primal; per_sample = per_sample, mode = mode, reduced = reduced)
-    parts = String[]
-    for f in (r.reset_accum, r.reset_reduced, r.reset_local,
-              r.allreduce_accum, r.allreduce_reduced, r.check)
-        push!(parts, "# " * f.doc * "\n" * io_expr_to_source(f.expr))
-    end
-    open(out_path, "w") do io
-        write(io, r.preamble * "\n" * join(parts, "\n\n") * "\n")
-    end
-    return r.roles
-end
-
-function stade_batch(primal::Expr; per_sample::Vector{Symbol}, mode::Symbol,
-                     reduced::Vector{Symbol} = Symbol[])
-    kernel = parse_kernel(primal)
-    roles = bgen_roles(kernel, per_sample, mode; reduced = reduced)
-    return (reset_accum   = bgen_reset_accum_expr(kernel, roles, mode),
-            reset_reduced = bgen_reset_reduced_expr(kernel, roles, mode),
-            reset_local   = bgen_reset_local_expr(kernel, roles, mode),
-            allreduce_accum   = bgen_allreduce_accum_expr(kernel, roles, mode),
-            allreduce_reduced = bgen_allreduce_reduced_expr(kernel, roles, mode),
-            check         = bgen_check_expr(kernel, roles, mode),
-            preamble      = bgen_preamble(kernel, roles, per_sample, reduced, mode),
-            roles         = roles)
-end
-
 # ==================== io_* ====================================
 # File-level entry points. The only stage permitted to touch the
 # filesystem -- everything above operates purely on Expr in memory.
@@ -14278,20 +14353,6 @@ function io_read_baseline_yaml(path::String)
     return (int_args = int_args, values = values)
 end
 
-# io_read_baseline_yaml is kernel-agnostic (plain text in, numbers out) so it has no way to know
-# which `values:` entries are really array_int args rather than array_float ones -- everything
-# comes back parsed as Float64. Any caller with `kernel` in scope must coerce those entries back
-# to Int before using them as array indices (round rather than raw Int(...) truncation, for
-# exact-integer-valued Float64->Int robustness).
-function val_coerce_int_arrays!(kernel, values::Dict)
-    for a in kernel.sig.args
-        if kernel.sig.kinds[a] == :array_int && haskey(values, a)
-            values[a] = round.(Int, values[a])
-        end
-    end
-    return values
-end
-
 
 # ==================== stade_* (public API) ========================
 # independents/dependents auto-derived -- see parse_infer_indep_dep.
@@ -14330,96 +14391,15 @@ function stade_site_level_tbr_check(kernel)
     return snap_sites, agen_sites
 end
 
-
-# ---- dead loop-entry scalars ----
-# A scalar assigned only inside a nested block of `body`, written there before anything reads it, carries a value from the previous iteration that nothing uses --
-# the adjoint's pre-write snapshot then reads that value, making the loop look loop-carried to cgen_use_before_def and blocking the split. ttgc's second cell nest
-# is the case in point: `vere` is assigned every i_loc iteration before use, but without a reset the cell loop stays on the host. Writing `var = 0.0` at the top
-# of `body` states that kill. Suppressing the snapshot instead does NOT work: cgen_use_before_def refuses regardless.
-function norm_dead_entry_vars(body, kinds, value_needed)
-    locals = agen_collect_reassigned(body, true)
-    return sort(collect(v for v in intersect(locals, value_needed)
-                        if get(kinds, v, :none) == :scalar_float &&
-                           !agen_has_top_level_write(body, v) &&
-                           norm_first_touch(body, v) === :write); by = string)
+# cross-check: both hand-maintained copies must agree exactly,
+# mirroring stade_site_level_tbr_check's own pattern.
+function stade_ii_plan_check(kernel)
+    a = snap_ii_plan(kernel)
+    b = agen_ii_plan(kernel)
+    @assert a == b "snap_ii_plan and agen_ii_plan disagree for kernel $(kernel.sig.name): $a vs $b"
+    return a
 end
 
-# :read, :write or :none -- what happens to `v` FIRST along every path through `body`. A write
-# only counts when it is GUARANTEED: both arms of an `:if`, or a loop whose literal bounds prove
-# at least one iteration. Anything weaker and the entry value can survive to a later read, so the
-# conservative answer is to keep scanning rather than claim a kill.
-function norm_first_touch(body, v)
-    for st in body
-        if st.kind == :assign
-            # any occurrence is a read here, linear or not: the primal executes it and sees the entry value
-            reads = Set{Symbol}()
-            agen_collect_expr_vars!(st.rhs, reads)
-            if st.lhs isa Expr
-                for a in st.lhs.args[2:end]
-                    agen_collect_expr_vars!(a, reads)
-                end
-            end
-            v in reads && return :read
-            st.lhs isa Symbol && st.lhs == v && return :write
-        elseif st.kind == :for
-            t = norm_first_touch(st.body, v)
-            t === :read && return :read
-            if t === :write && st.lo isa Number && st.hi isa Number && st.step isa Number
-                (st.step > 0 ? st.hi >= st.lo : st.hi <= st.lo) && return :write
-            end
-        elseif st.kind == :while
-            # the condition runs first and the body may not run at all
-            reads = Set{Symbol}()
-            agen_collect_expr_vars!(st.cond, reads)
-            v in reads && return :read
-            norm_first_touch(st.body, v) === :read && return :read
-        elseif st.kind == :if
-            reads = Set{Symbol}()
-            agen_collect_expr_vars!(st.cond, reads)
-            v in reads && return :read
-            tt = norm_first_touch(st.then, v)
-            te = norm_first_touch(st.els, v)
-            (tt === :read || te === :read) && return :read
-            (tt === :write && te === :write) && return :write
-        end
-    end
-    return :none
-end
-
-# Rewrites `kernel` with those resets inserted, innermost bodies included. Applied once, before
-# any analysis runs, so every stage downstream -- TBR, snapshot layout, lin_plan, cgen_ -- sees
-# one consistent kernel. The finite-difference oracles still evaluate the ORIGINAL primal, so a
-# reset inserted where the entry value was in fact live shows up as a gradient mismatch.
-function norm_insert_dead_entry_resets(kernel)
-    kinds = kernel.sig.kinds
-    value_needed = agen_value_needed_vars(kernel)
-    return merge(kernel, (body = norm_reset_body(kernel.body, kinds, value_needed),))
-end
-
-function norm_reset_body(body, kinds, value_needed)
-    out = NamedTuple[]
-    for st in body
-        if st.kind == :for
-            inner = norm_reset_body(st.body, kinds, value_needed)
-            for v in reverse(norm_dead_entry_vars(st.body, kinds, value_needed))
-                pushfirst!(inner, (kind = :assign, lhs = v, rhs = 0.0))
-            end
-            push!(out, merge(st, (body = inner,)))
-        elseif st.kind == :while
-            inner = norm_reset_body(st.body, kinds, value_needed)
-            for v in reverse(norm_dead_entry_vars(st.body, kinds, value_needed))
-                pushfirst!(inner, (kind = :assign, lhs = v, rhs = 0.0))
-            end
-            push!(out, merge(st, (body = inner,)))
-        elseif st.kind == :if
-            push!(out, merge(st, (then = norm_reset_body(st.then, kinds, value_needed),
-                                  els = norm_reset_body(st.els, kinds, value_needed))))
-        else
-            push!(out, st)
-        end
-    end
-    return out
-end
 
 function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
@@ -14644,6 +14624,39 @@ function stade_gpu_report_file(in_path::String, backend = cgen_backend_cuda(); r
         append!(records, plan.decisions)
     end
     return records
+end
+
+
+# stade_batch_file writes the six functions of stade_batch to a file. Each keeps its one-line contract as a comment above it. The
+# generated file is read by whoever writes the training loop, and a role table with no statement of what to call when is half a plan.
+function stade_batch_file(in_path::String, out_path::String;
+                          per_sample::Vector{Symbol}, mode::Symbol,
+                          reduced::Vector{Symbol} = Symbol[])
+    primal = io_read_corpus_entry(in_path)
+    r = stade_batch(primal; per_sample = per_sample, mode = mode, reduced = reduced)
+    parts = String[]
+    for f in (r.reset_accum, r.reset_reduced, r.reset_local,
+              r.allreduce_accum, r.allreduce_reduced, r.check)
+        push!(parts, "# " * f.doc * "\n" * io_expr_to_source(f.expr))
+    end
+    open(out_path, "w") do io
+        write(io, r.preamble * "\n" * join(parts, "\n\n") * "\n")
+    end
+    return r.roles
+end
+
+function stade_batch(primal::Expr; per_sample::Vector{Symbol}, mode::Symbol,
+                     reduced::Vector{Symbol} = Symbol[])
+    kernel = parse_kernel(primal)
+    roles = bgen_roles(kernel, per_sample, mode; reduced = reduced)
+    return (reset_accum   = bgen_reset_accum_expr(kernel, roles, mode),
+            reset_reduced = bgen_reset_reduced_expr(kernel, roles, mode),
+            reset_local   = bgen_reset_local_expr(kernel, roles, mode),
+            allreduce_accum   = bgen_allreduce_accum_expr(kernel, roles, mode),
+            allreduce_reduced = bgen_allreduce_reduced_expr(kernel, roles, mode),
+            check         = bgen_check_expr(kernel, roles, mode),
+            preamble      = bgen_preamble(kernel, roles, per_sample, reduced, mode),
+            roles         = roles)
 end
 
 
@@ -16218,15 +16231,6 @@ function agen_ii_plan_walk!(body, kernel, value_needed, active_map, plan)
         end
     end
     return nothing
-end
-
-# cross-check: both hand-maintained copies must agree exactly,
-# mirroring stade_site_level_tbr_check's own pattern.
-function stade_ii_plan_check(kernel)
-    a = snap_ii_plan(kernel)
-    b = agen_ii_plan(kernel)
-    @assert a == b "snap_ii_plan and agen_ii_plan disagree for kernel $(kernel.sig.name): $a vs $b"
-    return a
 end
 
 end # module STADE
