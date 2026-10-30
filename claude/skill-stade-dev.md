@@ -473,6 +473,8 @@ Rule 1 allows the one `module STADE ... end` that wraps the file. Rule 4 lists t
 
 `fresh_gradient` (v0.4.48, CUDA, default off; `false` writes the v0.4.47 text): a gradient written once per element per call is stored as `g[idx] = e`, so the caller must pass it as zeros and call the adjoint once per reset. It is a CPU/GPU contract difference by design. A guard added to the recogniser needs a sabotage case in `test/validate_fresh_gradient.jl`, and a validator that runs the flagged adjoint on a device must zero the flagged gradients first (`validate_corpus_gpu.jl` and `stade_validate_gpu_file` do).
 
+`skip_empty` (v0.4.49, CUDA, default on; `false` restores the v0.4.48 text): the plain launches of a kernel that holds only scalar assignments, loops and branches over pure expressions are deleted. A statement kind added to the emitter that has an effect must not pass `cgen_empty_body`; `test/validate_skip_empty.jl` has the sabotage cases.
+
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
 no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded

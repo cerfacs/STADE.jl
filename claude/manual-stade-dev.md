@@ -2658,6 +2658,18 @@ is that of v0.4.34. The plan's target (adjoint at most 100 ms at d1024) is misse
 
 *Validation.* `test/validate_fresh_gradient.jl`, see the README entry of v0.4.48.
 
+**Empty kernels** (`skip_empty`, v0.4.49)
+
+*Scope.* CUDA. A kernel whose body holds only scalar assignments, `for` loops and `if` branches over pure expressions has no effect the host can see. With `skip_empty = true` (the default) each plain launch of it is deleted, and so is its definition once no launch names it. `false` writes the v0.4.48 text.
+
+*What is empty.* Pure expressions are symbols, numbers, array reads, field access, `&&`, `||`, tuples and calls of arithmetic, comparisons, `div`, `mod`, `cld`, `fld`, `min`, `max`, `abs`, ranges, `zero`, `one`, `oftype` and the thread-index calls. A store, an atomic, a `while`, and any other call make a kernel non-empty. The pass runs before the `@inbounds` wrapper is added.
+
+*Where it applies.* The `initstacks_*` host: an index loop whose stores the stack analysis does not need leaves an empty kernel (`mpnn_gather`, `ddp_ragged`, `cascadic_mg_prolong`, `early_stage_offset`). No adjoint or HVP host of the 175 corpus and benchmark kernels has one. The launches run once at setup, so the saving is a few launches per setup call.
+
+*Not built (measured).* The input gradient of the convolution backward kernels as a gather (one thread per input element, no atomic) plus a weight-only kernel was timed standalone on a Tesla V100 against the current kernel: 0.75 to 0.97 times the speed in five shapes (151M multiply-adds: 2.66 against 2.28 ms). The weight-gradient path takes 1.60 of the 2.28 ms, so the gather gives at most 1.42 times even if it were free. The recogniser was not written.
+
+*Validation.* `test/validate_skip_empty.jl`, see the README entry of v0.4.49.
+
 **Gather form of affine stencil adjoints** (`gather_stencil`)
 All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The
 adjoint of `y[i] = f(x[i-1], x[i], x[i+1])` scatters: iteration `i` adds to
