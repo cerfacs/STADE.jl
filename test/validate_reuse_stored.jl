@@ -233,7 +233,7 @@ function rs_direct_checks()
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
     cuda = STADE.cgen_backend_cuda()
     expr = Meta.parse(RS_BASE)
-    plan = STADE.cgen_emit(STADE.cgen_gather_stencil(STADE.cgen_ingest(expr), true), cuda; reduction_threshold = STADE.CGEN_REDUCTION_THRESHOLD_DEFAULT)
+    plan = STADE.cgen_emit(STADE.cgen_gather_stencil(STADE.cgen_ingest(expr), true), cuda; reduction_threshold = STADE.cgen_reduction_threshold_default())
     kernels = Expr[STADE.cgen_dead_scalars(k, true) for k in plan.kernels]
     host = plan.host
     lm = cuda.launch_macro

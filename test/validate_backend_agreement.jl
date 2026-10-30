@@ -218,9 +218,9 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
             # more variables than the ceiling, or it was packed for no reason.
             for (i, kj) in enumerate(ja.kernels)
                 n = length(jacc_params(kj))
-                n <= STADE.JGEN_MAX_SPLAT_ARGS ||
-                    push!(problems, "jacc kernel $(i) takes $(n) splatted args (ceiling $(STADE.JGEN_MAX_SPLAT_ARGS)) -- it must be packed")
-                if n == 1 && jacc_params(kj)[1] === :__jargs && jacc_arity(kj) <= STADE.JGEN_MAX_SPLAT_ARGS
+                n <= STADE.jgen_max_splat_args() ||
+                    push!(problems, "jacc kernel $(i) takes $(n) splatted args (ceiling $(STADE.jgen_max_splat_args())) -- it must be packed")
+                if n == 1 && jacc_params(kj)[1] === :__jargs && jacc_arity(kj) <= STADE.jgen_max_splat_args()
                     push!(problems, "jacc kernel $(i) is packed but carries only $(jacc_arity(kj)) variables")
                 end
             end

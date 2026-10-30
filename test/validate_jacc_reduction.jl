@@ -20,7 +20,7 @@ by 45%. A wrong number, never an error.
 CuDim3(0x0, 0x1, 0x1) are not positive". CUDA's `mapreduce` carries an `init` and returns zero.
 
 Neither is reachable from the corpus at its normal settings: the reduce branch is taken only when the
-trip count is at least `CGEN_REDUCTION_THRESHOLD_DEFAULT` (32768) and corpus baselines draw integers
+trip count is at least `cgen_reduction_threshold_default()` (32768) and corpus baselines draw integers
 from 3..5, so every corpus run takes the atomic branch instead. The same invisibility hid the
 cross-thread write-overlap race. These checks therefore force the branch with `reduction_threshold = 0`.
 

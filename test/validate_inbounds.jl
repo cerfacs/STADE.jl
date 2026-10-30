@@ -333,7 +333,7 @@ function validate_inbounds(dir::String = joinpath(@__DIR__, "val-corpus"); phase
         # No entry for the initial `head = union(live, rng)` of a loop: the fixpoint's own update adds the bounds on the first sweep, so removing it changes no output.
         cases = [
             ("loop fixpoint stops after one sweep", "nh == head && break", "break"),
-            ("an effectful call may be deleted", "e.args[1] in CGEN_DEAD_PURE_CALLS || return false", "true || return false"),
+            ("an effectful call may be deleted", "e.args[1] in cgen_dead_pure_calls() || return false", "true || return false"),
             ("an array read may be deleted without @inbounds", "return refs_ok && all(a -> cgen_dead_pure(a, refs_ok), e.args)", "return all(a -> cgen_dead_pure(a, refs_ok), e.args)"),
             ("the else branch adds no reads", "union!(nl, el)", "nothing"),
             ("a missing else adds no reads", "union!(nl, live)", "nothing"),
