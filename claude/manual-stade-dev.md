@@ -2644,6 +2644,20 @@ is that of v0.4.34. The plan's target (adjoint at most 100 ms at d1024) is misse
 
 *Validation.* `test/validate_reduce_block.jl`, see the README entry of v0.4.47.
 
+**Fresh gradient stores** (`fresh_gradient`, v0.4.48)
+
+*Scope.* CUDA, the adjoint. A gradient store `g[idx] = g[idx] + e` is a read, an add and a write. When the kernel writes each element of `g` once per call, the read only returns what the caller left there, so `g[idx] = e` gives the same result from zeros and saves the read. With `fresh_gradient = true` (default `false`) the generator makes that change where it can prove the condition from the text.
+
+*Contract.* The generated adjoint then writes the flagged gradients instead of adding to them. The caller passes them as zeros and makes one adjoint call per reset; a second call overwrites the first. The CPU adjoint is not changed and still accumulates, so the two codes agree from zero gradients and differ from non-zero ones, by design. `stade_gpu` returns the flagged names in `fresh`; `stade_gpu_file` writes them and this rule in a comment at the top of the file. In `stade_batch`, `reset_accum` zeroes the buffers, so the contract holds with one adjoint call per reset. If a loop calls the adjoint several times into one `:accum` buffer between resets (several mini-batches into one gradient), leave the keyword off.
+
+*Recogniser.* For each gradient (a shadow argument of the host function) all of these must hold: the host array is mentioned in one statement of the host body, and that statement is one top-level launch group (a plain launch or a choice between variants of one kernel, not a loop or a branch around launches); the kernel holds exactly one store of the form `g[idx] = g[idx] + e` and no other mention of `g`; every name in `idx` is a parameter, an enclosing loop variable, the thread id or a scalar assigned once from those; for every enclosing loop variable the coefficient in `idx` is provably nonzero, that is a nonzero literal or a parameter whose thread count the guard proves is at least 1. A private variant of the kernel must hold the same one store and nothing else of the array.
+
+*Refused, keeping the accumulating store.* A weight shared by every thread (the index does not depend on the thread), a store inside a sequential loop, two stores or two mentions of one array, a gathered index, an index scalar defined in the loop body, a launch inside a host loop, an overlapping stride (the coefficient may be zero), and an input gradient that has another reader.
+
+*Cost.* mlp3 adjoint on a Tesla V100: 3.120 to 2.478 ms at 79M parameters (21%), 0.746 to 0.636 ms at 13M, 0.334 to 0.291 ms at 3M.
+
+*Validation.* `test/validate_fresh_gradient.jl`, see the README entry of v0.4.48.
+
 **Gather form of affine stencil adjoints** (`gather_stencil`)
 All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The
 adjoint of `y[i] = f(x[i-1], x[i], x[i+1])` scatters: iteration `i` adds to

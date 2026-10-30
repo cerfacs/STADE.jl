@@ -189,7 +189,7 @@ end
 # same CPU code is run in BigFloat (192 bits) on the same inputs. Returns (cpu, dev, ok): the worst relative error of the CPU and of the device result
 # against it, and whether the run was possible.
 function gval_truth_trial(kernel, int_args, values, seed, gen_out, cpu_gen_expr, mode, dvals, dsd, stack_arg_names,
-                          cpu_tracked, dev_tracked, dev_to_host, ret_cpu, ret_dev, n_ret)
+                          cpu_tracked, dev_tracked, dev_to_host, ret_cpu, ret_dev, n_ret, fresh = Symbol[])
     setprecision(BigFloat, 192)
     sig = kernel.sig
     for ex in (gen_out.initstacks, cpu_gen_expr)
@@ -201,6 +201,10 @@ function gval_truth_trial(kernel, int_args, values, seed, gen_out, cpu_gen_expr,
     tobig(x) = x isa AbstractArray{Float64} ? BigFloat.(x) : (x isa Float64 ? BigFloat(x) : x)
     big_args, big_tracked = gval_build_call(sig, int_args, values, seed, tobig; mode, dvalues = dvals, dseed = dsd)
     big_args = Any[tobig(x) for x in big_args]
+    for a in fresh
+        an = Symbol(chopsuffix(string(a), "b"))
+        haskey(big_tracked, an) && hasproperty(big_tracked[an], :sh) && fill!(big_tracked[an].sh, BigFloat(0))
+    end
     init_big = Core.eval(Main, Symbol(string(gen_out.initstacks.args[1].args[1]) * "_big"))
     gen_big = Core.eval(Main, Symbol(string(cpu_gen_expr.args[1].args[1]) * "_big"))
     stacks_big = gval_live_init_stacks(init_big, gval_stack_extra(stack_arg_names, int_args, values, tobig))
@@ -284,6 +288,12 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
         dsd   = mode == :hvp ? shtan_seeds[i_seed] : Dict{Symbol,Any}()
         cpu_args, cpu_tracked = gval_build_call(sig, int_args, values, seed, identity; mode, dvalues = dvals, dseed = dsd)
         dev_args, dev_tracked = gval_build_call(sig, int_args, values, seed, wrap; mode, dvalues = dvals, dseed = dsd)
+        # fresh_gradient: a flagged gradient is written, not accumulated, so it starts at zero on both sides
+        for a in get(plan_gen, :fresh, Symbol[])
+            an = Symbol(chopsuffix(string(a), "b"))
+            haskey(cpu_tracked, an) && hasproperty(cpu_tracked[an], :sh) || continue
+            fill!(cpu_tracked[an].sh, 0.0); fill!(dev_tracked[an].sh, 0.0)
+        end
         stacks_cpu = gval_live_init_stacks(cpu_init_fn, gval_stack_extra(stack_arg_names, int_args, values, identity))
         stacks_dev = gval_live_init_stacks(dev_init_fn, gval_stack_extra(stack_arg_names, int_args, values, wrap))
 
@@ -298,7 +308,7 @@ function gval_check_backend(kernel, int_args::Dict, values::Dict, seeds::Vector,
         ret_cpu = Base.invokelatest(cpu_gen_fn, cpu_args..., stacks_cpu...)
         ret_dev = Base.invokelatest(dev_gen_fn, dev_args..., stacks_dev...)
         if truth && tr_ran
-            ec, ed, okb = gval_truth_trial(kernel, int_args, values, seed, gen_out, cpu_gen_expr, mode, dvals, dsd, stack_arg_names, cpu_tracked, dev_tracked, dev_to_host, ret_cpu, ret_dev, n_ret)
+            ec, ed, okb = gval_truth_trial(kernel, int_args, values, seed, gen_out, cpu_gen_expr, mode, dvals, dsd, stack_arg_names, cpu_tracked, dev_tracked, dev_to_host, ret_cpu, ret_dev, n_ret, get(plan_gen, :fresh, Symbol[]))
             okb ? ((tr_cpu = max(tr_cpu, ec)); (tr_dev = max(tr_dev, ed))) : (tr_ran = false)
         end
 
@@ -328,7 +338,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                               modes::Vector{Symbol} = [:adjoint, :hvp],
                               only::Union{Vector{String},Nothing} = nothing,
                               int_lo::Int = 3, int_hi::Int = 5, grow_max::Int = 512,
-                              reduction_threshold::Int = STADE.cgen_reduction_threshold_default())
+                              reduction_threshold::Int = STADE.cgen_reduction_threshold_default(),
+                              fresh_gradient::Bool = false)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") ||
            endswith(f, ".yaml") || endswith(f, ".gpu.yaml") ||
@@ -392,7 +403,7 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         if run_cuda
             try
                 plan_init = STADE.stade_gpu(gen_out.initstacks, cuda_backend)
-                plan_gen  = STADE.stade_gpu(gen_expr, cuda_backend; reduction_threshold, init_hosts = Dict{Symbol,Expr}(plan_init.host.args[1].args[1] => plan_init.host))
+                plan_gen  = STADE.stade_gpu(gen_expr, cuda_backend; reduction_threshold, fresh_gradient, init_hosts = Dict{Symbol,Expr}(plan_init.host.args[1].args[1] => plan_init.host))
                 plan_init = merge(plan_init, (host = STADE.cgen_shrink_stacks(plan_init.host, plan_gen.dead_stacks, plan_gen.compact_stacks),))
                 if write_generated
                     open(joinpath(dir, name * suffix * "_cuda.jl"), "w") do f
