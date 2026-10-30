@@ -36,8 +36,8 @@ function validate_warp_atomics(dir::String = joinpath(@__DIR__, "val-corpus"); o
         for (mode, gen) in (("adjoint", STADE.stade_adjoint), ("hvp", STADE.stade_hvp))
             out = try gen(pe; keep_push_pop = false, fuse_ii_loops = true) catch; continue end
             e = mode == "hvp" ? out.hvp : out.adjoint
-            on = STADE.stade_gpu(e, cuda; inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
-            off = STADE.stade_gpu(e, cuda; warp_atomics = false, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
+            on = STADE.stade_gpu(e, cuda; reduce_block = false, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
+            off = STADE.stade_gpu(e, cuda; warp_atomics = false, reduce_block = false, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
             n = sum(ncalls(k) for k in on.kernels; init = 0)
             total += n; n > 0 && (kernels_with += 1)
             same = length(on.kernels) == length(off.kernels) && all(src(unwa(a)) == src(b) for (a, b) in zip(on.kernels, off.kernels)) && src(on.host) == src(off.host)

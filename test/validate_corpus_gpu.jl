@@ -327,7 +327,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                               write_generated::Bool = true,
                               modes::Vector{Symbol} = [:adjoint, :hvp],
                               only::Union{Vector{String},Nothing} = nothing,
-                              int_lo::Int = 3, int_hi::Int = 5, grow_max::Int = 512)
+                              int_lo::Int = 3, int_hi::Int = 5, grow_max::Int = 512,
+                              reduction_threshold::Int = STADE.cgen_reduction_threshold_default())
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") ||
            endswith(f, ".yaml") || endswith(f, ".gpu.yaml") ||
@@ -391,7 +392,7 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         if run_cuda
             try
                 plan_init = STADE.stade_gpu(gen_out.initstacks, cuda_backend)
-                plan_gen  = STADE.stade_gpu(gen_expr, cuda_backend; init_hosts = Dict{Symbol,Expr}(plan_init.host.args[1].args[1] => plan_init.host))
+                plan_gen  = STADE.stade_gpu(gen_expr, cuda_backend; reduction_threshold, init_hosts = Dict{Symbol,Expr}(plan_init.host.args[1].args[1] => plan_init.host))
                 plan_init = merge(plan_init, (host = STADE.cgen_shrink_stacks(plan_init.host, plan_gen.dead_stacks, plan_gen.compact_stacks),))
                 if write_generated
                     open(joinpath(dir, name * suffix * "_cuda.jl"), "w") do f
@@ -423,7 +424,7 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         if run_jacc
             try
                 plan_init = STADE.stade_jacc(gen_out.initstacks)
-                plan_gen  = STADE.stade_jacc(gen_expr)
+                plan_gen  = STADE.stade_jacc(gen_expr; reduction_threshold)
                 if write_generated
                     open(joinpath(dir, name * suffix * "_jacc.jl"), "w") do f
                         for k in plan_init.kernels

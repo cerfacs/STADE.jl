@@ -469,6 +469,8 @@ A value that two functions share is a function with no argument, never a global 
 
 Rule 1 allows the one `module STADE ... end` that wraps the file. Rule 4 lists three more stages, `inl_`, `norm_` and `bgen_`. A function sits under the banner of its own stage and a `stade_` function under a `stade_*` banner. `test/validate_house_rules.jl` checks all of this on the text of `src/STADE.jl`.
 
+`reduce_block` (v0.4.47, CUDA, default on; `false` restores the v0.4.46 text): the large-trip branch of an array-element reduction is a block-sum kernel with one atomic per block. Its collective helpers need every thread to reach them, so the kernel has no early return; `test/validate_reduce_block.jl` guards that and the helper emission.
+
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
 no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded

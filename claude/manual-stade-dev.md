@@ -2630,6 +2630,20 @@ is that of v0.4.34. The plan's target (adjoint at most 100 ms at d1024) is misse
 
 *Where code goes* (v0.4.46). The file is one `module STADE ... end`; inside it a `# ==== prefix_* ====` banner opens the block of each stage, in pipeline order: `inl_`, `parse_`, `shape_`, `der_`, `emit_`, `act_`, `norm_`, `snap_`, `lin_`, `tgen_`, `agen_`, `hvp_`, `cgen_`, `jgen_`, `val_`, `bgen_`, `io_`, `stade_` (the public API, then the baseline validation and the two `stade_validate_*` blocks), and last the `ii_*` section. `norm_` is a stage for the rewrites of a kernel that run before the analyses and return a kernel (today `norm_insert_dead_entry_resets`: a scalar that every iteration writes before it reads gets `var = 0.0` at the top of the loop body, so that the pre-write snapshot does not make the loop look carried); an analysis that returns a plan or a set belongs to `snap_`, `act_` or `agen_`, as `snap_carried_vars` does. A new public function goes into the first `stade_*` block, not next to the stage it calls. `test/validate_house_rules.jl` fails when a function has no stage prefix, when a `stade_`, `norm_`, `bgen_`, `inl_` or `jgen_` function is under another banner, when a second `module` or none is found, or on a top-level `const`, `global`, `struct`, `mutable struct`, `abstract type`, `primitive type` or `@enum`; a new stage needs its prefix in `hr_prefixes()` and in the rule 4 list of the skill.
 
+**Block-sum reduction** (`reduce_block`, v0.4.47)
+
+*Scope.* CUDA, the large-trip branch of an array-element reduction: a loop `for i = lo:step:hi; A[k] = A[k] +/- term(i)` whose array references are all indexed by `i` and whose target index does not depend on `i`. Above `reduction_threshold` iterations the v0.4.46 text is `view(A, k:k) .= op.(view(A, k:k), mapreduce(...; dims = 1))`; with `reduce_block = true` (the default) it is one launch of `cuda_kernel_<name>_<n>!`. A local scalar accumulator, AMDGPU, Metal and JACC are unchanged, and `reduce_block = false` or `sync_free_reduce = false` writes the old text.
+
+*Kernel.* `n` is the trip count, `acc = zero(eltype(A))`, and a `while` loop walks `t = global thread id` in steps of `gridDim * blockDim`, adding `oftype(acc, term)`. `acc = __stade_rb_sum(acc)` then returns the block total in thread 1, which runs `CUDA.@atomic A[k] += acc` (`-acc` for a subtraction). No thread leaves before that call: the helper uses full-mask `shfl_xor_sync` and `sync_threads`.
+
+*Helpers.* `__stade_rb_shfl` moves a value through the shuffle (an 8-byte value as two `UInt32`), `__stade_rb_sum` adds the 32 lanes of each warp, stores one value per warp in a 32-element `CuStaticSharedArray`, and adds those values in warp 1. Both are emitted once per file, only when a kernel calls `__stade_rb_sum`.
+
+*Launch.* `blocks = min(max(1, cld(n, nthread_per_block)), 1024)` with the common 256 threads. The cap keeps the atomics on the one address to at most 1024. A zero trip count launches one block that adds zero.
+
+*Accuracy and cost.* The order of the float sum differs from the atomic form and from `mapreduce`; agreement is to rounding (at most 1.6e-15 relative in the V100 sweep). On a Tesla V100 the kernel is within 0.5 us of the atomic kernel below 32768 iterations and the fastest form above (dotprod: 13.0 us at 262144 against 29.7 us atomic and 57.7 us mapreduce; 314 us at 16.8 million against 1316 and 354). The default threshold stays at 32768 because the two kernels tie below it. The branch is a single kernel launch with no allocation and no host synchronization.
+
+*Validation.* `test/validate_reduce_block.jl`, see the README entry of v0.4.47.
+
 **Gather form of affine stencil adjoints** (`gather_stencil`)
 All GPU backends. The keyword is a level: `0` or `false` restores the v0.4.27 output exactly, `1` gives the gather form alone (the v0.4.28 to v0.4.30 output, byte for byte), `2` or `true` (the default) adds the zero-fold described below. The
 adjoint of `y[i] = f(x[i-1], x[i], x[i+1])` scatters: iteration `i` adds to
