@@ -467,6 +467,8 @@ The split twin has a fallback of fewer lanes (v0.4.43, keyword `split_fallback`,
 
 A value that two functions share is a function with no argument, never a global `const` (rule 3): `cgen_reduction_threshold_default()`, `cgen_dead_pure_calls()` and `jgen_max_splat_args()` replaced three constants in v0.4.45. `test/validate_house_rules.jl` fails on a top-level `const`, `global`, `struct`, `mutable struct`, `abstract type`, `primitive type` or `@enum` in `src/STADE.jl`.
 
+Rule 1 allows the one `module STADE ... end` that wraps the file. Rule 4 lists three more stages, `inl_`, `norm_` and `bgen_`. A function sits under the banner of its own stage and a `stade_` function under a `stade_*` banner. `test/validate_house_rules.jl` checks all of this on the text of `src/STADE.jl`.
+
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
 no carried scalar, no scalar escaping it) folds into the gather loop that FOLLOWS it as a guarded
