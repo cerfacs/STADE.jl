@@ -6807,8 +6807,254 @@ function cgen_gather_refs!(e, out::Vector{Any})
     return out
 end
 
+# ---- gather form with periodic shifts (gather_stencil level 3) ----
+
+# A scalar that an adjoint resets (`cb = 0.0` as the last statement of its loop) is 0 at the top of every iteration. Returns scalar => literal for the scalars
+# whose every assignment is either one literal at the top of the function (before any use) or sits in an innermost loop whose body ends with the same literal.
+function cgen_gather_resets(body::Vector{NamedTuple})
+    lit = Dict{Symbol,Any}()
+    bad = Set{Symbol}()
+    seen = Set{Symbol}()
+    has_loop(b) = any(st -> st.kind in (:for, :while) || (st.kind == :if && (has_loop(st.then) || has_loop(st.els))), b)
+    # the scalars whose last assignment in the body is a literal (an assignment inside an `if` after it spoils that)
+    function trailing(b)
+        last = Dict{Symbol,Any}()
+        function spoil(bb)
+            for st in bb
+                if st.kind == :assign
+                    st.lhs isa Symbol && (last[st.lhs] = nothing)
+                elseif st.kind in (:for, :while)
+                    spoil(st.body)
+                elseif st.kind == :if
+                    spoil(st.then); spoil(st.els)
+                end
+            end
+        end
+        for st in b
+            if st.kind == :assign
+                st.lhs isa Symbol && (last[st.lhs] = st.rhs isa Number ? st.rhs : nothing)
+            else
+                spoil(st.kind == :if ? vcat(st.then, st.els) : st.body)
+            end
+        end
+        return Dict{Symbol,Any}(k => v for (k, v) in last if v !== nothing)
+    end
+    function walk(stmts, top::Bool, ctx)
+        for st in stmts
+            if st.kind == :assign
+                st.lhs isa Symbol || continue
+                nm = st.lhs
+                first = !(nm in seen)
+                push!(seen, nm)
+                if top && st.rhs isa Number
+                    if first
+                        lit[nm] = st.rhs
+                    elseif get(lit, nm, nothing) != st.rhs
+                        push!(bad, nm)
+                    end
+                    continue
+                end
+                ok = ctx !== nothing && haskey(lit, nm) && get(ctx, nm, nothing) == lit[nm]
+                ok || push!(bad, nm)
+            elseif st.kind in (:for, :while)
+                walk(st.body, false, has_loop(st.body) ? nothing : trailing(st.body))
+            elseif st.kind == :if
+                walk(st.then, false, ctx)
+                walk(st.els, false, ctx)
+            end
+        end
+    end
+    walk(body, true, nothing)
+    return Dict{Symbol,Any}(k => v for (k, v) in lit if !(k in bad))
+end
+
+# the scalars of the function that are assigned only at the top level, always the same array-free expression (`nn = n * n`)
+function cgen_gather_outer_defs(body::Vector{NamedTuple})
+    defs = Dict{Symbol,Any}()
+    bad = Set{Symbol}()
+    function nested(b)
+        for st in b
+            if st.kind == :assign
+                st.lhs isa Symbol && push!(bad, st.lhs)
+            elseif st.kind in (:for, :while)
+                nested(st.body)
+            elseif st.kind == :if
+                nested(st.then); nested(st.els)
+            end
+        end
+    end
+    for st in body
+        if st.kind == :assign
+            if st.lhs isa Symbol
+                (cgen_expr_has_ref(st.rhs) || (haskey(defs, st.lhs) && defs[st.lhs] != st.rhs)) && push!(bad, st.lhs)
+                defs[st.lhs] = st.rhs
+            end
+        else
+            nested(st.kind == :if ? vcat(st.then, st.els) : st.body)
+        end
+    end
+    return Dict{Symbol,Any}(k => v for (k, v) in defs if !(k in bad))
+end
+
+# the factors of a product with the outer scalars expanded, as a sorted list of strings
+function cgen_gather_factors(e, odefs)
+    out = String[]
+    function go(x, depth)
+        if x isa Symbol && haskey(odefs, x) && depth < 8
+            go(odefs[x], depth + 1)
+        elseif x isa Expr && x.head == :call && x.args[1] == :*
+            for a in x.args[2:end]
+                go(a, depth + 1)
+            end
+        else
+            push!(out, string(x))
+        end
+    end
+    go(e, 0)
+    return sort(out)
+end
+
+# The inverse of a scatter index that is a permutation of the loop. `idxe` is the linear index of a cell whose coordinates (decoded from `var` with mod and div) are each
+# kept or shifted periodically (`im = mod(i - 2, n) + 1`). Returns an expression in `jv` for the iteration whose term lands on element jv, or nothing.
+function cgen_gather_periodic_inverse(idxe, body, var::Symbol, amin, amax, jv::Symbol, odefs)
+    defs = Dict{Symbol,Any}()
+    counts = Dict{Symbol,Int}()
+    for st in body
+        if st.kind == :assign && st.lhs isa Symbol
+            counts[st.lhs] = get(counts, st.lhs, 0) + 1
+            defs[st.lhs] = st.rhs
+        end
+    end
+    scal = Set(keys(counts))
+    free_ok(e) = !cgen_expr_has_ref(e) && isdisjoint(cgen_expr_symbols(e), scal) && !(var in cgen_expr_symbols(e))
+    amin == 1 || return nothing
+    idxm1 = Expr(:call, :-, var, 1)
+    once(sym) = get(counts, sym, 0) == 1
+    is_m1(e) = e == idxm1 || (e isa Symbol && once(e) && defs[e] == idxm1)
+    callf(e, f, n) = e isa Expr && e.head == :call && e.args[1] == f && length(e.args) == n + 1
+    fac(e) = cgen_gather_factors(e, odefs)
+    # the coordinates: scalar => (stride, extent or nothing for the last one)
+    coords = Dict{Symbol,Any}()
+    for (nm, rhs) in defs
+        once(nm) && callf(rhs, :+, 2) && rhs.args[3] == 1 || continue
+        x = rhs.args[2]
+        if callf(x, :mod, 2) && is_m1(x.args[2]) && free_ok(x.args[3])
+            coords[nm] = (1, x.args[3])
+        elseif callf(x, :mod, 2) && callf(x.args[2], :div, 2) && is_m1(x.args[2].args[2]) && free_ok(x.args[2].args[3]) && free_ok(x.args[3])
+            coords[nm] = (x.args[2].args[3], x.args[3])
+        elseif callf(x, :div, 2) && is_m1(x.args[2]) && free_ok(x.args[3])
+            coords[nm] = (x.args[3], nothing)
+        end
+    end
+    length(coords) >= 2 || return nothing
+    count(c -> coords[c][1] == 1, keys(coords)) == 1 || return nothing
+    count(c -> coords[c][2] === nothing, keys(coords)) <= 1 || return nothing
+    order = sort(collect(keys(coords)), by = c -> coords[c][1] == 1 ? 0 : length(fac(coords[c][1])))
+    # each stride is the product of the extents below it
+    below = String[]
+    for (m, c) in enumerate(order)
+        S, E = coords[c]
+        (S == 1 ? isempty(below) : fac(S) == sort(below)) || return nothing
+        if E === nothing
+            m == length(order) || return nothing
+        else
+            append!(below, fac(E))
+        end
+    end
+    # the neighbours: scalar => (coordinate, shift, modulus)
+    nbr = Dict{Symbol,Any}()
+    for (nm, rhs) in defs
+        once(nm) && callf(rhs, :+, 2) && rhs.args[3] == 1 || continue
+        x = rhs.args[2]
+        callf(x, :mod, 2) && free_ok(x.args[3]) || continue
+        for c in order
+            l = cgen_gather_lin(x.args[2], c)
+            (l !== nothing && l[1] == 1) && (nbr[nm] = (c, l[2] + 1, x.args[3]))
+        end
+    end
+    # the index: one term per coordinate
+    terms = Any[]
+    function flat(e)
+        if e isa Expr && e.head == :call && e.args[1] == :+ && length(e.args) >= 3
+            for a in e.args[2:end]
+                flat(a)
+            end
+        else
+            push!(terms, e)
+        end
+    end
+    flat(idxe)
+    length(terms) == length(order) || return nothing
+    slot = Dict{Symbol,Any}()    # coordinate => (scalar used, shift, modulus)
+    for t in terms
+        sym = nothing; stride = 1
+        if t isa Symbol
+            sym = t
+        elseif callf(t, :*, 2)
+            a, b = t.args[2], t.args[3]
+            if callf(a, :-, 2) && a.args[3] == 1 && a.args[2] isa Symbol
+                sym = a.args[2]; stride = b
+            elseif callf(b, :-, 2) && b.args[3] == 1 && b.args[2] isa Symbol
+                sym = b.args[2]; stride = a
+            end
+        end
+        sym === nothing && return nothing
+        c, shift, mod_e = haskey(coords, sym) ? (sym, 0, nothing) : haskey(nbr, sym) ? nbr[sym] : (nothing, 0, nothing)
+        c === nothing && return nothing
+        (stride == 1 ? coords[c][1] == 1 : (coords[c][1] != 1 && fac(stride) == fac(coords[c][1]))) || return nothing
+        haskey(slot, c) && return nothing
+        slot[c] = (sym, shift, mod_e)
+    end
+    length(slot) == length(order) || return nothing
+    any(c -> slot[c][2] != 0, order) || return nothing
+    # the box: the loop covers the product of the extents; the last coordinate's extent is the modulus of its neighbour, which every shifted coordinate must also use
+    extent(c) = coords[c][2] !== nothing ? coords[c][2] : (slot[c][3] === nothing ? nothing : slot[c][3])
+    total = String[]
+    for c in order
+        E = extent(c)
+        if E === nothing
+            # an unshifted last coordinate: its extent is what is left of the loop length after the stride
+            rest = copy(fac(amax))
+            for f in fac(coords[c][1])
+                i = findfirst(==(f), rest)
+                i === nothing && return nothing
+                deleteat!(rest, i)
+            end
+            append!(total, rest)
+        else
+            append!(total, fac(E))
+            slot[c][3] === nothing || fac(slot[c][3]) == fac(E) || return nothing
+        end
+    end
+    sort(total) == fac(amax) || return nothing
+    call(f, args...) = Expr(:call, f, args...)
+    function tcoord(c)
+        S, E = coords[c]
+        q = S == 1 ? call(:-, jv, 1) : call(:div, call(:-, jv, 1), S)
+        return E === nothing ? call(:+, q, 1) : call(:+, call(:mod, q, E), 1)
+    end
+    g = jv
+    for c in order
+        sh = slot[c][2]
+        sh == 0 && continue
+        tc = tcoord(c)
+        E = extent(c)
+        # the coordinate of the element is in 1:E, so the shifted one needs no division when the shift is one step
+        if cgen_mod_reduce_enabled() && (sh == 1 || sh == -1)
+            d = sh == -1 ? call(:-, 1, call(:*, E, call(:>=, tc, E))) : call(:+, -1, call(:*, E, call(:<, tc, 2)))
+        else
+            inv = call(:+, call(:mod, call(:-, tc, 1 + sh), E), 1)
+            d = call(:-, inv, tc)
+        end
+        S = coords[c][1]
+        S == 1 || (d = call(:*, d, S))
+        g = call(:+, g, d)
+    end
+    return g
+end
+
 # The replacement statements for one `for` statement, or nothing when the loop does not qualify. `tag` makes the new names unique.
-function cgen_gather_loop(stmt, tag::Int)
+function cgen_gather_loop(stmt, tag::Int, ctx = nothing)
     stmt.kind == :for || return nothing
     (stmt.step isa Integer && abs(stmt.step) == 1) || return nothing
     var, body = stmt.var, stmt.body
@@ -6817,6 +7063,19 @@ function cgen_gather_loop(stmt, tag::Int)
     # a scalar the loop assigns must be defined before every use in the same iteration, so a replay at another index sees the same values
     scalars = Set{Symbol}(s.lhs for s in body if s.lhs isa Symbol)
     var in scalars && return nothing
+    # level 3: a scalar that every iteration starts at a literal (an adjoint's `cb = 0.0` reset) is assigned that literal at the top
+    if ctx !== nothing && !isempty(ctx.resets)
+        defd0 = Set{Symbol}(); rbd = Symbol[]
+        for s in body
+            rd0 = cgen_read_vars(s.rhs)
+            s.lhs isa Expr && union!(rd0, cgen_read_vars(Expr(:tuple, s.lhs.args[2:end]...)))
+            for r in rd0
+                (r in scalars && !(r in defd0) && haskey(ctx.resets, r) && !(r in rbd)) && push!(rbd, r)
+            end
+            s.lhs isa Symbol && push!(defd0, s.lhs)
+        end
+        isempty(rbd) || (body = vcat(NamedTuple[(kind = :assign, lhs = r, rhs = ctx.resets[r]) for r in sort(rbd)], body))
+    end
     (cgen_expr_has_ref(stmt.lo) || cgen_expr_has_ref(stmt.hi)) && return nothing
     isdisjoint(union(cgen_expr_symbols(stmt.lo), cgen_expr_symbols(stmt.hi)), scalars) || return nothing
     defined = Set{Symbol}()
@@ -6855,12 +7114,25 @@ function cgen_gather_loop(stmt, tag::Int)
             push!(get!(reads, arr, Any[]), (k, length(idxs) == 1 ? idxs[1] : nothing))
         end
     end
+    first_val, last_val = stmt.lo, stmt.hi
+    amin, amax = stmt.step == 1 ? (first_val, last_val) : (last_val, first_val)
+    jv = Symbol("__gj_", tag)
+    permcache = Dict{Any,Any}()
+    # the key of a scatter index: an integer offset from the loop variable, or (:perm, inverse) for a periodic permutation (level 3)
+    function gkey(ix)
+        o = cgen_gather_offset(ix, var)
+        o !== nothing && return o
+        ctx === nothing && return nothing
+        haskey(permcache, ix) && return permcache[ix]
+        g = cgen_expr_has_ref(ix) ? nothing : cgen_gather_periodic_inverse(ix, body, var, amin, amax, jv, ctx.odefs)
+        return permcache[ix] = (g === nothing ? nothing : (:perm, g))
+    end
     gathered = Symbol[]
     owned = Symbol[]
     for (arr, w) in writes
         r = get(reads, arr, Any[])
-        if isempty(r) && all(x -> x[2] && cgen_gather_offset(x[3], var) !== nothing, w)
-            any(x -> cgen_gather_offset(x[3], var) != 0, w) && push!(gathered, arr)
+        if isempty(r) && all(x -> x[2] && gkey(x[3]) !== nothing, w)
+            any(x -> (kk = gkey(x[3]); !(kk isa Integer) || kk != 0), w) && push!(gathered, arr)
             continue
         end
         # any other written array must be owned by the iteration: every access at exactly `var`. The replay keeps its element in a scalar.
@@ -6893,20 +7165,21 @@ function cgen_gather_loop(stmt, tag::Int)
     end
     scalars = union(scalars, Set{Symbol}(own_name(a) for a in owned))
     # the terms: statement index => (array, offset, term) for every accumulation into a gathered array
-    terms = Dict{Int,Any}(k => (a[1], cgen_gather_offset(a[2], var), own_ren(a[3])) for (k, a) in accs if a[1] in gset)
-    offsets = sort(unique(t[2] for t in values(terms)))
+    terms = Dict{Int,Any}(k => (a[1], gkey(a[2]), own_ren(a[3])) for (k, a) in accs if a[1] in gset)
+    ioffs = sort(unique(Int[t[2] for t in values(terms) if t[2] isa Integer]))
+    perms = sort(unique(Any[t[2] for t in values(terms) if !(t[2] isa Integer)]), by = string)
+    offsets = Any[ioffs..., perms...]
     length(offsets) <= 8 || return nothing
-    first_val, last_val = stmt.lo, stmt.hi
-    amin, amax = stmt.step == 1 ? (first_val, last_val) : (last_val, first_val)
+    allc = isempty(perms) ? ioffs : vcat(ioffs, [0])
     add(e, c) = c == 0 ? e : e isa Integer ? e + c : Expr(:call, c > 0 ? :+ : :-, e, abs(c))
-    jv = Symbol("__gj_", tag)
     gbody = NamedTuple[]
     for arr in gathered
         push!(gbody, (kind = :assign, lhs = Symbol("__ga_", arr), rhs = 0.0))
         push!(gbody, (kind = :assign, lhs = Symbol("__gh_", arr), rhs = 0))
     end
-    for (ti, c) in enumerate(offsets)
-        ks = sort([k for (k, t) in terms if t[2] == c])
+    for (ti, grp) in enumerate(offsets)
+        c = grp isa Integer ? grp : 0
+        ks = sort([k for (k, t) in terms if t[2] == grp])
         # statements this offset needs: backward liveness over the scalar assignments
         needed = Set{Symbol}()
         keep = Set{Int}(ks)
@@ -6923,7 +7196,7 @@ function cgen_gather_loop(stmt, tag::Int)
         gi = Symbol("__gi_", tag, "_", ti)
         ren = Dict{Symbol,Any}(s => Symbol(s, "_g", tag, "_", ti) for s in scalars)
         ren[var] = gi
-        blk = NamedTuple[(kind = :assign, lhs = gi, rhs = add(jv, -c))]
+        blk = NamedTuple[(kind = :assign, lhs = gi, rhs = grp isa Integer ? add(jv, -c) : grp[2])]
         # an owned element still needed at the top starts as the array element
         for arr in owned
             own_name(arr) in needed && push!(blk, (kind = :assign, lhs = ren[own_name(arr)], rhs = Expr(:ref, arr, gi)))
@@ -6951,7 +7224,7 @@ function cgen_gather_loop(stmt, tag::Int)
         push!(gbody, (kind = :if, cond = Expr(:call, :>, Symbol("__gh_", arr), 0),
                       then = NamedTuple[(kind = :assign, lhs = ref, rhs = Expr(:call, :+, ref, Symbol("__ga_", arr)))], els = NamedTuple[]))
     end
-    gather = (kind = :for, var = jv, lo = add(amin, offsets[1]), hi = add(amax, offsets[end]), step = 1, body = gbody)
+    gather = (kind = :for, var = jv, lo = add(amin, minimum(allc)), hi = add(amax, maximum(allc)), step = 1, body = gbody)
     rest = NamedTuple[s for (k, s) in enumerate(body) if !haskey(terms, k)]
     # a residual with no array write and only generated temporaries computes nothing anyone reads
     residual_dead = !any(s -> s.lhs isa Expr, rest) && all(s -> s.lhs isa Symbol && startswith(string(s.lhs), "__"), rest)
@@ -6959,21 +7232,21 @@ function cgen_gather_loop(stmt, tag::Int)
     return NamedTuple[gather, merge(stmt, (body = rest,))]
 end
 
-function cgen_gather_expand(body::Vector{NamedTuple}, tag::Base.RefValue{Int})
+function cgen_gather_expand(body::Vector{NamedTuple}, tag::Base.RefValue{Int}, ctx = nothing)
     out = NamedTuple[]
     for stmt in body
         if stmt.kind == :for
-            rep = cgen_gather_loop(stmt, tag[] + 1)
+            rep = cgen_gather_loop(stmt, tag[] + 1, ctx)
             if rep === nothing
-                push!(out, merge(stmt, (body = cgen_gather_expand(stmt.body, tag),)))
+                push!(out, merge(stmt, (body = cgen_gather_expand(stmt.body, tag, ctx),)))
             else
                 tag[] += 1
                 append!(out, rep)
             end
         elseif stmt.kind == :if
-            push!(out, merge(stmt, (then = cgen_gather_expand(stmt.then, tag), els = cgen_gather_expand(stmt.els, tag))))
+            push!(out, merge(stmt, (then = cgen_gather_expand(stmt.then, tag, ctx), els = cgen_gather_expand(stmt.els, tag, ctx))))
         elseif stmt.kind == :while
-            push!(out, merge(stmt, (body = cgen_gather_expand(stmt.body, tag),)))
+            push!(out, merge(stmt, (body = cgen_gather_expand(stmt.body, tag, ctx),)))
         else
             push!(out, stmt)
         end
@@ -7152,14 +7425,93 @@ function cgen_gather_fold_body(root, body::Vector{NamedTuple}, tag::Base.RefValu
     return out
 end
 
-# the ingested kernel with its scatter loops in gather form (see above). `level` 0 or false returns it unchanged, 1 is the gather form alone, 2 or true
-# adds the zero-fold
+# ---- range reduction of the periodic neighbour (cgen_mod_reduce) ----
+# `c = mod(X, E) + 1` puts c in 1:E whatever X is (for E >= 1; a kernel run with E < 1 has no meaning anyway). A neighbour `mod(c - 2, E) + 1`, `mod(c - 1, E) + 1` or
+# `mod(c, E) + 1` then needs a compare and an add instead of an integer division (a 64-bit division by a runtime value is 60 to 100 instructions on the device).
+cgen_mod_reduce_enabled() = true
+
+# the expression of `mod(c + a, E) + 1` for a in -2:0 with c in 1:E, or nothing
+function cgen_mod_reduce_form(c::Symbol, a::Integer, E)
+    call(f, args...) = Expr(:call, f, args...)
+    a == 0 && return call(:-, call(:+, c, 1), call(:*, E, call(:>=, c, E)))
+    a == -1 && return c
+    a == -2 && return call(:+, call(:-, c, 1), call(:*, E, call(:<, c, 2)))
+    return nothing
+end
+
+# every scalar assigned anywhere in the body, a self-referencing update (`i = i + 1`) and a loop variable included
+function cgen_mod_assigned(body::Vector{NamedTuple})
+    names = Set{Symbol}()
+    for st in body
+        if st.kind == :assign
+            st.lhs isa Symbol && push!(names, st.lhs)
+        elseif st.kind == :if
+            union!(names, cgen_mod_assigned(st.then), cgen_mod_assigned(st.els))
+        else
+            haskey(st, :var) && push!(names, st.var)
+            union!(names, cgen_mod_assigned(st.body))
+        end
+    end
+    return names
+end
+
+function cgen_mod_reduce_body(body::Vector{NamedTuple}, env0::Dict{Symbol,Any})
+    env = copy(env0)
+    out = NamedTuple[]
+    isadd1(e) = e isa Expr && e.head == :call && e.args[1] == :+ && length(e.args) == 3 && e.args[3] == 1
+    ismod(e) = e isa Expr && e.head == :call && e.args[1] == :mod && length(e.args) == 3
+    for st in body
+        if st.kind == :assign
+            if st.lhs isa Symbol
+                rhs = st.rhs
+                new = rhs
+                if isadd1(rhs) && ismod(rhs.args[2])
+                    arg, E = rhs.args[2].args[2], rhs.args[2].args[3]
+                    for (c, Ec) in env
+                        Ec == E || continue
+                        l = cgen_gather_lin(arg, c)
+                        (l !== nothing && l[1] == 1 && l[2] in (-2, -1, 0)) || continue
+                        f = cgen_mod_reduce_form(c, l[2], E)
+                        f === nothing || (new = f)
+                        break
+                    end
+                end
+                delete!(env, st.lhs)
+                # a coordinate: its modulus bounds it
+                isadd1(rhs) && ismod(rhs.args[2]) && !(st.lhs in cgen_expr_symbols(rhs.args[2].args[3])) && !(st.lhs in cgen_expr_symbols(rhs.args[2].args[2])) && (env[st.lhs] = rhs.args[2].args[3])
+                push!(out, new === rhs ? st : merge(st, (rhs = new,)))
+            else
+                push!(out, st)
+            end
+        else
+            killed = cgen_mod_assigned(st.kind == :if ? vcat(st.then, st.els) : st.body)
+            st.kind in (:for, :while) && haskey(st, :var) && push!(killed, st.var)
+            inner = Dict{Symbol,Any}(k => v for (k, v) in env if !(k in killed) && isdisjoint(cgen_expr_symbols(v), killed))
+            if st.kind == :if
+                push!(out, merge(st, (then = cgen_mod_reduce_body(st.then, inner), els = cgen_mod_reduce_body(st.els, inner))))
+            else
+                push!(out, merge(st, (body = cgen_mod_reduce_body(st.body, inner),)))
+            end
+            for k in collect(keys(env))
+                (k in killed || !isdisjoint(cgen_expr_symbols(env[k]), killed)) && delete!(env, k)
+            end
+        end
+    end
+    return out
+end
+
+# the ingested kernel with its scatter loops in gather form (see above). `level` 0 or false returns it unchanged, 1 is the gather form alone, 2 adds the zero-fold, 3 or true adds the periodic permutations,
+# the reset scalars and the range reduction of the periodic neighbour (2 is the v0.4.51 text)
 function cgen_gather_stencil(gk, level)
-    lv = level === true ? 2 : level === false ? 0 : Int(level)
-    lv <= 0 && return gk
-    g = merge(gk, (body = cgen_gather_expand(gk.body, Ref(0)),))
-    lv >= 2 || return g
-    return merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),))
+    lv = level === true ? 3 : level === false ? 0 : Int(level)
+    g = gk
+    if lv > 0
+        ctx = lv >= 3 ? (resets = cgen_gather_resets(gk.body), odefs = cgen_gather_outer_defs(gk.body)) : nothing
+        g = merge(gk, (body = cgen_gather_expand(gk.body, Ref(0), ctx),))
+        lv >= 2 && (g = merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),)))
+    end
+    lv >= 3 && cgen_mod_reduce_enabled() && (g = merge(g, (body = cgen_mod_reduce_body(g.body, Dict{Symbol,Any}()),)))
+    return g
 end
 
 # the statements of an ingested kernel back as plain Julia source; used to run a rewritten kernel on the host, which is how the rewrite is tested
