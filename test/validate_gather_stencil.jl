@@ -237,40 +237,7 @@ function f(ub, vb, wb, a, n)
     end
     return nothing
 end"""),
-    ("a replay of 26 statements: over the cap", 1, """
-function f(ub, vb, wb, a, n)
-    for i = 3:n - 2
-        s1 = ub[i] * 1.01
-        s2 = s1 * 1.01
-        s3 = s2 * 1.01
-        s4 = s3 * 1.01
-        s5 = s4 * 1.01
-        s6 = s5 * 1.01
-        s7 = s6 * 1.01
-        s8 = s7 * 1.01
-        s9 = s8 * 1.01
-        s10 = s9 * 1.01
-        s11 = s10 * 1.01
-        s12 = s11 * 1.01
-        s13 = s12 * 1.01
-        s14 = s13 * 1.01
-        s15 = s14 * 1.01
-        s16 = s15 * 1.01
-        s17 = s16 * 1.01
-        s18 = s17 * 1.01
-        s19 = s18 * 1.01
-        s20 = s19 * 1.01
-        s21 = s20 * 1.01
-        s22 = s21 * 1.01
-        s23 = s22 * 1.01
-        s24 = s23 * 1.01
-        s25 = s24 * 1.01
-        vb[i - 1] = vb[i - 1] + s25
-        vb[i + 1] = vb[i + 1] + s25
-        wb[i] = 2.0 * ub[i]
-    end
-    return nothing
-end"""),
+    ("a replay of 130 statements: over the cap", 1, "function f(ub, vb, wb, a, n)\n    for i = 3:n - 2\n        s1 = ub[i] * 1.01\n" * join(["        s$(k) = s$(k - 1) * 1.01\n" for k in 2:129]) * "        vb[i - 1] = vb[i - 1] + s129\n        vb[i + 1] = vb[i + 1] + s129\n        wb[i] = 2.0 * ub[i]\n    end\n    return nothing\nend"),
 ]
 
 # run the original and the rewritten function on the same random arrays for several n, zero-trip ones included; returns the loops after the
@@ -775,7 +742,7 @@ function validate_gather_stencil(dir::String = joinpath(@__DIR__, "val-corpus");
             ("scalars may be read before they are defined", "for r in reads\n            (r in scalars && !(r in defined)) && return nothing", "for r in reads\n            false && return nothing"),
             ("any step is accepted", "(stmt.step isa Integer && abs(stmt.step) == 1) || return nothing", "stmt.step isa Integer || return nothing"),
             ("offset cap removed", "length(offsets) <= 8 || return nothing", "true"),
-            ("replay cap removed", "length(keep) <= 24 || return nothing", "true"),
+            ("replay cap removed", "length(keep) <= cgen_gather_cap() || return nothing", "true"),
             ("residual always dropped", "residual_dead = !any(s -> s.lhs isa Expr, rest) &&", "residual_dead = true || !any(s -> s.lhs isa Expr, rest) &&"),
             ("residual always kept", "residual_dead && return NamedTuple[gather]", "false && return NamedTuple[gather]"),
             ("scalar definitions not replayed", "union!(needed, intersect(cgen_read_vars(terms[k][3]), scalars))", "nothing"),

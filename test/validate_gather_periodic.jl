@@ -136,6 +136,47 @@ function f(ub, vb, n, m)
     end
     return nothing
 end"""),
+    ("the index scalars assigned twice with other temporaries, an alias and a scalar-held index (an adjoint that recomputes the forward values)", 1, """
+function f(ub, vb, n, m)
+    for idx = 1:n * n
+        c0 = idx - 1
+        c1 = mod(c0, n) + 1
+        i = c1
+        c2 = div(c0, n) + 1
+        j = c2
+        im = mod(i - 2, n) + 1
+        c3 = (j - 1) * n
+        iw = c3 + im
+        o = vb[idx]
+        t = o * 2.0 + vb[iw]
+        i = c1
+        j = c2
+        im = mod(i - 2, n) + 1
+        c4 = (j - 1) * n
+        iw = c4 + im
+        ub[iw] = ub[iw] + 0.5 * o
+        ub[idx] = ub[idx] + t
+    end
+    return nothing
+end"""),
+    ("an index held in a scalar, assigned once", 1, gp_loop("", "idx = 1:n * n", """
+        im = mod(i - 2, n) + 1
+        iw = (j - 1) * n + im
+        o = vb[idx]
+        ub[iw] = ub[iw] + 0.5 * o""")),
+    ("a neighbour scalar assigned twice with different expressions is refused", 0, gp_loop("", "idx = 1:n * n", """
+        im = mod(i - 2, n) + 1
+        o = vb[idx]
+        ub[(j - 1) * n + im] = ub[(j - 1) * n + im] + o
+        im = mod(i, n) + 1
+        ub[(j - 1) * n + im] = ub[(j - 1) * n + im] + 2.0 * o""")),
+    ("a scalar index that depends on a scalar assigned twice differently is refused", 0, gp_loop("", "idx = 1:n * n", """
+        im = mod(i - 2, n) + 1
+        iw = (j - 1) * n + im
+        o = vb[idx]
+        ub[iw] = ub[iw] + o
+        im = mod(i, n) + 1
+        ub[iw] = ub[iw] + 2.0 * o""")),
 ]
 
 function gp_set_reduce(flag::Bool)  # the debugging switch; the default is on
@@ -209,6 +250,18 @@ function gp_unit_checks()
             catch e
                 check(false, "$(label): error $(first(split(sprint(showerror, e), "\n")))")
             end
+        end
+    end
+    # the cap on the replayed statements: the first source with the limit at 1 statement is refused, at the default it gathers
+    capsrc = GP_UNIT[findfirst(x -> startswith(x[1], "the index scalars assigned twice"), GP_UNIT)][3]
+    for (lim, want) in (("1", 0), (nothing, 1))
+        old = get(ENV, "STADE_GATHER_CAP", nothing)
+        lim === nothing ? delete!(ENV, "STADE_GATHER_CAP") : (ENV["STADE_GATHER_CAP"] = lim)
+        try
+            loops, worst = gp_run(STADE.cgen_ingest(Meta.parse(capsrc)))
+            check(loops == want && worst <= 1e-12, "replay cap $(lim === nothing ? "default" : lim): $(loops) gather loop(s) (want $(want)), max difference $(worst)")
+        finally
+            old === nothing ? delete!(ENV, "STADE_GATHER_CAP") : (ENV["STADE_GATHER_CAP"] = old)
         end
     end
     # the heat equation adjoint in three coordinates: 6 permutations and the cell itself, fires at level 3 and not at level 2
@@ -351,6 +404,10 @@ function validate_gather_periodic(; phases = (:units, :sabotage), slice = 1:type
             ("a reassigned coordinate keeps its bound", "                delete!(env, st.lhs)\n", ""),
             ("a coordinate assigned in a branch keeps its bound", "            inner = Dict{Symbol,Any}(k => v for (k, v) in env if !(k in killed) && isdisjoint(cgen_expr_symbols(v), killed))\n", "            inner = copy(env)\n"),
             ("a modulus that differs from the coordinate's is reduced", "                        Ec == E || continue\n", ""),
+            ("a scalar assigned twice differently is taken as stable", "(!any(isnothing, cs) && all(==(cs[1]), cs)) && (r = cs[1])", "(!any(isnothing, cs)) && (r = cs[1])"),
+            ("an alias scalar is not resolved", "defs[nm] = cgen_subst_expr(defs[nm], alias)", "nothing"),
+            ("a scalar-held index is not inlined", "    idxe = inline_idx(idxe, 0)\n", ""),
+            ("the replay cap is ignored", "length(keep) <= cgen_gather_cap() || return nothing", "true"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]

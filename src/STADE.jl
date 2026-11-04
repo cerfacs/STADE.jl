@@ -6809,6 +6809,11 @@ end
 
 # ---- gather form with periodic shifts (gather_stencil level 3) ----
 
+# The most statements that one offset of a gather loop may replay. V100, adjoint of a periodic 2D kernel with two fields: 78 statements for the largest
+# offset (and 15 for the others) is 2.0 times faster than the scatter; 485 (others 146) is 2.4 times slower, because the replay of the whole chain per
+# thread costs more than the atomics. STADE_GATHER_CAP overrides the limit (a debugging switch).
+cgen_gather_cap() = parse(Int, get(ENV, "STADE_GATHER_CAP", "128"))
+
 # A scalar that an adjoint resets (`cb = 0.0` as the last statement of its loop) is 0 at the top of every iteration. Returns scalar => literal for the scalars
 # whose every assignment is either one literal at the top of the function (before any use) or sits in an innermost loop whose body ends with the same literal.
 function cgen_gather_resets(body::Vector{NamedTuple})
@@ -6918,14 +6923,55 @@ end
 # kept or shifted periodically (`im = mod(i - 2, n) + 1`). Returns an expression in `jv` for the iteration whose term lands on element jv, or nothing.
 function cgen_gather_periodic_inverse(idxe, body, var::Symbol, amin, amax, jv::Symbol, odefs)
     defs = Dict{Symbol,Any}()
+    alldefs = Dict{Symbol,Vector{Any}}()
     counts = Dict{Symbol,Int}()
     for st in body
         if st.kind == :assign && st.lhs isa Symbol
             counts[st.lhs] = get(counts, st.lhs, 0) + 1
+            push!(get!(alldefs, st.lhs, Any[]), st.rhs)
             defs[st.lhs] = st.rhs
         end
     end
     scal = Set(keys(counts))
+    # An adjoint that recomputes the forward values assigns the index scalars twice (`i = ...` in the forward and in the backward part, with other
+    # temporaries in between). A scalar whose assignments all expand to the same expression of arguments and the loop variable counts as one definition.
+    memo = Dict{Symbol,Any}()
+    busy = Set{Symbol}()
+    function canon(e)
+        if e isa Symbol
+            e == var && return e
+            e in scal || return e
+            haskey(memo, e) && return memo[e]
+            e in busy && return nothing
+            push!(busy, e)
+            r = nothing
+            ds = alldefs[e]
+            if !any(cgen_expr_has_ref, ds)
+                cs = Any[canon(d) for d in ds]
+                (!any(isnothing, cs) && all(==(cs[1]), cs)) && (r = cs[1])
+            end
+            delete!(busy, e)
+            return memo[e] = r
+        end
+        e isa Expr || return e
+        args = Any[canon(a) for a in e.args[2:end]]
+        any(isnothing, args) && return nothing
+        return Expr(e.head, e.args[1], args...)
+    end
+    stable = Set{Symbol}(nm for nm in scal if counts[nm] == 1 || canon(nm) !== nothing)
+    for nm in stable
+        counts[nm] = 1
+    end
+    # a scalar that is another scalar (`i = __icse_1`, left by the common-subexpression pass) is that scalar
+    alias = Dict{Symbol,Any}(nm => defs[nm] for nm in stable if defs[nm] isa Symbol && defs[nm] in stable)
+    if !isempty(alias)
+        for _ in 1:3
+            for nm in stable
+                defs[nm] = cgen_subst_expr(defs[nm], alias)
+            end
+            idxe = cgen_subst_expr(idxe, alias)
+        end
+    end
     free_ok(e) = !cgen_expr_has_ref(e) && isdisjoint(cgen_expr_symbols(e), scal) && !(var in cgen_expr_symbols(e))
     amin == 1 || return nothing
     idxm1 = Expr(:call, :-, var, 1)
@@ -6983,6 +7029,16 @@ function cgen_gather_periodic_inverse(idxe, body, var::Symbol, amin, amax, jv::S
             push!(terms, e)
         end
     end
+    # an index kept in a scalar (`iw = (j - 1) * n + im`): the scalars that are neither coordinates nor neighbours are replaced by their definitions
+    function inline_idx(e, depth)
+        if e isa Symbol
+            (depth < 6 && e in stable && !haskey(coords, e) && !haskey(nbr, e) && e != var && !cgen_expr_has_ref(defs[e]) && !(defs[e] isa Number)) || return e
+            return inline_idx(defs[e], depth + 1)
+        end
+        e isa Expr || return e
+        return Expr(e.head, Any[inline_idx(a, depth) for a in e.args]...)
+    end
+    idxe = inline_idx(idxe, 0)
     flat(idxe)
     length(terms) == length(order) || return nothing
     slot = Dict{Symbol,Any}()    # coordinate => (scalar used, shift, modulus)
@@ -7192,7 +7248,7 @@ function cgen_gather_loop(stmt, tag::Int, ctx = nothing)
                 union!(needed, intersect(cgen_read_vars(prog[k][2]), scalars))
             end
         end
-        length(keep) <= 24 || return nothing
+        length(keep) <= cgen_gather_cap() || return nothing
         gi = Symbol("__gi_", tag, "_", ti)
         ren = Dict{Symbol,Any}(s => Symbol(s, "_g", tag, "_", ti) for s in scalars)
         ren[var] = gi
