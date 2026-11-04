@@ -218,12 +218,14 @@ function gp_adj_run(gk, lv::Int, reduce::Bool)
     local w::Float64 = 0.0
     try
         g = Base.invokelatest(STADE.cgen_gather_stencil, gk, lv)
-        f0 = Core.eval(Module(), STADE.cgen_gather_function_expr(gk))
-        f1 = Core.eval(Module(), STADE.cgen_gather_function_expr(g))
+        # the modules are kept alive: a function of a collected module crashes the runtime
+        m0, m1 = Module(), Module()
+        f0 = Core.eval(m0, STADE.cgen_gather_function_expr(gk))
+        f1 = Core.eval(m1, STADE.cgen_gather_function_expr(g))
         narr = length(gk.args) - 1
-        for n in (1, 2, 3, 4, 5)
+        GC.@preserve m0 m1 for n in (1, 2, 3, 4, 5)
             rng = MersenneTwister(n)
-            base = [randn(rng, n^3) for _ in 1:narr]
+            base = [randn(rng, n^3 + 64 * n^2 + 64) for _ in 1:narr]  # stack arrays of an adjoint need up to a few dozen slots per cell
             a0 = Any[[copy(b) for b in base]..., n]
             a1 = Any[[copy(b) for b in base]..., n]
             Base.invokelatest(f0, a0...); Base.invokelatest(f1, a1...)

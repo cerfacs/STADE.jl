@@ -10856,7 +10856,7 @@ end
 # assignment whose target is not live and whose right side is pure is dropped and adds no reads; that holds in a loop's fixpoint too, which is
 # the least fixpoint, so `s = s + x` alone in a loop is dead. A statement of any other form is opaque: it keeps every symbol it mentions live and
 # kills nothing, which can only keep more.
-function cgen_dead_walk(stmts::AbstractVector, live_out::Set{Symbol}, refs_ok::Bool)
+function cgen_dead_walk(stmts::AbstractVector, live_out::Set{Symbol}, refs_ok::Bool; droppable = nothing)
     live = copy(live_out)
     out = Any[]
     for s in Iterators.reverse(stmts)
@@ -10864,7 +10864,7 @@ function cgen_dead_walk(stmts::AbstractVector, live_out::Set{Symbol}, refs_ok::B
             push!(out, s)
         elseif s isa Expr && s.head === :(=) && s.args[1] isa Symbol
             v = s.args[1]
-            if !(v in live) && cgen_dead_pure(s.args[2], refs_ok)
+            if !(v in live) && cgen_dead_pure(s.args[2], refs_ok) && (droppable === nothing || droppable(v, s.args[2]))
                 continue
             end
             delete!(live, v)
@@ -10875,22 +10875,22 @@ function cgen_dead_walk(stmts::AbstractVector, live_out::Set{Symbol}, refs_ok::B
             rng = cgen_dead_syms!(s.args[1].args[2], Set{Symbol}())
             head = union(live, rng)
             while true
-                _, bin = cgen_dead_walk(s.args[2].args, head, refs_ok)
+                _, bin = cgen_dead_walk(s.args[2].args, head, refs_ok; droppable)
                 nh = union(live, rng, setdiff(bin, Set([var])))
                 nh == head && break
                 head = nh
             end
-            nb, _ = cgen_dead_walk(s.args[2].args, head, refs_ok)
+            nb, _ = cgen_dead_walk(s.args[2].args, head, refs_ok; droppable)
             push!(out, Expr(:for, s.args[1], Expr(:block, nb...)))
             live = head
         elseif s isa Expr && (s.head === :if || s.head === :elseif) && length(s.args) >= 2 && s.args[2] isa Expr && s.args[2].head === :block &&
                (length(s.args) == 2 || (length(s.args) == 3 && s.args[3] isa Expr && s.args[3].head in (:block, :elseif)))
-            tb, tl = cgen_dead_walk(s.args[2].args, live, refs_ok)
+            tb, tl = cgen_dead_walk(s.args[2].args, live, refs_ok; droppable)
             args = Any[s.args[1], Expr(:block, tb...)]
             nl = union(tl, cgen_dead_syms!(s.args[1], Set{Symbol}()))
             if length(s.args) == 3
-                eb, el = s.args[3].head === :block ? cgen_dead_walk(s.args[3].args, live, refs_ok) :
-                         cgen_dead_walk(Any[s.args[3]], live, refs_ok)
+                eb, el = s.args[3].head === :block ? cgen_dead_walk(s.args[3].args, live, refs_ok; droppable) :
+                         cgen_dead_walk(Any[s.args[3]], live, refs_ok; droppable)
                 push!(args, s.args[3].head === :block ? Expr(:block, eb...) : (length(eb) == 1 ? eb[1] : Expr(:block, eb...)))
                 union!(nl, el)
             else
@@ -10899,7 +10899,7 @@ function cgen_dead_walk(stmts::AbstractVector, live_out::Set{Symbol}, refs_ok::B
             push!(out, Expr(s.head, args...))
             live = nl
         elseif s isa Expr && s.head === :block
-            nb, nl = cgen_dead_walk(s.args, live, refs_ok)
+            nb, nl = cgen_dead_walk(s.args, live, refs_ok; droppable)
             push!(out, Expr(:block, nb...))
             live = nl
         else
@@ -10908,6 +10908,168 @@ function cgen_dead_walk(stmts::AbstractVector, live_out::Set{Symbol}, refs_ok::B
         end
     end
     return (reverse(out), live)
+end
+
+# ---- dead restores of scalars, and the stack stores that nothing reads then (cgen_dead_pops) ----
+# An adjoint saves a scalar before it overwrites it (`s_stack[k] = s`) and restores it in the reverse sweep (`s = s_stack[k]`). When the reverse sweep
+# overwrites `s` again before reading it, the restore is dead, and so is the save. The save reads `s` at the top of the forward loop, which makes the
+# loop carry a value, so the loop stays on the host. The deletion has to come before the offload decision, not after it like cgen_dead_scalars.
+# Only the restores of STADE's own stacks are deleted (a parameter that an `initstacks_*` host allocates), and only a stack that nothing reads any more
+# loses its stores. STADE_DEAD_POPS=0 switches it off.
+cgen_dead_pops_enabled() = get(ENV, "STADE_DEAD_POPS", "1") != "0"
+
+function cgen_dead_pops_stacks(expr::Expr, init_hosts)
+    init_hosts === nothing && return Set{Symbol}()
+    (expr.head === :function && expr.args[1] isa Expr && expr.args[1].head === :call) || return Set{Symbol}()
+    params = Set{Symbol}(a for a in expr.args[1].args[2:end] if a isa Symbol)
+    alloc = Set{Symbol}()
+    for (_, ih) in init_hosts
+        (ih isa Expr && ih.head === :function && length(ih.args) == 2 && ih.args[2] isa Expr) || continue
+        for st in ih.args[2].args
+            st isa Expr && st.head === :(=) && st.args[1] isa Symbol && st.args[2] isa Expr && st.args[2].head === :call && :undef in st.args[2].args && push!(alloc, st.args[1])
+        end
+    end
+    return Set{Symbol}(x for x in params if x in alloc || (endswith(string(x), "_stack_d") && Symbol(string(x)[1:end-2]) in alloc))
+end
+
+# The stores and reads of a stack are matched by their index formula: the index with every scalar replaced by its definition, in program order.
+# A scalar assigned in a loop or a branch is unknown after it (a fresh token), and so is a scalar that a loop body assigns when the body is entered.
+# STADE gives every save site its own block of slots, so a store that no read has the formula of is never read. A stack with a read that no store
+# matches (an index that the walk cannot expand, or a stack used any other way) is left as it is.
+function cgen_dp_assigned!(e, out::Set{Symbol})
+    e isa Expr || return out
+    if e.head === :(=) && e.args[1] isa Symbol
+        push!(out, e.args[1])
+    elseif e.head === :for && e.args[1] isa Expr && e.args[1].head === :(=) && e.args[1].args[1] isa Symbol
+        push!(out, e.args[1].args[1])
+    end
+    for a in e.args
+        cgen_dp_assigned!(a, out)
+    end
+    return out
+end
+
+function cgen_dp_token(st::Dict{Symbol,Any})
+    st[:ctr] += 1
+    return Symbol("__dp", st[:ctr])
+end
+
+function cgen_dp_canon(e, env::Dict{Symbol,Any}, st::Dict{Symbol,Any})
+    c = cgen_subst_expr(e, env)
+    return cgen_expr_node_count(c) > 4000 ? cgen_dp_token(st) : c
+end
+
+function cgen_dp_note_reads(e, env::Dict{Symbol,Any}, st::Dict{Symbol,Any})
+    if e isa Symbol
+        e in st[:stacks] && push!(st[:bad], e)
+    elseif e isa Expr
+        if e.head === :ref && e.args[1] isa Symbol && e.args[1] in st[:stacks]
+            if length(e.args) == 2
+                push!(st[:reads], (e.args[1], string(cgen_dp_canon(e.args[2], env, st))))
+            else
+                push!(st[:bad], e.args[1])
+            end
+            for a in e.args[2:end]
+                cgen_dp_note_reads(a, env, st)
+            end
+        else
+            for a in e.args
+                cgen_dp_note_reads(a, env, st)
+            end
+        end
+    end
+    return nothing
+end
+
+function cgen_dp_block(stmts, env::Dict{Symbol,Any}, st::Dict{Symbol,Any})
+    out = Any[]
+    for s in stmts
+        r = cgen_dp_stmt(s, env, st)
+        r === nothing || push!(out, r)
+    end
+    return out
+end
+
+function cgen_dp_stmt(s, env::Dict{Symbol,Any}, st::Dict{Symbol,Any})
+    s isa Expr || return s
+    if s.head === :(=)
+        lhs, rhs = s.args[1], s.args[2]
+        cgen_dp_note_reads(rhs, env, st)
+        if lhs isa Expr && lhs.head === :ref
+            for a in lhs.args[2:end]
+                cgen_dp_note_reads(a, env, st)
+            end
+            if lhs.args[1] isa Symbol && lhs.args[1] in st[:stacks]
+                if length(lhs.args) != 2
+                    push!(st[:bad], lhs.args[1])
+                else
+                    key = (lhs.args[1], string(cgen_dp_canon(lhs.args[2], env, st)))
+                    push!(st[:stores], key)
+                    st[:mode] === :drop && lhs.args[1] in st[:eligible] && !(key in st[:reads]) && return nothing
+                end
+            end
+        elseif lhs isa Symbol
+            env[lhs] = cgen_dp_canon(rhs, env, st)
+        end
+        return s
+    elseif s.head === :for && length(s.args) == 2 && s.args[1] isa Expr && s.args[1].head === :(=) && s.args[2] isa Expr && s.args[2].head === :block
+        cgen_dp_note_reads(s.args[1].args[2], env, st)
+        assigned = cgen_dp_assigned!(s, Set{Symbol}())
+        inner = copy(env)
+        for v in assigned
+            inner[v] = cgen_dp_token(st)
+        end
+        delete!(inner, s.args[1].args[1])
+        body = cgen_dp_block(s.args[2].args, inner, st)
+        for v in assigned
+            env[v] = cgen_dp_token(st)
+        end
+        return Expr(:for, s.args[1], Expr(:block, body...))
+    elseif (s.head === :if || s.head === :elseif) && length(s.args) >= 2
+        cgen_dp_note_reads(s.args[1], env, st)
+        assigned = cgen_dp_assigned!(s, Set{Symbol}())
+        parts = Any[]
+        for br in s.args[2:end]
+            if br isa Expr && br.head === :block
+                push!(parts, Expr(:block, cgen_dp_block(br.args, copy(env), st)...))
+            else
+                r = cgen_dp_stmt(br, copy(env), st)
+                push!(parts, r === nothing ? Expr(:block) : r)
+            end
+        end
+        for v in assigned
+            env[v] = cgen_dp_token(st)
+        end
+        return Expr(s.head, s.args[1], parts...)
+    elseif s.head === :block
+        return Expr(:block, cgen_dp_block(s.args, env, st)...)
+    end
+    cgen_dp_note_reads(s, env, st)
+    return s
+end
+
+function cgen_dp_stores(body::Expr, stacks::Set{Symbol})
+    st = Dict{Symbol,Any}(:ctr => 0, :mode => :collect, :stacks => stacks, :stores => Set{Tuple{Symbol,String}}(), :reads => Set{Tuple{Symbol,String}}(),
+                          :bad => Set{Symbol}(), :eligible => Set{Symbol}())
+    cgen_dp_stmt(body, Dict{Symbol,Any}(), st)
+    for k in stacks
+        k in st[:bad] && continue
+        all(r -> r in st[:stores], (r for r in st[:reads] if r[1] === k)) && push!(st[:eligible], k)
+    end
+    st[:ctr] = 0
+    st[:mode] = :drop
+    return cgen_dp_stmt(body, Dict{Symbol,Any}(), st)
+end
+
+function cgen_dead_pops(expr::Expr, init_hosts)
+    cgen_dead_pops_enabled() || return expr
+    (expr.head === :function && length(expr.args) == 2 && expr.args[2] isa Expr && expr.args[2].head === :block) || return expr
+    stacks = cgen_dead_pops_stacks(expr, init_hosts)
+    isempty(stacks) && return expr
+    pop(v, rhs) = rhs isa Expr && rhs.head === :ref && length(rhs.args) == 2 && rhs.args[1] in stacks
+    stmts, _ = cgen_dead_walk(expr.args[2].args, Set{Symbol}(), true; droppable = pop)
+    body = cgen_dp_stores(Expr(:block, stmts...), stacks)
+    return Expr(:function, expr.args[1], body)
 end
 
 # One walk is enough: a dropped statement adds no reads, so the statements that fed it are found dead in the same backward sweep (the corpus check
@@ -15667,6 +15829,7 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
     if backend.precision_locked && p !== backend.default_precision
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
+    dead_scalars && (expr = cgen_dead_pops(expr, init_hosts))
     plan = cgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil), backend; reduction_threshold)
     host, kernels = plan.host, plan.kernels
     dead_scalars && (kernels = Expr[cgen_dead_scalars(k, inbounds) for k in kernels])

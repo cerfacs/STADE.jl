@@ -307,8 +307,10 @@ end"""
     ok = try
         gk = STADE.cgen_ingest(Meta.parse(src))
         gk2 = STADE.cgen_gather_stencil(gk, true)
-        f2 = Core.eval(Module(), STADE.cgen_gather_function_expr(gk2))
+        m2 = Module()  # kept alive past the call
+        f2 = Core.eval(m2, STADE.cgen_gather_function_expr(gk2))
         Base.invokelatest(f2, zeros(3), zeros(3), 3)
+        GC.@preserve m2 nothing
         count(s -> s.kind == :for, gk2.body) == 1
     catch
         false
