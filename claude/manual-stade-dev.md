@@ -272,7 +272,7 @@ stade_tangent_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_adjoint_file(in_path, out_path; keep_push_pop=true, fuse_ii_loops=false)
 stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 
-stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, reduce_block=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6, inbounds=true, dead_scalars=true, split_reduce=16, split_min_inner=256, split_max_out=32768)
+stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, reduce_block=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6, inbounds=true, dead_scalars=true, split_reduce=16, split_min_inner=256, split_max_out=32768, fresh_gradient=false, fresh_check=false)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
 stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
@@ -2505,6 +2505,23 @@ Measured on a V100: geometric mean 1.18 (primal) and 1.06 (adjoint) over 39 case
 (`ufv_scatter_step` 4e6 adjoint 0.83, 1e6 adjoint 0.94; `transformer_block` d512 primal 0.94); the cause is not known.
 `test/validate_inbounds.jl` (19 sources, corpus pass, 11 sabotage cases) tests both passes. The text-inspecting validators pass
 `inbounds = false, dead_scalars = false`; `validate_ownership` runs with `OWN_FINISH=checked` (default: dead on, `@inbounds` off), `full` or `off`.
+
+**Fresh gradient** (`fresh_gradient`, `fresh_check`)
+CUDA only (`stade_gpu`, `stade_cuda`, the `_file` and the `validate` forms). Both default `false`, and `false` gives exactly the text without them.
+`fresh_gradient = true` turns the store `g[idx] = g[idx] + e` into `g[idx] = e` for an adjoint array `g` of the host function that gets one write per element per call.
+It saves one read pass over the array. The rewrite is made only when `cgen_fresh_gradient` proves all of these on the text: `g` and its primal are arguments
+of the host and `g` goes to one launch group; every mention of `g` in the host is in that group, which is a top-level statement (not in a host loop); in the kernel and
+in each private variant `g` has exactly one store, `g[idx] = g[idx] + e`, with no other mention; no enclosing loop is a `while` and the index is affine in every
+enclosing `for` variable with a coefficient that cannot be zero. The plan reports the flagged arrays in `plan.fresh` and the generated file lists them in its header.
+Contract: the caller passes `g` zeroed and makes one adjoint call per reset. The CPU adjoint still accumulates, so the two contracts differ for a flagged array, and a caller
+that breaks the contract gets wrong gradients with no error. Measured on a V100 with `primal_outputs = false`: `mlp3` 79M gap to JAX 1.41 to 1.12, `mlp3_push` 79M 1.64 to 1.46;
+a few percent on the stencil kernels; none on `ufv_gather_step`.
+`fresh_check = true` (needs `fresh_gradient`) puts one check per flagged array at the start of the host function, `cgen_fresh_check(host, flagged)`:
+`if !(Base.isempty(g)) && Base.maximum(Base.abs, g) != 0; error(...); end`. It raises on any non-zero value and on a NaN. It catches a gradient that was not reset, and a second call
+without a reset (the first call leaves `g` non-zero unless its result is zero). The `isempty` guard is needed on the device: `maximum(abs, CuArray{Float64}(undef, 0))` is `-Inf`;
+on the CPU it is 0, so a CPU test cannot see the guard. The check runs after all other GPU passes, so no pass sees it. It costs one reduction and one host synchronization per
+flagged array per call (0.3 to 1.1 ms for the six arrays of `mlp3` at 3M to 79M on a V100): use it for testing, not for timing.
+`test/validate_fresh_gradient.jl` tests both (14 cases, CPU shim, sabotage cases); the V100 negative path is in the kit (`h16_fresh_check`).
 
 **Split reduction** (`split_reduce`, `split_min_inner`, `split_max_out`)
 CUDA only (the keywords are accepted, and ignored, by the other backends' `stade_gpu` calls). `split_reduce = L` (default 16; 0 or 1 is off) builds a

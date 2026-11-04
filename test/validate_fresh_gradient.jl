@@ -16,6 +16,9 @@ small kernel in the house style, differentiated by stade_adjoint (keep_push_pop 
                A case with nothing flagged agrees everywhere. This is what makes a wrongly flagged accumulation visible: it differs from zero.
   4. OFF       the keyword off is the default output, byte for byte; AMDGPU and Metal never flag.
   5. SABOTAGE  with each guard replaced by `true`, the case built to need it is flagged and check 2 or 3 fails.
+  6. CHECK     `fresh_check = true` adds one entry check per flagged array and changes nothing else (the kernels are the same text, the keyword off or without
+               `fresh_gradient` is the plain output). From zero gradients it runs and agrees with the plan without the check. From a non-zero gradient, and
+               from the gradient a first call left behind, it raises the contract error. An empty array passes and a NaN does not.
 =#
 
 fg_src(e) = STADE.io_expr_to_source(e)
@@ -237,6 +240,18 @@ function fg_unit_checks()
     kd = Expr(:function, :(k!(w, e)), Expr(:block, good))
     kd2 = Expr(:function, :(k!(w, e)), Expr(:block, good, :(q = w[1])))
     check(STADE.cgen_fresh_variant_ok(kd, :w, good) && !STADE.cgen_fresh_variant_ok(kd2, :w, good) && !STADE.cgen_fresh_variant_ok(Expr(:function, :(k!(w, e)), Expr(:block, other, :(q = w[1]))), :w, good), "a variant must hold the same one store and nothing else of the array")
+    # fresh_check on a handmade host: zero, empty, tiny, NaN and a second array
+    hostc = Meta.parse("function fgc_h(wb, bb, n)\n    return nothing\nend")
+    chk = STADE.cgen_fresh_check(hostc, Symbol[:wb, :bb])
+    mc = Module(:FgCheck); Core.eval(mc, chk)
+    runc(a, b) = try Base.invokelatest(getfield(mc, :fgc_h), a, b, 1); "pass" catch ex; ex isa ErrorException && occursin("must be zero on entry", ex.msg) ? "raise" : "other" end
+    # the isempty guard cannot be sabotaged here: Base gives maximum(abs, empty) == 0, so the CPU passes without it. It is for the device library, and the V100 run covers it.
+    check(runc(zeros(3), zeros(2)) == "pass", "fresh_check: zero arrays pass")
+    check(runc(Float64[], zeros(2)) == "pass" && runc(zeros(3), Float64[]) == "pass", "fresh_check: an empty array passes")
+    check(runc([0.0, 1e-300, 0.0], zeros(2)) == "raise" && runc(zeros(3), [0.0, -2.0]) == "raise", "fresh_check: a tiny or negative value in either array raises")
+    check(runc([0.0, NaN, 0.0], zeros(2)) == "raise" && runc(zeros(3), [NaN, 0.0]) == "raise", "fresh_check: a NaN raises")
+    check(STADE.cgen_fresh_check(hostc, Symbol[]) === hostc, "fresh_check: nothing flagged leaves the host as it is")
+    check(length(chk.args[2].args) == length(hostc.args[2].args) + 2 && chk.args[2].args[end] == hostc.args[2].args[end], "fresh_check: the checks come first and the body is unchanged")
     return bad
 end
 
@@ -263,6 +278,18 @@ function validate_fresh_gradient(; only::Union{Nothing,Vector{String}} = nothing
             pl = try STADE.stade_gpu(e, be) catch; continue end
             check(isempty(pl.fresh), "$fname: $lab output flags nothing")
         end
+        # 6. CHECK: text
+        fc = fg_plan(e; fresh_gradient = true, fresh_check = true)
+        fcoff = fg_plan(e; fresh_gradient = true, fresh_check = false)
+        fconly = fg_plan(e; fresh_check = true)
+        check(fc.fresh == fresh.fresh, "$fname: fresh_check flags the same arrays")
+        check(length(fc.kernels) == length(fresh.kernels) && all(fg_src(a) == fg_src(b) for (a, b) in zip(fc.kernels, fresh.kernels)), "$fname: fresh_check leaves the kernels as they are")
+        check(fg_src(fcoff.host) == fg_src(fresh.host), "$fname: fresh_check = false is the plan without the check")
+        check(fg_src(fconly.host) == fg_src(plain.host), "$fname: fresh_check without fresh_gradient is the plain output")
+        ctext = fg_src(fc.host)
+        ncheck = length(collect(eachmatch(r"must be zero on entry", ctext)))
+        check(ncheck == length(want) && all(w -> occursin("gradient array $w of", ctext), want), "$fname: one entry check for each flagged array ($ncheck for $(length(want)))")
+        check(isempty(want) ? fg_src(fc.host) == fg_src(fresh.host) : fg_src(fc.host) != fg_src(fresh.host), "$fname: the host changes if and only if something is flagged")
         # 1. only the flagged stores differ
         if !isempty(want)
             pt = join(fg_src.(plain.kernels), "\n"); ft = join(fg_src.(fresh.kernels), "\n")
@@ -300,6 +327,14 @@ function validate_fresh_gradient(; only::Union{Nothing,Vector{String}} = nothing
             check(ok_other, "$fname $(sz): from non-zero gradients the unflagged arrays agree")
             n_active = !isempty(fresh.fresh) && prod(max.(1, collect(values(sz)))) > 0 && !any(==(0), collect(values(sz)))
             n_active && check(sort(differ) == sort(fresh.fresh), "$fname $(sz): a flagged gradient loses its old value ($(differ))")
+            # 6. CHECK: execution
+            rc = fg_run(fc, fname, z1)
+            check(all((a isa AbstractArray ? a == b : (a === b || a == b)) for (a, b) in zip(rf.arrays, rc.arrays)) && rf.ret == rc.ret, "$fname $(sz): from zero gradients the plan with the check agrees")
+            fidx = Int[i for (i, nm) in enumerate(names) if nm in fresh.fresh]
+            raises(args) = try fg_run(fc, fname, args); "pass" catch ex; ex isa ErrorException && occursin("must be zero on entry", ex.msg) ? "raise" : "other:" * sprint(showerror, ex) end
+            nz(arr) = any(i -> any(!iszero, arr[i]) , fidx)
+            check(raises(n1) == (nz(n1) ? "raise" : "pass"), "$fname $(sz): a non-zero flagged gradient raises ($(raises(n1)))")
+            check(raises(rf.arrays) == (nz(rf.arrays) ? "raise" : "pass"), "$fname $(sz): the gradient a first call left behind raises on a second call without a reset ($(raises(rf.arrays)))")
         end
     end
     if sabotage
@@ -309,6 +344,9 @@ function validate_fresh_gradient(; only::Union{Nothing,Vector{String}} = nothing
                 ("index names forced", "cgen_fresh_index_names_ok(idx, params::Set{Symbol}, loops::Vector{Symbol}, defs::Set{Symbol}) = true", ["fg_hidden"]),
                 ("single store forced", "cgen_fresh_single_store(body, p::Symbol, sites::Vector{Any}) = length(sites) >= 1", ["fg_twosites"]),
                 ("host group forced", "cgen_fresh_host_group(hs::Vector{Any}, hbody, g::Symbol) = (i = findfirst(st -> cgen_count_symbol(st, g) > 0, hs); i === nothing ? nothing : hs[i])", ["fg_shared"]),
+                ("check never raises", "cgen_fresh_check(host::Expr, flagged::Vector{Symbol}) = host", ["fg_dense"]),
+                ("only the first array checked", "cgen_fresh_check(host::Expr, flagged::Vector{Symbol}) = (isempty(flagged) ? host : Expr(:function, host.args[1], Expr(:block, Expr(:if, Expr(:&&, Expr(:call, :!, Expr(:call, Expr(:., :Base, QuoteNode(:isempty)), flagged[1])), Expr(:call, :!=, Expr(:call, Expr(:., :Base, QuoteNode(:maximum)), Expr(:., :Base, QuoteNode(:abs)), flagged[1]), 0)), Expr(:call, :error, \"fresh_gradient: the gradient array \" * string(flagged[1]) * \" of \" * string(host.args[1].args[1]) * \" must be zero on entry.\")), host.args[2].args...)))", ["fg_dense"]),
+                ("NaN passes", "cgen_fresh_check(host::Expr, flagged::Vector{Symbol}) = (isempty(flagged) ? host : Expr(:function, host.args[1], Expr(:block, [Expr(:if, Expr(:&&, Expr(:call, :!, Expr(:call, Expr(:., :Base, QuoteNode(:isempty)), g)), Expr(:call, :>, Expr(:call, Expr(:., :Base, QuoteNode(:maximum)), Expr(:., :Base, QuoteNode(:abs)), g), 0)), Expr(:call, :error, \"fresh_gradient: the gradient array \" * string(g) * \" of \" * string(host.args[1].args[1]) * \" must be zero on entry.\")) for g in flagged]..., host.args[2].args...)))", Symbol[]),
                 ("variant check forced", "cgen_fresh_variant_ok(kd, p::Symbol, stmt) = true", Symbol[]),
                 ("top-level launch forced", "cgen_fresh_top_level_launch(grp, kdefs::Dict{Symbol,Expr}, lm) = (names = cgen_split_launched!(grp, lm, Set{Symbol}()); base = first(Set(cgen_split_base_name(n) for n in names)); (names = names, base = base, call = cgen_split_first_call(grp, lm, base)))", ["fg_bias"]))
         for (label, redef, cases) in sabs

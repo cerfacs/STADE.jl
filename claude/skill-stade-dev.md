@@ -328,13 +328,23 @@ cancels, so it complements rather than replaces.
 
 ## GPU (`cgen_`/`jgen_`)
 
-`stade_gpu` ingests **already-generated** code; its only keywords are
+`stade_gpu` ingests **already-generated** code; its keywords are
 `precision`, `reduction_threshold`, `hoist_atomics`, `gather_stencil` (all backends) and the CUDA-only `warp_atomics`,
 `sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly), plus the CUDA-only opt-in
-`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). Every backend also takes `inbounds` and `dead_scalars` (default on; both `false` is the exact v0.4.31 text). CUDA also takes `split_reduce` (lanes per output, default 16; 0 off), `split_min_inner` and `split_max_out`. **Only `keep_push_pop=false` output is
+`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). Every backend also takes `inbounds` and `dead_scalars` (default on; both `false` is the exact v0.4.31 text). CUDA also takes `split_reduce` (lanes per output, default 16; 0 off), `split_min_inner` and `split_max_out`. CUDA also takes the opt-in `fresh_gradient` and `fresh_check` (default off; see below). **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
+
+### `fresh_gradient` and `fresh_check` (CUDA, opt-in)
+
+`fresh_gradient = true` rewrites `g[idx] = g[idx] + e` to `g[idx] = e` for an adjoint array with one write per element per call (`cgen_fresh_gradient`,
+every condition proved on the text). The caller owns the contract: `g` zeroed, one adjoint call per reset. The CPU adjoint is not changed. A broken contract gives
+wrong gradients and no error, so it is never a default. `false` must stay byte-identical to the output without it.
+
+`fresh_check = true` adds an entry check per flagged array (`cgen_fresh_check`): an error if the array holds a non-zero value or a NaN. It runs after every other
+GPU pass. The `isempty` guard is load-bearing on the device (`maximum(abs, empty CuArray)` is `-Inf`) and invisible on the CPU, so a V100 run covers it. The check costs
+a reduction and a synchronization per array: for tests, not timing. `fresh_check` without `fresh_gradient` flags nothing and changes nothing.
 
 GPU parity compares to a **BigFloat truth** (the same CPU code run in 192-bit
 BigFloat), never to the Float64 CPU result alone: the CPU result is off the exact
