@@ -237,7 +237,7 @@ function f(ub, vb, wb, a, n)
     end
     return nothing
 end"""),
-    ("a replay of 130 statements: over the cap", 1, "function f(ub, vb, wb, a, n)\n    for i = 3:n - 2\n        s1 = ub[i] * 1.01\n" * join(["        s$(k) = s$(k - 1) * 1.01\n" for k in 2:129]) * "        vb[i - 1] = vb[i - 1] + s129\n        vb[i + 1] = vb[i + 1] + s129\n        wb[i] = 2.0 * ub[i]\n    end\n    return nothing\nend"),
+    ("a replay of 130 statements: refused by the cost gate", 1, "function f(ub, vb, wb, a, n)\n    for i = 3:n - 2\n        s1 = ub[i] * 1.01\n" * join(["        s$(k) = s$(k - 1) * 1.01\n" for k in 2:129]) * "        vb[i - 1] = vb[i - 1] + s129\n        vb[i + 1] = vb[i + 1] + s129\n        wb[i] = 2.0 * ub[i]\n    end\n    return nothing\nend"),
 ]
 
 # run the original and the rewritten function on the same random arrays for several n, zero-trip ones included; returns the loops after the
@@ -280,6 +280,19 @@ function gat_unit_checks()
             check(loops == want && worst <= 1e-12, "$(label): $(loops) loop(s) (want $(want)), max difference $(worst)")
         catch e
             check(false, "$(label): error $(first(split(sprint(showerror, e), "\n")))")
+        end
+    end
+    # the hard cap on replayed statements, with the cost gate out of the way: the 130-statement source is refused at 100 and gathers at 1000
+    capsrc = GAT_UNIT[findfirst(x -> startswith(x[1], "a replay of 130 statements"), GAT_UNIT)][3]
+    for (cap, want) in (("100", 1), ("1000", 2))
+        oldc, oldr = get(ENV, "STADE_GATHER_CAP", nothing), get(ENV, "STADE_GATHER_RATIO", nothing)
+        ENV["STADE_GATHER_CAP"] = cap; ENV["STADE_GATHER_RATIO"] = "1e9"
+        try
+            loops, worst = gat_run_unit(capsrc)
+            check(loops == want && worst <= 1e-12, "hard cap $(cap) with the cost gate open: $(loops) loop(s) (want $(want)), max difference $(worst)")
+        finally
+            oldc === nothing ? delete!(ENV, "STADE_GATHER_CAP") : (ENV["STADE_GATHER_CAP"] = oldc)
+            oldr === nothing ? delete!(ENV, "STADE_GATHER_RATIO") : (ENV["STADE_GATHER_RATIO"] = oldr)
         end
     end
     # an empty loop whose gather range is wide must not touch an array shorter than that range

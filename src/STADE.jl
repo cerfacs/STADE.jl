@@ -6809,10 +6809,36 @@ end
 
 # ---- gather form with periodic shifts (gather_stencil level 3) ----
 
-# The most statements that one offset of a gather loop may replay. V100, adjoint of a periodic 2D kernel with two fields: 78 statements for the largest
-# offset (and 15 for the others) is 2.0 times faster than the scatter; 485 (others 146) is 2.4 times slower, because the replay of the whole chain per
-# thread costs more than the atomics. STADE_GATHER_CAP overrides the limit (a debugging switch).
-cgen_gather_cap() = parse(Int, get(ENV, "STADE_GATHER_CAP", "128"))
+# The most statements that one offset of a gather loop may replay: a bound on code size and analysis time, not a speed rule (the speed rule is
+# cgen_gather_worth). STADE_GATHER_CAP overrides it (a debugging switch).
+cgen_gather_cap() = parse(Int, get(ENV, "STADE_GATHER_CAP", "1024"))
+
+# The gather replays, for every receiving element, the statements that each offset needs; the scatter evaluates the body once and adds with atomics.
+# The gather pays off when the replayed work is below the work of the scatter. V100, adjoint of a periodic 2D kernel, gather time over scatter time against
+# replayed work over scatter work: burgers2d 0.50 over 0.50 (2.0 times faster), swe2d 2.35 over 1.39, probes with a chain of 6 to 24 dependent
+# statements 3.5 to 5.8 over 2.6 to 3.9. The threshold lies between the first two measured points. STADE_GATHER_RATIO overrides it (a debugging switch).
+cgen_gather_ratio() = parse(Float64, get(ENV, "STADE_GATHER_RATIO", "0.8"))
+
+# Work of an expression in units of one floating-point add: a load or an operation counts 1, a division or a square root 4, mod and div 8, a transcendental 20.
+function cgen_opw(e)
+    e isa Expr || return 0.0
+    w = 0.0
+    if e.head === :call
+        f = e.args[1]
+        n = length(e.args) - 2
+        w += f in (:sin, :cos, :tan, :exp, :log, :log10, :atan, :asin, :acos, :sinh, :cosh, :tanh) ? 20.0 : f in (:/, :sqrt) ? 4.0 : f in (:mod, :div) ? 8.0 : 1.0 * max(n, 1)
+    elseif e.head === :ref
+        w += 1.0
+    end
+    for a in e.args
+        w += cgen_opw(a)
+    end
+    return w
+end
+
+# gather_work: replayed work summed over every offset; body_work: work of one pass of the body; nterms: atomic adds that the scatter issues.
+# An atomic add counts 10 add-equivalents (burgers2d: 18 atomics).
+cgen_gather_worth(gather_work::Real, body_work::Real, nterms::Integer) = gather_work <= cgen_gather_ratio() * (body_work + 10.0 * nterms)
 
 # A scalar that an adjoint resets (`cb = 0.0` as the last statement of its loop) is 0 at the top of every iteration. Returns scalar => literal for the scalars
 # whose every assignment is either one literal at the top of the function (before any use) or sits in an innermost loop whose body ends with the same literal.
@@ -7233,6 +7259,7 @@ function cgen_gather_loop(stmt, tag::Int, ctx = nothing)
         push!(gbody, (kind = :assign, lhs = Symbol("__ga_", arr), rhs = 0.0))
         push!(gbody, (kind = :assign, lhs = Symbol("__gh_", arr), rhs = 0))
     end
+    gather_work = 0.0
     for (ti, grp) in enumerate(offsets)
         c = grp isa Integer ? grp : 0
         ks = sort([k for (k, t) in terms if t[2] == grp])
@@ -7249,6 +7276,7 @@ function cgen_gather_loop(stmt, tag::Int, ctx = nothing)
             end
         end
         length(keep) <= cgen_gather_cap() || return nothing
+        gather_work += sum(k in ks ? cgen_opw(terms[k][3]) + 1.0 : cgen_opw(prog[k][2]) for k in keep; init = 0.0)
         gi = Symbol("__gi_", tag, "_", ti)
         ren = Dict{Symbol,Any}(s => Symbol(s, "_g", tag, "_", ti) for s in scalars)
         ren[var] = gi
@@ -7280,6 +7308,8 @@ function cgen_gather_loop(stmt, tag::Int, ctx = nothing)
         push!(gbody, (kind = :if, cond = Expr(:call, :>, Symbol("__gh_", arr), 0),
                       then = NamedTuple[(kind = :assign, lhs = ref, rhs = Expr(:call, :+, ref, Symbol("__ga_", arr)))], els = NamedTuple[]))
     end
+    body_work = sum(haskey(terms, k) ? cgen_opw(terms[k][3]) + 1.0 : prog[k] === nothing ? 0.0 : cgen_opw(prog[k][2]) for k in 1:length(body); init = 0.0)
+    cgen_gather_worth(gather_work, body_work, length(terms)) || return nothing
     gather = (kind = :for, var = jv, lo = add(amin, minimum(allc)), hi = add(amax, maximum(allc)), step = 1, body = gbody)
     rest = NamedTuple[s for (k, s) in enumerate(body) if !haskey(terms, k)]
     # a residual with no array write and only generated temporaries computes nothing anyone reads

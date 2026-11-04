@@ -238,6 +238,61 @@ function gp_adj_run(gk, lv::Int, reduce::Bool)
     return cnt, w
 end
 
+const GP_BURGERS = """function burgers2d_step(u, v, un, vn, n)
+    for idx = 1:n * n
+        i = mod(idx - 1, n) + 1
+        j = div(idx - 1, n) + 1
+        im = mod(i - 2, n) + 1
+        ip = mod(i, n) + 1
+        jm = mod(j - 2, n) + 1
+        jp = mod(j, n) + 1
+        iw = (j - 1) * n + im
+        ie = (j - 1) * n + ip
+        is = (jm - 1) * n + i
+        inn = (jp - 1) * n + i
+        uc = u[idx]
+        vc = v[idx]
+        # upwind weights: the positive part of the speed looks west/south, the negative part east/north
+        upos = max(uc, 0.0)
+        uneg = min(uc, 0.0)
+        vpos = max(vc, 0.0)
+        vneg = min(vc, 0.0)
+        un[idx] = uc - 0.1 * (upos * (uc - u[iw]) + uneg * (u[ie] - uc) + vpos * (uc - u[is]) + vneg * (u[inn] - uc)) + 0.05 * (u[iw] + u[ie] + u[is] + u[inn] - 4.0 * uc)
+        vn[idx] = vc - 0.1 * (upos * (vc - v[iw]) + uneg * (v[ie] - vc) + vpos * (vc - v[is]) + vneg * (v[inn] - vc)) + 0.05 * (v[iw] + v[ie] + v[is] + v[inn] - 4.0 * vc)
+    end
+    return nothing
+end"""
+
+const GP_PROBE6 = """function capprobe_q006(u, un, n)
+    for idx = 1:n * n
+        i = mod(idx - 1, n) + 1
+        j = div(idx - 1, n) + 1
+        im = mod(i - 2, n) + 1
+        ip = mod(i, n) + 1
+        jm = mod(j - 2, n) + 1
+        jp = mod(j, n) + 1
+        iw = (j - 1) * n + im
+        ie = (j - 1) * n + ip
+        is = (jm - 1) * n + i
+        inn = (jp - 1) * n + i
+        uc = u[idx]
+        a = u[iw]
+        b = u[ie]
+        c = u[is]
+        d = u[inn]
+        s0 = 0.5 * uc + 0.1 * (a + b + c + d)
+        # chain of dependent polynomial updates, one scalar per step
+        s1 = s0 + 0.1 * a * (1.0 - s0 * s0)
+        s2 = s1 + 0.1 * b * (1.0 - s1 * s1)
+        s3 = s2 + 0.1 * c * (1.0 - s2 * s2)
+        s4 = s3 + 0.1 * d * (1.0 - s3 * s3)
+        s5 = s4 + 0.1 * uc * (1.0 - s4 * s4)
+        s6 = s5 + 0.1 * a * (1.0 - s5 * s5)
+        un[idx] = s6
+    end
+    return nothing
+end"""
+
 function gp_unit_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
@@ -262,6 +317,22 @@ function gp_unit_checks()
             check(loops == want && worst <= 1e-12, "replay cap $(lim === nothing ? "default" : lim): $(loops) gather loop(s) (want $(want)), max difference $(worst)")
         finally
             old === nothing ? delete!(ENV, "STADE_GATHER_CAP") : (ENV["STADE_GATHER_CAP"] = old)
+        end
+    end
+    # the cost gate: replayed work against the work of the scatter. burgers2d replays little beyond the body and gathers; a chain of 6 dependent
+    # statements is replayed by all five offsets, costs about 4 times the scatter, and is refused (the ratio switch lets it through)
+    check(STADE.cgen_gather_worth(10, 100, 5) && !STADE.cgen_gather_worth(1000, 100, 5), "cost gate: 10 against 100 passes, 1000 against 100 is refused")
+    check(STADE.cgen_gather_worth(120, 100, 5) && !STADE.cgen_gather_worth(121, 100, 5), "cost gate: the threshold is 0.8 of the body plus 10 per atomic")
+    for (lbl, src, ratio, want) in (("burgers2d", GP_BURGERS, nothing, 1), ("chain of 6", GP_PROBE6, nothing, 0), ("chain of 6 with the ratio at 100", GP_PROBE6, "100", 1))
+        old = get(ENV, "STADE_GATHER_RATIO", nothing)
+        ratio === nothing ? delete!(ENV, "STADE_GATHER_RATIO") : (ENV["STADE_GATHER_RATIO"] = ratio)
+        try
+            adj = STADE.stade_adjoint(Meta.parse(src); keep_push_pop = false, fuse_ii_loops = true)
+            gk = STADE.cgen_ingest(Meta.parse(STADE.io_expr_to_source(adj.adjoint)))
+            loops, worst = gp_adj_run(gk, 3, true)
+            check(loops == want && worst <= 1e-12, "cost gate, $(lbl): $(loops) gather loop(s) (want $(want)), max difference $(worst)")
+        finally
+            old === nothing ? delete!(ENV, "STADE_GATHER_RATIO") : (ENV["STADE_GATHER_RATIO"] = old)
         end
     end
     # the heat equation adjoint in three coordinates: 6 permutations and the cell itself, fires at level 3 and not at level 2
@@ -408,6 +479,9 @@ function validate_gather_periodic(; phases = (:units, :sabotage), slice = 1:type
             ("an alias scalar is not resolved", "defs[nm] = cgen_subst_expr(defs[nm], alias)", "nothing"),
             ("a scalar-held index is not inlined", "    idxe = inline_idx(idxe, 0)\n", ""),
             ("the replay cap is ignored", "length(keep) <= cgen_gather_cap() || return nothing", "true"),
+            ("the cost gate is removed", "cgen_gather_worth(gather_work, body_work, length(terms)) || return nothing", "true"),
+            ("the replayed work of one offset only is counted", "gather_work += sum(", "gather_work = sum("),
+            ("the atomics are free in the scatter work", "(body_work + 10.0 * nterms)", "(body_work + 0.0 * nterms)"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]
