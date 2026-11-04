@@ -3297,7 +3297,7 @@ end
 # sequential loop's direction), distributing each seed via der_rule(op).adjoint; pure accumulation skips resetting
 # the shadow, else it resets to 0.0. A snapshotted write pops its old value first.
 
-function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, push_pop = nothing, ii_plan = nothing, remat = nothing)
+function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, push_pop = nothing, ii_plan = nothing, remat = nothing, primal_outputs::Bool = true)
     active_map = act_analyze(kernel)
     layout = nothing
     value_needed = exempt = stacks = nothing
@@ -3317,15 +3317,15 @@ function agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop::Bool = true, 
     (initstacks_expr, table_names, tot_names, val_names) = agen_init_emit(kernel, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout,
                                       active_map = active_map, value_needed = value_needed, exempt = exempt, stacks = stacks, push_pop = push_pop)
     tier_b_extra_args = vcat(table_names, tot_names, val_names)
-    adjoint_expr = agen_adjoint_emit(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = push_pop,
-                                      tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan, remat = remat)
+    (adjoint_expr, primal_pruned) = agen_adjoint_emit_(kernel, active_map, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, layout = layout, push_pop = push_pop,
+                                      tier_b_extra_args = tier_b_extra_args, ii_plan = ii_plan, remat = remat, primal_outputs = primal_outputs)
     # fuse_ii_loops can leave a stack with zero remaining push!/pop!/indexed-ref references
     # anywhere in the generated body (every site that would have used it got fused away) --
     # checked from the actual generated code, never predicted ahead of time, since a var's
     # ii_plan coverage does NOT by itself guarantee its stack is fully unused. Runs under both
     # keep_push_pop values; agen_finalize_stacks detects use under either storage mode.
     (adjoint_expr, initstacks_expr) = agen_finalize_stacks(adjoint_expr, initstacks_expr, snapshot_plan, ii_plan; force = !keep_push_pop && (any(s -> agen_asnap_site_array(s, kernel.sig.kinds) !== nothing, snapshot_plan) || !isempty(agen_remat_cross_vars(remat))))
-    return (adjoint = adjoint_expr, initstacks = initstacks_expr)
+    return (adjoint = adjoint_expr, initstacks = initstacks_expr, primal_pruned = primal_pruned)
 end
 
 # Every float-valued name an adjoint or hvp body can mention: each float variable, its adjoint, both
@@ -3373,8 +3373,240 @@ function agen_signature_args(sig)
     return fargs
 end
 
-function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing,
-                            tier_b_extra_args::Vector{Symbol} = Symbol[], ii_plan = nothing, remat = nothing)
+# The adjoint function, without its forward sweep when `primal_outputs = false` and the backward sweep does not need it (agen_forward_skippable). The primal
+# outputs of the kernel are then left at their input values. Returns (function expression, whether the forward sweep was dropped).
+function agen_adjoint_emit(kernel, active_map, lin_plan, sites; kw...)
+    return agen_adjoint_emit_(kernel, active_map, lin_plan, sites; kw...)[1]
+end
+
+# The forward sweep can be dropped when the backward body (the generated statements, not the kernel) never reads a name that the primal writes, and never touches a
+# stack or a table. Every other name it reads is an input that the primal leaves unchanged, so the backward sweep sees the same values without the forward sweep.
+# The test reads the generated text on purpose: it holds whatever the emitters decided to restore, recompute or snapshot.
+function agen_all_symbols!(e, acc::Set{Symbol})
+    if e isa Symbol
+        push!(acc, e)
+    elseif e isa Expr
+        for a in e.args
+            agen_all_symbols!(a, acc)
+        end
+    end
+    return acc
+end
+
+# Can `e` read `x` before it has written it? Conservative: any use that is not a plain assignment to x at the top of a block or of a loop body counts as a read of the entry
+# value. A scalar that every statement of the backward body assigns before reading does not need the forward sweep to have run.
+function agen_needs_entry(e, x::Symbol)
+    e isa Symbol && return e == x
+    e isa Expr || return false
+    if e.head == :block
+        for a in e.args
+            agen_needs_entry(a, x) && return true
+            a isa Expr && a.head == :(=) && a.args[1] == x && return false
+        end
+        return false
+    elseif e.head == :(=)
+        lhs = e.args[1]
+        if lhs isa Expr && lhs.head == :ref
+            return any(ix -> agen_needs_entry(ix, x), lhs.args[2:end]) || agen_needs_entry(e.args[2], x)
+        end
+        lhs isa Symbol && return agen_needs_entry(e.args[2], x)
+        return agen_needs_entry(lhs, x) || agen_needs_entry(e.args[2], x)
+    elseif e.head == :for
+        return agen_needs_entry(e.args[1].args[2], x) || agen_needs_entry(e.args[2], x)
+    elseif e.head == :if || e.head == :elseif
+        return any(a -> agen_needs_entry(a, x), e.args)
+    end
+    return any(a -> agen_needs_entry(a, x), e.args)
+end
+
+function agen_forward_skippable(kernel, fwd, bwd, stack_names, extra_names)
+    # a fused independent loop sits at the forward position with its adjoint statements: a forward sweep that touches an adjoint variable is not primal only
+    fused = agen_all_symbols!(Expr(:block, fwd...), Set{Symbol}())
+    for (v, k) in kernel.sig.kinds
+        k in (:scalar_float, :array_float) && agen_shadow(v) in fused && return false
+    end
+    written = Set{Symbol}()
+    for st in kernel.body
+        agen_primal_written_stmt!(st, written)
+    end
+    seq = Expr(:block, bwd...)
+    used = agen_all_symbols!(seq, Set{Symbol}())
+    any(in(used), stack_names) && return false
+    any(in(used), extra_names) && return false
+    for x in written
+        x in used && agen_needs_entry(seq, x) && return false
+    end
+    return true
+end
+
+function agen_primal_written_stmt!(st, acc::Set{Symbol})
+    if st.kind == :assign
+        push!(acc, st.lhs isa Expr ? st.lhs.args[1] : st.lhs)
+    elseif st.kind == :for || st.kind == :while
+        for b in st.body
+            agen_primal_written_stmt!(b, acc)
+        end
+    elseif st.kind == :if
+        for b in st.then
+            agen_primal_written_stmt!(b, acc)
+        end
+        for b in st.els
+            agen_primal_written_stmt!(b, acc)
+        end
+    end
+    return nothing
+end
+
+# Dead primal stores. With `primal_outputs = false` a store into an array that the kernel writes, which nothing in the generated body reads, is dropped, then the scalar
+# assignments that only fed it, then the loops and branches left empty. A read is any mention except the target of an assignment, so a loop that reads what it writes
+# (an in-place update) keeps its stores. A scalar assignment is dropped only when its right side has no push!/pop! (a stack operation is a side effect).
+function agen_dse_reads!(e, reads::Set{Symbol})
+    if e isa Symbol
+        push!(reads, e)
+    elseif e isa Expr
+        if e.head == :(=)
+            lhs = e.args[1]
+            if lhs isa Expr && lhs.head == :ref
+                for ix in lhs.args[2:end]
+                    agen_dse_reads!(ix, reads)
+                end
+            elseif !(lhs isa Symbol)
+                agen_dse_reads!(lhs, reads)
+            end
+            agen_dse_reads!(e.args[2], reads)
+        elseif e.head == :for
+            agen_dse_reads!(e.args[1].args[2], reads)
+            agen_dse_reads!(e.args[2], reads)
+        else
+            for a in e.args
+                agen_dse_reads!(a, reads)
+            end
+        end
+    end
+    return reads
+end
+
+function agen_dse_drop(e, dead_arrays, dead_scalars)
+    e isa Expr || return e
+    if e.head == :(=)
+        lhs = e.args[1]
+        if lhs isa Expr && lhs.head == :ref && lhs.args[1] in dead_arrays
+            return nothing
+        elseif lhs isa Symbol && lhs in dead_scalars
+            rs = agen_all_symbols!(e.args[2], Set{Symbol}())
+            (:push! in rs || :pop! in rs) || return nothing
+        end
+        return e
+    elseif e.head == :block
+        kept = Any[]
+        for a in e.args
+            r = agen_dse_drop(a, dead_arrays, dead_scalars)
+            r === nothing || push!(kept, r)
+        end
+        return Expr(:block, kept...)
+    elseif e.head == :for
+        b = agen_dse_drop(e.args[2], dead_arrays, dead_scalars)
+        return (b === nothing || isempty(filter(x -> !(x isa LineNumberNode), b.args))) ? nothing : Expr(:for, e.args[1], b)
+    elseif e.head == :if || e.head == :elseif
+        parts = Any[e.args[1]]
+        for a in e.args[2:end]
+            push!(parts, a isa Expr ? agen_dse_drop(a, dead_arrays, dead_scalars) : a)
+        end
+        isempty(filter(x -> !(x isa LineNumberNode), (parts[2] === nothing ? Any[] : parts[2].args))) && (length(parts) == 2 || parts[3] === nothing || isempty(filter(x -> !(x isa LineNumberNode), parts[3].args))) && return nothing
+        return Expr(e.head, [p for p in parts if p !== nothing]...)
+    end
+    return e
+end
+
+# Scalars accumulated in a loop nested in another loop that also accumulates into an array (`s = s + ...` beside `gb[k] = gb[k] + ...`, an adjoint increment). The GPU stage
+# splits the enclosing loop across the lanes of a block only while such a scalar is live, and without it the increments become contended atomic adds. A store that reads
+# one of these scalars is kept even when nothing reads its array.
+function agen_dse_has_array_acc(e)
+    e isa Expr || return false
+    if e.head == :(=) && e.args[1] isa Expr && e.args[1].head == :ref
+        return e.args[1].args[1] in agen_all_symbols!(e.args[2], Set{Symbol}())
+    end
+    return any(agen_dse_has_array_acc, e.args)
+end
+
+function agen_dse_self_scalars!(e, acc::Set{Symbol})
+    e isa Expr || return acc
+    if e.head == :(=) && e.args[1] isa Symbol
+        e.args[1] in agen_all_symbols!(e.args[2], Set{Symbol}()) && push!(acc, e.args[1])
+    else
+        for a in e.args
+            agen_dse_self_scalars!(a, acc)
+        end
+    end
+    return acc
+end
+
+function agen_dse_inner_acc!(e, depth::Int, acc::Set{Symbol})
+    e isa Expr || return acc
+    if e.head == :for
+        depth >= 1 && agen_dse_has_array_acc(e.args[2]) && agen_dse_self_scalars!(e.args[2], acc)
+        agen_dse_inner_acc!(e.args[2], depth + 1, acc)
+    else
+        for a in e.args
+            agen_dse_inner_acc!(a, depth, acc)
+        end
+    end
+    return acc
+end
+
+function agen_dse_acc_stored!(e, acc::Set{Symbol}, keep::Set{Symbol})
+    e isa Expr || return keep
+    if e.head == :(=) && e.args[1] isa Expr && e.args[1].head == :ref
+        isempty(intersect(agen_all_symbols!(e.args[2], Set{Symbol}()), acc)) || push!(keep, e.args[1].args[1])
+    else
+        for a in e.args
+            agen_dse_acc_stored!(a, acc, keep)
+        end
+    end
+    return keep
+end
+
+function agen_prune_dead_primal(kernel, body, stack_names)
+    args = Set{Symbol}(kernel.sig.args)
+    written = Set{Symbol}()
+    for st in kernel.body
+        agen_primal_written_stmt!(st, written)
+    end
+    warrays = Set{Symbol}(a for a in written if get(kernel.sig.kinds, a, :none) in (:array_float, :array_int))
+    wscalars = Set{Symbol}(a for a in written if !(a in args) && get(kernel.sig.kinds, a, :none) in (:scalar_float, :scalar_int))
+    cur = Any[b for b in body]
+    changed = false
+    inner_acc = Set{Symbol}()
+    for e in cur
+        agen_dse_inner_acc!(e, 0, inner_acc)
+    end
+    keep_arrays = Set{Symbol}()
+    for e in cur
+        agen_dse_acc_stored!(e, inner_acc, keep_arrays)
+    end
+    warrays = setdiff(warrays, keep_arrays)
+    for _ in 1:20
+        reads = Set{Symbol}()
+        for e in cur
+            agen_dse_reads!(e, reads)
+        end
+        dead_a = Set{Symbol}(a for a in warrays if !(a in reads))
+        dead_s = Set{Symbol}(a for a in wscalars if !(a in reads))
+        (isempty(dead_a) && isempty(dead_s)) && break
+        nxt = Any[]
+        for e in cur
+            r = agen_dse_drop(e, dead_a, dead_s)
+            r === nothing || push!(nxt, r)
+        end
+        length(nxt) == length(cur) && all(i -> nxt[i] == cur[i], eachindex(cur)) && break
+        changed = true
+        cur = nxt
+    end
+    return (cur, changed)
+end
+
+function agen_adjoint_emit_(kernel, active_map, lin_plan, sites; keep_push_pop::Bool = true, layout = nothing, push_pop = nothing,
+                            tier_b_extra_args::Vector{Symbol} = Symbol[], ii_plan = nothing, remat = nothing, primal_outputs::Bool = true)
     fname = agen_fname(kernel.sig.name)
     stacks = agen_stack_map(sites)
     # `tier_b_extra_args` (Phase D) is the same table/total/value-table name list agen_init_emit
@@ -3393,13 +3625,20 @@ function agen_adjoint_emit(kernel, active_map, lin_plan, sites; keep_push_pop::B
     body = Any[]
     append!(body, agen_local_primal_inits(kernel, active_map, agen_itbr_vars(stacks)))
     append!(body, agen_local_shadow_inits(kernel, active_map))
-    append!(body, agen_forward_body(kernel.body, kernel.sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, lin_body = lin_plan, unsafe = unsafe))
-    append!(body, agen_backward_body(lin_plan, kernel.body, kernel.sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx))
+    fwd = agen_forward_body(kernel.body, kernel.sig.kinds, active_map, value_needed, reassigned, stacks, exempt; ectx = ectx, lin_body = lin_plan, unsafe = unsafe)
+    bwd = agen_backward_body(lin_plan, kernel.body, kernel.sig.kinds, active_map, unsafe, value_needed, reassigned, stacks, exempt; ectx = ectx)
+    skipped = !primal_outputs && agen_forward_skippable(kernel, fwd, bwd, agen_stack_names(sites), tier_b_extra_args)
+    skipped || append!(body, fwd)
+    append!(body, bwd)
+    if !primal_outputs
+        (body, dropped) = agen_prune_dead_primal(kernel, body, agen_stack_names(sites))
+        skipped = skipped || dropped
+    end
 
     scalar_args = [a for a in kernel.sig.args if kernel.sig.kinds[a] == :scalar_float]
     push!(body, emit_return_scalars([agen_shadow(a) for a in scalar_args]))
 
-    return Expr(:function, Expr(:call, fname, fargs...), Expr(:block, emit_cse_stmts(body, Ref(0), agen_cse_float_names(kernel.sig, sites))...))
+    return (Expr(:function, Expr(:call, fname, fargs...), Expr(:block, emit_cse_stmts(body, Ref(0), agen_cse_float_names(kernel.sig, sites))...)), skipped)
 end
 
 # Int64 variables reassigned at more than one :assign site are evolving state depending on the full
@@ -15712,7 +15951,7 @@ end
 
 function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
                         dependents::Union{Vector{Symbol},Nothing}=nothing,
-                        keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
+                        keep_push_pop::Bool=true, fuse_ii_loops::Bool=false, primal_outputs::Bool=true)
     kernel = parse_override_indep_dep(parse_kernel(expr), independents, dependents)
     kernel = norm_insert_dead_entry_resets(kernel)   # see norm_dead_entry_vars
     active_map = act_analyze(kernel)
@@ -15724,7 +15963,7 @@ function stade_adjoint(expr::Expr; independents::Union{Vector{Symbol},Nothing}=n
     (agen_sites, remat) = keep_push_pop ? (agen_sites, nothing) : agen_remat_apply(kernel, active_map, agen_sites)
     (agen_sites, asnap) = keep_push_pop ? (agen_sites, nothing) : agen_asnap_apply(kernel, active_map, agen_sites; ii_plan = ii_plan)
     asnap === nothing || (snapshot_plan = vcat(snapshot_plan, agen_asnap_sites(asnap)))
-    return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, push_pop = agen_sites, ii_plan = ii_plan, remat = remat)
+    return agen_emit(kernel, lin_plan, snapshot_plan; keep_push_pop = keep_push_pop, push_pop = agen_sites, ii_plan = ii_plan, remat = remat, primal_outputs = primal_outputs)
 end
 
 function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothing,
@@ -15778,9 +16017,9 @@ function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=tr
     return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
 end
 
-function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
+function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false, primal_outputs::Bool=true)
     inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
+    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops, primal_outputs = primal_outputs) for (name, expr) in inlined)
 end
 
 function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
@@ -15802,11 +16041,12 @@ function stade_tangent_file(in_path::String, out_path::String; keep_push_pop::Bo
     return out_path
 end
 
-function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
+function stade_adjoint_file(in_path::String, out_path::String; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false, primal_outputs::Bool=true)
     kernels = io_read_kernel_corpus(in_path)
     entry_name = io_corpus_entry_name(in_path, kernels)
     inlined = inl_inline_calls(kernels)
-    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops)
+    generated = stade_adjoint(inlined[entry_name]; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops, primal_outputs = primal_outputs)
+    primal_outputs || generated.primal_pruned || @info "primal_outputs = false: the backward sweep of $(entry_name) had no primal statement to drop, so it is generated as with primal_outputs = true"
     io_write_kernel_corpus_file(out_path, Dict(entry_name => inlined[entry_name]), Dict(entry_name => Expr[generated.initstacks, generated.adjoint]))
     return out_path
 end
