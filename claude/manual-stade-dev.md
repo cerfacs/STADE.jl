@@ -285,6 +285,9 @@ the filesystem, through the `io_*` stage.
 
 The differentiation entry points take **exactly two** flags. Do not add a
 third without a strong argument. Both flags are explained in Part IV.
+`stade_adjoint` alone also takes `primal_outputs::Bool = true` (v0.4.57), a
+deliberate exception: it changes which outputs the adjoint produces, not how
+it differentiates.
 
 ## II.4 The pipeline
 

@@ -89,10 +89,26 @@ subsequent `bash_tool` call needing Julia.
 `stade_tangent`/`stade_adjoint`/`stade_hvp` (and `_file`/`_corpus`
 wrappers) take exactly two: `keep_push_pop::Bool = true` and
 `fuse_ii_loops::Bool = false`. Site-level TBR is unconditional.
+`stade_adjoint` (and its `_file`/`_corpus` wrappers) takes one more,
+`primal_outputs::Bool = true`; see below. Tangent and HVP do not take it.
 
 Any new snapshot-exclusion mechanism must go through
 `agen_ii_override_ectx`. `agen_push_pop_source` reads `ectx.push_pop`,
 so modifying `value_needed` alone is silently ignored.
+
+### `primal_outputs`
+
+`true` must stay byte-identical to the output without the keyword. `false`
+drops the forward sweep when the backward sweep reads no primal-written name
+before writing it, touches no stack or table, and the forward body holds no
+adjoint statement (a fused independent loop does). It then drops stores into
+kernel-written arrays that nothing reads, the scalar assignments that only fed
+them (kept when the right side has `push!`/`pop!`), and loops left empty.
+The primal arrays keep their input values; the gradients are identical.
+
+A store that reads a scalar accumulated in a loop nested in another loop that
+also accumulates into an array is kept: the GPU stage splits the gradient loop
+only while that scalar is live (`agen_dse_inner_acc!`).
 
 ### `keep_push_pop`
 
