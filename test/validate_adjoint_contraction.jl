@@ -74,6 +74,12 @@ const TANG_ONE = """for c = 1:k
             end"""
 const ADJ_CASES = [
     ("two statements", adj_src(), :con_adj, adj_args, 2),
+    # split-K: the weight gradient sums over 700 rows with one 64 x 64 tile, so its inner sum is cut into 5 pieces (the data gradient sums over 40 columns and is not cut)
+    ("split inner sum, tall", adj_src(), :con_adj, sd -> adj_args(sd; n = 40, m = 700, k = 40), 2),
+    # both products cut: 300 columns and 300 rows, two pieces each; sizes that are not multiples of the tile or the step
+    ("split inner sums, both", adj_src(), :con_adj, sd -> adj_args(sd; n = 301, m = 299, k = 37), 2),
+    # the data gradient cut alone: 1000 columns, 40 rows
+    ("split inner sum, wide", adj_src(), :con_adj, sd -> adj_args(sd; n = 1000, m = 40, k = 40), 2),
     ("first statement only", adj_src(loop = "for c = 1:k\n xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs\n end"), :con_adj, adj_args, 1),
     ("second statement only", adj_src(loop = "for c = 1:k\n wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + x[(t - 1) * k + c] * gs\n end"), :con_adj, adj_args, 1),
     ("factors in the other order", adj_src(loop = """for c = 1:k
@@ -391,12 +397,16 @@ function adj_unit_checks()
         name, src, entry, mk, _ = ADJ_CASES[1]
         args = mk(1)                       # n = 70, m = 67, k = 19
         check(all(c -> count(adj_is_twin, con_run(src, entry, args, c).launched) == 2, (8, 9, 32)) && all(c -> count(adj_is_twin, con_run(src, entry, args, c).launched) == 0, (33, 64, 65)), "$name: the twins run at 8, at 9 and at 32 and not at 33 (the weight gradient has a quarter of the tiles it wants up to 32)")
-        # a tall and narrow product (the rows of a graph, 16 columns, inner length 16): the weight gradient has 1 tile and sums over 4000 rows on one block. The group takes the plain kernel at the default and runs once the tile count scales down.
-        targs = adj_args(1; m = 4000, n = 16, k = 16)
-        check(count(adj_is_twin, con_run(src, entry, targs, 256).launched) == 0 && count(adj_is_twin, con_run(src, entry, targs, 16).launched) == 2, "$name: a tall and narrow product takes the plain kernel at 256 and runs at 16")
-        # no twin has the tile count of its layout, and each has at least a quarter of it (contraction 128: the input gradient wants 4 tiles and has 3, the weight gradient wants 32 and has 10): the group takes the plain kernel; at contraction 1 every twin wants its tiles
-        wargs = adj_args(1; m = 130, n = 640, k = 64)
-        check(count(adj_is_twin, con_run(src, entry, wargs, 128).launched) == 0 && count(adj_is_twin, con_run(src, entry, wargs, 1).launched) == 2, "$name: a group in which no twin has the tile count of its layout, each with at least a quarter of it, takes the plain kernel (contraction 128) and runs at 1")
+        # a tall and narrow product (the rows of a graph, 16 columns, inner length 16): the weight gradient has 1 tile and sums over 4000 rows. With split-K it runs 31 blocks and the twin is 3.3 times faster than the plain kernel on the V100 (SK04), so the group runs at the default. At 1500 rows the pieces are 11 blocks, below a quarter of the tile count of the layout, and the plain kernel (equal speed) stays.
+        targs = adj_args(1; m = 4000, n = 16, k = 16); sargs = adj_args(1; m = 1500, n = 16, k = 16)
+        check(count(adj_is_twin, con_run(src, entry, targs, 256).launched) == 2 && count(adj_is_twin, con_run(src, entry, sargs, 256).launched) == 0 && count(adj_is_twin, con_run(src, entry, sargs, 16).launched) == 2, "$name: a tall and narrow product runs at 256 from 4000 rows (split sum) and not at 1500, and runs at 16")
+        # the seed kernel keeps a bias gradient summed over all rows (an atomic add that is not a twin statement). The plain kernel handles it with the split-reduce form and the seed kernel does not
+        # (mpnn_gather, V100: 3.4 ms against 1.5 ms), so such a group keeps the gate that counts tiles: the same 4000 x 16 x 16 product takes the plain kernel at 256 and runs at 16
+        bsrc = adj_src(post = "bb[o] = bb[o] + gs")
+        check(count(adj_is_twin, con_run(bsrc, entry, targs, 256).launched) == 0 && count(adj_is_twin, con_run(bsrc, entry, targs, 16).launched) == 2, "$name: with a bias gradient in the seed kernel the 4000 x 16 x 16 product keeps the tile-count gate (plain at 256, twins at 16)")
+        # no twin has the block count of its layout and each has at least a quarter of it (contraction 64, 64 rows, 200 columns, inner length 64: the input gradient wants 2 blocks and has 1, the weight gradient wants 16 and has 4, a quarter is 1 and 4): the group takes the plain kernel; at contraction 1 every twin wants its blocks
+        wargs = adj_args(1; m = 64, n = 200, k = 64)
+        check(count(adj_is_twin, con_run(src, entry, wargs, 64).launched) == 0 && count(adj_is_twin, con_run(src, entry, wargs, 1).launched) == 2, "$name: a group in which no twin has the block count of its layout, each with at least a quarter of it, takes the plain kernel (contraction 64) and runs at 1")
         k0 = Any[args[1:8]..., 0]
         z = con_run(src, entry, k0, 1)
         zb = con_run(src, entry, k0, 0)
@@ -467,6 +477,8 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
         check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
         text = read(joinpath(abspath(joinpath(@__DIR__, "..")), "src", "STADE.jl"), String)
         cases = [
+            ("a group with residual atomic adds is gated by blocks", "gate = isempty(resid))", "gate = true)"),
+            ("the blocks of a split sum are not counted by the launch test", "        splitk && gate && (tiles = call(:*, tiles, cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN)))\n", ""),
             ("a loop with a plain store is chosen as the loop of adds", " && all(st -> cgen_atomic_site(st) !== nothing || cgen_split_is_scalar(st), l.body)), rest)", "), rest)"),
             ("the thread index may be offset", " && first_st.args[2] == :(1 + (__tid - 1))\n        X = n_iter", "\n        X = n_iter"),
             ("the reversed thread index may be offset", " && first_st.args[2] == :(\$Xc + (__tid - 1) * -1)", ""),
@@ -542,6 +554,9 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the two sums of the stage share a scratch array", "fnames = Symbol[k == 1 ? :__cf_s : Symbol(\"__cf_s\", k) for k in 1:length(sf)]", "fnames = Symbol[:__cf_s for k in 1:length(sf)]"),
             ("the first kernel reads only the first sum from the stage", "for k in eachindex(fstage.accs)]", "for k in 1:1]"),
             ("the second scratch array of the stage is not allocated", "                        for sc in fsc\n", "                        for sc in fsc[1:1]\n"),
+            ("every piece of a split sum starts at zero", "call(:(:), cmul(:__ct_z, :__ct_kc), TK,", "call(:(:), 0, TK,"),
+            ("the grid has no pieces", "bz = bv === nothing ? (splitk ? cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN) : nothing) : d.Bh", "bz = bv === nothing ? nothing : d.Bh"),
+            ("the pieces are rounded down and leave a tail", "cmul(call(Expr(:., :Base, QuoteNode(:cld)), call(Expr(:., :Base, QuoteNode(:cld)), :__ct_K, TK), :__ct_sp), TK)", "cmul(call(:div, call(Expr(:., :Base, QuoteNode(:cld)), :__ct_K, TK), :__ct_sp), TK)"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]

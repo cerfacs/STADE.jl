@@ -12007,6 +12007,16 @@ end
 # Recognized shape of the plain kernel, after the thread guard:  idx = 1 + (__tid - 1);  scalar statements (among them o = mod(idx - 1, N) + 1 and
 # t = div(idx - 1, N) + 1, and the start value of the sum); ONE flat loop whose body is the one accumulation; scalar statements and plain stores. `ia` may read only
 # kernel parameters, the row `t` and the loop variable; `ib` only parameters, the column `o` and the loop variable; neither input array is stored in the kernel.
+# Split-K: a twin whose epilogue is one atomic add per element (the adjoint products) may cut its inner sum into `sp` pieces, one per block of the third grid dimension, each added
+# with its own atomic add. `sp` fills about 240 blocks (3 per SM of 80) and keeps at least 128 inner elements per piece, at most 64 pieces. It is an expression of the three sizes,
+# so the host and the kernel compute the same value.
+function cgen_contraction_splits(Mh, Nh, Kh, TN)
+    cld_(a, b) = Expr(:call, Expr(:., :Base, QuoteNode(:cld)), a, b)
+    tiles = Expr(:call, :*, cld_(Mh, cgen_contr_tm()), cld_(Nh, TN))
+    return Expr(:call, :max, 1, Expr(:call, :min, cld_(240, tiles), Expr(:call, :div, Kh, 128), 64))
+end
+# the widest output that a narrow twin of `bn` columns takes: one column block (a test widens it to run several)
+cgen_contraction_narrow_limit(bn::Int) = bn
 cgen_contraction_name(name::Symbol) = (s = string(name); endswith(s, "!") ? Symbol(s[1:end-1], "_t!") : Symbol(s, "_t"))
 cgen_contr_tm() = 64
 cgen_contr_tk() = 16
@@ -12058,8 +12068,10 @@ function cgen_contraction_tiles(d, cmin::Int)
     return cld(base * cmin, 256)
 end
 
-function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
+function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = cgen_contr_tm(), sk::Bool = false, gate::Bool = true)
     TM = cgen_contr_tm(); TK = cgen_contr_tk(); RT = TM ÷ 16
+    # the tile is TM rows by TN columns: TN is 16, 32 or 64 (a narrow output wastes most of a 64-wide tile)
+    TN = bn; RC = TN ÷ 16
     sh = :__ct_sh
     ex(h, args...) = Expr(h, args...)
     asg(a, b) = Expr(:(=), a, b)
@@ -12071,10 +12083,16 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     push!(body, asg(:__ct_tx, call(:-, ex(:., call(:threadIdx), QuoteNode(:x)), 1)))
     push!(body, asg(:__ct_ty, call(:-, ex(:., call(:threadIdx), QuoteNode(:y)), 1)))
     push!(body, asg(:__ct_r0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:y)), 1), TM)))
-    push!(body, asg(:__ct_c0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:x)), 1), TM)))
+    push!(body, asg(:__ct_c0, call(:*, call(:-, ex(:., call(:blockIdx), QuoteNode(:x)), 1), TN)))
     bv = get(d, :batchvar, nothing)
     bv === nothing || push!(body, asg(:__ct_bz, call(:-, ex(:., call(:blockIdx), QuoteNode(:z)), 1)))
     append!(body, d.prelude)
+    splitk = sk && bv === nothing
+    if splitk
+        push!(body, asg(:__ct_sp, cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN)))
+        push!(body, asg(:__ct_z, call(:-, ex(:., call(:blockIdx), QuoteNode(:z)), 1)))
+        push!(body, asg(:__ct_kc, cmul(call(Expr(:., :Base, QuoteNode(:cld)), call(Expr(:., :Base, QuoteNode(:cld)), :__ct_K, TK), :__ct_sp), TK)))
+    end
     # The sums: `accs` is a list with one entry per accumulator, each a list of (i, j) pairs: the sum of the products of the i-th left tile and the j-th right tile.
     # Without it the descriptor has one sum of the products `terms` (or of the one product A * B), each with tiles of its own.
     if get(d, :accs, nothing) === nothing
@@ -12085,7 +12103,7 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
         alist = Any[d.alist...]; blist = Any[d.blist...]; accs = d.accs
     end
     # a slot holds one tile of each side; the number of slots is the larger of the two counts of distinct operands
-    nt = max(length(alist), length(blist)); TS = (TM + 1) * TK + TM * TK
+    nt = max(length(alist), length(blist)); TS = (TM + 1) * TK + TN * TK
     offq(e, q0) = q0 == 0 ? e : cadd(q0 * TS, e)
     push!(body, asg(sh, call(:CuDynamicSharedArray, :Float64, nt * TS)))
     push!(body, asg(:__ct_tl, cadd(cmul(:__ct_ty, 16), :__ct_tx)))
@@ -12093,7 +12111,7 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
         push!(body, asg(sym, 0))
     end
     bv === nothing || push!(body, asg(bv, cadd(:__ct_bz, 1)))
-    for a in 0:length(accs)-1, i in 0:RT-1, j in 0:RT-1
+    for a in 0:length(accs)-1, i in 0:RT-1, j in 0:RC-1
         push!(body, asg(acc_ij(a, i, j), 0.0))
     end
     # loads of the two pieces
@@ -12115,16 +12133,16 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     end
     for (q0, opd) in enumerate(blist)
         q0 -= 1
-        for q in 0:3
+        for q in 0:(TN * TK ÷ 256) - 1
             push!(loadB, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
-            push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TM)))
-            push!(loadB, asg(:__ct_cc, call(:mod, :__ct_e, TM)))
+            push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TN)))
+            push!(loadB, asg(:__ct_cc, call(:mod, :__ct_e, TN)))
             push!(loadB, asg(d.colvar, cadd(cadd(:__ct_c0, :__ct_cc), d.colbase)))
             push!(loadB, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))
             push!(loadB, zfill)
             push!(loadB, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
                               Expr(:block, asg(:__ct_v, Expr(:ref, opd.arr, opd.idx)))))
-            push!(loadB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), :__ct_cc), 1), q0)), :__ct_v))
+            push!(loadB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TN)), :__ct_cc), 1), q0)), :__ct_v))
         end
     end
     sname(q0) = q0 == 0 ? "" : string(q0, "_")
@@ -12132,19 +12150,20 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     for q0 in 0:length(alist)-1, i in 0:RT-1
         push!(mac, asg(Symbol("__ct_av", sname(q0), i), Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), cadd(:__ct_ty, 16 * i)), 1), q0))))
     end
-    for q0 in 0:length(blist)-1, j in 0:RT-1
-        push!(mac, asg(Symbol("__ct_bv", sname(q0), j), Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TM)), cadd(:__ct_tx, 16 * j)), 1), q0))))
+    for q0 in 0:length(blist)-1, j in 0:RC-1
+        push!(mac, asg(Symbol("__ct_bv", sname(q0), j), Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TN)), cadd(:__ct_tx, 16 * j)), 1), q0))))
     end
-    for (a, pairs) in enumerate(accs), i in 0:RT-1, j in 0:RT-1
+    for (a, pairs) in enumerate(accs), i in 0:RT-1, j in 0:RC-1
         prods = [cmul(Symbol("__ct_av", sname(ia - 1), i), Symbol("__ct_bv", sname(ib - 1), j)) for (ia, ib) in pairs]
         push!(mac, asg(acc_ij(a - 1, i, j), cadd(acc_ij(a - 1, i, j), foldl(cadd, prods))))
     end
-    kloop = Expr(:for, asg(:__ct_k0, call(:(:), 0, TK, call(:-, :__ct_K, 1))),
+    krange = splitk ? call(:(:), cmul(:__ct_z, :__ct_kc), TK, call(:-, call(:min, :__ct_K, cmul(call(:+, :__ct_z, 1), :__ct_kc)), 1)) : call(:(:), 0, TK, call(:-, :__ct_K, 1))
+    kloop = Expr(:for, asg(:__ct_k0, krange),
                  Expr(:block, loadA..., loadB..., call(:sync_threads),
                       Expr(:for, asg(:__ct_kk, call(:(:), 0, TK - 1)), Expr(:block, mac...)),
                       call(:sync_threads)))
     push!(body, kloop)
-    for i in 0:RT-1, j in 0:RT-1
+    for i in 0:RT-1, j in 0:RC-1
         stmts = Any[asg(:__ct_row, cadd(:__ct_r0, cadd(:__ct_ty, 16 * i))), asg(:__ct_col, cadd(:__ct_c0, cadd(:__ct_tx, 16 * j)))]
         inner = get(d, :accs, nothing) === nothing ? d.epilogue(:__ct_row, :__ct_col, acc_ij(0, i, j)) : d.epilogue(:__ct_row, :__ct_col, Symbol[acc_ij(a, i, j) for a in 0:length(accs)-1])
         push!(stmts, Expr(:if, Expr(:&&, call(:<, :__ct_row, :__ct_M), call(:<, :__ct_col, :__ct_N)), Expr(:block, inner...)))
@@ -12154,7 +12173,9 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     kd = Expr(:function, Expr(:call, d.name, d.fargs...), Expr(:block, body...))
     if bv === nothing
         # a side or the inner length of at least min(cmin, 16), and enough tiles for the layout of the operands (see cgen_contraction_tiles)
-        tiles = call(:*, call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM))
+        tiles = call(:*, call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TN))
+        # a split sum runs `sp` blocks per tile: the blocks, not the tiles, decide whether the twin has enough to do
+        splitk && gate && (tiles = call(:*, tiles, cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN)))
         cond = Expr(:&&, Expr(:&&, Expr(:&&, call(:>=, d.Nh, min(cmin, 16)), call(:>=, d.Mh, min(cmin, 16))), call(:>=, d.Kh, min(cmin, 16))), call(:>, d.Nh, 0))
         # a loop of two sums or of a sum of two products needs a full tile of columns: with 16 columns (the node projection of mpnn_gather, V100) three quarters of the products of a
         # tile are wasted and the twin ran 21 to 27% slower than the plain kernel
@@ -12173,9 +12194,9 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min())
     d.extra === nothing || (cond = Expr(:&&, cond, d.extra))
     can = cond
     want === nothing || (cond = Expr(:&&, cond, want))
-    bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM)
+    bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TN)
     by = call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM)
-    return (kdef = kd, name = d.name, cond = cond, can = can, want = want, okt = okt, bx = bx, by = by, bz = bv === nothing ? nothing : d.Bh, shmem = 8 * nt * TS)
+    return (kdef = kd, name = d.name, nh = d.Nh, cond = cond, can = can, want = want, okt = okt, bx = bx, by = by, bz = bv === nothing ? (splitk ? cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN) : nothing) : d.Bh, shmem = 8 * nt * TS)
 end
 
 # The decode of the flat index in a kernel with one thread per element. `X` is `idx - 1` or a variable that holds it. The column is `mod(X, N) + 1`. Without a batch the
@@ -12631,6 +12652,7 @@ end
 # tiled kernel per atomic statement.
 function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin::Int = cgen_contraction_min())
     fwd = Dict{Symbol,Any}()
+    nar = Dict{Symbol,Any}()
     adj = Dict{Symbol,Any}()
     for k in kernels
         k.head === :function || continue
@@ -12639,11 +12661,18 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
         d = cgen_contraction_kernel(k; cmin)
         if d !== nothing
             fwd[nm] = cgen_contraction_emit(d; cmin)
+            # a single sum of an output 16 to 32 wide: a tile of 16 or 32 columns (a 64-wide tile wastes 50 to 75 percent of its products)
+            if get(d, :accs, nothing) === nothing && d.batchvar === nothing && cmin >= 1
+                nar[nm] = [(bn, cgen_contraction_emit(merge(d, (name = Symbol(replace(string(d.name), "_t!" => string("_n", bn, "_t!"))),)); cmin, bn)) for bn in (16, 32)]
+            end
             continue
         end
         a = cgen_adjoint_contraction(k, backend; cmin)
         a === nothing && continue
-        adj[nm] = (a = a, ts = [cgen_contraction_emit(d2; cmin) for d2 in a.descs], fs = a.fstage === nothing ? nothing : cgen_contraction_emit(a.fstage.desc; cmin))
+        # the seed kernel keeps every atomic add that is not a twin statement (a bias gradient summed over all rows). The plain kernel takes the split-reduce form for those and the seed kernel
+        # does not (mpnn_gather: 3.4 ms against 1.5 ms), so such a group keeps the gate that counts tiles; its twins still split once the group runs
+        resid = Any[]; cgen_all_atomic_sites!(a.ka.args[2].args, resid)
+        adj[nm] = (a = a, ts = [cgen_contraction_emit(d2; cmin, sk = true, gate = isempty(resid)) for d2 in a.descs], fs = a.fstage === nothing ? nothing : cgen_contraction_emit(a.fstage.desc; cmin))
     end
     (isempty(fwd) && isempty(adj)) && return (host, kernels)
     used = Set{Symbol}()
@@ -12661,7 +12690,15 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
                     t = fwd[base]
                     call = Expr(:call, t.name, plain.args[2:end]...)
                     push!(used, base)
-                    return emit_if(Expr(:&&, t.cond, fits(t, call)), Any[tiled(t, call)], Any[e])
+                    res = emit_if(Expr(:&&, t.cond, fits(t, call)), Any[tiled(t, call)], Any[e])
+                    if haskey(nar, base)
+                        # the narrow twin of the smallest width that holds the output; the 64-wide twin and the plain kernel stay the fallbacks
+                        for (bn, tn) in reverse(nar[base])
+                            ncall = Expr(:call, tn.name, plain.args[2:end]...)
+                            res = emit_if(Expr(:&&, Expr(:&&, t.cond, Expr(:call, :<=, t.nh, cgen_contraction_narrow_limit(bn))), fits(tn, ncall)), Any[tiled(tn, ncall)], Any[res])
+                        end
+                    end
+                    return res
                 elseif haskey(adj, base) && plain !== nothing
                     A = adj[base]
                     launch = cgen_contraction_find_launch(e, backend.launch_macro, base)
@@ -12713,6 +12750,7 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
     for nm in sort(collect(used); by = string)
         if haskey(fwd, nm)
             push!(newk, fwd[nm].kdef)
+            haskey(nar, nm) && for (_, tn) in nar[nm]; push!(newk, tn.kdef); end
         else
             push!(newk, adj[nm].a.ka)
             adj[nm].fs === nothing || push!(newk, adj[nm].fs.kdef)

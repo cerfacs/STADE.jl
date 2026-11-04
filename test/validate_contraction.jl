@@ -1005,6 +1005,46 @@ end
 
 con_relerr(a, b) = maximum(maximum(abs.(x .- y) ./ max.(abs.(x), abs.(y), 1.0)) for (x, y) in zip(a.outs, b.outs) if x isa AbstractArray; init = 0.0)
 
+# Narrow twins: a single sum whose output is 16 to 32 columns wide runs a twin with a tile of 16 or 32 columns; wider outputs keep the 64-wide twin.
+function con_narrow_checks()
+    bad = 0
+    check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
+    src = """function con_nb(x, w, b, y, m, n, k)
+        for idx = 1:m * n
+            o = mod(idx - 1, n) + 1
+            t = div(idx - 1, n) + 1
+            s = b[o]
+            for c = 1:k
+                s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]
+            end
+            y[idx] = max(s, 0.0)
+        end
+        return nothing
+    end"""
+    mk(n, m, k, sd) = (r = MersenneTwister(sd); Any[randn(r, m * k), randn(r, k * n), randn(r, n), zeros(m * n), m, n, k])
+    for (n, want) in ((16, "_n16_t!"), (17, "_n32_t!"), (24, "_n32_t!"), (32, "_n32_t!"), (33, "_t!"), (70, "_t!"))
+        args = mk(n, 131, 37, n)
+        a = con_run(src, :con_nb, args, 1); b = con_run(src, :con_nb, args, 0)
+        err = con_relerr(a, b)
+        names = unique(a.launched)
+        hit = any(endswith(x, want) && (want != "_t!" || (!occursin("_n16_", x) && !occursin("_n32_", x))) for x in names)
+        check(hit && err <= 1e-12 && isempty(a.conflicts), "narrow n=$n: expect $want, launched $(filter(x -> occursin("_t!", x), names)), error $(round(err, sigdigits = 3)), conflicts $(length(a.conflicts))")
+    end
+    # the narrow twins on an output of several column blocks (the dispatch never builds this: it takes one block), to check the column offset and the grid
+    Core.eval(STADE, :(cgen_contraction_narrow_limit(bn::Int) = 1000000))
+    try
+        for (n, want) in ((70, "_n16_t!"), (53, "_n16_t!"))
+            args = mk(n, 131, 37, n + 1)
+            a = con_run(src, :con_nb, args, 1); b = con_run(src, :con_nb, args, 0)
+            err = con_relerr(a, b)
+            hit = any(endswith(x, want) for x in unique(a.launched))
+            check(hit && err <= 1e-12 && isempty(a.conflicts), "narrow forced on n=$n ($(cld(n, 16)) column blocks): launched $(filter(x -> occursin("_t!", x), unique(a.launched))), error $(round(err, sigdigits = 3)), conflicts $(length(a.conflicts))")
+        end
+    finally
+        Core.eval(STADE, :(cgen_contraction_narrow_limit(bn::Int) = bn))
+    end
+    return bad
+end
 function con_unit_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
@@ -1153,6 +1193,7 @@ function con_unit_checks()
     catch e
         check(false, "head in the column thresholds: error " * first(split(sprint(showerror, e), "\n")))
     end
+    bad += con_narrow_checks()
     return bad
 end
 
@@ -1193,7 +1234,7 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the rows are not tested against the floor", "call(:>=, d.Mh, min(cmin, 16))", "call(:>, d.Mh, 0)"),
             ("the inner length is not tested against the floor", "call(:>=, d.Kh, min(cmin, 16))", "call(:>, d.Kh, 0)"),
             ("the number of tiles is not tested", "want = call(:>=, tiles, cgen_contraction_tiles(d, cmin))", "want = nothing"),
-            ("the tiles are counted by the rows only", "call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM))\n        cond", "call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), 1)\n        cond"),
+            ("the tiles are counted by the rows only", "call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TN))\n        # a split sum", "call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), 1)\n        # a split sum"),
             ("every layout needs the count of nn", "    base = au && bu ? 8 : au ? 32 : 64\n", "    base = 32\n"),
             ("a layout with the right operand along the inner index needs the count of nt", "    base = au && bu ? 8 : au ? 32 : 64\n", "    base = bu ? 8 : au ? 32 : 64\n"),
             ("the count of tiles does not scale with contraction", "    return cld(base * cmin, 256)", "    return base"),
@@ -1233,8 +1274,8 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("a sum of three products is cut to two", "(term isa Expr && term.head === :call && term.args[1] === :+ && length(term.args) == 3) || return nothing", "(term isa Expr && term.head === :call && term.args[1] === :+) || return nothing"),
             ("a summand that is no product is accepted", "(f1 === nothing || f2 === nothing) && return nothing", "false && return nothing"),
             ("only the first sum's start is checked", "    for (acc, _, _) in sums\n", "    for (acc, _, _) in sums[1:1]\n"),
-            ("the second sum is not cleared", "    for a in 0:length(accs)-1, i in 0:RT-1, j in 0:RT-1\n        push!(body, asg(acc_ij(a, i, j), 0.0))", "    for a in 0:0, i in 0:RT-1, j in 0:RT-1\n        push!(body, asg(acc_ij(a, i, j), 0.0))"),
-            ("every sum gets the products of the first", "    for (a, pairs) in enumerate(accs), i in 0:RT-1, j in 0:RT-1\n", "    for (a, pairs) in zip(1:length(accs), fill(accs[1], length(accs))), i in 0:RT-1, j in 0:RT-1\n"),
+            ("the second sum is not cleared", "    for a in 0:length(accs)-1, i in 0:RT-1, j in 0:RC-1\n        push!(body, asg(acc_ij(a, i, j), 0.0))", "    for a in 0:0, i in 0:RT-1, j in 0:RC-1\n        push!(body, asg(acc_ij(a, i, j), 0.0))"),
+            ("every sum gets the products of the first", "    for (a, pairs) in enumerate(accs), i in 0:RT-1, j in 0:RC-1\n", "    for (a, pairs) in zip(1:length(accs), fill(accs[1], length(accs))), i in 0:RT-1, j in 0:RT-1\n"),
             ("every output takes the first accumulator", "Symbol[acc_ij(a, i, j) for a in 0:length(accs)-1]", "Symbol[acc_ij(0, i, j) for a in 0:length(accs)-1]"),
             ("every sum takes the first accumulator in the epilogue", "as isa Symbol ? as : as[k]", "as isa Symbol ? as : as[1]"),
             ("the slots are counted by the left operands", "    nt = max(length(alist), length(blist)); TS", "    nt = length(alist); TS"),
@@ -1243,6 +1284,11 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("equal operands get a tile each", "(i = findfirst(==(x), l); i === nothing ? (push!(l, x); length(l)) : i)", "(push!(l, x); length(l))"),
             ("two sums need no full tile of columns", "        get(d, :accs, nothing) === nothing || (cond = Expr(:&&, cond, call(:>=, d.Nh, min(cmin, 64))))\n", ""),
             ("the column floor of two sums is that of one sum", "call(:>=, d.Nh, min(cmin, 64))))\n", "call(:>=, d.Nh, min(cmin, 16))))\n"),
+            ("a narrow twin is used for any width", "Expr(:call, :<=, t.nh, cgen_contraction_narrow_limit(bn))", "true"),
+            ("a narrow twin of 16 columns is chosen for 32", "for bn in (16, 32)]", "for bn in (16, 16)]"),
+            ("the column offset of a narrow tile uses the wide width", ":blockIdx), QuoteNode(:x)), 1), TN)))", ":blockIdx), QuoteNode(:x)), 1), TM)))"),
+            ("the grid of a narrow twin counts wide tiles", "bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TN)", "bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM)"),
+            ("the loads of a narrow right tile use the wide width", "push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TN)))", "push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TM)))"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]

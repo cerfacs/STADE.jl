@@ -36,16 +36,22 @@ subsequent `bash_tool` call needing Julia.
 
 ## Hard rules
 
-1. **No `module` blocks.** One file, top level, organized by
-   `# ==== prefix_* ====` banners.
+1. **No `module` blocks**, except the single `module STADE ... end` that
+   wraps the file. One file, organized by `# ==== prefix_* ====` banners.
 2. **No `struct` or `@enum`.** Records are plain `NamedTuple`s with a
    fixed key set. Open-ended key sets use `Dict`.
 3. **No global `const`** or any top-level mutable/shared state. Lookup
    tables are built fresh inside the function that uses them.
 4. **Every function name carries its stage prefix**: `parse_`, `shape_`,
    `der_`, `emit_`, `act_`, `snap_`, `lin_`, `tgen_`, `agen_`, `hvp_`,
-   `cgen_`, `jgen_`, `ii_`, `val_`, `io_`, `stade_`. `io_` is the only
-   prefix permitted to touch the filesystem. This replaces namespacing —
+   `cgen_`, `jgen_`, `ii_`, `val_`, `io_`, `stade_`, and three stages
+   added in v0.4.46 for code that was already there: `inl_` (kernel
+   inlining), `norm_` (kernel-to-kernel normalisation: a pure rewrite of
+   a kernel that states a fact the analyses cannot see) and `bgen_` (the
+   data-parallel epilogue). `io_` is the only prefix permitted to touch
+   the filesystem. A function sits under the banner of its own stage,
+   and every `stade_` function under a `stade_*` banner (the public API);
+   a one-line helper may sit next to the code it serves. This replaces namespacing —
    a cross-prefix name collision is a bug to fix before merging.
 5. **Frozen data shapes.** Changing a key is a breaking-change event
    across every stage touching it.
@@ -309,7 +315,7 @@ cancels, so it complements rather than replaces.
 `stade_gpu` ingests **already-generated** code; its only keywords are
 `precision`, `reduction_threshold`, `hoist_atomics`, `gather_stencil` (all backends) and the CUDA-only `warp_atomics`,
 `sync_free_reduce` and `shared_private` (all default on; `false` restores the old output exactly), plus the CUDA-only opt-in
-`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). Every backend also takes `inbounds` and `dead_scalars` (default on; both `false` is the exact v0.4.31 text). CUDA also takes `split_reduce` (lanes per output, default 16; 0 off), `split_min_inner` and `split_max_out`. CUDA also takes `contraction` (smallest `M`, `N`, `K` of a matrix product that gets a tiled twin, default 256; 0 off). **Only `keep_push_pop=false` output is
+`coarsen` (default 1 = old output), `coarsen_min` and `coarsen_fill` (launch tests of the variant; 0 forces it) and `coarsen_occ` (occupancy gate, default 0.6; 0 removes it). Every backend also takes `inbounds` and `dead_scalars` (default on; both `false` is the exact v0.4.31 text). CUDA also takes `split_reduce` (lanes per output, default 16; 0 off), `split_min_inner` and `split_max_out`. **Only `keep_push_pop=false` output is
 a GPU target** — `:stack` mode's growable `Vector`s are inherently
 host-only. The caller pre-offloads array arguments; stacks must come
 from the converted `initstacks_*_cuda`, not the host `initstacks_*`.
@@ -363,7 +369,7 @@ kernel's own `__tid > trip_count` check; JACC's callee is a plain indexed
 function with no such guard, and `range = 0` raises `DivideError` on a
 live device. `jgen_launch_expr` must skip the launch instead.
 
-A JACC kernel with more than `JGEN_MAX_SPLAT_ARGS` free variables takes them as
+A JACC kernel with more than `jgen_max_splat_args()` free variables takes them as
 one tuple (`__jargs`), because JACC splats its arguments and Julia cannot compile
 a splat that wide. Never hold such a loop on the host instead: a host fallback
 mishandles any scalar adjoint that JACC promoted to a device array.
@@ -433,47 +439,12 @@ mutant runs against the original and "NOT CAUGHT" means nothing.
 
 `split_reduce = L` (CUDA) emits a twin `<name>_s!` of a one-thread-per-output kernel whose inner loops accumulate (`s = s + t`) or update arrays: a block of
 32 outputs x L lanes, lane-partitioned loops, partial sums in dynamic shared memory summed in the same order by every lane, stores on lane 1 or lane-partitioned,
-`sync_threads()` between groups of items that read what another wrote. Compare a split result with the CPU Float64 result only up to that result's own error: `validate_ownership` falls back to the BigFloat truth (at most 20 times the CPU error, or 1e-10) for a draw that fails the tolerance, and `validate_inbounds` builds its plans with `split_reduce = 0`. The host launches it only when the outputs are in `1:split_max_out`, the inner trip count is at
+`sync_threads()` between groups of items that read what another wrote. The host launches it only when the outputs are in `1:split_max_out`, the inner trip count is at
 least `split_min_inner`, the strides are nonzero and the block fits `CUDA.maxthreads` of the compiled twin. Read the guards before changing anything: an accumulator that
 another statement reads, an integer start, a temporary live after the loop, a plain-stored array seen outside its loop or at two indices, and an atomically updated array that is read
 each make the lanes disagree. Forced onto kernels with large outputs or short inner loops the twin is slower (the transformer lost 25%); the limits are measured, not derived. One guard
 (the plain-stored array appears nowhere outside its loop) cannot be sabotage-tested: every shape that reaches it is already refused by the plain-write gate, so say it is a second
 line of defense. Validators that inspect text pass `split_reduce = 0`.
-
-`contraction = n` (CUDA) emits a twin `<name>_t!` of a one-thread-per-output kernel whose one flat inner loop is `acc = acc + A[ia] * B[ib]` with `ia` reading the row and the loop variable and `ib` the column and the loop variable: a 64 x 64 tile per block of 16 x 16
-threads, 4 x 4 outputs per thread, 16-wide steps through shared memory, the statements before and after the loop run once per output element on the same text. The sum keeps its order and is added to the start value last (last bits only). The host
-launches it by the layout rule below (v0.4.37: sides at least `min(n, 16)` and a number of 64 x 64 tiles that depends on the layout), `N > 0`, whole rows, and the block fits `CUDA.maxthreads`. With the sides below 256 the twin was slower on the V100 in few tiles, so the default is 256. A guard that STADE's own gates make unreachable from
-source needs a direct test on hand-written kernel text (`con_kernel`); a guard that no test fails when it is removed is a guard you do not have. Validators that inspect text pass `contraction = 0`.
-
-`contraction` also tiles the adjoint of such a product (v0.4.35): the plain adjoint kernel stores its seed `gs` in a scratch array `__ct_g` and skips the loop of atomic adds; one tiled kernel per atomic statement reads `__ct_g` and adds into its target with one atomic add per element; a recomputed forward product gets a stage `<name>_f_t!` and a second scratch array `__cf_s`. The host takes the twin branch only if every kernel of the group passes the launch test. A product whose loop holds anything but atomic adds and scalars is refused. An HVP is not tiled.
-
-`contraction` also tiles a product batched over heads (v0.4.36): the flat index decodes into a column `mod(X, N) + 1`, a row `mod(div(X, N), M) + 1` and a batch `div(X, N * M) + 1`; the twin has a third grid dimension (`blockIdx().z` is the batch, at most 65535), the rows must reach `contraction` and the columns and the inner length `min(contraction, 8)`. A guard that STADE's own passes make unreachable from source (a loop variable with the batch's name is renamed before the recognizer sees it) needs a direct test on hand-written kernel text, and the sabotage run is what shows that it does.
-
-`contraction` also tiles a product whose head is a part of the column index (v0.4.37; tiles batched over the heads, `dh` columns each) and its launch test for the unbatched twin follows the layout: the sides are at least `min(n, 16)` and the number of 64 x 64 tiles is at least `cld(base * n, 256)` with `base` 8 for `x * w'`, 32 for `x * w` and 64 for the weight gradient. An adjoint group runs when each tiled kernel can run, one has the tile count and every one has a quarter of it. A rule measured on one family of shapes (square and transformer) had a defect on another (the graph layer's tall and narrow products, 7.4 times slower): time every kernel of the kit after a change to a launch rule, not only the kernel that motivated it.
-
-`reuse_stored` (CUDA, v0.4.38, default 1) makes a backward kernel read `h[j]` where a forward kernel stored `h[j] = f(s)` from the same reduction, so the recompute of `s` disappears. Every guard compares text after the kernel parameters become the host arguments, so a rule that depends on a name (a host scalar changed between the two launches, a use of `f(s)` after `s` changed) needs its own case: the first version of the pass missed both, and the unit cases found them. A refusal check that looks only for an added launch argument misses a rewrite that reuses an argument the kernel already takes; check the kernel text for the sum as well. The HVP is left alone because it needs the tangent of the sum.
-
-The split reduction (v0.4.39) also takes a loop that stores and accumulates: in it a scalar is an accumulator when every statement that assigns it is `v = v + e`, `v = e + v` or `v = v - e` and no other statement of the loop reads it (a store too), with a non-integer-literal start; the lanes sum partials as in a reduction loop. One array may be stored by several loops only at one index (after renaming the loop variable), from one start, with one step. A guard that refuses a read of the accumulator has to be separate from the generic read-before-write test, or the sabotage case cannot tell which one caught it. A test source whose loops are independent is split into one kernel per loop and does not reach the rule it names: tie the loops with a scalar (`t = s * 0.5`) so that they stay in one kernel. A shim run of a benchmark kernel must be generated with `fuse_ii_loops = true` (`OWN_FUSE=1`), or it checks a different plan. The HVP twin of the layer-norm backward needs more registers than the adjoint: 16 lanes do not fit the V100, so the HVP launch falls back to the plain kernel.
-
-The adjoint contraction (v0.4.40) also tiles the HVP: an atomic statement may add one product `F * g` or a sum of two products (`g * Fd + F * gd`); the loop may use up to two seeds (`g`, `gd`), each assigned before the loop, not a parameter and not the loop variable, each stored by the plain kernel in its own scratch array (`__ct_g`, `__ct_g2`). The tiled kernel of a statement has one pair of tiles per term. All terms of a statement must read the operand index in the same way, and no operand of any term may be stored in the kernel or be a target. One term and one seed give the text of v0.4.39. The forward loop of an HVP is tiled in v0.4.41 (below).
-
-The forward loops of an HVP are tiled too (v0.4.41): a loop may have up to two accumulators `s = s + P`, each `P` one product or the sum of two products of array elements, with the operand reads shared through scalar temporaries, and the forward stage of an adjoint group may store two scalars (`__cf_s`, `__cf_s2`). One accumulator and one product give the text of v0.4.40. A twin of two accumulators or two products also needs `N` at least `min(contraction, 64)`; below that the plain kernel runs (V100, `mpnn_gather` at N = 16: the twin was 21 to 27% slower).
-
-The baseline generator redraws up to 256 times (v0.4.42): a kernel with a low acceptance of integer draws needs more than 16, and which seeds fail depends on the Julia version. A failure after 256 redraws is a real incoherence in the kernel's integer arguments.
-
-The split twin has a fallback of fewer lanes (v0.4.43, keyword `split_fallback`, default 8): when a block of 32 x 16 threads does not fit the registers, the launch uses a twin of 8 lanes before the plain kernel. `split_fallback = 0` is the v0.4.42 text.
-
-`dead_stack` (CUDA, v0.4.44, default 2) deletes the stores to a stack that no kernel reads and, at level 2, moves the one kept region to the start of the array and shrinks the allocation of the `initstacks_*` host. It is the same kind of pass as `reuse_stored` and has the same trap: every comparison is on text, so a name that stands for two values (a host scalar with two definitions, a local scalar of the kernel that differs between two kernels) makes two formulas equal that are not, and the store that is then deleted is the one that is read. Each such name has its own case and its own sabotage. A stack is one of STADE's own only if an `initstacks_*` host allocates it; a naming rule alone would delete the output array of a caller that ends in `_stack`. The device-versus-host stack comparison of the GPU parity script now differs in the slots that were deleted; it is informational.
-
-A value that two functions share is a function with no argument, never a global `const` (rule 3): `cgen_reduction_threshold_default()`, `cgen_dead_pure_calls()` and `jgen_max_splat_args()` replaced three constants in v0.4.45. `test/validate_house_rules.jl` fails on a top-level `const`, `global`, `struct`, `mutable struct`, `abstract type`, `primitive type` or `@enum` in `src/STADE.jl`.
-
-Rule 1 allows the one `module STADE ... end` that wraps the file. Rule 4 lists three more stages, `inl_`, `norm_` and `bgen_`. A function sits under the banner of its own stage and a `stade_` function under a `stade_*` banner. `test/validate_house_rules.jl` checks all of this on the text of `src/STADE.jl`.
-
-`reduce_block` (v0.4.47, CUDA, default on; `false` restores the v0.4.46 text): the large-trip branch of an array-element reduction is a block-sum kernel with one atomic per block. Its collective helpers need every thread to reach them, so the kernel has no early return; `test/validate_reduce_block.jl` guards that and the helper emission.
-
-`fresh_gradient` (v0.4.48, CUDA, default off; `false` writes the v0.4.47 text): a gradient written once per element per call is stored as `g[idx] = e`, so the caller must pass it as zeros and call the adjoint once per reset. It is a CPU/GPU contract difference by design. A guard added to the recogniser needs a sabotage case in `test/validate_fresh_gradient.jl`, and a validator that runs the flagged adjoint on a device must zero the flagged gradients first (`validate_corpus_gpu.jl` and `stade_validate_gpu_file` do).
-
-`skip_empty` (v0.4.49, CUDA, default on; `false` restores the v0.4.48 text): the plain launches of a kernel that holds only scalar assignments, loops and branches over pure expressions are deleted. A statement kind added to the emitter that has an effect must not pass `cgen_empty_body`; `test/validate_skip_empty.jl` has the sabotage cases.
 
 `gather_stencil` is a level: 0 off, 1 gather form only (the v0.4.28 output), 2 (default) adds the
 **zero-fold**. A residual that only touches its own elements (index = loop variable, assignments,
@@ -502,8 +473,8 @@ on one GPU model. `test/validate_coarsen.jl` sabotage-tests each guard, the sele
 
 ## Self-check before returning STADE code
 
-- [ ] No `module`, `struct`, `@enum`, top-level `const`, or shared state
-- [ ] Correct stage prefix on every function; no filesystem outside `io_*`
+- [ ] No `module` but the one that wraps the file, no `struct`, `@enum`, top-level `const`, or shared state
+- [ ] Correct stage prefix on every function, under the banner of its stage; no filesystem outside `io_*`
 - [ ] `NamedTuple`s match the frozen shapes; no `:while`; no ad hoc keys
 - [ ] Plain `Expr`/`Symbol`/`Number`, never a custom type
 - [ ] Only documented upstream shapes as inputs
