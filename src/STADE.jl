@@ -16065,8 +16065,68 @@ end
 # (Float64 for CUDA/AMDGPU, Float32 for Metal); an explicit precision overrides that, except for a precision_locked
 # backend, where anything else is a hard error at generation time rather than a silent guarantee that only surfaces
 # once the caller tries to compile/run the result.
+# Merge accumulations into one array element. `A[idx] = A[idx] + e1` and a later `A[idx] = A[idx] + e2` in one block, with only scalar assignments between them that touch
+# neither the array, nor a name of the index or of e1, become one `A[idx] = A[idx] + (e1 + e2)`. On the GPU each accumulation into a shared element is an atomic add, and
+# an adjoint that reads one gathered value twice (phi[j] in two terms of a flux) adds twice into the same random element. The sum is rounded differently, as an atomic add is.
+function cgen_accum_parts(st)
+    (st isa Expr && st.head == :(=) && length(st.args) == 2) || return nothing
+    lhs, rhs = st.args
+    (lhs isa Expr && lhs.head == :ref) || return nothing
+    (rhs isa Expr && rhs.head == :call && length(rhs.args) == 3 && rhs.args[1] == :+ && rhs.args[2] == lhs) || return nothing
+    return (lhs, rhs.args[3])
+end
+
+function cgen_merge_accum_block(stmts)
+    out = Any[s for s in stmts]
+    changed = true
+    while changed
+        changed = false
+        for i in eachindex(out)
+            p1 = cgen_accum_parts(out[i])
+            p1 === nothing && continue
+            lhs, e1 = p1
+            arr = lhs.args[1]
+            syms1 = agen_all_symbols!(lhs, Set{Symbol}())
+            union!(syms1, agen_all_symbols!(e1, Set{Symbol}()))
+            (:push! in syms1 || :pop! in syms1) && continue
+            k = i + 1
+            while k <= length(out)
+                st = out[k]
+                if st isa LineNumberNode
+                    k += 1
+                    continue
+                end
+                p2 = cgen_accum_parts(st)
+                if p2 !== nothing && p2[1] == lhs
+                    syms2 = agen_all_symbols!(p2[2], Set{Symbol}())
+                    if !(arr in syms2) && !(:push! in syms2 || :pop! in syms2)
+                        out[k] = Expr(:(=), lhs, Expr(:call, :+, lhs, Expr(:call, :+, e1, p2[2])))
+                        deleteat!(out, i)
+                        changed = true
+                    end
+                    break
+                end
+                # between the two: only a scalar assignment that leaves the array, the index and e1 alone
+                (st isa Expr && st.head == :(=) && st.args[1] isa Symbol) || break
+                rs = agen_all_symbols!(st.args[2], Set{Symbol}())
+                (st.args[1] in syms1 || arr in rs || :push! in rs || :pop! in rs) && break
+                k += 1
+            end
+            changed && break
+        end
+    end
+    return out
+end
+
+function cgen_merge_accum(e)
+    e isa Expr || return e
+    args = Any[cgen_merge_accum(a) for a in e.args]
+    e.head == :block && (args = cgen_merge_accum_block(args))
+    return Expr(e.head, args...)
+end
+
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(),
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true, init_hosts = nothing)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true, init_hosts = nothing)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill), coarsen_occ = Float64(coarsen_occ))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
@@ -16079,6 +16139,7 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
         error("stade_gpu: backend `$(backend.kernel_tag)` only supports precision=$(backend.default_precision) (got $(p)) -- $(backend.precision_lock_reason)")
     end
     dead_scalars && (expr = cgen_dead_pops(expr, init_hosts))
+    merge_accum && (expr = cgen_merge_accum(expr))
     plan = cgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil), backend; reduction_threshold)
     host, kernels = plan.host, plan.kernels
     dead_scalars && (kernels = Expr[cgen_dead_scalars(k, inbounds) for k in kernels])
@@ -16098,8 +16159,8 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, skip_empty)
+           sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, skip_empty)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -16111,7 +16172,7 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(),
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
@@ -16121,7 +16182,7 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
     # two functions that take stacks may share one `initstacks_*`: neither may change it then
     nclaim = count(d -> d isa Expr && d.args[1] isa Expr && !startswith(string(d.args[1].args[1]), "initstacks_") && any(a -> a isa Symbol && endswith(string(a), "_stack"), d.args[1].args[2:end]), defs)
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, skip_empty, init_hosts = (nclaim > 1 ? nothing : inits))
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, skip_empty, init_hosts = (nclaim > 1 ? nothing : inits))
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         for h in plan.helpers
@@ -16141,8 +16202,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, skip_empty)
+                sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, skip_empty)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -16153,7 +16214,8 @@ stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Ty
 # locked default here for the same reason: Float64 unless the caller asks otherwise.
 # On JACC a matched reduction becomes one
 # JACC.@parallel_reduce call instead of @parallel_for + Atomix.@atomic.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true)
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true)
+    merge_accum && (expr = cgen_merge_accum(expr))
     plan = jgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil); reduction_threshold, hoist_atomics)
     kernels = cgen_finish_kernels(plan.kernels; inbounds, dead_scalars)
     p = precision === nothing ? Float64 : precision
@@ -16162,12 +16224,12 @@ function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}}
             kernels = Expr[cgen_convert_precision(k, p) for k in kernels])
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
     for expr in defs
-        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics, gather_stencil, inbounds, dead_scalars)
+        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics, gather_stencil, inbounds, dead_scalars, merge_accum)
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
@@ -16718,7 +16780,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = cgen_reduction_threshold_default(),
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, skip_empty::Bool = true)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -16732,13 +16794,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, reduce_block = reduce_block, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, fresh_gradient = fresh_gradient, skip_empty = skip_empty)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, reduce_block = reduce_block, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, merge_accum = merge_accum, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, fresh_gradient = fresh_gradient, skip_empty = skip_empty)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, reduce_block = reduce_block, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, fresh_gradient = fresh_gradient, skip_empty = skip_empty, init_hosts = Dict{Symbol,Expr}(gpu_init.host.args[1].args[1] => gpu_init.host))
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, reduce_block = reduce_block, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, merge_accum = merge_accum, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, fresh_gradient = fresh_gradient, skip_empty = skip_empty, init_hosts = Dict{Symbol,Expr}(gpu_init.host.args[1].args[1] => gpu_init.host))
     gpu_init = merge(gpu_init, (host = cgen_shrink_stacks(gpu_init.host, gpu_gen.dead_stacks, gpu_gen.compact_stacks),))
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
