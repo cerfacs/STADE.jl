@@ -379,14 +379,14 @@ function adj_unit_checks()
         end
     end
     bad += adj_direct_checks()
-    # the tile memory of a twin: one term 2064 values (16512 bytes), two terms 4128 values (33024 bytes), in the kernel and in the launch
+    # the tile memory of a twin: one term 2080 values (16640 bytes), two terms 4160 values (33280 bytes), in the kernel and in the launch
     try
         name, src, entry, mk, _ = first(c for c in ADJ_CASES if startswith(c[1], "tangent pair, four statements"))
         r = con_run(src, entry, mk(1), 1)
         ks(sfx) = STADE.io_expr_to_source(first(k for k in r.plan.kernels if endswith(string(k.args[1].args[1]), sfx)))
         hs = STADE.io_expr_to_source(r.plan.host)
-        check(occursin("CuDynamicSharedArray(Float64, 2064)", ks("_t1!")) && occursin("CuDynamicSharedArray(Float64, 2064)", ks("_t3!")) && occursin("CuDynamicSharedArray(Float64, 4128)", ks("_t2!")) && occursin("CuDynamicSharedArray(Float64, 4128)", ks("_t4!")), "$name: the tile memory is 2064 values for one term and 4128 for two")
-        check(count("shmem = 16512", hs) >= 2 && count("shmem = 33024", hs) >= 2, "$name: the launches ask for 16512 and 33024 bytes")
+        check(occursin("CuDynamicSharedArray(Float64, 2080)", ks("_t1!")) && occursin("CuDynamicSharedArray(Float64, 2080)", ks("_t3!")) && occursin("CuDynamicSharedArray(Float64, 4160)", ks("_t2!")) && occursin("CuDynamicSharedArray(Float64, 4160)", ks("_t4!")), "$name: the tile memory is 2080 values for one term and 4160 for two")
+        check(count("shmem = 16640", hs) >= 2 && count("shmem = 33280", hs) >= 2, "$name: the launches ask for 16640 and 33280 bytes")
     catch e
         check(false, "tile memory: error " * first(split(sprint(showerror, e), "\n")))
     end

@@ -1111,7 +1111,7 @@ function con_unit_checks()
     catch e
         check(false, "thresholds: error " * first(split(sprint(showerror, e), "\n")))
     end
-    # the tile memory: one slot of tiles is 2064 values (16512 bytes); a sum of two products with two left and two right operands has two slots, one with one operand on a side and two on the other too
+    # the tile memory: one slot of tiles is 2080 values (16640 bytes: a left tile of 65 x 16 and a right tile of 65 x 16, both padded by one column against bank conflicts); a sum of two products with two left and two right operands has two slots, one with one operand on a side and two on the other too
     try
         function mem(prefix)
             c = first(c for c in CON_CASES if startswith(c[1], prefix))
@@ -1120,15 +1120,36 @@ function con_unit_checks()
             return ks, STADE.io_expr_to_source(r.plan.host)
         end
         ks, hs = mem("two sums: a value and its tangent")
-        check(occursin("CuDynamicSharedArray(Float64, 4128)", ks) && occursin("shmem = 33024", hs), "two sums, two left and two right operands: 4128 values in the kernel and 33024 bytes in the launch")
+        check(occursin("CuDynamicSharedArray(Float64, 4160)", ks) && occursin("shmem = 33280", hs), "two sums, two left and two right operands: 4160 values in the kernel and 33280 bytes in the launch")
         ks, hs = mem("two sums of the same product")
-        check(occursin("CuDynamicSharedArray(Float64, 2064)", ks) && occursin("shmem = 16512", hs), "two sums of one product: 2064 values and 16512 bytes")
+        check(occursin("CuDynamicSharedArray(Float64, 2080)", ks) && occursin("shmem = 16640", hs), "two sums of one product: 2080 values and 16640 bytes")
         for p in ("one sum, one left operand and two right", "one sum, two left operands and one right")
             ks, hs = mem(p)
-            check(occursin("CuDynamicSharedArray(Float64, 4128)", ks) && occursin("shmem = 33024", hs), "$p: two slots, 4128 values and 33024 bytes")
+            check(occursin("CuDynamicSharedArray(Float64, 4160)", ks) && occursin("shmem = 33280", hs), "$p: two slots, 4160 values and 33280 bytes")
         end
     catch e
         check(false, "tile memory of the two-sum twins: error " * first(split(sprint(showerror, e), "\n")))
+    end
+    # the load order of a tile follows the layout: a left operand along the row is read along the row, a right operand along the inner index along the inner index, the other
+    # operands as before; the right tile is padded by one column (65 wide) like the left one
+    try
+        ktext(prefix) = (c = first(c for c in CON_CASES if startswith(c[1], prefix)); r = con_run(c[2], c[3], c[4](1), 1);
+                         STADE.io_expr_to_source(first(k for k in r.plan.kernels if endswith(string(k.args[1].args[1]), "_t!"))))
+        kn = ktext("bias product"); ka = ktext("left operand read across the inner index"); kb = ktext("same array on both sides")
+        check(occursin("__ct_cc = mod(__ct_e, 64)", kn) && occursin("__ct_rr = div(__ct_e, 16)", kn) && !occursin("__ct_rr = mod(__ct_e, 64)", kn), "the plain layout loads the left tile along the inner index and the right tile along the column")
+        check(occursin("__ct_rr = mod(__ct_e, 64)", ka) && occursin("__ct_kk = div(__ct_e, 64)", ka), "a left operand along the row is loaded along the row")
+        check(occursin("__ct_cc = div(__ct_e, 16)", kb) && occursin("__ct_kk = mod(__ct_e, 16)", kb), "a right operand along the inner index is loaded along the inner index")
+        check(all(occursin("__ct_kk * 65", k) for k in (kn, ka, kb)) && occursin("1040 + __ct_kk * 65", kn), "the left and the right tile have 65 values per step of the inner index")
+        # a column variable that the twin computes once per thread keeps the column order of the right tile load, with an operand along the inner index too
+        hd(cp) = (name = :tk, fargs = Any[:C, :A, :B, :M, :N, :K], prelude = Any[], decls = (:t, :o, :c), rowvar = :t, colvar = :o, kvar = :c, rowbase = 1, colbase = 1, kbase = 1,
+                  A = (arr = :A, idx = :((t - 1) * K + c)), B = (arr = :B, idx = :((o - 1) * K + c)), epilogue = (r, c2, acc) -> Any[:(C[1] = $acc)],
+                  Mh = :M, Nh = :N, Kh = :K, extra = nothing, colpre = cp)
+        ksrc(cp) = STADE.io_expr_to_source(STADE.cgen_contraction_emit(hd(cp)).kdef)
+        k0 = ksrc(Any[]); k1 = ksrc(Any[:(oq = o + 1)])
+        check(occursin("__ct_cc = div(__ct_e, 16)", k0) && !occursin("__ct_cc = mod(__ct_e, 64)", k0), "a descriptor without a precomputed column: the right tile is loaded along the inner index")
+        check(occursin("__ct_cc = mod(__ct_e, 64)", k1) && !occursin("__ct_cc = div(__ct_e, 16)", k1), "a descriptor with a precomputed column: the right tile is loaded along the column")
+    catch e
+        check(false, "the load order of a tile: error " * first(split(sprint(showerror, e), "\n")))
     end
     # a loop of two sums or of a sum of two products needs a full tile of columns: min(contraction, 64). With contraction 32, 260 rows, 19 inner terms and 19 tiles: the tiles
     # rule asks for cld(32 * 32, 256) = 4, the 260 x 40 product has 5, the one with 24 columns has 5 too (the tile floor of one sum is min(contraction, 16)): 40 columns run the twin and 24 do not.
@@ -1278,8 +1299,8 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("every sum gets the products of the first", "    for (a, pairs) in enumerate(accs), i in 0:RT-1, j in 0:RC-1\n", "    for (a, pairs) in zip(1:length(accs), fill(accs[1], length(accs))), i in 0:RT-1, j in 0:RT-1\n"),
             ("every output takes the first accumulator", "Symbol[acc_ij(a, i, j) for a in 0:length(accs)-1]", "Symbol[acc_ij(0, i, j) for a in 0:length(accs)-1]"),
             ("every sum takes the first accumulator in the epilogue", "as isa Symbol ? as : as[k]", "as isa Symbol ? as : as[1]"),
-            ("the slots are counted by the left operands", "    nt = max(length(alist), length(blist)); TS", "    nt = length(alist); TS"),
-            ("the slots are counted by the right operands", "    nt = max(length(alist), length(blist)); TS", "    nt = length(blist); TS"),
+            ("the slots are counted by the left operands", "    nt = max(length(alist), length(blist))\n    lay", "    nt = length(alist)\n    lay"),
+            ("the slots are counted by the right operands", "    nt = max(length(alist), length(blist))\n    lay", "    nt = length(blist)\n    lay"),
             ("operands of one array are merged", "slot(l, x) = (i = findfirst(==(x), l);", "slot(l, x) = (i = findfirst(y -> y.arr === x.arr, l);"),
             ("equal operands get a tile each", "(i = findfirst(==(x), l); i === nothing ? (push!(l, x); length(l)) : i)", "(push!(l, x); length(l))"),
             ("two sums need no full tile of columns", "        get(d, :accs, nothing) === nothing || (cond = Expr(:&&, cond, call(:>=, d.Nh, min(cmin, 64))))\n", ""),
@@ -1288,7 +1309,11 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("a narrow twin of 16 columns is chosen for 32", "for bn in (16, 32)]", "for bn in (16, 16)]"),
             ("the column offset of a narrow tile uses the wide width", ":blockIdx), QuoteNode(:x)), 1), TN)))", ":blockIdx), QuoteNode(:x)), 1), TM)))"),
             ("the grid of a narrow twin counts wide tiles", "bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TN)", "bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM)"),
-            ("the loads of a narrow right tile use the wide width", "push!(ldB, asg(:__ct_kk, call(:div, :__ct_e, TN)))", "push!(ldB, asg(:__ct_kk, call(:div, :__ct_e, TM)))"),
+            ("the loads of a narrow right tile use the wide width", "asg(:__ct_kk, call(:div, :__ct_e, TN)), asg(:__ct_cc, call(:mod, :__ct_e, TN))]", "asg(:__ct_kk, call(:div, :__ct_e, TM)), asg(:__ct_cc, call(:mod, :__ct_e, TN))]"),
+            ("the tile loads ignore the layout of the operands", "    lay = cgen_contraction_layout()\n", "    lay = false\n"),
+            ("a right operand along the inner index is loaded along the column", "b_kfast(opd) = lay && (cpv === nothing || isempty(cpv)) && plain(opd) && cgen_contraction_unit(opd.idx, d.kvar) && !cgen_contraction_unit(opd.idx, d.colvar)", "b_kfast(opd) = false"),
+            ("a left operand along the row is loaded along the inner index", "a_rfast(opd) = lay && plain(opd) && !cgen_contraction_unit(opd.idx, d.kvar) && cgen_contraction_unit(opd.idx, d.rowvar)", "a_rfast(opd) = false"),
+            ("a right operand along the inner index is loaded that way when columns are precomputed", "b_kfast(opd) = lay && (cpv === nothing || isempty(cpv)) && plain(opd)", "b_kfast(opd) = lay && plain(opd)"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]

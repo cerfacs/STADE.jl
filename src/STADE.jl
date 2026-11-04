@@ -12620,6 +12620,8 @@ cgen_contraction_narrow_limit(bn::Int) = bn
 cgen_contraction_name(name::Symbol) = (s = string(name); endswith(s, "!") ? Symbol(s[1:end-1], "_t!") : Symbol(s, "_t"))
 cgen_contr_tm() = 64
 cgen_contr_tk() = 16
+# the load of a tile along the contiguous index of each operand, and a padded right tile (STADE_TILE_LAYOUT=0 restores the earlier text)
+cgen_contraction_layout() = get(ENV, "STADE_TILE_LAYOUT", "1") != "0"
 cgen_contraction_min() = 256
 
 # The `X[i]` factors of a product `X[i] * Y[j]` of two plain array references, or nothing
@@ -12705,7 +12707,18 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
         alist = Any[d.alist...]; blist = Any[d.blist...]; accs = d.accs
     end
     # a slot holds one tile of each side; the number of slots is the larger of the two counts of distinct operands
-    nt = max(length(alist), length(blist)); TS = (TM + 1) * TK + TN * TK
+    nt = max(length(alist), length(blist))
+    lay = cgen_contraction_layout()
+    SA = TM + 1; SB = lay ? TN + 1 : TN; TS = SA * TK + SB * TK
+    # the thread order of a tile load: along k when the operand has unit stride in k, else along its row (left) or its column (right), so that a warp reads adjacent addresses
+    cpv = get(d, :colpre, nothing)
+    plain(opd) = !hasproperty(opd, :segs) && hasproperty(opd, :idx)
+    a_rfast(opd) = lay && plain(opd) && !cgen_contraction_unit(opd.idx, d.kvar) && cgen_contraction_unit(opd.idx, d.rowvar)
+    b_kfast(opd) = lay && (cpv === nothing || isempty(cpv)) && plain(opd) && cgen_contraction_unit(opd.idx, d.kvar) && !cgen_contraction_unit(opd.idx, d.colvar)
+    mapA(opd, q) = a_rfast(opd) ? Any[asg(:__ct_e, cadd(:__ct_tl, 256 * q)), asg(:__ct_rr, call(:mod, :__ct_e, TM)), asg(:__ct_kk, call(:div, :__ct_e, TM))] :
+                                  Any[asg(:__ct_e, cadd(:__ct_tl, 256 * q)), asg(:__ct_rr, call(:div, :__ct_e, TK)), asg(:__ct_kk, call(:mod, :__ct_e, TK))]
+    mapB(opd, q) = b_kfast(opd) ? Any[asg(:__ct_e, cadd(:__ct_tl, 256 * q)), asg(:__ct_cc, call(:div, :__ct_e, TK)), asg(:__ct_kk, call(:mod, :__ct_e, TK))] :
+                                  Any[asg(:__ct_e, cadd(:__ct_tl, 256 * q)), asg(:__ct_kk, call(:div, :__ct_e, TN)), asg(:__ct_cc, call(:mod, :__ct_e, TN))]
     offq(e, q0) = q0 == 0 ? e : cadd(q0 * TS, e)
     push!(body, asg(sh, call(:CuDynamicSharedArray, :Float64, nt * TS)))
     push!(body, asg(:__ct_tl, cadd(cmul(:__ct_ty, 16), :__ct_tx)))
@@ -12750,9 +12763,7 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
     for (q0, opd) in enumerate(alist)
         q0 -= 1
         for q in 0:(TM * TK ÷ 256) - 1
-            push!(loadA, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
-            push!(loadA, asg(:__ct_rr, call(:div, :__ct_e, TK)))
-            push!(loadA, asg(:__ct_kk, call(:mod, :__ct_e, TK)))
+            append!(loadA, mapA(opd, q))
             push!(loadA, asg(d.rowvar, cadd(cadd(:__ct_r0, :__ct_rr), d.rowbase)))
             append!(loadA, segload(opd, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M)))
             push!(loadA, asg(Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), :__ct_rr), 1), q0)), :__ct_v))
@@ -12761,12 +12772,10 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
     for (q0, opd) in enumerate(blist)
         q0 -= 1
         for q in 0:(TN * TK ÷ 256) - 1
-            push!(loadB, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
-            push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TN)))
-            push!(loadB, asg(:__ct_cc, call(:mod, :__ct_e, TN)))
+            append!(loadB, mapB(opd, q))
             push!(loadB, asg(d.colvar, cadd(cadd(:__ct_c0, :__ct_cc), d.colbase)))
             append!(loadB, segload(opd, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N)))
-            push!(loadB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TN)), :__ct_cc), 1), q0)), :__ct_v))
+            push!(loadB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd(SA * TK, cmul(:__ct_kk, SB)), :__ct_cc), 1), q0)), :__ct_v))
         end
     end
     # software pipelining: the next tile is read into registers while the current one is multiplied, and stored to shared memory after the next pass
@@ -12777,10 +12786,10 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
             q0 -= 1
             for q in 0:(TM * TK ÷ 256) - 1
                 r = Symbol("__ct_pa", q0, "_", q)
-                push!(ldA, asg(:__ct_e, cadd(:__ct_tl, 256 * q))); push!(ldA, asg(:__ct_rr, call(:div, :__ct_e, TK))); push!(ldA, asg(:__ct_kk, call(:mod, :__ct_e, TK)))
+                append!(ldA, mapA(opd, q))
                 push!(ldA, asg(d.rowvar, cadd(cadd(:__ct_r0, :__ct_rr), d.rowbase)))
                 append!(ldA, segload(opd, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), :__ct_kn, r))
-                push!(stA, asg(:__ct_e, cadd(:__ct_tl, 256 * q))); push!(stA, asg(:__ct_rr, call(:div, :__ct_e, TK))); push!(stA, asg(:__ct_kk, call(:mod, :__ct_e, TK)))
+                append!(stA, mapA(opd, q))
                 push!(stA, asg(Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), :__ct_rr), 1), q0)), r))
             end
         end
@@ -12788,11 +12797,11 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
             q0 -= 1
             for q in 0:(TN * TK ÷ 256) - 1
                 r = Symbol("__ct_pb", q0, "_", q)
-                push!(ldB, asg(:__ct_e, cadd(:__ct_tl, 256 * q))); push!(ldB, asg(:__ct_kk, call(:div, :__ct_e, TN))); push!(ldB, asg(:__ct_cc, call(:mod, :__ct_e, TN)))
+                append!(ldB, mapB(opd, q))
                 push!(ldB, asg(d.colvar, cadd(cadd(:__ct_c0, :__ct_cc), d.colbase)))
                 append!(ldB, segload(opd, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), :__ct_kn, r))
-                push!(stB, asg(:__ct_e, cadd(:__ct_tl, 256 * q))); push!(stB, asg(:__ct_kk, call(:div, :__ct_e, TN))); push!(stB, asg(:__ct_cc, call(:mod, :__ct_e, TN)))
-                push!(stB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TN)), :__ct_cc), 1), q0)), r))
+                append!(stB, mapB(opd, q))
+                push!(stB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd(SA * TK, cmul(:__ct_kk, SB)), :__ct_cc), 1), q0)), r))
             end
         end
     end
@@ -12802,7 +12811,7 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
         push!(mac, asg(Symbol("__ct_av", sname(q0), i), Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), cadd(:__ct_ty, 16 * i)), 1), q0))))
     end
     for q0 in 0:length(blist)-1, j in 0:RC-1
-        push!(mac, asg(Symbol("__ct_bv", sname(q0), j), Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TN)), cadd(:__ct_tx, 16 * j)), 1), q0))))
+        push!(mac, asg(Symbol("__ct_bv", sname(q0), j), Expr(:ref, sh, offq(cadd(cadd(cadd(SA * TK, cmul(:__ct_kk, SB)), cadd(:__ct_tx, 16 * j)), 1), q0))))
     end
     for (a, pairs) in enumerate(accs), i in 0:RT-1, j in 0:RC-1
         prods = [cmul(Symbol("__ct_av", sname(ia - 1), i), Symbol("__ct_bv", sname(ib - 1), j)) for (ia, ib) in pairs]
