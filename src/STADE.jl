@@ -12061,15 +12061,17 @@ end
 # The smallest number of 64 x 64 tiles for which the twin beats the plain kernel. It depends on how the operands lie: the plain kernel reads the right operand along the
 # inner index when the layout is "nt" (the twin wins from 8 tiles on), reads both along the thread index when it is "nn" (it wins from 32 tiles on) and is cheap when
 # the left operand is read across the inner index too ("tn" and anything else: it wins from 64 tiles on). The counts are those of `cmin` = 256, scale with `cmin` and are at least 1 for `cmin` >= 1.
-function cgen_contraction_tiles(d, cmin::Int)
+function cgen_contraction_tiles(d, cmin::Int; area::Int = 4096)
     au = cgen_contraction_unit(d.A.idx, d.kvar)
     bu = cgen_contraction_unit(d.B.idx, d.kvar)
     base = au && bu ? 8 : au ? 32 : 64
+    # a convolution twin of 64 x 64 tiles with fewer than two blocks per multiprocessor (160) is latency bound (V100: 0.8 TFLOP/s against 1.3 for the 32 x 32 tiles)
+    get(d, :convk, false) && area >= 4096 && (base = max(base, cgen_contraction_convtiles()))
     return cld(base * cmin, 256)
 end
 
-function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = cgen_contr_tm(), sk::Bool = false, gate::Bool = true)
-    TM = cgen_contr_tm(); TK = cgen_contr_tk(); RT = TM ÷ 16
+function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = cgen_contr_tm(), sk::Bool = false, gate::Bool = true, bm::Int = cgen_contr_tm())
+    TM = bm; TK = cgen_contr_tk(); RT = TM ÷ 16
     # the tile is TM rows by TN columns: TN is 16, 32 or 64 (a narrow output wastes most of a 64-wide tile)
     TN = bn; RC = TN ÷ 16
     sh = :__ct_sh
@@ -12111,23 +12113,48 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
         push!(body, asg(sym, 0))
     end
     bv === nothing || push!(body, asg(bv, cadd(:__ct_bz, 1)))
+    # the variables derived from the column: each thread loads one column of the right tiles (256 is a multiple of TN), so they are computed once
+    cp = get(d, :colpre, nothing)
+    if cp !== nothing && !isempty(cp)
+        push!(body, asg(d.colvar, cadd(cadd(:__ct_c0, call(:mod, :__ct_tl, TN)), d.colbase)))
+        append!(body, cp)
+    end
     for a in 0:length(accs)-1, i in 0:RT-1, j in 0:RC-1
         push!(body, asg(acc_ij(a, i, j), 0.0))
     end
     # loads of the two pieces
     zfill = asg(:__ct_v, 0.0)
     loadA = Any[]; loadB = Any[]
+    # the statements that read one element of a tile into __ct_v (0 outside the matrix): an operand with `segs` reads the array of the segment that holds k
+    function segload(opd, inside, k0 = :__ct_k0, dst = :__ct_v)
+        kg = cadd(k0, :__ct_kk)
+        guard = Expr(:&&, inside, call(:<, kg, :__ct_K))
+        zf = asg(dst, 0.0)
+        if !hasproperty(opd, :segs)
+            return Any[asg(d.kvar, cadd(cadd(d.kbase, k0), :__ct_kk)), zf, Expr(:if, guard, Expr(:block, asg(dst, Expr(:ref, opd.arr, opd.idx))))]
+        end
+        ends = Any[]; tot = 0
+        for sg in opd.segs
+            tot = tot === 0 ? sg.hi : cadd(tot, sg.hi); push!(ends, tot)
+        end
+        starts = Any[0, ends[1:end-1]...]
+        # the last segment is the else branch: the guard has already tested k against the total
+        chain = nothing
+        for i in length(opd.segs):-1:1
+            sg = opd.segs[i]
+            blk = Expr(:block, asg(d.kvar, cadd(d.kbase, starts[i] === 0 ? kg : call(:-, kg, starts[i]))), asg(dst, Expr(:ref, sg.arr, sg.idx)))
+            chain = chain === nothing ? blk : Expr(:if, call(:<, kg, ends[i]), blk, chain)
+        end
+        return Any[zf, Expr(:if, guard, Expr(:block, chain))]
+    end
     for (q0, opd) in enumerate(alist)
         q0 -= 1
-        for q in 0:3
+        for q in 0:(TM * TK ÷ 256) - 1
             push!(loadA, asg(:__ct_e, cadd(:__ct_tl, 256 * q)))
             push!(loadA, asg(:__ct_rr, call(:div, :__ct_e, TK)))
             push!(loadA, asg(:__ct_kk, call(:mod, :__ct_e, TK)))
             push!(loadA, asg(d.rowvar, cadd(cadd(:__ct_r0, :__ct_rr), d.rowbase)))
-            push!(loadA, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))
-            push!(loadA, zfill)
-            push!(loadA, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
-                              Expr(:block, asg(:__ct_v, Expr(:ref, opd.arr, opd.idx)))))
+            append!(loadA, segload(opd, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M)))
             push!(loadA, asg(Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), :__ct_rr), 1), q0)), :__ct_v))
         end
     end
@@ -12138,11 +12165,35 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
             push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TN)))
             push!(loadB, asg(:__ct_cc, call(:mod, :__ct_e, TN)))
             push!(loadB, asg(d.colvar, cadd(cadd(:__ct_c0, :__ct_cc), d.colbase)))
-            push!(loadB, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))
-            push!(loadB, zfill)
-            push!(loadB, Expr(:if, Expr(:&&, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)),
-                              Expr(:block, asg(:__ct_v, Expr(:ref, opd.arr, opd.idx)))))
+            append!(loadB, segload(opd, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N)))
             push!(loadB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TN)), :__ct_cc), 1), q0)), :__ct_v))
+        end
+    end
+    # software pipelining: the next tile is read into registers while the current one is multiplied, and stored to shared memory after the next pass
+    pf = cgen_contraction_prefetch()
+    ldA = Any[]; stA = Any[]; ldB = Any[]; stB = Any[]
+    if pf
+        for (q0, opd) in enumerate(alist)
+            q0 -= 1
+            for q in 0:(TM * TK ÷ 256) - 1
+                r = Symbol("__ct_pa", q0, "_", q)
+                push!(ldA, asg(:__ct_e, cadd(:__ct_tl, 256 * q))); push!(ldA, asg(:__ct_rr, call(:div, :__ct_e, TK))); push!(ldA, asg(:__ct_kk, call(:mod, :__ct_e, TK)))
+                push!(ldA, asg(d.rowvar, cadd(cadd(:__ct_r0, :__ct_rr), d.rowbase)))
+                append!(ldA, segload(opd, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), :__ct_kn, r))
+                push!(stA, asg(:__ct_e, cadd(:__ct_tl, 256 * q))); push!(stA, asg(:__ct_rr, call(:div, :__ct_e, TK))); push!(stA, asg(:__ct_kk, call(:mod, :__ct_e, TK)))
+                push!(stA, asg(Expr(:ref, sh, offq(cadd(cadd(cmul(:__ct_kk, TM + 1), :__ct_rr), 1), q0)), r))
+            end
+        end
+        for (q0, opd) in enumerate(blist)
+            q0 -= 1
+            for q in 0:(TN * TK ÷ 256) - 1
+                r = Symbol("__ct_pb", q0, "_", q)
+                push!(ldB, asg(:__ct_e, cadd(:__ct_tl, 256 * q))); push!(ldB, asg(:__ct_kk, call(:div, :__ct_e, TN))); push!(ldB, asg(:__ct_cc, call(:mod, :__ct_e, TN)))
+                push!(ldB, asg(d.colvar, cadd(cadd(:__ct_c0, :__ct_cc), d.colbase)))
+                append!(ldB, segload(opd, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), :__ct_kn, r))
+                push!(stB, asg(:__ct_e, cadd(:__ct_tl, 256 * q))); push!(stB, asg(:__ct_kk, call(:div, :__ct_e, TN))); push!(stB, asg(:__ct_cc, call(:mod, :__ct_e, TN)))
+                push!(stB, asg(Expr(:ref, sh, offq(cadd(cadd(cadd((TM + 1) * TK, cmul(:__ct_kk, TN)), :__ct_cc), 1), q0)), r))
+            end
         end
     end
     sname(q0) = q0 == 0 ? "" : string(q0, "_")
@@ -12158,10 +12209,16 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
         push!(mac, asg(acc_ij(a - 1, i, j), cadd(acc_ij(a - 1, i, j), foldl(cadd, prods))))
     end
     krange = splitk ? call(:(:), cmul(:__ct_z, :__ct_kc), TK, call(:-, call(:min, :__ct_K, cmul(call(:+, :__ct_z, 1), :__ct_kc)), 1)) : call(:(:), 0, TK, call(:-, :__ct_K, 1))
-    kloop = Expr(:for, asg(:__ct_k0, krange),
-                 Expr(:block, loadA..., loadB..., call(:sync_threads),
-                      Expr(:for, asg(:__ct_kk, call(:(:), 0, TK - 1)), Expr(:block, mac...)),
-                      call(:sync_threads)))
+    macloop = Expr(:for, asg(:__ct_kk, call(:(:), 0, TK - 1)), Expr(:block, mac...))
+    if pf
+        push!(body, asg(:__ct_kn, splitk ? cmul(:__ct_z, :__ct_kc) : 0))
+        append!(body, ldA); append!(body, ldB)
+        kloop = Expr(:for, asg(:__ct_k0, krange),
+                     Expr(:block, stA..., stB..., call(:sync_threads), asg(:__ct_kn, cadd(:__ct_k0, TK)), ldA..., ldB..., macloop, call(:sync_threads)))
+    else
+        kloop = Expr(:for, asg(:__ct_k0, krange),
+                     Expr(:block, loadA..., loadB..., call(:sync_threads), macloop, call(:sync_threads)))
+    end
     push!(body, kloop)
     for i in 0:RT-1, j in 0:RC-1
         stmts = Any[asg(:__ct_row, cadd(:__ct_r0, cadd(:__ct_ty, 16 * i))), asg(:__ct_col, cadd(:__ct_c0, cadd(:__ct_tx, 16 * j)))]
@@ -12180,9 +12237,9 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
         # a loop of two sums or of a sum of two products needs a full tile of columns: with 16 columns (the node projection of mpnn_gather, V100) three quarters of the products of a
         # tile are wasted and the twin ran 21 to 27% slower than the plain kernel
         get(d, :accs, nothing) === nothing || (cond = Expr(:&&, cond, call(:>=, d.Nh, min(cmin, 64))))
-        want = call(:>=, tiles, cgen_contraction_tiles(d, cmin))
+        want = call(:>=, tiles, cgen_contraction_tiles(d, cmin; area = TM * TN))
         # a kernel that runs with the group without wanting the tiles needs a quarter of that count: with fewer tiles a long inner sum (the weight gradient over many rows) runs on a few blocks and is several times slower
-        okt = call(:>=, tiles, cld(cgen_contraction_tiles(d, cmin), 4))
+        okt = call(:>=, tiles, cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 4))
     else
         want = nothing; okt = nothing
         # a product batched over heads has short sides: the rows must reach `cmin`, the columns and the inner length only one step of the tile
@@ -12196,7 +12253,7 @@ function cgen_contraction_emit(d; cmin::Int = cgen_contraction_min(), bn::Int = 
     want === nothing || (cond = Expr(:&&, cond, want))
     bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TN)
     by = call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM)
-    return (kdef = kd, name = d.name, nh = d.Nh, cond = cond, can = can, want = want, okt = okt, bx = bx, by = by, bz = bv === nothing ? (splitk ? cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN) : nothing) : d.Bh, shmem = 8 * nt * TS)
+    return (kdef = kd, name = d.name, nh = d.Nh, mh = d.Mh, cond = cond, can = can, want = want, okt = okt, bx = bx, by = by, bz = bv === nothing ? (splitk ? cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN) : nothing) : d.Bh, shmem = 8 * nt * TS)
 end
 
 # The decode of the flat index in a kernel with one thread per element. `X` is `idx - 1` or a variable that holds it. The column is `mod(X, N) + 1`. Without a batch the
@@ -12297,7 +12354,112 @@ function cgen_contraction_accums(lp, outside, params::Set{Symbol})
 end
 
 # The contraction twin of a plain kernel whose inner loop sums a product, as a description for cgen_contraction_emit, or nothing
+# A nest of loops `for v = 1:T`, each holding only the next loop and the innermost only scalar statements, as one loop over the product of the trip counts. The original
+# variables are decoded from the flat one at the top of the body (the outermost varies slowest). Returns the loop or nothing.
+function cgen_contraction_flatten(lpst; ok = cgen_split_is_scalar)
+    loops = Any[]; cur = lpst; body = nothing
+    while true
+        (cur isa Expr && cur.head === :for && length(cur.args) == 2 && cur.args[1] isa Expr && cur.args[1].head === :(=) && cur.args[1].args[1] isa Symbol &&
+         cur.args[2] isa Expr && cur.args[2].head === :block) || return nothing
+        rng = cur.args[1].args[2]
+        (rng isa Expr && rng.head === :call && rng.args[1] === :(:)) || return nothing
+        # `1:T`, or `T:-1:1` (a reversed loop of an adjoint: its body is a sum of atomic adds, so the order does not matter)
+        if length(rng.args) == 3 && rng.args[2] == 1
+            push!(loops, (var = cur.args[1].args[1], hi = rng.args[3], rev = false))
+        elseif length(rng.args) == 4 && rng.args[3] == -1 && rng.args[4] == 1
+            push!(loops, (var = cur.args[1].args[1], hi = rng.args[2], rev = true))
+        else
+            return nothing
+        end
+        body = Any[x for x in cur.args[2].args if !(x isa LineNumberNode)]
+        if length(body) == 1 && body[1] isa Expr && body[1].head === :for
+            cur = body[1]
+        else
+            break
+        end
+    end
+    length(loops) >= 2 || return nothing
+    all(ok, body) || return nothing
+    any(l -> l.rev, loops) && !all(l -> l.rev, loops) && return nothing
+    mulc(a, b) = a isa Integer && b isa Integer ? a * b : a == 1 ? b : b == 1 ? a : Expr(:call, :*, a, b)
+    f = :__ct_kf
+    dec = Any[]
+    for j in 1:length(loops)
+        stride = 1
+        for l in j+1:length(loops)
+            stride = mulc(stride, loops[l].hi)
+        end
+        q = stride == 1 ? Expr(:call, :-, f, 1) : Expr(:call, :div, Expr(:call, :-, f, 1), stride)
+        j > 1 && (q = Expr(:call, :mod, q, loops[j].hi))
+        push!(dec, Expr(:(=), loops[j].var, loops[j].rev ? Expr(:call, :-, loops[j].hi, q) : Expr(:call, :+, q, 1)))
+    end
+    total = 1
+    for l in loops
+        total = mulc(total, l.hi)
+    end
+    return Expr(:for, Expr(:(=), f, Expr(:call, :(:), 1, total)), Expr(:block, dec..., body...))
+end
+
+# The decode of a flat index into (x, y, channel) -- `px = mod(X, a) + 1`, `py = mod(div(X, a), b) + 1`, `oc = div(X, a * b) + 1`, the form that a nest of three
+# loops over a feature map flattens to -- with the pixel of the output as ONE column: `__ct_pix = mod(X, a * b) + 1`, and x and y read it. mod(mod(X, a b), a) = mod(X, a), so the
+# elements are the same. Returns the statements, or nothing when the decode is not there exactly once.
+function cgen_contraction_pixel(stmts, idxv, holds)
+    isX(e) = e == Expr(:call, :-, idxv, 1) || (e isa Symbol && e in holds)
+    ix = findall(st -> st isa Expr && st.head === :(=) && st.args[2] isa Expr && st.args[2].head === :call && st.args[2].args[1] === :+ && length(st.args[2].args) == 3 && st.args[2].args[3] == 1, stmts)
+    px = Int[]; py = Int[]; oc = Int[]; a = nothing; b = nothing
+    for i in ix
+        r = stmts[i].args[2].args[2]
+        (r isa Expr && r.head === :call && length(r.args) == 3) || continue
+        if r.args[1] === :mod && isX(r.args[2])
+            push!(px, i); a = r.args[3]
+        elseif r.args[1] === :mod && r.args[2] isa Expr && r.args[2].head === :call && r.args[2].args[1] === :div && length(r.args[2].args) == 3 && isX(r.args[2].args[2])
+            push!(py, i); b = r.args[3]
+        end
+    end
+    (length(px) == 1 && length(py) == 1 && a !== nothing && b !== nothing) || return nothing
+    stmts[py[1]].args[2].args[2].args[2].args[3] == a || return nothing
+    nab = Expr(:call, :*, a, b)
+    for i in ix
+        r = stmts[i].args[2].args[2]
+        r isa Expr && r.head === :call && r.args[1] === :div && length(r.args) == 3 && isX(r.args[2]) && r.args[3] == nab && push!(oc, i)
+    end
+    length(oc) == 1 || return nothing
+    X = Expr(:call, :-, idxv, 1)
+    sub(e) = isX(e) ? Expr(:call, :-, :__ct_pix, 1) : (e isa Expr ? Expr(e.head, Any[sub(x) for x in e.args]...) : e)
+    out = Any[Expr(:(=), :__ct_pix, Expr(:call, :+, Expr(:call, :mod, X, nab), 1))]
+    for (i, st) in enumerate(stmts)
+        push!(out, i in (px[1], py[1]) ? Expr(:(=), st.args[1], sub(st.args[2])) : st)
+    end
+    return out
+end
+
+# The contraction twin of a plain kernel whose inner loop sums a product, as a description for cgen_contraction_emit, or nothing. A convolution (a nest of loops over the
+# window and the input channels, the output pixel as two indices) is tried after the flat form: it is a product with the window and channel loops as ONE inner index
+# and the pixel as ONE column, the clamped indices of the input read as functions of the two.
 function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
+    r = cgen_contraction_kernel_(kdef; cmin, conv = false)
+    r !== nothing && return r
+    return cgen_contraction_conv() ? cgen_contraction_kernel_(kdef; cmin, conv = true) : nothing
+end
+
+# Whether a convolution (a nest of window and channel loops over a feature map) gets a twin. The adjoint twins of a U-Net run 2.5 to 5 times faster than the plain kernels
+# (V100); the forward twin is correct (parity 2e-16) and runs at the speed of the plain kernel.
+cgen_contraction_conv() = true
+
+# Whether a convolution of 16 or 32 output channels runs a twin with a tile of 16 or 32 rows (a 64-row tile is three quarters or half empty)
+cgen_contraction_rowtiles() = true
+
+# Whether a convolution that has too few 64 x 64 tiles runs a twin of 32 x 32 tiles
+cgen_contraction_gridtiles() = true
+
+# The least number of 64 x 64 tiles that a convolution needs for the twin of 64 x 64 tiles, over the count of the layout. 0 keeps the count of the layout: a threshold of 160 (two
+# blocks per multiprocessor) sent the shapes of 64 to 160 tiles to the twin of 32 x 32 tiles and it was slower (V100, c32_n128: 618 us against 549 us for the largest skip convolution).
+cgen_contraction_convtiles() = 0
+
+# Whether the tiled kernels read the next tile into registers while they multiply the current one
+cgen_contraction_prefetch() = true
+
+function cgen_contraction_kernel_(kdef; cmin::Int = cgen_contraction_min(), conv::Bool = false)
     parts = cgen_kernel_parts(kdef)
     parts === nothing && return nothing
     fargs = Symbol[parts.sig.args[2:end]...]
@@ -12309,7 +12471,19 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     # split the statements around the single loop
     li = findfirst(x -> x isa Expr && x.head === :for, rest)
     li === nothing && return nothing
-    pre = rest[1:li-1]; lpst = rest[li]; post = rest[li+1:end]
+    # a convolution is a nest of loops, or two nests that add into the same sum (the two segments of the input channels of a skip connection: the upsampled tensor and the skipped one)
+    xn = Any[]
+    if conv
+        lj = li; nests = Any[]
+        while lj <= length(rest) && rest[lj] isa Expr && rest[lj].head === :for
+            fl = cgen_contraction_flatten(rest[lj]); fl === nothing && return nothing
+            push!(nests, fl); lj += 1
+        end
+        length(nests) <= 2 || return nothing
+        rest = Any[rest[1:li-1]..., nests..., rest[lj:end]...]
+        xn = nests[2:end]
+    end
+    pre = rest[1:li-1]; lpst = rest[li]; post = rest[li+length(xn)+1:end]
     length(pre) >= 1 || return nothing
     first_st = pre[1]
     (first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol && first_st.args[2] == :(1 + (__tid - 1))) || return nothing
@@ -12324,6 +12498,10 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     for st in pre_rest
         st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])
     end
+    if conv
+        pre_rest = cgen_contraction_pixel(pre_rest, idxv, holds)
+        pre_rest === nothing && return nothing
+    end
     dec = cgen_contraction_decode(pre_rest, idxv, params, holds)
     dec === nothing && return nothing
     ov, tv, hv, N, M = dec.col, dec.row, dec.batch, dec.N, dec.M
@@ -12337,23 +12515,57 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     lp = cgen_split_loop(lpst)
     (lp !== nothing && lp.step == 1 && !isempty(lp.body)) || return nothing
     issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing
-    sums = cgen_contraction_accums(lp, Expr(:block, pre..., post...), params)
+    sums = cgen_contraction_accums(lp, Expr(:block, pre..., post..., xn...), params)
     sums === nothing && return nothing
     # two accumulators at most: each is a set of registers of the tile kernel
     length(sums) <= 2 || return nothing
     cv = lp.var
+    # the second nest: the same flat variable, one product added into the same sum
+    segs = Any[]
+    for xj in xn
+        lpj = cgen_split_loop(xj)
+        (lpj !== nothing && lpj.step == 1 && lpj.lo == 1 && !isempty(lpj.body) && issubset(cgen_split_vars(lpj.hi), params)) || return nothing
+        sj = cgen_contraction_accums(lpj, Expr(:block, pre..., post..., lpst), params)
+        sj === nothing && return nothing
+        (length(sums) == 1 && length(sums[1][3]) == 1 && length(sj) == 1 && sj[1][1] === sums[1][1] && sj[1][2] === sums[1][2] && length(sj[1][3]) == 1) || return nothing
+        push!(segs, (lp = lpj, sums = sj))
+    end
     # each sum's start value is a scalar assigned before the loop, and the loop is its only accumulation
     for (acc, _, _) in sums
         count(st -> st.args[1] === acc, pre_rest) == 1 || return nothing
         inits = findfirst(st -> st.args[1] === acc, pre_rest)
         any(st -> acc in cgen_split_vars(st.args[2]), pre_rest[1:inits]) && return nothing
     end
+    # a variable that is derived from the column (or the row) alone and that an operand index reads -- the pixel row and column of a convolution -- is inlined in the index
+    colpre = Any[]
+    if conv
+        inl = Dict{Symbol,Any}()
+        substi(e) = e isa Symbol ? get(inl, e, e) : (e isa Expr ? Expr(e.head, Any[substi(x) for x in e.args]...) : e)
+        cnames = Set{Symbol}()
+        for st in pre_rest
+            v = st.args[1]
+            (v === ov || v === tv || v === hv || v in params) && continue
+            dbat !== nothing && v === dbat.var && continue
+            count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === v, Any[pre_rest..., post...]) == 1 || continue
+            vs = cgen_split_vars(st.args[2])
+            if issubset(vs, union(params, Set([ov]), cnames)) && !isempty(intersect(vs, union(Set([ov]), cnames)))
+                # derived from the column alone: a thread has one column for all its loads, so the twin computes it once, before the loop
+                push!(colpre, st); push!(cnames, v)
+            elseif issubset(vs, union(params, Set([tv]), Set(keys(inl))))
+                inl[v] = substi(st.args[2])
+            end
+        end
+        inlsums(ss) = Any[(a, op, Any[Any[(arr = f.arr, idx = substi(f.idx)) for f in fac] for fac in terms]) for (a, op, terms) in ss]
+        sums = inlsums(sums)
+        segs = Any[(lp = sg.lp, sums = inlsums(sg.sums)) for sg in segs]
+    end
+    colnames = Set{Symbol}(st.args[1] for st in colpre)
     # operands: A depends on (t, c) only, B on (o, c) only
     function classify(fa, fb)
         va = cgen_split_vars(fa.idx); vb = cgen_split_vars(fb.idx)
         bat = hv !== nothing ? Set{Symbol}([hv]) : (dbat !== nothing ? Set{Symbol}([dbat.var]) : Set{Symbol}())
-        issubset(va, union(params, Set([tv, cv]), bat)) && issubset(vb, union(params, Set([ov, cv]), bat)) || return nothing
-        (tv in va && ov in vb) || return nothing
+        issubset(va, union(params, Set([tv, cv]), bat)) && issubset(vb, union(params, Set([ov, cv]), bat, colnames)) || return nothing
+        (tv in va && (ov in vb || !isempty(intersect(vb, colnames)))) || return nothing
         return (fa, fb)
     end
     # every product, its operands in the order (A, B); the distinct left and right operands get one tile each
@@ -12374,8 +12586,23 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     max(length(alist), length(blist)) <= 2 || return nothing
     fa, fb = alist[sumpairs[1][1][1]], blist[sumpairs[1][1][2]]
     single = length(sums) == 1 && length(sums[1][3]) == 1
+    extra_ops = Set{Symbol}()
+    if !isempty(segs)
+        # each segment is classified like the first; the tiles of the two sides take their values from the array of the segment that holds k
+        sa = Any[(hi = lp.hi, arr = fa.arr, idx = fa.idx)]; sb = Any[(hi = lp.hi, arr = fb.arr, idx = fb.idx)]
+        for sg in segs
+            fac = sg.sums[1][3][1]
+            ab = classify(fac[1], fac[2])
+            ab === nothing && (ab = classify(fac[2], fac[1]))
+            ab === nothing && return nothing
+            push!(sa, (hi = sg.lp.hi, arr = ab[1].arr, idx = ab[1].idx)); push!(sb, (hi = sg.lp.hi, arr = ab[2].arr, idx = ab[2].idx))
+            push!(extra_ops, ab[1].arr); push!(extra_ops, ab[2].arr)
+        end
+        fa = merge(fa, (segs = sa,)); fb = merge(fb, (segs = sb,))
+        alist = Any[fa]; blist = Any[fb]
+    end
     # the operand arrays of every product
-    opsyms = Set{Symbol}(x.arr for x in alist); union!(opsyms, Set{Symbol}(x.arr for x in blist))
+    opsyms = Set{Symbol}(x.arr for x in alist); union!(opsyms, Set{Symbol}(x.arr for x in blist)); union!(opsyms, extra_ops)
     # a head derived from the column that an operand index reads: the tiles are batched over the heads, `dh` columns each
     derived = dbat !== nothing && hv === nothing && any(x -> dbat.var in cgen_split_vars(x.idx), vcat(alist, blist))
     if derived
@@ -12394,6 +12621,9 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     end
     any(cv in cgen_split_vars(st) for st in pre_rest) && return nothing
     K = lp.lo == 1 ? lp.hi : Expr(:call, :+, Expr(:call, :-, lp.hi, lp.lo), 1)
+    for sg in segs
+        K = Expr(:call, :+, K, sg.lp.hi)
+    end
     Mh = hv === nothing ? Expr(:call, :div, n_iter, N) : M
     Bh = hv === nothing ? nothing : Expr(:call, :div, n_iter, Expr(:call, :*, N, M))
     flat(row, col) = hv === nothing ? Expr(:call, :+, Expr(:call, :+, Expr(:call, :*, row, :__ct_N), col), 1) :
@@ -12424,7 +12654,7 @@ function cgen_contraction_kernel(kdef; cmin::Int = cgen_contraction_min())
     end
     return merge((name = cgen_contraction_name(parts.sig.args[1]), fargs = fargs,
             prelude = Any[Expr(:(=), :__ct_N, N), Expr(:(=), :__ct_M, hv === nothing ? Expr(:call, :div, n_iter, :__ct_N) : M), Expr(:(=), :__ct_K, K), Expr(:(=), :__ct_lo, lp.lo)],
-            rowvar = tv, colvar = ov, kvar = cv, rowbase = 1, colbase = 1, kbase = :__ct_lo, decls = hv === nothing ? (ov, tv, cv) : (ov, tv, cv, hv), A = fa, B = fb, epilogue = epilogue,
+            rowvar = tv, colvar = ov, kvar = cv, rowbase = 1, colbase = 1, kbase = :__ct_lo, decls = hv === nothing ? (ov, tv, cv, colnames...) : (ov, tv, cv, hv), colpre = colpre, convk = conv, A = fa, B = fb, epilogue = epilogue,
             Mh = Mh, Nh = N, Kh = K, batchvar = hv, Bh = Bh,
             extra = Expr(:call, :(==), Expr(:call, :mod, n_iter, hv === nothing ? N : Expr(:call, :*, N, M)), 0)), multi)
 end
@@ -12441,6 +12671,12 @@ end
 # body is only atomic adds `arr[ix] += F[iw] * g` with one scalar `g` assigned before the loop; scalar assignments and stores. `ix` may read parameters, `c` and one of
 # `t`, `o`; `iw` parameters, `c` and the other. The `F` arrays are never stored and the target arrays never read in the kernel.
 function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_min())
+    r = cgen_adjoint_contraction_(kdef, backend; cmin, conv = false)
+    r !== nothing && return r
+    return cgen_contraction_conv() ? cgen_adjoint_contraction_(kdef, backend; cmin, conv = true) : nothing
+end
+
+function cgen_adjoint_contraction_(kdef, backend; cmin::Int = cgen_contraction_min(), conv::Bool = false)
     parts = cgen_kernel_parts(kdef)
     parts === nothing && return nothing
     fargs = Symbol[parts.sig.args[2:end]...]
@@ -12450,8 +12686,20 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
     cgen_contraction_reserved(rest; scratch = true) && return nothing
     # the loop of atomic adds; a forward loop before it (the adjoint kernel recomputes the forward value) stays in the first kernel
     li = findfirst(x -> (l = cgen_split_loop(x); l !== nothing && !isempty(l.body) && any(st -> cgen_atomic_site(st) !== nothing, l.body) && all(st -> cgen_atomic_site(st) !== nothing || cgen_split_is_scalar(st), l.body)), rest)
+    extra = Any[]
+    if li === nothing && conv
+        # a kernel with several nests of atomic adds (the convolution of a skip connection reads two inputs): each nest is flattened and has twins of its own
+        atomic_or_scalar(st) = cgen_atomic_site(st) !== nothing || cgen_split_is_scalar(st)
+        flat_of(x) = (fl = cgen_contraction_flatten(x; ok = atomic_or_scalar); fl !== nothing && any(st -> cgen_atomic_site(st) !== nothing, fl.args[2].args) ? fl : nothing)
+        idxs = findall(x -> flat_of(x) !== nothing, rest)
+        if !isempty(idxs)
+            rest = Any[(i in idxs ? flat_of(rest[i]) : rest[i]) for i in eachindex(rest)]
+            li = idxs[1]
+            extra = Any[rest[i] for i in idxs[2:end]]
+        end
+    end
     li === nothing && return nothing
-    pre = rest[1:li-1]; lpst = rest[li]; post = rest[li+1:end]
+    pre = rest[1:li-1]; lpst = rest[li]; post = Any[x for x in rest[li+1:end] if !any(e -> e === x, extra)]
     length(pre) >= 1 || return nothing
     first_st = pre[1]
     (first_st isa Expr && first_st.head === :(=) && first_st.args[1] isa Symbol) || return nothing
@@ -12479,6 +12727,10 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
     for st in pre_rest
         cgen_split_is_scalar(st) && st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])
     end
+    if conv
+        pre_rest = cgen_contraction_pixel(pre_rest, idxv, holds)
+        pre_rest === nothing && return nothing
+    end
     dec = cgen_contraction_decode(Any[st for st in pre_rest if cgen_split_is_scalar(st)], idxv, params, holds)
     dec === nothing && return nothing
     ov, tv, hv, N, M = dec.col, dec.row, dec.batch, dec.N, dec.M
@@ -12489,18 +12741,19 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
         count(st -> st isa Expr && st.head === :(=) && st.args[1] === v, leaves(Any[pre_rest..., post...])) == nd || return nothing
     end
     # the loop: atomic adds `arr[ix] += F[iw] * g` and nothing else
-    lp = cgen_split_loop(lpst)
+    gs_list = Symbol[]
+    sts = Any[]
+    for lpst_i in Any[lpst, extra...]
+    lp = cgen_split_loop(lpst_i)
     (lp !== nothing && !isempty(lp.body)) || return nothing
     issubset(cgen_split_vars(lp.lo), params) && issubset(cgen_split_vars(lp.hi), params) || return nothing
     cv = lp.var
     (cv in params || cv in (ov, tv, idxv) || cv === hv) && return nothing
-    gs_list = Symbol[]
-    sts = Any[]
     # scalar temporaries of the loop body (common subexpressions of operand reads) are inlined, in order, into the later statements; none is read or assigned outside the loop
     subst(e, d) = e isa Symbol ? get(d, e, e) : (e isa Expr ? Expr(e.head, Any[subst(x, d) for x in e.args]...) : e)
     tmps = Dict{Symbol,Any}()
     lbody = Any[]
-    outside = Expr(:block, pre..., post...)
+    outside = Expr(:block, pre..., post..., Any[x for x in Any[lpst, extra...] if x !== lpst_i]...)
     for st in lp.body
         if cgen_split_is_scalar(st) && st.args[1] isa Symbol
             tn = st.args[1]
@@ -12521,6 +12774,21 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
         b isa Symbol && isref(a) && return (gs = b, F = (arr = a.args[1], idx = a.args[2]))
         return nothing
     end
+    # a variable derived from the column or the row alone (the pixel row and column of a convolution) is inlined in the indices
+    if conv
+        inl = Dict{Symbol,Any}()
+        substi(e) = e isa Symbol ? get(inl, e, e) : (e isa Expr ? Expr(e.head, Any[substi(x) for x in e.args]...) : e)
+        for st in pre_rest
+            cgen_split_is_scalar(st) || continue
+            v = st.args[1]
+            (v === ov || v === tv || v === hv || v in params) && continue
+            count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === v, leaves(Any[pre_rest..., post...])) == 1 || continue
+            vs = cgen_split_vars(st.args[2])
+            (issubset(vs, union(params, Set([ov]), Set(keys(inl)))) || issubset(vs, union(params, Set([tv]), Set(keys(inl))))) || continue
+            inl[v] = substi(st.args[2])
+        end
+        lbody = Any[substi(st) for st in lbody]
+    end
     for st in lbody
         # every statement left is an atomic add: the loop was chosen because its body is atomic adds and scalars. Its value is one product or the sum of two (the tangent of a product)
         site = cgen_atomic_site(st)
@@ -12531,12 +12799,13 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
         for tm in terms
             tm.gs in gs_list || push!(gs_list, tm.gs)
         end
-        push!(sts, (site = site, terms = terms, F = terms[1].F))
+        push!(sts, (site = site, terms = terms, F = terms[1].F, trip = cgen_trip_count(lp.lo, lp.step, lp.hi), colbase = lp.step == 1 ? lp.lo : lp.hi, cv = cv))
+    end
     end
     length(gs_list) <= 2 || return nothing
     # each g is a thread-local scalar assigned before the loop
     for g in gs_list
-        g === cv && return nothing
+        any(s -> g === s.cv, sts) && return nothing
         any(st -> cgen_split_is_scalar(st) && st.args[1] === g, pre_rest) || return nothing
     end
     g = gs_list[1]
@@ -12564,14 +12833,13 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
     derived = dbat !== nothing && hv === nothing && any(s -> dbat.var in cgen_split_vars(s.site.idx) || any(tm -> dbat.var in cgen_split_vars(tm.F.idx), s.terms), sts)
     if derived
         count(st -> st isa Expr && st.head === :(=) && st.args[1] === dbat.var, leaves(Any[pre_rest..., post...])) == dbat.n || return nothing
-        (dbat.var === cv || dbat.var in params) && return nothing
+        (any(s -> dbat.var === s.cv, sts) || dbat.var in params) && return nothing
         Bh = Expr(:call, :div, N, dbat.dh)
     end
     bat = hv !== nothing ? Set{Symbol}([hv]) : (derived ? Set{Symbol}([dbat.var]) : Set{Symbol}())
-    trip = cgen_trip_count(lp.lo, lp.step, lp.hi)
-    colbase = lp.step == 1 ? lp.lo : lp.hi
     atomic = backend.atomic_macro
     for s in sts
+        cv = s.cv; trip = s.trip; colbase = s.colbase
         vi = cgen_split_vars(s.site.idx)
         u = v = nothing
         for (cu, cvv) in ((tv, ov), (ov, tv))
@@ -12631,7 +12899,7 @@ function cgen_adjoint_contraction(kdef, backend; cmin::Int = cgen_contraction_mi
     body = Any[parts.head, parts.guard, pre_a..., stores..., post..., emit_return_nothing()]
     ka_name = Symbol(base, "_a", endswith(nms, "!") ? "!" : "")
     ka = Expr(:function, Expr(:call, ka_name, fargs..., Symbol[scratch_of(gg) for gg in gs_list]..., (fstage === nothing ? Symbol[] : fstage.scratch)...), Expr(:block, body...))
-    return (ka = ka, ka_name = ka_name, descs = descs, count = X, fstage = fstage, scratch = Symbol[scratch_of(gg) for gg in gs_list])
+    return (ka = ka, ka_name = ka_name, descs = descs, count = X, fstage = fstage, scratch = Symbol[scratch_of(gg) for gg in gs_list], conv = conv)
 end
 
 # the whole launch statement of a kernel (the macro call with its keywords), by the kernel's name
@@ -12653,6 +12921,8 @@ end
 function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin::Int = cgen_contraction_min())
     fwd = Dict{Symbol,Any}()
     nar = Dict{Symbol,Any}()
+    rows = Dict{Symbol,Any}()
+    grid = Dict{Symbol,Any}()
     adj = Dict{Symbol,Any}()
     for k in kernels
         k.head === :function || continue
@@ -12662,6 +12932,14 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
         if d !== nothing
             fwd[nm] = cgen_contraction_emit(d; cmin)
             # a single sum of an output 16 to 32 wide: a tile of 16 or 32 columns (a 64-wide tile wastes 50 to 75 percent of its products)
+            # a convolution with 16 or 32 output channels (the rows): a tile of 16 or 32 rows
+            if get(d, :accs, nothing) === nothing && d.batchvar === nothing && cmin >= 1 && get(d, :convk, false) && cgen_contraction_rowtiles()
+                rows[nm] = [(bm, cgen_contraction_emit(merge(d, (name = Symbol(replace(string(d.name), "_t!" => string("_m", bm, "_t!"))),)); cmin, bm)) for bm in (16, 32)]
+            end
+            # a convolution over a small feature map has too few 64 x 64 tiles to fill the device: a twin of 32 x 32 tiles (four times the blocks)
+            if get(d, :accs, nothing) === nothing && d.batchvar === nothing && cmin >= 1 && get(d, :convk, false) && cgen_contraction_gridtiles()
+                grid[nm] = cgen_contraction_emit(merge(d, (name = Symbol(replace(string(d.name), "_t!" => "_g32_t!")),)); cmin, bn = 32, bm = 32)
+            end
             if get(d, :accs, nothing) === nothing && d.batchvar === nothing && cmin >= 1
                 nar[nm] = [(bn, cgen_contraction_emit(merge(d, (name = Symbol(replace(string(d.name), "_t!" => string("_n", bn, "_t!"))),)); cmin, bn)) for bn in (16, 32)]
             end
@@ -12672,7 +12950,7 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
         # the seed kernel keeps every atomic add that is not a twin statement (a bias gradient summed over all rows). The plain kernel takes the split-reduce form for those and the seed kernel
         # does not (mpnn_gather: 3.4 ms against 1.5 ms), so such a group keeps the gate that counts tiles; its twins still split once the group runs
         resid = Any[]; cgen_all_atomic_sites!(a.ka.args[2].args, resid)
-        adj[nm] = (a = a, ts = [cgen_contraction_emit(d2; cmin, sk = true, gate = isempty(resid)) for d2 in a.descs], fs = a.fstage === nothing ? nothing : cgen_contraction_emit(a.fstage.desc; cmin))
+        adj[nm] = (a = a, ts = [cgen_contraction_emit(d2; cmin, sk = true, gate = isempty(resid) || a.conv) for d2 in a.descs], fs = a.fstage === nothing ? nothing : cgen_contraction_emit(a.fstage.desc; cmin))
     end
     (isempty(fwd) && isempty(adj)) && return (host, kernels)
     used = Set{Symbol}()
@@ -12690,7 +12968,20 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
                     t = fwd[base]
                     call = Expr(:call, t.name, plain.args[2:end]...)
                     push!(used, base)
-                    res = emit_if(Expr(:&&, t.cond, fits(t, call)), Any[tiled(t, call)], Any[e])
+                    res = e
+                    if haskey(grid, base)
+                        tg = grid[base]
+                        gcall = Expr(:call, tg.name, plain.args[2:end]...)
+                        res = emit_if(Expr(:&&, tg.cond, fits(tg, gcall)), Any[tiled(tg, gcall)], Any[res])
+                    end
+                    res = emit_if(Expr(:&&, t.cond, fits(t, call)), Any[tiled(t, call)], Any[res])
+                    if haskey(rows, base)
+                        # a convolution with few output channels: the twin of 16 or 32 rows when the rows fit
+                        for (bm, tm) in reverse(rows[base])
+                            rcall = Expr(:call, tm.name, plain.args[2:end]...)
+                            res = emit_if(Expr(:&&, Expr(:&&, tm.cond, Expr(:call, :<=, tm.mh, bm)), fits(tm, rcall)), Any[tiled(tm, rcall)], Any[res])
+                        end
+                    end
                     if haskey(nar, base)
                         # the narrow twin of the smallest width that holds the output; the 64-wide twin and the plain kernel stay the fallbacks
                         for (bn, tn) in reverse(nar[base])
@@ -12751,6 +13042,8 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
         if haskey(fwd, nm)
             push!(newk, fwd[nm].kdef)
             haskey(nar, nm) && for (_, tn) in nar[nm]; push!(newk, tn.kdef); end
+            haskey(rows, nm) && for (_, tm) in rows[nm]; push!(newk, tm.kdef); end
+            haskey(grid, nm) && push!(newk, grid[nm].kdef)
         else
             push!(newk, adj[nm].a.ka)
             adj[nm].fs === nothing || push!(newk, adj[nm].fs.kdef)

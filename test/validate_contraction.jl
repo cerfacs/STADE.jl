@@ -985,14 +985,14 @@ function con_init!()
 end
 
 # builds the plan, evaluates its functions into Main, runs the host function; returns (outputs, kernels launched, conflicts, plan)
-function con_run(src::String, entry::Symbol, args, contraction::Int; maxt = nothing)
+function con_run(src::String, entry::Symbol, args, contraction::Int; maxt = nothing, inbounds::Bool = false)
     con_init!()
-    return Base.invokelatest(con_run_body, src, entry, args, contraction, maxt)
+    return Base.invokelatest(con_run_body, src, entry, args, contraction, maxt, inbounds)
 end
-function con_run_body(src::String, entry::Symbol, args, contraction::Int, maxt)
+function con_run_body(src::String, entry::Symbol, args, contraction::Int, maxt, inbounds::Bool = false)
     Main.CUDA.MAXT[] = maxt === nothing ? (name -> 1024) : maxt
     cuda = STADE.cgen_backend_cuda()
-    plan = STADE.stade_gpu(Meta.parse(src), cuda; warp_atomics = false, shared_private = false, inbounds = false, split_reduce = 0, contraction = contraction)
+    plan = STADE.stade_gpu(Meta.parse(src), cuda; warp_atomics = false, shared_private = false, inbounds = inbounds, split_reduce = 0, contraction = contraction)
     for k in plan.kernels; Core.eval(Main, k); end
     Core.eval(Main, plan.host)
     host = plan.host.args[1].args[1]
@@ -1208,16 +1208,16 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
         check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
         text = read(joinpath(abspath(joinpath(@__DIR__, "..")), "src", "STADE.jl"), String)
         cases = [
-            ("no barrier after the loads", "Expr(:block, loadA..., loadB..., call(:sync_threads),", "Expr(:block, loadA..., loadB...,"),
-            ("no barrier after the products", "Expr(:for, asg(:__ct_kk, call(:(:), 0, TK - 1)), Expr(:block, mac...)),\n                      call(:sync_threads)))", "Expr(:for, asg(:__ct_kk, call(:(:), 0, TK - 1)), Expr(:block, mac...))))"),
-            ("the tile is padded with ones", "zfill = asg(:__ct_v, 0.0)", "zfill = asg(:__ct_v, 1.0)"),
-            ("the row of a load is not bounded", "Expr(:&&, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K))", "call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)"),
-            ("the column of a load is not bounded", "Expr(:&&, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K))", "call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K)"),
-            ("the inner index of a load is not bounded", "Expr(:&&, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), call(:<, cadd(:__ct_k0, :__ct_kk), :__ct_K))", "call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M)"),
+            ("no barrier after the loads", "stA..., stB..., call(:sync_threads), asg(:__ct_kn, cadd(:__ct_k0, TK))", "stA..., stB..., asg(:__ct_kn, cadd(:__ct_k0, TK))"),
+            ("no barrier after the products", "ldA..., ldB..., macloop, call(:sync_threads)))", "ldA..., ldB..., macloop))"),
+            ("the tile is padded with ones", "        zf = asg(dst, 0.0)\n", "        zf = asg(dst, 1.0)\n"),
+            ("the row of a load is not bounded", "segload(opd, call(:<, cadd(:__ct_r0, :__ct_rr), :__ct_M), :__ct_kn, r)", "segload(opd, true, :__ct_kn, r)"),
+            ("the column of a load is not bounded", "segload(opd, call(:<, cadd(:__ct_c0, :__ct_cc), :__ct_N), :__ct_kn, r)", "segload(opd, true, :__ct_kn, r)"),
+            ("the inner index of a load is not bounded", "        guard = Expr(:&&, inside, call(:<, kg, :__ct_K))\n", "        guard = inside\n"),
             ("the outputs are not bounded", "Expr(:if, Expr(:&&, call(:<, :__ct_row, :__ct_M), call(:<, :__ct_col, :__ct_N)), Expr(:block, inner...))", "Expr(:if, true, Expr(:block, inner...))"),
-            ("the loop start is ignored", "push!(loadA, asg(d.kvar, cadd(cadd(d.kbase, :__ct_k0), :__ct_kk)))", "push!(loadA, asg(d.kvar, cadd(cadd(1, :__ct_k0), :__ct_kk)))"),
+            ("the loop start is ignored", "asg(d.kvar, cadd(cadd(d.kbase, k0), :__ct_kk))", "asg(d.kvar, cadd(cadd(1, k0), :__ct_kk))"),
             ("a descending loop is accepted", "(lp !== nothing && lp.step == 1 && !isempty(lp.body)) || return nothing", "(lp !== nothing && !isempty(lp.body)) || return nothing"),
-            ("operands that depend on the wrong index are accepted", "issubset(va, union(params, Set([tv, cv]), bat)) && issubset(vb, union(params, Set([ov, cv]), bat)) || return nothing", "true"),
+            ("operands that depend on the wrong index are accepted", "issubset(va, union(params, Set([tv, cv]), bat)) && issubset(vb, union(params, Set([ov, cv]), bat, colnames)) || return nothing", "true"),
             ("an operand of the product that is stored is accepted", "any(in(stored), opsyms) && return nothing", "false && return nothing"),
             ("the loop variable may be read after the loop", "    for st in post\n        cv in cgen_split_vars(st) && return nothing\n    end\n", ""),
             ("the loop variable may be read before the loop", "    any(cv in cgen_split_vars(st) for st in pre_rest) && return nothing\n", ""),
@@ -1233,7 +1233,7 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("the columns are not tested against the floor", "call(:>=, d.Nh, min(cmin, 16))", "call(:>, d.Nh, 0)"),
             ("the rows are not tested against the floor", "call(:>=, d.Mh, min(cmin, 16))", "call(:>, d.Mh, 0)"),
             ("the inner length is not tested against the floor", "call(:>=, d.Kh, min(cmin, 16))", "call(:>, d.Kh, 0)"),
-            ("the number of tiles is not tested", "want = call(:>=, tiles, cgen_contraction_tiles(d, cmin))", "want = nothing"),
+            ("the number of tiles is not tested", "want = call(:>=, tiles, cgen_contraction_tiles(d, cmin; area = TM * TN))", "want = nothing"),
             ("the tiles are counted by the rows only", "call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TN))\n        # a split sum", "call(Expr(:., :Base, QuoteNode(:cld)), d.Mh, TM), 1)\n        # a split sum"),
             ("every layout needs the count of nn", "    base = au && bu ? 8 : au ? 32 : 64\n", "    base = 32\n"),
             ("a layout with the right operand along the inner index needs the count of nt", "    base = au && bu ? 8 : au ? 32 : 64\n", "    base = bu ? 8 : au ? 32 : 64\n"),
@@ -1288,7 +1288,7 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
             ("a narrow twin of 16 columns is chosen for 32", "for bn in (16, 32)]", "for bn in (16, 16)]"),
             ("the column offset of a narrow tile uses the wide width", ":blockIdx), QuoteNode(:x)), 1), TN)))", ":blockIdx), QuoteNode(:x)), 1), TM)))"),
             ("the grid of a narrow twin counts wide tiles", "bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TN)", "bx = call(Expr(:., :Base, QuoteNode(:cld)), d.Nh, TM)"),
-            ("the loads of a narrow right tile use the wide width", "push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TN)))", "push!(loadB, asg(:__ct_kk, call(:div, :__ct_e, TM)))"),
+            ("the loads of a narrow right tile use the wide width", "push!(ldB, asg(:__ct_kk, call(:div, :__ct_e, TN)))", "push!(ldB, asg(:__ct_kk, call(:div, :__ct_e, TM)))"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]

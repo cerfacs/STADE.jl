@@ -450,7 +450,7 @@ function adj_unit_checks()
         t1 = STADE.io_expr_to_source(first(k for k in r1.plan.kernels if endswith(string(k.args[1].args[1]), "_t1!")))
         t2 = STADE.io_expr_to_source(first(k for k in r1.plan.kernels if endswith(string(k.args[1].args[1]), "_t2!")))
         check(occursin("div(d, dh)", hostsrc) && occursin("mod(d, dh) == 0", hostsrc) && occursin("dh > 0 &&", hostsrc), "$name: the host test and the grids count heads, and the head width is tested before it divides")
-        check(occursin("__ct_hb = 1 + __ct_bz * dh", t1) && occursin("__ct_K = dh", t1) && occursin("__ct_M = div(tt * d, d)", t1) && occursin("__ct_M = dh", t2) && occursin("__ct_K = div(tt * d, d)", t2) && occursin("c = (__ct_hb + __ct_k0) + __ct_kk", t1) && occursin("c = (__ct_r0 + __ct_rr) + __ct_hb", t2), "$name: the first product contracts over the dh columns of a head and the second has dh rows")
+        check(occursin("__ct_hb = 1 + __ct_bz * dh", t1) && occursin("__ct_K = dh", t1) && occursin("__ct_M = div(tt * d, d)", t1) && occursin("__ct_M = dh", t2) && occursin("__ct_K = div(tt * d, d)", t2) && (occursin("c = (__ct_hb + __ct_k0) + __ct_kk", t1) || occursin("c = (__ct_hb + __ct_kn) + __ct_kk", t1)) && occursin("c = (__ct_r0 + __ct_rr) + __ct_hb", t2), "$name: the first product contracts over the dh columns of a head and the second has dh rows")
         check(count(adj_is_twin, con_run(src, entry, args, 70).launched) == 2 && count(adj_is_twin, con_run(src, entry, args, 71).launched) == 0, "$name: the twins run at 70 rows or columns (the rows reach contraction) and not at 71")
         nname, nsrc, nentry, nmk, _ = first(c for c in ADJ_CASES if c[1] == "head in the column, the targets do not read the head")
         nhost = STADE.io_expr_to_source(con_run(nsrc, nentry, nmk(1), 1).plan.host)
@@ -477,7 +477,7 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
         check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
         text = read(joinpath(abspath(joinpath(@__DIR__, "..")), "src", "STADE.jl"), String)
         cases = [
-            ("a group with residual atomic adds is gated by blocks", "gate = isempty(resid))", "gate = true)"),
+            ("a group with residual atomic adds is gated by blocks", "gate = isempty(resid) || a.conv)", "gate = true)"),
             ("the blocks of a split sum are not counted by the launch test", "        splitk && gate && (tiles = call(:*, tiles, cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN)))\n", ""),
             ("a loop with a plain store is chosen as the loop of adds", " && all(st -> cgen_atomic_site(st) !== nothing || cgen_split_is_scalar(st), l.body)), rest)", "), rest)"),
             ("the thread index may be offset", " && first_st.args[2] == :(1 + (__tid - 1))\n        X = n_iter", "\n        X = n_iter"),
@@ -485,7 +485,7 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the thread count may use a local", "    issubset(cgen_split_vars(X), params) || return nothing\n    pre_rest = pre[2:end]", "    pre_rest = pre[2:end]"),
             ("a branch may stand beside the loop", "    all(okst, pre_rest) && all(okst, post) || return nothing\n", ""),
             ("a held index may be changed", "cgen_split_is_scalar(st) && st.args[2] == Expr(:call, :-, idxv, 1) && count(s2 -> s2 isa Expr && s2.head === :(=) && s2.args[1] === st.args[1], Any[pre_rest..., post...]) == 1 && push!(holds, st.args[1])", "cgen_split_is_scalar(st) && st.args[2] == Expr(:call, :-, idxv, 1) && push!(holds, st.args[1])"),
-            ("a decode of another value is accepted", "    isX(e) = e == Expr(:call, :-, idxv, 1) || (e isa Symbol && e in holds)\n", "    isX(e) = true\n"),
+            ("a decode of another value is accepted", "function cgen_contraction_decode(stmts, idxv, params, holds)\n    isX(e) = e == Expr(:call, :-, idxv, 1) || (e isa Symbol && e in holds)\n", "function cgen_contraction_decode(stmts, idxv, params, holds)\n    isX(e) = true\n"),
             ("a decode size computed in the kernel is accepted", "            issubset(cgen_split_vars(a2), params) || return nothing\n            push!(f === :mod ? cols : divs, (st.args[1], a2))", "            push!(f === :mod ? cols : divs, (st.args[1], a2))"),
             ("the two decodes may use different sizes", "        all(d -> d[1] === tv && d[2] == N, divs) || return nothing", "        all(d -> d[1] === tv, divs) || return nothing"),
             ("the column or the row may be changed after its decode", "        count(st -> st isa Expr && st.head === :(=) && st.args[1] === v, leaves(Any[pre_rest..., post...])) == nd || return nothing\n", ""),
@@ -500,8 +500,8 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("a value that is not a product is accepted", "        (v isa Expr && v.head === :call && v.args[1] === :* && length(v.args) == 3) || return nothing\n        a, b = v.args[2], v.args[3]", "        (v isa Expr && v.head === :call && length(v.args) == 3) || return nothing\n        a, b = v.args[2], v.args[3]"),
             ("a sum of three seeds is accepted", "    length(gs_list) <= 2 || return nothing\n", ""),
             ("a sum of more than two products is accepted", "v.args[1] === :+ && length(v.args) == 3 && product(v.args[2]) !== nothing && product(v.args[3]) !== nothing ?", "v.args[1] === :+ && product(v.args[2]) !== nothing ?"),
-            ("a second seed may be a parameter or a loop-local value", "    for g in gs_list\n        g === cv", "    for g in gs_list[1:1]\n        g === cv"),
-            ("the seed may be the loop variable", "        g === cv && return nothing\n", ""),
+            ("a second seed may be a parameter or a loop-local value", "    for g in gs_list\n        any(s -> g === s.cv, sts)", "    for g in gs_list[1:1]\n        any(s -> g === s.cv, sts)"),
+            ("the seed may be the loop variable", "        any(s -> g === s.cv, sts) && return nothing\n", ""),
             ("the seed may be a parameter", "        any(st -> cgen_split_is_scalar(st) && st.args[1] === g, pre_rest) || return nothing\n", ""),
             ("an operand that is stored is accepted", "(tm.F.arr in stored || tm.F.arr in targets) && return nothing", "(tm.F.arr in targets) && return nothing"),
             ("the operands of the second term are not checked", "        for tm in s.terms\n            (tm.F.arr in stored", "        for tm in s.terms[1:1]\n            (tm.F.arr in stored"),
@@ -513,10 +513,10 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the operand index may ignore the loop variable", "&& cvv in vw && cv in vw), s.terms)", "&& cvv in vw), s.terms)"),
             ("the whole-rows test is dropped", "                              Expr(:call, :(==), Expr(:call, :mod, X, hv === nothing ? N : Expr(:call, :*, N, M)), 0), target = site.arr))", "                              true, target = site.arr))"),
             ("the seed of a batched product ignores the batch", "Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, hv, 1), M), Expr(:call, :-, tv, 1)), N), ov)", "Expr(:call, :*, Expr(:call, :+, Expr(:call, :*, 0, M), Expr(:call, :-, tv, 1)), N), ov)"),
-            ("a batched twin ignores the batch of the target", "bat = hv !== nothing ? Set{Symbol}([hv]) : (derived ? Set{Symbol}([dbat.var]) : Set{Symbol}())\n    trip = ", "bat = Set{Symbol}()\n    trip = "),
+            ("a batched twin ignores the batch of the target", "    bat = hv !== nothing ? Set{Symbol}([hv]) : (derived ? Set{Symbol}([dbat.var]) : Set{Symbol}())\n    atomic = backend.atomic_macro", "    bat = Set{Symbol}()\n    atomic = backend.atomic_macro"),
             ("a head is used when no statement reads it", "derived = dbat !== nothing && hv === nothing && any(s -> dbat.var in cgen_split_vars(s.site.idx) || any(tm -> dbat.var in cgen_split_vars(tm.F.idx), s.terms), sts)", "derived = dbat !== nothing && hv === nothing"),
             ("the head is not assigned once", "        count(st -> st isa Expr && st.head === :(=) && st.args[1] === dbat.var, leaves(Any[pre_rest..., post...])) == dbat.n || return nothing\n", ""),
-            ("the head may be the loop variable", "(dbat.var === cv || dbat.var in params) && return nothing", "false && return nothing"),
+            ("the head may be the loop variable", "(any(s -> dbat.var === s.cv, sts) || dbat.var in params) && return nothing", "false && return nothing"),
             ("a head product keeps the full width for its rows and inner length", "derived && (u === ov ? (rows = dbat.dh) : (kdim = dbat.dh))", "nothing"),
             ("the rows of a head start at the first column", "rowoff = derived && u === ov ? :__ct_hb : 1", "rowoff = 1"),
             ("the row loads of a head start at the first column", "rowbase = derived && u === ov ? :__ct_hb : 1, colbase", "rowbase = 1, colbase"),
@@ -532,8 +532,8 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the second scratch array is not allocated", "body = Any[Expr(:(=), sc, zeros_expr) for sc in A.a.scratch]", "body = Any[Expr(:(=), sc, zeros_expr) for sc in A.a.scratch[1:1]]"),
             ("the first kernel does not take the second scratch array", "Symbol[scratch_of(gg) for gg in gs_list]..., (fstage === nothing", "Symbol[:__ct_g]..., (fstage === nothing"),
             ("a twin does not take the second scratch array", "fargs = Symbol[fargs..., unique(Symbol[scratch_of(tm.gs) for tm in s.terms])...],", "fargs = Symbol[fargs..., :__ct_g],"),
-            ("the second left tile is not loaded", "    for (q0, opd) in enumerate(alist)\n", "    for (q0, opd) in enumerate(alist[1:1])\n"),
-            ("the second right tile is not loaded", "    for (q0, opd) in enumerate(blist)\n", "    for (q0, opd) in enumerate(blist[1:1])\n"),
+            ("the second left tile is not loaded", "    if pf\n        for (q0, opd) in enumerate(alist)\n", "    if pf\n        for (q0, opd) in enumerate(alist[1:1])\n"),
+            ("the second right tile is not loaded", "        for (q0, opd) in enumerate(blist)\n            q0 -= 1\n            for q in 0:(TN * TK ÷ 256) - 1\n                r =", "        for (q0, opd) in enumerate(blist[1:1])\n            q0 -= 1\n            for q in 0:(TN * TK ÷ 256) - 1\n                r ="),
             ("the products of the second term are not added", "foldl(cadd, prods)", "prods[1]"),
             ("the second term shares the tile of the first", "offq(e, q0) = q0 == 0 ? e : cadd(q0 * TS, e)", "offq(e, q0) = e"),
             ("the tile memory is sized for one term", "call(:CuDynamicSharedArray, :Float64, nt * TS)", "call(:CuDynamicSharedArray, :Float64, TS)"),
@@ -549,8 +549,8 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("a group needs every twin to want the tiles", "foldl((a, b) -> Expr(:||, a, b), wants)", "foldl((a, b) -> Expr(:&&, a, b), wants)"),
             ("a group runs when no twin wants the tiles", "isempty(wants) || (cond = ", "true || (cond = "),
             ("a twin does not need a quarter of the tiles", "t.okt === nothing || push!(oks, t.okt); ", ""),
-            ("the twin needs all the tiles, not a quarter", "cld(cgen_contraction_tiles(d, cmin), 4)", "cld(cgen_contraction_tiles(d, cmin), 1)"),
-            ("the twin needs a sixteenth of the tiles", "cld(cgen_contraction_tiles(d, cmin), 4)", "cld(cgen_contraction_tiles(d, cmin), 16)"),
+            ("the twin needs all the tiles, not a quarter", "cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 4)", "cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 1)"),
+            ("the twin needs a sixteenth of the tiles", "cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 4)", "cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 16)"),
             ("the two sums of the stage share a scratch array", "fnames = Symbol[k == 1 ? :__cf_s : Symbol(\"__cf_s\", k) for k in 1:length(sf)]", "fnames = Symbol[:__cf_s for k in 1:length(sf)]"),
             ("the first kernel reads only the first sum from the stage", "for k in eachindex(fstage.accs)]", "for k in 1:1]"),
             ("the second scratch array of the stage is not allocated", "                        for sc in fsc\n", "                        for sc in fsc[1:1]\n"),
