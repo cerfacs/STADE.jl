@@ -76,9 +76,25 @@ subsequent `bash_tool` call needing Julia.
 10. **A loop nest is whatever `for` structure the source contains.**
     skill-stade fuses a rectangular nest into one `for idx = 1:n*m` with
     indices recovered by `div`/`mod`. Treat that as a depth-1 nest with
-    tripcount `n*m`. **Never pattern-match body-level `div`/`mod` to
+    tripcount `n*m`. **The derivative stages (`parse_` through `hvp_`,
+    `ii_`, `snap_`, `agen_`) never pattern-match body-level `div`/`mod` to
     reconstruct a synthetic nest** — those are ordinary assignments, not
-    loop structure.
+    loop structure. A wrong match there changes a gradient and nothing
+    fails loudly, and the flat loop is already correct without it.
+    **The GPU stages (`cgen_`, `jgen_`) may recognize the flat form for
+    speed**, because there a wrong match costs speed or is refused by a
+    guard, and the fused style hides the reduction over the inner index
+    that a row-wise kernel needs. A recognizer in those stages must:
+    (a) match the exact shape (`div(r, N) + 1` and `mod(r, N) + 1` of one
+    `r = idx - 1`, `N` made of kernel parameters only, each of `idx`, the
+    row and the column assigned once, only scalar, store and atomic
+    statements in the body), (b) refuse every other use of the derived
+    symbols and every atomic target that depends on the column,
+    (c) launch its twin only when a run-time condition proves that the flat
+    range is exactly R rows of N (`mod(n_iter, N) == 0`, and for a
+    descending loop `n_iter == lo`), keeping the plain kernel as the
+    fallback, (d) be a twin or an opt-in keyword first, and (e) have a
+    sabotage case for each guard. `cgen_rowblock_kernel` is the model.
 11. **`snap_*`/`agen_*` duplicated pairs must be changed identically.**
     `stade_ii_plan_check` and `stade_site_level_tbr_check` assert exact
     equality between the two copies; treat a disagreement as a
@@ -351,6 +367,7 @@ a reduction and a synchronization per array: for tests, not timing. `fresh_check
 `split_coalesce` (default `true`) transposes the split twin when every lane-loop reference has unit coefficient (`cgen_split_unit_refs`); `false` is the v0.4.59 text. `cublas = W` (default `2^26` from v0.4.62, `0` = off) emits
 `CUDA.CUBLAS.gemm!` for an adjoint product with affine dense operands and M * N * K >= W, with the tile twin as the runtime fallback (`cgen_cublas_plan`). Both change summation order, so compare to 1e-12, not bitwise.
 Sabotage-test the guards (`validate_split.jl`, `validate_cublas.jl`); a guard the adjoint recognizer cannot reach gets a comment, not a sabotage entry.
+`row_block = M` (default `0`, opt-in) emits a row-block twin of a flat `div`/`mod` loop with an accumulation into `A[i]` (`cgen_rowblock_kernel`); it is the model for rule 10 (a GPU-stage recognizer: exact shape, refusal of other uses, run-time proof of whole rows, plain fallback, sabotage cases). The twin needs a device check, because the CPU shim has no shuffles.
 Under `cublas > 0` a scratch array that a gemm or the first kernel fully writes is allocated `undef` (gemm with beta 0.0); the shim poisons undefined floats with NaN. The split recognizer skips empty loops and judges a temporary live after a loop only if a later item reads it before assigning it.
 
 GPU parity compares to a **BigFloat truth** (the same CPU code run in 192-bit
@@ -514,7 +531,7 @@ on one GPU model. `test/validate_coarsen.jl` sabotage-tests each guard, the sele
 - [ ] No caller-supplied independents/dependents
 - [ ] Comments one line, only where non-obvious
 - [ ] No corpus kernel named in `STADE.jl`
-- [ ] Loop-nest analysis walks actual `for` structure; no synthetic nests
+- [ ] Derivative-stage loop-nest analysis walks actual `for` structure; no synthetic nests (a `cgen_`/`jgen_` flat-index recognizer follows rule 10's list instead)
 - [ ] Duplicated `snap_*`/`agen_*` pairs edited identically; the
       `stade_*_check` assertions pass
 - [ ] Tier B index expressions pure; block-local scalars via value tables

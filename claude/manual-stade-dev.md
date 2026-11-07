@@ -2877,8 +2877,8 @@ defects.
 - [ ] No caller-supplied independents or dependents
 - [ ] Comments one line, only where the code is not self-explanatory
 - [ ] No corpus kernel named in `STADE.jl`
-- [ ] Loop-nest analysis walks actual `for` structure, with no synthetic
-      nests reconstructed from body-level `div`/`mod`
+- [ ] Derivative-stage loop-nest analysis walks actual `for` structure, with no synthetic
+      nests reconstructed from body-level `div`/`mod` (GPU stages: see rule 10 in skill-stade-dev.md for the allowed flat-index recognizers)
 - [ ] Duplicated `snap_*`/`agen_*` pairs edited identically, and the
       `stade_*_check` assertions pass
 - [ ] Tier B index expressions pure, block-local scalars through value
@@ -2944,3 +2944,6 @@ wrongly. Only then change the code, and change both copies of any
 duplicated pair.
 
 **v0.4.62 change.** `cublas` defaults to `2^26` (it was `0`). Among the 14 bench kernels only `transformer_block`, `mpnn_gather` and `unet2` generate different text; only the transformer changes speed (V100 adjoint: d512 4.0 to 3.5 ms, d1024 26 to 22, d2048 84 to 67; mpnn_gather and unet2 within 1%). A product below `M*N*K = 2^26` keeps the tile twin. `cublas = 0` is the v0.4.61 text. The sum order changes, so results agree to about 1e-13, not bitwise.
+
+**v0.4.63: row-block twin** (`row_block`, CUDA, default `0` = off; `row_block = M` also sets the smallest inner length `N`).
+A flat kernel of the shape `idx = 1 + (__tid - 1)` (or `lo + (__tid - 1) * -1`), `r = idx - 1`, `i = div(r, N) + 1`, `j = mod(r, N) + 1`, then scalar statements, plain stores and atomic sites whose target index uses `i` and nothing derived from `j`, gets a twin `<name>_r!`. `cgen_rowblock_kernel` matches the shape exactly (see dev rule 10: the GPU stages may recognize it, the derivative stages may not) and `cgen_rowblock_apply` wraps each launch: `if N >= M && n_iter > 0 && mod(n_iter, N) == 0 && div(n_iter, N) >= 64 [&& n_iter == lo]` runs the twin with 256 threads and `div(n_iter, N)` blocks, else the plain launch. In the twin a block walks its row (`j = tid, tid + 256, ...`), each accumulation sums into a register, two shuffle stages and one shared array of 32 per accumulation reduce the block, and one thread adds the total with the same atomic form as the plain kernel. The array of an atomic site may appear nowhere else in the kernel; at most 4 sites; Float64 only. Among the 14 bench kernels and the 161 corpus kernels, only mlp3_push (adjoint and HVP) and the corpus kernel matvec_loss change. V100, mlp3_push adjoint median: 3M 0.212 to 0.207 ms, 13M 0.519 to 0.489, 79M 3.111 to 2.605. Tests: `test/validate_rowblock.jl` (units, launch text, 13 sabotage cases); the device result is checked by the parity jobs against the CPU (grad_relerr 1e-14, the same as the plain kernel).
