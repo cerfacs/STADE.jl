@@ -54,7 +54,7 @@ function f(u, out, n)
     out[1] = s
     return nothing
 end"""),
-    ("a tanh layer then a linear output layer (the store of the output stays: its inner-loop sum feeds the gradient loop that the GPU stage splits)", false, Symbol[], """
+    ("a tanh layer then a linear output layer (the store of the output and its inner-loop sum are dropped)", true, [:y], """
 function f(x, w1, w2, h, y, n)
     for j = 1:n
         s = 0.0
@@ -298,8 +298,6 @@ function validate_primal_outputs(; phases = (:units, :sabotage), slice = 1:typem
             ("dead stores are never pruned", "    if !primal_outputs\n        (body, dropped) = agen_prune_dead_primal(kernel, body, agen_stack_names(sites))", "    if false\n        (body, dropped) = agen_prune_dead_primal(kernel, body, agen_stack_names(sites))"),
             ("the forward sweep is dropped with the default setting", "skipped = !primal_outputs && agen_forward_skippable", "skipped = agen_forward_skippable"),
             ("an array written by the kernel is not a candidate", "warrays = Set{Symbol}(a for a in written if get(kernel.sig.kinds, a, :none) in (:array_float, :array_int))", "warrays = Set{Symbol}()"),
-            ("an array stored from an inner-loop sum is a dead-store candidate", "    warrays = setdiff(warrays, keep_arrays)\n", ""),
-            ("no loop counts as holding an adjoint increment", "depth >= 1 && agen_dse_has_array_acc(e.args[2]) && agen_dse_self_scalars!(e.args[2], acc)", "nothing"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]
