@@ -351,6 +351,7 @@ a reduction and a synchronization per array: for tests, not timing. `fresh_check
 `split_coalesce` (default `true`) transposes the split twin when every lane-loop reference has unit coefficient (`cgen_split_unit_refs`); `false` is the v0.4.59 text. `cublas = W` (default `0`, opt-in) emits
 `CUDA.CUBLAS.gemm!` for an adjoint product with affine dense operands and M * N * K >= W, with the tile twin as the runtime fallback (`cgen_cublas_plan`). Both change summation order, so compare to 1e-12, not bitwise.
 Sabotage-test the guards (`validate_split.jl`, `validate_cublas.jl`); a guard the adjoint recognizer cannot reach gets a comment, not a sabotage entry.
+Under `cublas > 0` a scratch array that a gemm or the first kernel fully writes is allocated `undef` (gemm with beta 0.0); the shim poisons undefined floats with NaN. The split recognizer skips empty loops and judges a temporary live after a loop only if a later item reads it before assigning it.
 
 GPU parity compares to a **BigFloat truth** (the same CPU code run in 192-bit
 BigFloat), never to the Float64 CPU result alone: the CPU result is off the exact

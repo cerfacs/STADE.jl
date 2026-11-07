@@ -60,11 +60,12 @@ struct TArray{T,N} <: AbstractArray{T,N}
     id::Int
 end
 TArray(a::Array{T,N}) where {T,N} = TArray{T,N}(a, (NEXTID[] += 1))
-TArray{T}(::UndefInitializer, dims::Integer...) where {T} = TArray(Array{T}(undef, dims...))
-TArray{T}(::UndefInitializer, dims::Tuple) where {T} = TArray(Array{T}(undef, dims...))
-TArray{T,N}(::UndefInitializer, dims::Integer...) where {T,N} = TArray(Array{T,N}(undef, dims...))
-TArray{T,N}(::UndefInitializer, dims::Tuple) where {T,N} = TArray(Array{T,N}(undef, dims...))
-
+# an uninitialized float array holds NaN, so a read of an element nobody wrote shows
+_tundef(::Type{T}, dims...) where {T} = (a = Array{T}(undef, dims...); T <: AbstractFloat && fill!(a, T(NaN)); a)
+TArray{T}(::UndefInitializer, dims::Integer...) where {T} = TArray(_tundef(T, dims...))
+TArray{T}(::UndefInitializer, dims::Tuple) where {T} = TArray(_tundef(T, dims...))
+TArray{T,N}(::UndefInitializer, dims::Integer...) where {T,N} = TArray(_tundef(T, dims...))
+TArray{T,N}(::UndefInitializer, dims::Tuple) where {T,N} = TArray(_tundef(T, dims...))
 Base.size(a::TArray) = size(a.data)
 Base.IndexStyle(::Type{<:TArray}) = IndexLinear()
 Base.similar(a::TArray, ::Type{T}, dims::Dims) where {T} = TArray(Array{T}(undef, dims))

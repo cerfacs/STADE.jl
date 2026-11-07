@@ -124,6 +124,13 @@ function cub_unit_checks()
     # cublas = 0 gives the text without the keyword for a forward kernel too
     bc = first(c for c in CON_CASES if c[1] == "bias product")
     check(STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), 0).plan.host) == STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), nothing).plan.host), "forward, cublas = 0 is the plan without the keyword")
+    # the seed scratch of an adjoint: undefined under the keyword, zeroed without
+    ac = first(c for c in ADJ_CASES if c[5] isa Integer && c[5] > 0)
+    at1 = STADE.io_expr_to_source(cub_run(ac[2], ac[3], ac[4](1), 1).plan.host); at0 = STADE.io_expr_to_source(cub_run(ac[2], ac[3], ac[4](1), 0).plan.host)
+    check(occursin("__ct_g = CuArray{Float64}(undef", at1) && occursin("__ct_g = CUDA.zeros", at0) && !occursin("__ct_g = CuArray", at0), "adjoint seed scratch: undefined under the keyword, zeroed without")
+    # the scratch arrays: forward sums go to an undefined array with beta 0.0, the seed scratch of an adjoint is undefined; without the keyword both are zeroed
+    ft = STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), 1).plan.host); f0 = STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), 0).plan.host)
+    check(occursin("undef", ft) && occursin("0.0, ", ft) && !occursin("CUDA.zeros", ft) && !occursin("undef", f0), "forward scratch: undefined with beta 0.0 under the keyword, no scratch without")
     # a recomputed forward value below the threshold: the tile stage fills the scratch array with the sum of the products alone, and the first kernel adds the start value
     for (name, src, entry, mk, must) in ADJ_CASES
         (must isa Integer && must > 0) || continue
@@ -179,18 +186,20 @@ function validate_cublas(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("a stride that is not unit is taken as a leading dimension", "    elseif sc == 1\n        ld = sr; srows = cols; scols = rows; tr = true\n    else\n        return nothing\n    end", "    else\n        ld = sr; srows = cols; scols = rows; tr = true\n    end"),
             ("the transpose flag is inverted", "ld = sr; srows = cols; scols = rows; tr = true", "ld = sr; srows = cols; scols = rows; tr = false"),
             ("the output is never swapped", "swap = fc.co[1] != 1", "swap = false"),
-            ("the swap keeps the order of the operands", "call = swap ? Expr(:call, gemm, tc(flip(ob.tr)), tc(flip(oa.tr)), 1.0, ob.view, oa.view, 1.0, oc.view) :", "call = swap ? Expr(:call, gemm, tc(flip(ob.tr)), tc(flip(oa.tr)), 1.0, oa.view, ob.view, 1.0, oc.view) :"),
-            ("the beta is zero", "tc(oa.tr), tc(ob.tr), 1.0, oa.view, ob.view, 1.0, oc.view)", "tc(oa.tr), tc(ob.tr), 1.0, oa.view, ob.view, 0.0, oc.view)"),
+            ("the swap keeps the order of the operands", "call = swap ? Expr(:call, gemm, tc(flip(ob.tr)), tc(flip(oa.tr)), 1.0, ob.view, oa.view, beta, oc.view) :", "call = swap ? Expr(:call, gemm, tc(flip(ob.tr)), tc(flip(oa.tr)), 1.0, oa.view, ob.view, beta, oc.view) :"),
+            ("the beta is zero", "tc(oa.tr), tc(ob.tr), 1.0, oa.view, ob.view, beta, oc.view)", "tc(oa.tr), tc(ob.tr), 1.0, oa.view, ob.view, 0.0, oc.view)"),
             ("the work threshold is ignored", "Float64(minwork)))", "0.0))"),
             ("the start of the columns is ignored", "Dict{Symbol,Any}(u => 1, v => 1, cv => cbv)", "Dict{Symbol,Any}(u => 1, v => 1, cv => 1)"),
             ("a coefficient that reads a loop variable is accepted", "isempty(intersect(cgen_split_vars(c), Set(vars))) || return nothing", "true"),
             ("an empty product is offloaded", "Expr(:call, :>, M, 0), Expr(:call, :>, N, 0)), Expr(:call, :>, K, 0))", "true, true), true)"),
-            ("the guard reads the length of the scratch before it exists", "minwork; lenC = Expr(:call, :*, d.Mh, d.Nh))", "minwork; lenC = Expr(:call, :length, scratch))"),
+            ("the guard reads the length of the scratch before it exists", "minwork; lenC = Expr(:call, :*, d.Mh, d.Nh), beta)", "minwork; lenC = Expr(:call, :length, scratch), beta)"),
             ("the forward kernel drops the start value", "repl = Expr(:(=), acc, Expr(:call, :+, acc, Expr(:ref, scratch, first_st.args[1])))", "repl = Expr(:(=), acc, Expr(:ref, scratch, first_st.args[1]))"),
             ("the stage keeps the start value in the scratch", "Expr(:(=), st.args[1], 0.0) : st for (k, st) in enumerate(pre[1:fi+1])]", "st : st for (k, st) in enumerate(pre[1:fi+1])]"),
             ("the first kernel overwrites the sum with the scratch", "fstage.pure ? Expr(:call, :+, fstage.accs[k], Expr(:ref, fstage.scratch[k], idxv)) : Expr(:ref, fstage.scratch[k], idxv)", "Expr(:ref, fstage.scratch[k], idxv)"),
             ("a subtracted sum is offloaded", "(sums !== nothing && length(sums) == 1 && sums[1][2] === :+ && length(sums[1][3]) == 1) || return nothing", "(sums !== nothing && length(sums) == 1 && length(sums[1][3]) == 1) || return nothing"),
             ("the start of the forward loop is ignored", "Dict{Symbol,Any}(u => 1, v => lo, cv => 1)", "Dict{Symbol,Any}(u => 1, v => 1, cv => 1)"),
+            ("the forward gemm adds into an array nobody zeroed", "cgen_cublas_forward_plan(d, sc, cublas; beta = 0.0)", "cgen_cublas_forward_plan(d, sc, cublas)"),
+            ("the seed scratch stays undefined when the keyword is off", "cublas > 0 ? undef_expr : zeros_expr", "undef_expr"),
             ("the keyword is ignored", "cp = cublas > 0 ? cgen_cublas_plan(d, cublas) : nothing", "cp = cgen_cublas_plan(d, max(cublas, 1))"),
         ]
         mktempdir() do tmp

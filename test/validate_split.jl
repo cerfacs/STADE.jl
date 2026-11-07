@@ -14,6 +14,8 @@
 # v0.4.60 (`split_coalesce`): a twin whose lane loops only touch arrays at unit stride in the loop variable puts the lanes on threadIdx().x and the outputs on
 # threadIdx().y, so a warp reads and writes adjacent addresses. SPL_COAL_CASES run each such kernel with the keyword on and off against the plain kernel, and check which
 # layout the twin has (text); spl_coal_direct_checks calls the criterion `cgen_split_unit_refs` on handmade loops.
+# v0.4.61 candidate: `reads_after` counts only the reads that precede an assignment (a later loop that assigns a temporary first does not keep it alive). Its rule that a loop which may not run assigns nothing has no
+# sabotage entry: a temporary read after such a loop is already refused by the check of that loop itself, so the rule cannot change a result.
 # SABOTAGE edits of the split code, each of which one case must catch. One guard has no sabotage entry: the test that a plain-stored array
 # appears nowhere outside its own loop (`n_all == inside`). Every shape tried to reach it (a second update loop reading the array at another
 # index, a reduction reading it before the store, a shifted index) is already refused by the plain-write gate that builds the kernel, or is
@@ -38,6 +40,65 @@ const SPL_CASES = [
         end
         return nothing
     end""", :spl_mv, sd -> (r = MersenneTwister(sd); n = 37; m = 19; Any[randn(r, n * m), randn(r, m), randn(r, n), zeros(n), n, m]), true),
+    ("an empty loop before the reduction loop (the adjoint of a loop whose statements are dead)", """function spl_emp(w, x, y, n, m)
+        for j = 1:n
+            s = 0.0
+            for i = 1:m
+            end
+            for i = 1:m
+                s += w[(i - 1) * n + j] * x[i]
+            end
+            y[j] = s
+        end
+        return nothing
+    end""", :spl_emp, sd -> (r = MersenneTwister(sd); n = 35; m = 13; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), true),
+    ("a temporary that a later loop assigns before it reads it", """function spl_tmp(w, x, y, n, m)
+        for j = 1:n
+            s = 0.0
+            q = 0.0
+            for i = 1:m
+                t = w[(i - 1) * n + j] * x[i]
+                s += t
+            end
+            for i = 1:m
+                t = w[(i - 1) * n + j] + x[i]
+                q += t * x[i]
+            end
+            y[j] = s + q
+        end
+        return nothing
+    end""", :spl_tmp, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), true),
+    ("a later loop reads the temporary of the first (its value after the last iteration)", """function spl_tmp2(w, x, y, n, m)
+        for j = 1:n
+            s = 0.0
+            q = 0.0
+            t = 0.0
+            for i = 1:m
+                t = w[(i - 1) * n + j] * x[i]
+                s += t
+            end
+            for i = 1:m
+                q += t * x[i]
+            end
+            y[j] = s + q
+        end
+        return nothing
+    end""", :spl_tmp2, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), false),
+    ("a later loop that may not run assigns the temporary that is read after it", """function spl_tmp3(w, x, y, n, m, m2)
+        for j = 1:n
+            s = 0.0
+            t = 0.0
+            for i = 1:m
+                t = w[(i - 1) * n + j] * x[i]
+                s += t
+            end
+            for i = 1:m2
+                t = w[(i - 1) * n + j] + x[i]
+            end
+            y[j] = s + t
+        end
+        return nothing
+    end""", :spl_tmp3, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n), n, m, 0]), false),
     ("subtracted sum", """function spl_sub(w, x, y, n, m)
         for j = 1:n
             s = 1.5
@@ -734,6 +795,9 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("a storing loop: the partial sum of an accumulator is not formed", "            accs, newbody = cgen_split_partials(lp)\n            for (v, p) in accs\n                push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, Expr(:if, act", "            accs, newbody = cgen_split_partials(lp)\n            newbody = lp.body; accs = Tuple{Symbol,Symbol}[]\n            for (v, p) in accs\n                push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, Expr(:if, act"),
             ("one array stored by two loops at different indices is accepted", "                                canon0 == canon || return nothing", "                                false && return nothing"),
             ("one array stored by two loops from different starts is accepted", "                                (i0 == i || (lo0 == lp.lo && step0 == lp.step)) || return nothing", "                                false && return nothing"),
+            # ---- v0.4.61 candidate: an empty loop ----
+            ("an empty loop makes the kernel unsplittable", "(s.head === :for && length(s.args) == 2 && s.args[2] isa Expr && all(x -> x isa LineNumberNode, s.args[2].args)) && continue", "false && continue"),
+            ("a scalar read of a later loop is not counted", "                        add!(st.args[2], d2)\n                        push!(d2, st.args[1])", "                        push!(d2, st.args[1])"),
             # ---- v0.4.60: split_coalesce ----
             ("a stride reference is accepted as unit", "                elseif c !== 0\n                    ok = false", "                elseif c !== 0\n                    n_unit += 0"),
             ("an index through a scalar of the loop body is accepted", "if !isempty(intersect(cgen_split_vars(idx), assigned))\n                    ok = false\n                    return\n                end", "if false\n                    ok = false\n                    return\n                end"),

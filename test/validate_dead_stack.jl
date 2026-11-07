@@ -70,6 +70,8 @@ function ds_run(src::String, args; dead::Int = 1, run::Bool = true, init::Bool =
     return Base.invokelatest(ds_run_body, src, args, dead, run, init, initsrc)
 end
 function ds_run_body(src::String, args, dead::Int, run::Bool, init::Bool, initsrc::String)
+    # cgen_dead_pops (v0.4.55) deletes the same unread stack stores before cgen_dead_stack_apply runs; it is switched off so that these checks see the pass they test
+    ENV["STADE_DEAD_POPS"] = "0"
     Main.CUDA.MAXT[] = name -> 1024
     cuda = STADE.cgen_backend_cuda()
     kw = (warp_atomics = false, shared_private = false, split_reduce = 0, contraction = 0, reuse_stored = 0, dead_stack = dead)
