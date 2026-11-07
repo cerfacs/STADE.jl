@@ -12000,6 +12000,9 @@ function cgen_dead_stack_apply(host::Expr, kernels::Vector{Expr}, backend; inbou
         end
         for x in sort!(collect(setdiff(stripped, skip)))
             (x in bad || !haskey(alloc, x) || !haskey(prefix, x)) && continue
+            # a shadow stack that a kernel still reads or writes is allocated with the length of x and indexed like x: x keeps its size (checked mode, where the dead reads stay)
+            xd = Symbol(string(x), "_d")
+            (xd in cands && any(((kn, i),) -> cgen_dstack_uses(kdefs[kn].args[2], kdefs[kn].args[1].args[1+i]), get(bind, xd, Tuple{Symbol,Int}[]))) && continue
             ps = prefix[x]
             (length(ps) == 1 && !(:NOSPLIT in ps)) || continue
             ph = cgen_dstack_inline_all(first(ps), hdefs)

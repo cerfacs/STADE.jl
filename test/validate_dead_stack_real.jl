@@ -12,7 +12,8 @@ bad = 0
 check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (global bad += 1))
 src = Meta.parse(read(joinpath(kd, "unet2.jl"), String))
 backend = STADE.cgen_backend_cuda()
-nstore(plan) = sum(count(l -> occursin(r"^\s*\w+_stack(_d)?\[.*\] = ", l), split(string(k), "\n")) for k in plan.kernels if k.head === :function; init = 0)
+# the plain kernels only: the tile twins (names ending in `_t!`, from v0.4.54) repeat the kept store of a stack once per tile unroll, so counting them hides the change
+nstore(plan) = sum(count(l -> occursin(r"^\s*\w+_stack(_d)?\[.*\] = ", l), split(string(k), "\n")) for k in plan.kernels if k.head === :function && !endswith(string(k.args[1].args[1]), "_t!"); init = 0)
 for mode in (:adjoint, :hvp)
     gen = mode == :hvp ? STADE.stade_hvp(src; keep_push_pop = false, fuse_ii_loops = true) : STADE.stade_adjoint(src; keep_push_pop = false, fuse_ii_loops = true)
     gexpr = mode == :hvp ? gen.hvp : gen.adjoint

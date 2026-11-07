@@ -140,6 +140,7 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
             row = try
                 one_draw(name, mode, path)
             catch e
+                isempty(get(ENV, "OWN_TRACE", "")) || showerror(stderr, e, catch_backtrace())   # OWN_TRACE=1 prints the stack of an error
                 (parity = false, shuffled_parity = false, errs = (NaN,), rtol = NaN, by_truth = false, truth = (NaN,), truth_cpu = (NaN,), vacuous = false, violations = NamedTuple[],
                  error = first(split(sprint(showerror, e), "\n")))
             end
