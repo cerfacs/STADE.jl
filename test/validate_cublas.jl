@@ -8,7 +8,7 @@
 # The cases are the adjoint-contraction kernels of validate_adjoint_contraction.jl run through the CPU shim (ownership_shim.jl, where CUDA.CUBLAS.gemm! multiplies on the host)
 # with `cublas = 1` and with `cublas = 0` from the same random inputs.
 #   - a case that tiles: every product runs as a gemm or as a tile twin (their sum is the number of statements), outputs agree to 1e-12, no conflict, something changed;
-#   - `cublas = 0` is the very same text as the plan without the keyword; a keyword above the work of every product keeps all the tile twins;
+#   - `cublas = 0` launches no gemm; the plan without the keyword is the plan with `cublas = 2^26`; a keyword above the work of every product keeps all the tile twins;
 #   - an operand whose view would end past its array (a leading dimension larger than the rows, the array cut at the last element) keeps the tile twin and the outputs agree;
 #   - the same strides with the array long enough run the gemm.
 # SABOTAGE edits of the recognizer, each of which one check must catch. Two guards have no sabotage entry because the adjoint recognizer cannot reach them: the offset of a view
@@ -77,7 +77,8 @@ function cub_unit_checks()
     # the keyword 0 is the plan without the keyword; a keyword above the work keeps the tile twins
     args = s2[4](1)
     t0 = STADE.io_expr_to_source(cub_run(s2[2], s2[3], args, 0).plan.host); tn = STADE.io_expr_to_source(cub_run(s2[2], s2[3], args, nothing).plan.host)
-    check(t0 == tn, "cublas = 0 is the plan without the keyword")
+    check(cub_ngemm(cub_run(s2[2], s2[3], args, 0)) == 0, "cublas = 0 launches no gemm (the default is 2^26, so the keyword is needed to turn it off)")
+    check(STADE.io_expr_to_source(cub_run(s2[2], s2[3], args, 1 << 26).plan.host) == tn, "the plan without the keyword is the plan with cublas = 2^26")
     big = cub_run(s2[2], s2[3], args, typemax(Int) ÷ 2)
     check(cub_ngemm(big) == 0 && cub_ntile(big) == 2, "a keyword above the work of every product runs the tile twins (gemm $(cub_ngemm(big)), tile $(cub_ntile(big)))")
     # the work threshold: 67 * 70 * 19 = 89110 products
@@ -121,9 +122,9 @@ function cub_unit_checks()
     sc = first(c for c in CON_CASES if c[1] == "subtracted product")
     a = cub_run(sc[2], sc[3], sc[4](1), 1)
     check(cub_ngemm(a) == 0, "forward, a subtracted sum stays on the tile twin")
-    # cublas = 0 gives the text without the keyword for a forward kernel too
+    # the default (2^26) is the explicit 2^26 for a forward kernel too
     bc = first(c for c in CON_CASES if c[1] == "bias product")
-    check(STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), 0).plan.host) == STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), nothing).plan.host), "forward, cublas = 0 is the plan without the keyword")
+    check(STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), 1 << 26).plan.host) == STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), nothing).plan.host), "forward, the default is cublas = 2^26")
     # the seed scratch of an adjoint: undefined under the keyword, zeroed without
     ac = first(c for c in ADJ_CASES if c[5] isa Integer && c[5] > 0)
     at1 = STADE.io_expr_to_source(cub_run(ac[2], ac[3], ac[4](1), 1).plan.host); at0 = STADE.io_expr_to_source(cub_run(ac[2], ac[3], ac[4](1), 0).plan.host)

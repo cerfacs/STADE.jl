@@ -2529,8 +2529,8 @@ The split twin of `split_reduce` puts 32 outputs on `threadIdx().x` and `L` lane
 Then `cgen_split_kernel` builds the transposed layout: 32 lanes on `x`, `L` outputs on `y`, `cld(n_iter, L)` blocks. Any other loop keeps the old layout. `split_coalesce = false` gives the v0.4.59 text.
 V100, `transformer_block` adjoint: d2048 82.9 to 77.0 ms, `b_18_s` 5.97 to 0.67 ms. Among the 14 bench kernels only the transformer changes; 13 corpus kernels change text. Tests: `test/validate_split.jl`, `validate_split_real.jl` (run it with `OWN_SPLIT=4`).
 
-**cuBLAS offload** (`cublas`, default `0` = off, v0.4.60 candidate)
-CUDA only, opt-in. `cublas = W` (W > 0) replaces the tile twin of an adjoint product by one `CUDA.CUBLAS.gemm!` call (beta = 1) when M * N * K >= W. `cgen_cublas_plan(d, W)` reads the descriptor of `cgen_adjoint_contraction`:
+**cuBLAS offload** (`cublas`, default `2^26` from v0.4.62, `0` = off)
+CUDA only. `cublas = W` (W > 0) replaces the tile twin of an adjoint product by one `CUDA.CUBLAS.gemm!` call (beta = 1) when M * N * K >= W. `cgen_cublas_plan(d, W)` reads the descriptor of `cgen_adjoint_contraction`:
 the three index expressions must be affine in their two variables with coefficients free of the loop variables (`cgen_cublas_affine`), each operand needs a literal unit stride in one index (`cgen_cublas_operand`: unit row stride is 'N', unit column stride is 'T'),
 and a target with unit stride in the columns swaps the operands (C^T = B^T A^T). The statement is `if guard; gemm!(...); else <tile twin>; end`; the guard tests M, N, K > 0, the threshold, that every view fits in its array and that each leading dimension is at least the stored rows.
 Three kinds of product are offloaded. (1) An adjoint product (`cgen_cublas_plan`). (2) The forward product that an adjoint kernel recomputes (the stage `fstage`): with `cublas > 0` its scratch array holds the sum of the products alone and the first kernel adds the start value (`acc = acc + scratch[idx]`); `cgen_cublas_stage_plan`. (3) A plain forward product (`cgen_cublas_forward`, `cgen_cublas_forward_plan`): `scratch = CUDA.zeros`, one gemm, then the plain kernel with its loop replaced (`_fa!`). Only a `+` sum of one product qualifies for (2) and (3). A batch, a head in the column, a sum of two products or a convolution keeps the tile twin. `cublas = 0` gives the text without the keyword (checked on the 14 bench kernels). The CPU shim has a `gemm!` stand-in. The result agrees with the tile twin to about 1e-14 (the sum order differs).
@@ -2942,3 +2942,5 @@ IV.8, then read `stade_site_level_tbr_check`, then write a kernel that
 exercises the shape you care about and confirm the current code handles it
 wrongly. Only then change the code, and change both copies of any
 duplicated pair.
+
+**v0.4.62 change.** `cublas` defaults to `2^26` (it was `0`). Among the 14 bench kernels only `transformer_block`, `mpnn_gather` and `unet2` generate different text; only the transformer changes speed (V100 adjoint: d512 4.0 to 3.5 ms, d1024 26 to 22, d2048 84 to 67; mpnn_gather and unet2 within 1%). A product below `M*N*K = 2^26` keeps the tile twin. `cublas = 0` is the v0.4.61 text. The sum order changes, so results agree to about 1e-13, not bitwise.
