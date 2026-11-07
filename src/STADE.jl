@@ -12266,6 +12266,8 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
     items = Tuple{Symbol,Any}[]
     for s in rest
         s isa Expr || return nothing
+        # a loop with an empty body does nothing (the adjoint keeps the one of a forward loop whose statements are all dead): the twin leaves it out
+        (s.head === :for && length(s.args) == 2 && s.args[2] isa Expr && all(x -> x isa LineNumberNode, s.args[2].args)) && continue
         if cgen_split_is_scalar(s)
             push!(items, (:S, s))
         elseif cgen_split_is_store(s)
@@ -12281,7 +12283,35 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
     end
     any(it -> it[1] in (:R, :A), items) || return nothing
     # what each later item reads, to find a scalar that outlives its loop
-    reads_after(i) = (out = Set{Symbol}(); for k in (i + 1):length(items); cgen_dead_syms!(items[k][2], out); end; out)
+    # the scalars that a later item reads before it assigns them (a scalar that a later loop assigns first in each iteration is not read after this item;
+    # a loop that may not run assigns nothing, so it adds nothing to the assigned set)
+    function reads_after(i)
+        out = Set{Symbol}()
+        defd = Set{Symbol}()
+        add!(e, d) = (r = cgen_dead_syms!(e, Set{Symbol}()); union!(out, setdiff(r, d)))
+        for k in (i + 1):length(items)
+            kind, s = items[k]
+            if kind === :S
+                add!(s.args[2], defd)
+                push!(defd, s.args[1])
+            elseif kind === :W
+                add!(s, defd)
+            else
+                lp = cgen_split_loop(s)
+                add!(Expr(:tuple, lp.lo, lp.hi), defd)
+                d2 = copy(defd); push!(d2, lp.var)
+                for st in lp.body
+                    if cgen_split_is_scalar(st)
+                        add!(st.args[2], d2)
+                        push!(d2, st.args[1])
+                    else
+                        add!(st, d2)
+                    end
+                end
+            end
+        end
+        return out
+    end
     # arrays: every plain-stored or atomically-updated array of an :A loop, with the stride the host must find nonzero
     strides = Any[]
     plain_sites = Dict{Symbol,Any}()
@@ -13927,7 +13957,7 @@ end
 
 # The gemm! call of C[r, c] += sum_k A[r, k] * B[k, c] for the three arrays and their index expressions in the row variable `u`, the column variable `cv` and the inner variable `v`.
 # `at` gives the value of each variable at the element (0, 0); M, N, K are the sizes. Returns (cond, call) or nothing.
-function cgen_cublas_core(arrA, idxA, arrB, idxB, arrC, idxC, u, cv, v, at, M, N, K, extra, minwork::Int; lenC = Expr(:call, :length, arrC))
+function cgen_cublas_core(arrA, idxA, arrB, idxB, arrC, idxC, u, cv, v, at, M, N, K, extra, minwork::Int; lenC = Expr(:call, :length, arrC), beta::Float64 = 1.0)
     fa = cgen_cublas_affine(idxA, Symbol[u, v], at)
     fb = cgen_cublas_affine(idxB, Symbol[v, cv], at)
     fc = cgen_cublas_affine(idxC, Symbol[u, cv], at)
@@ -13941,8 +13971,8 @@ function cgen_cublas_core(arrA, idxA, arrB, idxB, arrC, idxC, u, cv, v, at, M, N
     tc(t) = t ? 'T' : 'N'
     flip(t) = !t
     gemm = Expr(:., Expr(:., :CUDA, QuoteNode(:CUBLAS)), QuoteNode(:gemm!))
-    call = swap ? Expr(:call, gemm, tc(flip(ob.tr)), tc(flip(oa.tr)), 1.0, ob.view, oa.view, 1.0, oc.view) :
-                  Expr(:call, gemm, tc(oa.tr), tc(ob.tr), 1.0, oa.view, ob.view, 1.0, oc.view)
+    call = swap ? Expr(:call, gemm, tc(flip(ob.tr)), tc(flip(oa.tr)), 1.0, ob.view, oa.view, beta, oc.view) :
+                  Expr(:call, gemm, tc(oa.tr), tc(ob.tr), 1.0, oa.view, ob.view, beta, oc.view)
     cond = Expr(:&&, Expr(:&&, Expr(:&&, oa.cond, ob.cond), oc.cond), Expr(:call, :>=, Expr(:call, :*, Expr(:call, :*, Expr(:call, :Float64, M), Expr(:call, :Float64, N)), Expr(:call, :Float64, K)), Float64(minwork)))
     cond = Expr(:&&, Expr(:&&, Expr(:&&, Expr(:&&, Expr(:call, :>, M, 0), Expr(:call, :>, N, 0)), Expr(:call, :>, K, 0)), cond), extra === nothing ? true : extra)
     return (cond = cgen_cublas_simp(cond), call = cgen_cublas_simp(call))
@@ -13968,7 +13998,7 @@ function cgen_cublas_plan(d, minwork::Int)
 end
 
 # The plan of a forward product whose sums go to a zero scratch array `scratch` at (t - 1) * N + o (descriptor `d` of cgen_contraction_kernel): the gemm adds the products into it.
-function cgen_cublas_forward_plan(d, scratch::Symbol, minwork::Int)
+function cgen_cublas_forward_plan(d, scratch::Symbol, minwork::Int; beta::Float64 = 1.0)
     (get(d, :accs, nothing) === nothing && get(d, :terms, nothing) === nothing && get(d, :batchvar, nothing) === nothing && !get(d, :headcol, false) && !get(d, :convk, false)) || return nothing
     isempty(get(d, :colpre, Any[])) || return nothing
     (hasproperty(d.A, :idx) && !hasproperty(d.A, :segs) && !hasproperty(d.B, :segs) && d.rowbase == 1 && d.colbase == 1) || return nothing
@@ -13980,7 +14010,7 @@ function cgen_cublas_forward_plan(d, scratch::Symbol, minwork::Int)
     lo === nothing && return nothing
     d.kbase === :__ct_lo || return nothing
     cidx = Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, u, 1), d.Nh), cv)
-    return cgen_cublas_core(d.A.arr, d.A.idx, d.B.arr, d.B.idx, scratch, cidx, u, cv, v, Dict{Symbol,Any}(u => 1, v => lo, cv => 1), d.Mh, d.Nh, d.Kh, d.extra, minwork; lenC = Expr(:call, :*, d.Mh, d.Nh))
+    return cgen_cublas_core(d.A.arr, d.A.idx, d.B.arr, d.B.idx, scratch, cidx, u, cv, v, Dict{Symbol,Any}(u => 1, v => lo, cv => 1), d.Mh, d.Nh, d.Kh, d.extra, minwork; lenC = Expr(:call, :*, d.Mh, d.Nh), beta)
 end
 
 # The stage of an adjoint kernel (built with the sum of the products alone)
@@ -14028,7 +14058,7 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
             if cublas > 0 && get(d, :accs, nothing) === nothing && get(d, :batchvar, nothing) === nothing
                 sc = Symbol("__cfs_", nm)
                 kf = cgen_cublas_forward(k, sc)
-                cpf = kf === nothing ? nothing : cgen_cublas_forward_plan(d, sc, cublas)
+                cpf = kf === nothing ? nothing : cgen_cublas_forward_plan(d, sc, cublas; beta = 0.0)
                 cpf === nothing || (fcub[nm] = (kdef = kf.kdef, name = kf.name, plan = cpf, scratch = sc, size = Expr(:call, :*, d.Mh, d.Nh)))
             end
             # a single sum of an output 16 to 32 wide: a tile of 16 or 32 columns (a 64-wide tile wastes 50 to 75 percent of its products)
@@ -14094,7 +14124,7 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
                         fc = fcub[base]
                         launch = cgen_contraction_find_launch(e, backend.launch_macro, base)
                         if launch !== nothing
-                            fbody = Any[Expr(:(=), fc.scratch, Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, fc.size)), fc.plan.call,
+                            fbody = Any[Expr(:(=), fc.scratch, Expr(:call, Expr(:curly, :CuArray, :Float64), :undef, fc.size)), fc.plan.call,
                                         Expr(:macrocall, backend.launch_macro, nothing, launch.args[3:end-1]..., Expr(:call, fc.name, plain.args[2:end]..., fc.scratch))]
                             res = emit_if(fc.plan.cond, fbody, Any[res])
                         end
@@ -14108,7 +14138,8 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
                     # inner index gains from few tiles and pays for a product of the "tn" layout, which loses a little)
                     cans = Any[]; wants = Any[]; oks = Any[]; fitl = Any[]
                     zeros_expr = Expr(:call, Expr(:., :CUDA, QuoteNode(:zeros)), :Float64, A.a.count)
-                    body = Any[Expr(:(=), sc, zeros_expr) for sc in A.a.scratch]
+                    undef_expr = Expr(:call, Expr(:curly, :CuArray, :Float64), :undef, A.a.count)
+                    body = Any[Expr(:(=), sc, cublas > 0 ? undef_expr : zeros_expr) for sc in A.a.scratch]
                     kargs = Any[A.a.scratch...]
                     if A.fs !== nothing
                         fsc = A.a.fstage.scratch
