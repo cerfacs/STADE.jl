@@ -7807,6 +7807,138 @@ function cgen_gather_carry_body(root, body::Vector{NamedTuple}, tag::Base.RefVal
     return changed ? out : body
 end
 
+# ---- horizontal fusion: adjacent independent loops over abutting ranges become one loop, one kernel ----
+# `for i = 2:2 ...; for i = 3:n-2 ...; for i = n-1:n-1 ...` (the boundary points of a stencil beside its interior) write different elements of one array and read
+# arrays none of them writes. Each is its own launch; as one loop over 2:n-1 with a branch per original range it is one. The ranges must abut (the high end + 1 of
+# one is the low end of another, provable as an affine identity), so no thread idles between them. The fused loop is guarded by a run-time test that every
+# loop has a non-negative trip count (with a negative one, abutting ranges overlap or leave a gap), and the original loops stay in the other arm.
+
+# the facts of a loop that can be one branch of a fused loop, or nothing: the arrays it writes (each at its own index), the array references it reads, its local scalars
+function cgen_hfuse_loop_info(L)
+    (L.kind == :for && L.step isa Integer && L.step == 1) || return nothing
+    isempty(L.body) && return nothing
+    all(s -> s.kind == :assign && !cgen_is_stackop_assign(s) && !cgen_is_stack_alloc(s.rhs) && !cgen_is_length_call(s.rhs), L.body) || return nothing
+    (cgen_expr_has_ref(L.lo) || cgen_expr_has_ref(L.hi)) && return nothing
+    var = L.var
+    locals = Set{Symbol}(s.lhs for s in L.body if s.lhs isa Symbol)
+    var in locals && return nothing
+    isdisjoint(union(cgen_expr_symbols(L.lo), cgen_expr_symbols(L.hi)), locals) || return nothing
+    wr = Set{Symbol}()
+    reads = Any[]
+    defined = Set{Symbol}()
+    for s in L.body
+        for r in cgen_read_vars(s.rhs)
+            (r in locals && !(r in defined)) && return nothing
+        end
+        append!(reads, cgen_gather_refs!(s.rhs, Any[]))
+        if s.lhs isa Symbol
+            push!(defined, s.lhs)
+        else
+            l = s.lhs
+            at_own = l isa Expr && l.head == :ref && length(l.args) == 2 && l.args[1] isa Symbol && l.args[2] === var
+            at_own || return nothing
+            push!(wr, l.args[1])
+        end
+    end
+    isempty(wr) && return nothing
+    return (wr = wr, reads = reads, locals = locals)
+end
+
+# do the loops not depend on each other? An array one of them writes is read by the others nowhere, and by itself only at its own index.
+function cgen_hfuse_independent(Ls, infos)
+    W = Set{Symbol}()
+    for i in infos
+        union!(W, i.wr)
+    end
+    for (L, i) in zip(Ls, infos)
+        for (arr, idxs) in i.reads
+            arr in W || continue
+            (arr in i.wr && length(idxs) == 1 && idxs[1] === L.var) || return false
+        end
+    end
+    return true
+end
+
+hfuse_abuts(hi, lo) = (e = Expr(:call, :+, hi, 1); cgen_gather_ge(e, lo) && cgen_gather_ge(lo, e))
+
+# the loops in order of position, or nothing when they do not abut into one range
+function cgen_hfuse_order(Ls)
+    m = length(Ls)
+    starts = [k for k in 1:m if !any(j -> j != k && hfuse_abuts(Ls[j].hi, Ls[k].lo), 1:m)]
+    length(starts) == 1 || return nothing
+    order = [starts[1]]
+    while length(order) < m
+        nxt = [j for j in 1:m if !(j in order) && hfuse_abuts(Ls[order[end]].hi, Ls[j].lo)]
+        length(nxt) == 1 || return nothing
+        push!(order, nxt[1])
+    end
+    return order
+end
+
+# the fused statement for a group of loops, or nothing
+function cgen_hfuse_group(root, Ls)
+    length(Ls) >= 2 || return nothing
+    infos = [cgen_hfuse_loop_info(L) for L in Ls]
+    any(isnothing, infos) && return nothing
+    cgen_hfuse_independent(Ls, infos) || return nothing
+    order = cgen_hfuse_order(Ls)
+    order === nothing && return nothing
+    # a local scalar that anything after the loop reads would see a different value once the loops are fused
+    for (L, i) in zip(Ls, infos)
+        isempty(i.locals) || isempty(ii_escapes_nested(root, L.body, i.locals)) || return nothing
+    end
+    first_loop, last_loop = Ls[order[1]], Ls[order[end]]
+    var = first_loop.var
+    arms = [NamedTuple[(kind = :assign, lhs = cgen_subst_expr(s.lhs, Dict{Symbol,Any}(Ls[k].var => var)), rhs = cgen_subst_expr(s.rhs, Dict{Symbol,Any}(Ls[k].var => var))) for s in Ls[k].body] for k in order]
+    chain = arms[end]
+    for k in length(order)-1:-1:1
+        chain = NamedTuple[(kind = :if, cond = Expr(:call, :<=, var, Ls[order[k]].hi), then = arms[k], els = chain)]
+    end
+    fused = merge(first_loop, (hi = last_loop.hi, body = chain))
+    trips = [Expr(:call, :-, Expr(:call, :+, L.hi, 1), L.lo) for L in Ls]
+    cond = Expr(:call, :>=, length(trips) == 1 ? trips[1] : Expr(:call, :min, trips...), 0)
+    return (kind = :if, cond = cond, then = NamedTuple[fused], els = NamedTuple[Ls...])
+end
+
+# the body with every maximal run of fusable loops fused; a statement that does not change keeps its identity (ii_escapes_nested finds a loop in `root` by it)
+function cgen_hfuse_body(root, body::Vector{NamedTuple}, tag::Base.RefValue{Int})
+    out = NamedTuple[]
+    changed = false
+    i = 1
+    n = length(body)
+    while i <= n
+        st = body[i]
+        if cgen_hfuse_loop_info(st) !== nothing
+            # the longest run of loops from i that do not depend on each other
+            j = i
+            while j < n && cgen_hfuse_loop_info(body[j + 1]) !== nothing &&
+                  (infs = [cgen_hfuse_loop_info(L) for L in body[i:j+1]]; cgen_hfuse_independent(body[i:j+1], infs))
+                j += 1
+            end
+            fused = cgen_hfuse_group(root, body[i:j])
+            if fused !== nothing
+                tag[] += 1
+                push!(out, fused)
+                changed = true
+                i = j + 1
+                continue
+            end
+        end
+        new = st
+        if st.kind in (:for, :while)
+            nb = cgen_hfuse_body(root, st.body, tag)
+            nb === st.body || (new = merge(st, (body = nb,)))
+        elseif st.kind == :if
+            nt, ne = cgen_hfuse_body(root, st.then, tag), cgen_hfuse_body(root, st.els, tag)
+            (nt === st.then && ne === st.els) || (new = merge(st, (then = nt, els = ne)))
+        end
+        push!(out, new)
+        changed |= new !== st
+        i += 1
+    end
+    return changed ? out : body
+end
+
 # ---- range reduction of the periodic neighbour (cgen_mod_reduce) ----
 # `c = mod(X, E) + 1` puts c in 1:E whatever X is (for E >= 1; a kernel run with E < 1 has no meaning anyway). A neighbour `mod(c - 2, E) + 1`, `mod(c - 1, E) + 1` or
 # `mod(c, E) + 1` then needs a compare and an add instead of an integer division (a 64-bit division by a runtime value is 60 to 100 instructions on the device).
@@ -7885,13 +8017,14 @@ end
 # the ingested kernel with its scatter loops in gather form (see above). `level` 0 or false returns it unchanged, 1 is the gather form alone, 2 adds the zero-fold, 3 adds the periodic permutations,
 # the reset scalars and the range reduction of the periodic neighbour (2 is the v0.4.51 text)
 function cgen_gather_stencil(gk, level)
-    lv = level === true ? 4 : level === false ? 0 : Int(level)
+    lv = level === true ? 5 : level === false ? 0 : Int(level)
     g = gk
     if lv > 0
         ctx = lv >= 3 ? (resets = cgen_gather_resets(gk.body), odefs = cgen_gather_outer_defs(gk.body)) : nothing
         g = merge(gk, (body = cgen_gather_expand(gk.body, Ref(0), ctx),))
         lv >= 2 && (g = merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),)))
         lv >= 4 && (g = merge(g, (body = cgen_gather_carry_body(g.body, g.body, Ref(100)),)))
+        lv >= 5 && (g = merge(g, (body = cgen_hfuse_body(g.body, g.body, Ref(200)),)))
     end
     lv >= 3 && cgen_mod_reduce_enabled() && (g = merge(g, (body = cgen_mod_reduce_body(g.body, Dict{Symbol,Any}()),)))
     return g
