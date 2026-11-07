@@ -739,21 +739,21 @@ function validate_gather_stencil(dir::String = joinpath(@__DIR__, "val-corpus");
         repo = abspath(joinpath(@__DIR__, ".."))
         text = read(joinpath(repo, "src", "STADE.jl"), String)
         cases = [
-            ("offset sign of the shifted index", "rhs = add(jv, -c))]", "rhs = add(jv, c))]"),
+            ("offset sign of the shifted index", "rhs = grp isa Integer ? add(jv, -c) : grp[2])]", "rhs = grp isa Integer ? add(jv, c) : grp[2])]"),
             ("lower guard ignores the offset", "cond = Expr(:call, :>=, jv, add(amin, c))", "cond = Expr(:call, :>=, jv, add(amin, 0))"),
             ("upper guard ignores the offset", "cond = Expr(:call, :<=, jv, add(amax, c))", "cond = Expr(:call, :<=, jv, add(amax, 0))"),
-            ("gather range misses the low offsets", "lo = add(amin, offsets[1])", "lo = amin"),
-            ("gather range misses the high offsets", "hi = add(amax, offsets[end])", "hi = amax"),
+            ("gather range misses the low offsets", "lo = add(amin, minimum(allc))", "lo = amin"),
+            ("gather range misses the high offsets", "hi = add(amax, maximum(allc))", "hi = amax"),
             ("orientation of a descending loop ignored", "amin, amax = stmt.step == 1 ? (first_val, last_val) : (last_val, first_val)", "amin, amax = (first_val, last_val)"),
             ("write flag always true", "cond = Expr(:call, :>, Symbol(\"__gh_\", arr), 0)", "cond = Expr(:call, :>=, Symbol(\"__gh_\", arr), 0)"),
-            ("receiving array may be read", "if isempty(r) && all(x -> x[2] && cgen_gather_offset(x[3], var) !== nothing, w)", "if all(x -> x[2] && cgen_gather_offset(x[3], var) !== nothing, w)"),
-            ("receiving array may be plainly written", "if isempty(r) && all(x -> x[2] && cgen_gather_offset(x[3], var) !== nothing, w)", "if isempty(r) && all(x -> cgen_gather_offset(x[3], var) !== nothing, w)"),
+            ("receiving array may be read", "if isempty(r) && all(x -> x[2] && gkey(x[3]) !== nothing, w)", "if all(x -> x[2] && gkey(x[3]) !== nothing, w)"),
+            ("receiving array may be plainly written", "if isempty(r) && all(x -> x[2] && gkey(x[3]) !== nothing, w)", "if isempty(r) && all(x -> gkey(x[3]) !== nothing, w)"),
             ("owned array may be written off the loop index", "all(x -> x[3] === var, w) || return nothing", "true"),
             ("owned array may be read off the loop index", "all(x -> x[2] === var, r) || return nothing", "true"),
             ("owned element not loaded at the top of a replay", "own_name(arr) in needed && push!(blk,", "false && push!(blk,"),
             ("owned plain write not replayed", "elseif !haskey(accs, k) && s.lhs.args[1] in oset", "elseif false && s.lhs.args[1] in oset"),
             ("owned accumulation replayed as a plain write", "prog[k] = (nm, Expr(:call, :+, nm, own_ren(accs[k][3])))", "prog[k] = (nm, own_ren(accs[k][3]))"),
-            ("owned reads not renamed in a gathered term", "terms = Dict{Int,Any}(k => (a[1], cgen_gather_offset(a[2], var), own_ren(a[3]))", "terms = Dict{Int,Any}(k => (a[1], cgen_gather_offset(a[2], var), a[3])"),
+            ("owned reads not renamed in a gathered term", "terms = Dict{Int,Any}(k => (a[1], gkey(a[2]), own_ren(a[3]))", "terms = Dict{Int,Any}(k => (a[1], gkey(a[2]), a[3])"),
             ("scalars may be read before they are defined", "for r in reads\n            (r in scalars && !(r in defined)) && return nothing", "for r in reads\n            false && return nothing"),
             ("any step is accepted", "(stmt.step isa Integer && abs(stmt.step) == 1) || return nothing", "stmt.step isa Integer || return nothing"),
             ("offset cap removed", "length(offsets) <= 8 || return nothing", "true"),
@@ -774,8 +774,8 @@ function validate_gather_stencil(dir::String = joinpath(@__DIR__, "val-corpus");
             ("fold: the lower guard is dropped", "outer = (kind = :if, cond = Expr(:call, :>=, G.var, amin), then = NamedTuple[inner], els = NamedTuple[])", "outer = (kind = :if, cond = Expr(:call, :>=, 1, 0), then = NamedTuple[inner], els = NamedTuple[])"),
             ("fold: the zeroing runs after the gather's own write", "return merge(G, (body = vcat(NamedTuple[outer], G.body),))", "return merge(G, (body = vcat(G.body, NamedTuple[outer]),))"),
             ("fold: temporaries nobody reads are kept", "        if s.lhs isa Symbol && !(s.lhs in live)\n            continue\n        end\n", ""),
-            ("fold: level 1 folds too", "    lv >= 2 || return g\n", ""),
-            ("fold: level 2 does not fold", "    lv >= 2 || return g\n", "    return g\n"),
+            ("fold: level 1 folds too", "        lv >= 2 && (g = merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),)))\n", "        (g = merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),)))\n"),
+            ("fold: level 2 does not fold", "        lv >= 2 && (g = merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),)))\n", "        false && (g = merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),)))\n"),
         ]
         mktempdir() do tmp
             for (label, old, new) in cases[intersect(eachindex(cases), slice)]
