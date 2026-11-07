@@ -3518,54 +3518,6 @@ function agen_dse_drop(e, dead_arrays, dead_scalars)
     return e
 end
 
-# Scalars accumulated in a loop nested in another loop that also accumulates into an array (`s = s + ...` beside `gb[k] = gb[k] + ...`, an adjoint increment). The GPU stage
-# splits the enclosing loop across the lanes of a block only while such a scalar is live, and without it the increments become contended atomic adds. A store that reads
-# one of these scalars is kept even when nothing reads its array.
-function agen_dse_has_array_acc(e)
-    e isa Expr || return false
-    if e.head == :(=) && e.args[1] isa Expr && e.args[1].head == :ref
-        return e.args[1].args[1] in agen_all_symbols!(e.args[2], Set{Symbol}())
-    end
-    return any(agen_dse_has_array_acc, e.args)
-end
-
-function agen_dse_self_scalars!(e, acc::Set{Symbol})
-    e isa Expr || return acc
-    if e.head == :(=) && e.args[1] isa Symbol
-        e.args[1] in agen_all_symbols!(e.args[2], Set{Symbol}()) && push!(acc, e.args[1])
-    else
-        for a in e.args
-            agen_dse_self_scalars!(a, acc)
-        end
-    end
-    return acc
-end
-
-function agen_dse_inner_acc!(e, depth::Int, acc::Set{Symbol})
-    e isa Expr || return acc
-    if e.head == :for
-        depth >= 1 && agen_dse_has_array_acc(e.args[2]) && agen_dse_self_scalars!(e.args[2], acc)
-        agen_dse_inner_acc!(e.args[2], depth + 1, acc)
-    else
-        for a in e.args
-            agen_dse_inner_acc!(a, depth, acc)
-        end
-    end
-    return acc
-end
-
-function agen_dse_acc_stored!(e, acc::Set{Symbol}, keep::Set{Symbol})
-    e isa Expr || return keep
-    if e.head == :(=) && e.args[1] isa Expr && e.args[1].head == :ref
-        isempty(intersect(agen_all_symbols!(e.args[2], Set{Symbol}()), acc)) || push!(keep, e.args[1].args[1])
-    else
-        for a in e.args
-            agen_dse_acc_stored!(a, acc, keep)
-        end
-    end
-    return keep
-end
-
 function agen_prune_dead_primal(kernel, body, stack_names)
     args = Set{Symbol}(kernel.sig.args)
     written = Set{Symbol}()
@@ -3576,15 +3528,6 @@ function agen_prune_dead_primal(kernel, body, stack_names)
     wscalars = Set{Symbol}(a for a in written if !(a in args) && get(kernel.sig.kinds, a, :none) in (:scalar_float, :scalar_int))
     cur = Any[b for b in body]
     changed = false
-    inner_acc = Set{Symbol}()
-    for e in cur
-        agen_dse_inner_acc!(e, 0, inner_acc)
-    end
-    keep_arrays = Set{Symbol}()
-    for e in cur
-        agen_dse_acc_stored!(e, inner_acc, keep_arrays)
-    end
-    warrays = setdiff(warrays, keep_arrays)
     for _ in 1:20
         reads = Set{Symbol}()
         for e in cur
