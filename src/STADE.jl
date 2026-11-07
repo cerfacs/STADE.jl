@@ -7699,7 +7699,7 @@ function cgen_gather_fold_stmts(R, G, tag::Int, scalars::Set{Symbol})
 end
 
 # the gather loop with `R` folded in, or nothing when the fold is not provably safe
-function cgen_gather_fold_pair(root, R, G, tag::Int)
+function cgen_gather_fold_pair(root, R, G, tag::Int; guard = nothing)
     G.kind == :for && startswith(string(G.var), "__gj_") && G.step == 1 || return nothing
     info = cgen_gather_owned_loop(R)
     info === nothing && return nothing
@@ -7721,7 +7721,38 @@ function cgen_gather_fold_pair(root, R, G, tag::Int)
     isempty(stmts) && return nothing
     inner = (kind = :if, cond = Expr(:call, :<=, G.var, amax), then = stmts, els = NamedTuple[])
     outer = (kind = :if, cond = Expr(:call, :>=, G.var, amin), then = NamedTuple[inner], els = NamedTuple[])
+    guard === nothing || (outer = (kind = :if, cond = guard, then = NamedTuple[outer], els = NamedTuple[]))
     return merge(G, (body = vcat(NamedTuple[outer], G.body),))
+end
+
+# ---- carry fold: the zeroing loop that ends a sequential loop, folded into the gather loop that starts the next iteration ----
+# A time loop `for t ...; G; ...; R; end` with G a gather loop and R a loop that only touches its own elements (the zeroing of the array G adds into) launches R once per
+# iteration. R at the end of iteration t is R at the start of iteration t + 1, so it joins G through the same fold as above, guarded by a flag that is 0 in the first iteration
+# (R did not run before it). R then runs once after the loop, if the loop ran at all. The fold needs R to read nothing the loop changes: no scalar the body assigns, not the loop variable.
+function cgen_gather_carry(root, S, tag::Int)
+    S.kind == :for && S.step isa Integer && S.step != 0 || return nothing
+    length(S.body) >= 2 || return nothing
+    G, R = S.body[1], S.body[end]
+    (G.kind == :for && R.kind == :for) || return nothing
+    assigned = cgen_mod_assigned(S.body[1:end - 1])
+    push!(assigned, S.var)
+    # nothing the loop changes may reach the bounds of S or the statements of R
+    isdisjoint(union(cgen_expr_symbols(S.lo), cgen_expr_symbols(S.hi)), assigned) || return nothing
+    syms = union(cgen_expr_symbols(R.lo), cgen_expr_symbols(R.hi))
+    for s in R.body
+        s.kind == :assign || return nothing
+        union!(syms, cgen_expr_symbols(s.lhs), cgen_expr_symbols(s.rhs))
+    end
+    own = union(Set([R.var]), cgen_locally_assigned_scalars(R.body))
+    isdisjoint(setdiff(syms, own), assigned) || return nothing
+    zf = Symbol("__zf", tag)
+    guard = Expr(:call, :>=, zf, 1)
+    fused = cgen_gather_fold_pair(root, R, G, tag; guard)
+    fused === nothing && return nothing
+    flag = (kind = :assign, lhs = zf, rhs = Expr(:call, :min, Expr(:call, :abs, Expr(:call, :-, S.var, S.lo)), 1))
+    loop = merge(S, (body = vcat(NamedTuple[flag, fused], S.body[2:end - 1]),))
+    ran = (kind = :if, cond = Expr(:call, S.step > 0 ? :<= : :>=, S.lo, S.hi), then = NamedTuple[R], els = NamedTuple[])
+    return NamedTuple[loop, ran]
 end
 
 function cgen_gather_fold_body(root, body::Vector{NamedTuple}, tag::Base.RefValue{Int})
@@ -7748,6 +7779,32 @@ function cgen_gather_fold_body(root, body::Vector{NamedTuple}, tag::Base.RefValu
         i += 1
     end
     return out
+end
+
+# the carry fold on every sequential loop of the body. A statement that does not change keeps its identity, which `ii_escapes_nested` needs to find it in `root`.
+function cgen_gather_carry_body(root, body::Vector{NamedTuple}, tag::Base.RefValue{Int})
+    out = NamedTuple[]
+    changed = false
+    for st in body
+        new = st
+        if st.kind in (:for, :while)
+            nb = cgen_gather_carry_body(root, st.body, tag)
+            nb === st.body || (new = merge(st, (body = nb,)))
+        elseif st.kind == :if
+            nt, ne = cgen_gather_carry_body(root, st.then, tag), cgen_gather_carry_body(root, st.els, tag)
+            (nt === st.then && ne === st.els) || (new = merge(st, (then = nt, els = ne)))
+        end
+        rep = new.kind == :for ? cgen_gather_carry(root, new, tag[] + 1) : nothing
+        if rep === nothing
+            push!(out, new)
+            changed |= new !== st
+        else
+            tag[] += 1
+            append!(out, rep)
+            changed = true
+        end
+    end
+    return changed ? out : body
 end
 
 # ---- range reduction of the periodic neighbour (cgen_mod_reduce) ----
@@ -7825,15 +7882,16 @@ function cgen_mod_reduce_body(body::Vector{NamedTuple}, env0::Dict{Symbol,Any})
     return out
 end
 
-# the ingested kernel with its scatter loops in gather form (see above). `level` 0 or false returns it unchanged, 1 is the gather form alone, 2 adds the zero-fold, 3 or true adds the periodic permutations,
+# the ingested kernel with its scatter loops in gather form (see above). `level` 0 or false returns it unchanged, 1 is the gather form alone, 2 adds the zero-fold, 3 adds the periodic permutations,
 # the reset scalars and the range reduction of the periodic neighbour (2 is the v0.4.51 text)
 function cgen_gather_stencil(gk, level)
-    lv = level === true ? 3 : level === false ? 0 : Int(level)
+    lv = level === true ? 4 : level === false ? 0 : Int(level)
     g = gk
     if lv > 0
         ctx = lv >= 3 ? (resets = cgen_gather_resets(gk.body), odefs = cgen_gather_outer_defs(gk.body)) : nothing
         g = merge(gk, (body = cgen_gather_expand(gk.body, Ref(0), ctx),))
         lv >= 2 && (g = merge(g, (body = cgen_gather_fold_body(g.body, g.body, Ref(0)),)))
+        lv >= 4 && (g = merge(g, (body = cgen_gather_carry_body(g.body, g.body, Ref(100)),)))
     end
     lv >= 3 && cgen_mod_reduce_enabled() && (g = merge(g, (body = cgen_mod_reduce_body(g.body, Dict{Symbol,Any}()),)))
     return g
