@@ -346,6 +346,12 @@ wrong gradients and no error, so it is never a default. `false` must stay byte-i
 GPU pass. The `isempty` guard is load-bearing on the device (`maximum(abs, empty CuArray)` is `-Inf`) and invisible on the CPU, so a V100 run covers it. The check costs
 a reduction and a synchronization per array: for tests, not timing. `fresh_check` without `fresh_gradient` flags nothing and changes nothing.
 
+### `split_coalesce` and `cublas` (CUDA)
+
+`split_coalesce` (default `true`) transposes the split twin when every lane-loop reference has unit coefficient (`cgen_split_unit_refs`); `false` is the v0.4.59 text. `cublas = W` (default `0`, opt-in) emits
+`CUDA.CUBLAS.gemm!` for an adjoint product with affine dense operands and M * N * K >= W, with the tile twin as the runtime fallback (`cgen_cublas_plan`). Both change summation order, so compare to 1e-12, not bitwise.
+Sabotage-test the guards (`validate_split.jl`, `validate_cublas.jl`); a guard the adjoint recognizer cannot reach gets a comment, not a sabotage entry.
+
 GPU parity compares to a **BigFloat truth** (the same CPU code run in 192-bit
 BigFloat), never to the Float64 CPU result alone: the CPU result is off the exact
 value by up to 1e-10 on a large HVP, so a device-vs-CPU gap is noise. One

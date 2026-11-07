@@ -20,7 +20,7 @@
 #
 # Only what the generator emits is implemented: `@cuda threads=.. blocks=.. f(..)`,
 # `threadIdx/blockIdx/blockDim().x`, `CUDA.@atomic a[i..] += v`,
-# `CUDA.@allowscalar`, `CUDA.allowscalar`, and `CuArray` as a constructor.
+# `CUDA.@allowscalar`, `CUDA.allowscalar`, `CUDA.CUBLAS.gemm!` and `CuArray` as a constructor.
 # Anything else fails loudly instead of being guessed at.
 
 module CUDA
@@ -317,5 +317,16 @@ function analyze(f, args)
     end
     return nothing
 end
+
+# CUDA.CUBLAS.gemm! (the cuBLAS offload of the adjoint products, `cublas`): C = alpha * op(A) * op(B) + beta * C on the host, logged in LAUNCHED
+module CUBLAS
+using LinearAlgebra
+import ..LAUNCHED
+function gemm!(tA::Char, tB::Char, alpha, A, B, beta, C)
+    push!(LAUNCHED, "cublas_gemm!")
+    mul!(C, tA == 'T' ? transpose(A) : A, tB == 'T' ? transpose(B) : B, alpha, beta)
+    return C
+end
+end # module CUBLAS
 
 end # module CUDA

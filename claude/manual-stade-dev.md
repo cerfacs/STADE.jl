@@ -2523,6 +2523,19 @@ on the CPU it is 0, so a CPU test cannot see the guard. The check runs after all
 flagged array per call (0.3 to 1.1 ms for the six arrays of `mlp3` at 3M to 79M on a V100): use it for testing, not for timing.
 `test/validate_fresh_gradient.jl` tests both (14 cases, CPU shim, sabotage cases); the V100 negative path is in the kit (`h16_fresh_check`).
 
+**Coalesced split twin** (`split_coalesce`, default `true`, v0.4.60 candidate)
+The split twin of `split_reduce` puts 32 outputs on `threadIdx().x` and `L` lanes on `threadIdx().y`. When the lane loop runs along unit-stride memory and the outputs are strided, a warp reads 32 far-apart addresses.
+`cgen_split_unit_refs(items)` is true when every array reference in every lane loop has coefficient +1 or -1 in the loop variable (coefficient 0 is fine, at least one reference is non-zero, no index reads a scalar assigned in the loop body).
+Then `cgen_split_kernel` builds the transposed layout: 32 lanes on `x`, `L` outputs on `y`, `cld(n_iter, L)` blocks. Any other loop keeps the old layout. `split_coalesce = false` gives the v0.4.59 text.
+V100, `transformer_block` adjoint: d2048 82.9 to 77.0 ms, `b_18_s` 5.97 to 0.67 ms. Among the 14 bench kernels only the transformer changes; 13 corpus kernels change text. Tests: `test/validate_split.jl`, `validate_split_real.jl` (run it with `OWN_SPLIT=4`).
+
+**cuBLAS offload** (`cublas`, default `0` = off, v0.4.60 candidate)
+CUDA only, opt-in. `cublas = W` (W > 0) replaces the tile twin of an adjoint product by one `CUDA.CUBLAS.gemm!` call (beta = 1) when M * N * K >= W. `cgen_cublas_plan(d, W)` reads the descriptor of `cgen_adjoint_contraction`:
+the three index expressions must be affine in their two variables with coefficients free of the loop variables (`cgen_cublas_affine`), each operand needs a literal unit stride in one index (`cgen_cublas_operand`: unit row stride is 'N', unit column stride is 'T'),
+and a target with unit stride in the columns swaps the operands (C^T = B^T A^T). The statement is `if guard; gemm!(...); else <tile twin>; end`; the guard tests M, N, K > 0, the threshold, that every view fits in its array and that each leading dimension is at least the stored rows.
+Three kinds of product are offloaded. (1) An adjoint product (`cgen_cublas_plan`). (2) The forward product that an adjoint kernel recomputes (the stage `fstage`): with `cublas > 0` its scratch array holds the sum of the products alone and the first kernel adds the start value (`acc = acc + scratch[idx]`); `cgen_cublas_stage_plan`. (3) A plain forward product (`cgen_cublas_forward`, `cgen_cublas_forward_plan`): `scratch = CUDA.zeros`, one gemm, then the plain kernel with its loop replaced (`_fa!`). Only a `+` sum of one product qualifies for (2) and (3). A batch, a head in the column, a sum of two products or a convolution keeps the tile twin. `cublas = 0` gives the text without the keyword (checked on the 14 bench kernels). The CPU shim has a `gemm!` stand-in. The result agrees with the tile twin to about 1e-14 (the sum order differs).
+V100, `transformer_block` adjoint with `split_coalesce` (16 gemm calls): d512 4.01 to 3.60 ms, d1024 23.93 to 21.28, d2048 76.91 to 62.33; W = 2^26 and 2^28 give the same times from d512 up. Tests: `test/validate_cublas.jl`.
+
 **Split reduction** (`split_reduce`, `split_min_inner`, `split_max_out`)
 CUDA only (the keywords are accepted, and ignored, by the other backends' `stade_gpu` calls). `split_reduce = L` (default 16; 0 or 1 is off) builds a
 second kernel `<name>_s!` beside a plain kernel that has the shape below, and the host launches it instead of the plain kernel when a test holds.

@@ -11,6 +11,9 @@
 #   - a case that must not split: no twin exists, and the two plans are the very same text.
 # The runs use sizes that are not multiples of 32 (a partial last block) and one case whose weight stride is 0 at run time, where the host test
 # must send the launch to the plain kernel.
+# v0.4.60 (`split_coalesce`): a twin whose lane loops only touch arrays at unit stride in the loop variable puts the lanes on threadIdx().x and the outputs on
+# threadIdx().y, so a warp reads and writes adjacent addresses. SPL_COAL_CASES run each such kernel with the keyword on and off against the plain kernel, and check which
+# layout the twin has (text); spl_coal_direct_checks calls the criterion `cgen_split_unit_refs` on handmade loops.
 # SABOTAGE edits of the split code, each of which one case must catch. One guard has no sabotage entry: the test that a plain-stored array
 # appears nowhere outside its own loop (`n_all == inside`). Every shape tried to reach it (a second update loop reading the array at another
 # index, a reduction reading it before the store, a shifted index) is already refused by the plain-write gate that builds the kernel, or is
@@ -437,6 +440,73 @@ const SPL_CASES = [
     end""", :spl_twoidx, sd -> (r = MersenneTwister(sd); n = 35; m = 11; Any[randn(r, n * m), randn(r, m), randn(r, n * m), zeros(n), n, m]), false),
 ]
 
+# (name, source, entry, args, transposed): the twin must have the lanes on threadIdx().x exactly when `transposed`
+const SPL_COAL_CASES = [
+    ("row broadcast: a scalar added along each row", """function spl_bcast(d, s, n, m)
+        for r = 1:n
+            v = d[r]
+            d[r] = 0.0
+            for u = 1:m
+                s[(r - 1) * m + u] = s[(r - 1) * m + u] + v
+            end
+        end
+        return nothing
+    end""", :spl_bcast, sd -> (r = MersenneTwister(sd); n = 37; m = 41; Any[randn(r, n), randn(r, n * m), n, m]), true),
+    ("row sum along the contiguous index", """function spl_rowsum(x, y, n, m)
+        for t = 1:n
+            s = 0.0
+            for c = 1:m
+                s += x[(t - 1) * m + c]
+            end
+            y[t] = s
+        end
+        return nothing
+    end""", :spl_rowsum, sd -> (r = MersenneTwister(sd); n = 35; m = 43; Any[randn(r, n * m), zeros(n), n, m]), true),
+    ("row mean, then a store along the row, descending", """function spl_center(x, y, n, m)
+        for t = 1:n
+            s = 0.0
+            for c = 1:m
+                s += x[(t - 1) * m + c]
+            end
+            mu = s / m
+            for c = m:-1:1
+                y[(t - 1) * m + c] = x[(t - 1) * m + c] - mu
+            end
+        end
+        return nothing
+    end""", :spl_center, sd -> (r = MersenneTwister(sd); n = 33; m = 29; Any[randn(r, n * m), zeros(n * m), n, m]), true),
+    ("index with a coefficient of minus one", """function spl_back(x, y, n, m)
+        for t = 1:n
+            s = 0.0
+            for c = 1:m
+                s += x[(t - 1) * m + (m - c) + 1]
+            end
+            y[t] = s
+        end
+        return nothing
+    end""", :spl_back, sd -> (r = MersenneTwister(sd); n = 34; m = 31; Any[randn(r, n * m), zeros(n), n, m]), true),
+    ("matvec: the weight moves by a stride", """function spl_mvc(w, x, y, n, m)
+        for j = 1:n
+            s = 0.0
+            for i = 1:m
+                s += w[(i - 1) * n + j] * x[i]
+            end
+            y[j] = s
+        end
+        return nothing
+    end""", :spl_mvc, sd -> (r = MersenneTwister(sd); n = 37; m = 19; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), false),
+    ("mixed: one reference by a stride, one contiguous", """function spl_mixu(w, x, y, n, m)
+        for j = 1:n
+            s = 0.0
+            for i = 1:m
+                s += w[(i - 1) * n + j] * x[(j - 1) * m + i]
+            end
+            y[j] = s
+        end
+        return nothing
+    end""", :spl_mixu, sd -> (r = MersenneTwister(sd); n = 37; m = 19; Any[randn(r, n * m), randn(r, n * m), zeros(n), n, m]), false),
+]
+
 const SPL_INIT = Ref(false)
 function spl_init!()
     SPL_INIT[] && return
@@ -447,15 +517,15 @@ function spl_init!()
 end
 
 # builds the plan, evaluates its functions into Main, runs the host function; returns (outputs, kernels launched, conflicts, plan)
-function spl_run(src::String, entry::Symbol, args, split::Int; maxt = nothing, fallback::Int = 0)
+function spl_run(src::String, entry::Symbol, args, split::Int; maxt = nothing, fallback::Int = 0, coal::Bool = true)
     spl_init!()
-    return Base.invokelatest(spl_run_body, src, entry, args, split, maxt, fallback)
+    return Base.invokelatest(spl_run_body, src, entry, args, split, maxt, fallback, coal)
 end
-function spl_run_body(src::String, entry::Symbol, args, split::Int, maxt, fallback::Int)
+function spl_run_body(src::String, entry::Symbol, args, split::Int, maxt, fallback::Int, coal::Bool = true)
     Main.CUDA.MAXT[] = maxt === nothing ? (name -> 1024) : maxt
     cuda = STADE.cgen_backend_cuda()
     plan = STADE.stade_gpu(Meta.parse(src), cuda; warp_atomics = false, shared_private = false, inbounds = false,
-                           split_reduce = split, split_fallback = fallback, split_min_inner = 0, split_max_out = 10^9, contraction = 0)
+                           split_reduce = split, split_fallback = fallback, split_min_inner = 0, split_max_out = 10^9, contraction = 0, split_coalesce = coal)
     for k in plan.kernels; Core.eval(Main, k); end
     Core.eval(Main, plan.host)
     host = plan.host.args[1].args[1]
@@ -538,11 +608,66 @@ function spl_unit_checks()
     catch e
         check(false, "fallback: error " * first(split(sprint(showerror, e), "\n")))
     end
+    bad += spl_coal_checks()
     return bad
 end
 
 # Recognizer calls on a kernel edited by hand, for a guard that no source can reach: a source whose second loop stores the array at another index
 # keeps its outer loop on the host (the plain-write gate cannot prove the stores of two threads disjoint), so the recognizer never sees it.
+# the twin of a coalesced case: lanes on threadIdx().x, outputs on threadIdx().y
+spl_is_transposed(plan) = any(k -> endswith(string(k.args[1].args[1]), "_s!") && occursin("__jx = (threadIdx()).y", STADE.io_expr_to_source(k)), plan.kernels)
+
+function spl_coal_checks()
+    bad = 0
+    check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
+    for (name, src, entry, mk, want) in SPL_COAL_CASES
+        try
+            args = mk(1)
+            plain = spl_run(src, entry, args, 0)
+            on = spl_run(src, entry, args, 16)
+            off = spl_run(src, entry, args, 16; coal = false)
+            err(r) = maximum(maximum(abs.(x .- y) ./ max.(abs.(x), abs.(y), 1.0)) for (x, y) in zip(r.outs, plain.outs) if x isa AbstractArray; init = 0.0)
+            changed = sum(count(x .!= y) for (x, y) in zip(on.outs, args) if x isa AbstractArray; init = 0)
+            tw_on = spl_is_transposed(on.plan)
+            tw_off = spl_is_transposed(off.plan)
+            check(tw_on == want && !tw_off, "$name: layout with the keyword on: transposed $tw_on (expected $want), keyword off: transposed $tw_off")
+            check(any(n -> endswith(n, "_s!"), on.launched) && err(on) <= 1e-12 && isempty(on.conflicts) && changed > 0, "$name: the twin runs, error $(round(err(on), sigdigits = 3)), conflicts $(length(on.conflicts)), changed $changed")
+            check(err(off) <= 1e-12 && isempty(off.conflicts), "$name: keyword off, error $(round(err(off), sigdigits = 3)), conflicts $(length(off.conflicts))")
+            on4 = spl_run(src, entry, args, 4)
+            check(err(on4) <= 1e-12 && isempty(on4.conflicts), "$name: 4 outputs per block, error $(round(err(on4), sigdigits = 3)), conflicts $(length(on4.conflicts))")
+            if !want
+                check(STADE.io_expr_to_source(on.plan.host) == STADE.io_expr_to_source(off.plan.host) && join(STADE.io_expr_to_source.(on.plan.kernels), "\n") == join(STADE.io_expr_to_source.(off.plan.kernels), "\n"), "$name: a kernel with another stride has the same plan with the keyword on and off")
+            end
+            if want
+                # the host launches (32 lanes, L outputs) with ceil(n / L) blocks: a different count would leave outputs undone, which the comparison above would show
+                hs = STADE.io_expr_to_source(on.plan.host)
+                check(occursin("Base.cld(", hs) && occursin(", 16)", hs), "$name: the host divides the output count by the outputs per block")
+            end
+        catch e
+            check(false, "$name: error " * first(split(sprint(showerror, e), "\n")))
+        end
+    end
+    return bad
+end
+
+function spl_coal_direct_checks()
+    bad = 0
+    check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
+    loop(src) = (:A, Meta.parse(src))
+    unit = STADE.cgen_split_unit_refs
+    check(unit([loop("for u = 1:m\n s[(r - 1) * m + u] = s[(r - 1) * m + u] + v\n end")]), "criterion: a store and a load that move by one element are accepted")
+    check(unit([loop("for u = m:-1:1\n s[(r - 1) * m + u] = v\n end")]), "criterion: a descending loop with a unit index is accepted")
+    check(unit([loop("for u = 1:m\n s[(r - 1) * m + (m - u)] = v\n end")]), "criterion: a coefficient of minus one is accepted")
+    check(!unit([loop("for i = 1:m\n s[(i - 1) * n + j] = v\n end")]), "criterion: a stride is refused")
+    check(!unit([loop("for u = 1:m\n s[(r - 1) * m + u] = s[(r - 1) * m + u] + w[(u - 1) * n + r]\n end")]), "criterion: one unit reference and one stride refuse")
+    check(!unit([loop("for u = 1:m\n k = 2 * u\n s[k] = v\n end")]), "criterion: an index through a scalar of the loop body is refused")
+    check(!unit([loop("for u = 1:m\n k = 2 * u\n s[(r - 1) * m + u] = s[(r - 1) * m + u] + x[k]\n end")]), "criterion: a load through a scalar of the loop body is refused")
+    check(!unit([loop("for u = 1:m\n s[(r - 1) * m + u] = s[(r - 1) * m + u] + x[idx[u]]\n end")]), "criterion: a gathered index is refused")
+    check(!unit([loop("for u = 1:m\n y[r] = y[r] + v\n end")]), "criterion: no reference that uses the loop variable is refused")
+    check(!unit([(:S, Meta.parse("a = 1"))]), "criterion: no lane loop is refused")
+    return bad
+end
+
 function spl_direct_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
@@ -569,6 +694,7 @@ function spl_direct_checks()
     catch e
         check(false, "direct checks: error " * first(split(sprint(showerror, e), "\n")))
     end
+    bad += spl_coal_direct_checks()
     return bad
 end
 
@@ -586,7 +712,7 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
         cases = [
             ("no barrier between groups", "prev !== nothing && g !== prev && push!(body, Expr(:call, :sync_threads))", "false && push!(body, Expr(:call, :sync_threads))"),
             ("no barrier after the partial sums", "        push!(body, Expr(:call, :sync_threads))\n        for (k, (v, p)) in enumerate(accs)\n            terms", "        for (k, (v, p)) in enumerate(accs)\n            terms"),
-            ("lane stride is wrong", "Expr(:call, :(:), first_, lp.step * L, lp.hi)", "Expr(:call, :(:), first_, lp.step * (L - 1), lp.hi)"),
+            ("lane stride is wrong", "Expr(:call, :(:), first_, lp.step * nlane, lp.hi)", "Expr(:call, :(:), first_, lp.step * (nlane - 1), lp.hi)"),
             ("partial sum of a reduction loop starts from the pre-value", "push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, lane_loop(lp, newbody))", "push!(body, Expr(:(=), p, v))\n            end\n            push!(body, lane_loop(lp, newbody))"),
             ("partial sum of a storing loop starts from the pre-value", "push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, Expr(:if, act", "push!(body, Expr(:(=), p, v))\n            end\n            push!(body, Expr(:if, act"),
             ("every lane runs the top-level stores", "Expr(:if, Expr(:&&, act, Expr(:call, :(==), ly, 1)), Expr(:block, s))", "Expr(:if, act, Expr(:block, s))"),
@@ -600,7 +726,7 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("the register limit is not checked", "fts = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), tprobe), 32 * tw.lanes)", "fts = true"),
             ("the fallback twin is never launched", "other = Any[emit_if(Expr(:&&, t.cond, fits2), Any[launch2], Any[e])]", "other = Any[e]"),
             ("the register limit of the fallback twin is not checked", "emit_if(Expr(:&&, t.cond, fits2), Any[launch2], Any[e])", "emit_if(Expr(:&&, t.cond, true), Any[launch2], Any[e])"),
-            ("the fallback twin is built with the lanes of the first", "t2 = cgen_split_kernel(k, fallback; min_inner, max_out)", "t2 = cgen_split_kernel(k, L; min_inner, max_out)"),
+            ("the fallback twin is built with the lanes of the first", "t2 = cgen_split_kernel(k, fallback; min_inner, max_out, coalesce)", "t2 = cgen_split_kernel(k, L; min_inner, max_out, coalesce)"),
             ("the clamp of the thread index is dropped", "Expr(:(=), :__tid, Expr(:call, :min, :__tidr, n_iter))]", "Expr(:(=), :__tid, :__tidr)]"),
             # ---- v0.4.39: accumulators in a storing loop ----
             ("a storing loop: an accumulator may feed a scalar statement", "                            v in cgen_split_vars(s2.args[2]) && return nothing\n                        else", "                            false && return nothing\n                        else"),
@@ -608,6 +734,15 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("a storing loop: the partial sum of an accumulator is not formed", "            accs, newbody = cgen_split_partials(lp)\n            for (v, p) in accs\n                push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, Expr(:if, act", "            accs, newbody = cgen_split_partials(lp)\n            newbody = lp.body; accs = Tuple{Symbol,Symbol}[]\n            for (v, p) in accs\n                push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, Expr(:if, act"),
             ("one array stored by two loops at different indices is accepted", "                                canon0 == canon || return nothing", "                                false && return nothing"),
             ("one array stored by two loops from different starts is accepted", "                                (i0 == i || (lo0 == lp.lo && step0 == lp.step)) || return nothing", "                                false && return nothing"),
+            # ---- v0.4.60: split_coalesce ----
+            ("a stride reference is accepted as unit", "                elseif c !== 0\n                    ok = false", "                elseif c !== 0\n                    n_unit += 0"),
+            ("an index through a scalar of the loop body is accepted", "if !isempty(intersect(cgen_split_vars(idx), assigned))\n                    ok = false\n                    return\n                end", "if false\n                    ok = false\n                    return\n                end"),
+            ("a loop with no unit reference is accepted", "return n_unit > 0", "return true"),
+            ("the keyword is ignored", "tr = coalesce && cgen_split_unit_refs(items)", "tr = cgen_split_unit_refs(items)"),
+            ("the lane loop keeps the stride of the plain layout", "Expr(:call, :(:), first_, lp.step * nlane, lp.hi)", "Expr(:call, :(:), first_, lp.step * L, lp.hi)"),
+            ("the host divides by 32 outputs per block", "tw.n_iter, tw.nout))", "tw.n_iter, 32))"),
+            ("the output index of a block ignores the block width", "QuoteNode(:x)), 1), nout), jx)),", "QuoteNode(:x)), 1), 32), jx)),"),
+            ("every lane adds the same partial", "(slot + k - 1) * 32 * L + l, Expr(:call, :*, Expr(:call, :-, jx, 1), 32))) for l in 1:nlane]", "(slot + k - 1) * 32 * L + 1, Expr(:call, :*, Expr(:call, :-, jx, 1), 32))) for l in 1:nlane]"),
             ("update loops run for inactive threads", "push!(body, Expr(:if, act, Expr(:block, lane_loop(lp, newbody))))", "push!(body, lane_loop(lp, newbody))"),
         ]
         mktempdir() do tmp
