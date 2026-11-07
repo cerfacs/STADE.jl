@@ -597,6 +597,99 @@ function spl_run_body(src::String, entry::Symbol, args, split::Int, maxt, fallba
     return (outs = outs, launched = copy(Main.CUDA.LAUNCHED), conflicts = copy(Main.CUDA.VIOLATIONS), plan = plan)
 end
 
+# v0.4.65 (`split_gather`): a lane loop whose index comes from an array element (`j = nbr[..]`, then `phi[j]`) gets the twin below `split_min_inner`, and up to 10^8 outputs.
+const SPL_GATHER_SRC = """function spl_gat(nbr, phi, out, n, deg)
+    for c = 1:n
+        s = 0.0
+        for k = 1:deg
+            j = nbr[(c - 1) * deg + k]
+            s += phi[j]
+        end
+        out[c] = s
+    end
+    return nothing
+end"""
+# the same shape with a contiguous read: the scalar `hv` comes from an array but is not an index
+const SPL_NOGATHER_SRC = """function spl_nog(h, w, out, n, deg)
+    for c = 1:n
+        s = 0.0
+        for k = 1:deg
+            hv = h[(c - 1) * deg + k]
+            s += hv * w[k]
+        end
+        out[c] = s
+    end
+    return nothing
+end"""
+
+function spl_run_g(src::String, entry::Symbol, args, gather::Int; max_out::Int = 64, split::Int = 16, fallback::Int = 0)
+    spl_init!()
+    return Base.invokelatest(spl_run_g_body, src, entry, args, gather, max_out, split, fallback)
+end
+function spl_run_g_body(src::String, entry::Symbol, args, gather::Int, max_out::Int, split::Int, fallback::Int)
+    Main.CUDA.MAXT[] = name -> 1024
+    plan = STADE.stade_gpu(Meta.parse(src), STADE.cgen_backend_cuda(); warp_atomics = false, shared_private = false, inbounds = false,
+                           split_reduce = split, split_fallback = fallback, split_min_inner = 256, split_max_out = max_out, split_gather = gather, contraction = 0)
+    for k in plan.kernels; Core.eval(Main, k); end
+    Core.eval(Main, plan.host)
+    host = plan.host.args[1].args[1]
+    dev = Any[a isa AbstractArray ? Main.CUDA.TArray(copy(a)) : a for a in args]
+    empty!(Main.CUDA.LAUNCHED); empty!(Main.CUDA.VIOLATIONS)
+    Base.invokelatest(getfield(Main, host), dev...)
+    outs = Any[a isa Main.CUDA.TArray ? copy(a.data) : a for a in dev]
+    return (outs = outs, launched = copy(Main.CUDA.LAUNCHED), conflicts = copy(Main.CUDA.VIOLATIONS), plan = plan)
+end
+
+function spl_gather_checks()
+    bad = 0
+    check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
+    gargs(n, deg) = (r = MersenneTwister(7); Any[rand(r, 1:n, n * deg), randn(r, n), zeros(n), n, deg])
+    twin(r) = any(nm -> endswith(nm, "_s!"), r.launched)
+    try
+        # direct: the recognizer on handmade loops
+        gl(src) = STADE.cgen_split_gather_loop(STADE.cgen_split_loop(Meta.parse(src)))
+        check(gl("for k = 1:deg\n j = nbr[k]\n s = s + phi[j]\n end"), "gather: a read through an index scalar is a gather")
+        check(gl("for k = 1:deg\n j = nbr[k]\n m = j + 1\n s = s + phi[m]\n end"), "gather: an index scalar derived from another is a gather")
+        check(gl("for k = 1:deg\n j = nbr[k]\n phib[j] = phib[j] + v\n end"), "gather: a plain store through an index scalar is a gather")
+        check(!gl("for k = 1:deg\n hv = h[k]\n s = s + hv * w[k]\n end"), "gather: a scalar read from an array that is only a value is not a gather")
+        check(!gl("for k = 1:deg\n s = s + w[(c - 1) * deg + k]\n end"), "gather: an affine index is not a gather")
+        check(!gl("for k = 1:deg\n m = 2 * k\n s = s + w[m]\n end"), "gather: an index scalar with no array read is not a gather")
+        # kernel: the gate and the plan text
+        a = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 4), 4)
+        b = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 4), 0)
+        ref = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 4), 0; split = 0)
+        err = maximum(abs.(a.outs[3] .- ref.outs[3]))
+        check(twin(a) && err <= 1e-12 && isempty(a.conflicts) && count(a.outs[3] .!= 0) > 0, "gather: 4 neighbours, 100 outputs above max_out: the twin runs, error $(round(err, sigdigits = 3)), conflicts $(length(a.conflicts))")
+        check(!twin(b), "gather: split_gather = 0 keeps the plain kernel for 4 neighbours")
+        c = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 2), 4)
+        check(!twin(c), "gather: 2 neighbours is below split_gather = 4: the plain kernel")
+        hs = STADE.io_expr_to_source(a.plan.host)
+        check(occursin("<= 100000000", hs) && occursin(">= 4", hs), "gather: the host condition has the gather bounds (10^8 outputs, inner trip 4)")
+        check(!occursin("<= 100000000", STADE.io_expr_to_source(b.plan.host)), "gather: split_gather = 0 has no gather bound in the host text")
+        # lanes: a gather loop of at most `fallback` iterations takes the twin with `fallback` lanes, a longer one the twin with all L lanes
+        tw8(r) = any(nm -> endswith(nm, "_s8!"), r.launched)
+        tw16(r) = any(nm -> endswith(nm, "_s!"), r.launched)
+        f4 = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 4), 4; fallback = 8)
+        f12 = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 12), 4; fallback = 8)
+        f8 = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 8), 4; fallback = 8)
+        r4 = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 4), 0; split = 0)
+        r12 = spl_run_g(SPL_GATHER_SRC, :spl_gat, gargs(100, 12), 0; split = 0)
+        e4 = maximum(abs.(f4.outs[3] .- r4.outs[3])); e12 = maximum(abs.(f12.outs[3] .- r12.outs[3]))
+        check(tw8(f4) && !tw16(f4) && e4 <= 1e-12 && isempty(f4.conflicts), "gather: 4 neighbours with a fallback of 8 lanes run the 8-lane twin (error $(round(e4, sigdigits = 3)))")
+        check(tw8(f8) && !tw16(f8), "gather: 8 neighbours run the 8-lane twin")
+        check(tw16(f12) && !tw8(f12) && e12 <= 1e-12 && isempty(f12.conflicts), "gather: 12 neighbours run the 16-lane twin (error $(round(e12, sigdigits = 3)))")
+        # a kernel without a gather keeps the very same plan
+        ng = Any[randn(MersenneTwister(3), 37 * 9), randn(MersenneTwister(4), 9), zeros(37), 37, 9]
+        n1 = spl_run_g(SPL_NOGATHER_SRC, :spl_nog, ng, 4)
+        n0 = spl_run_g(SPL_NOGATHER_SRC, :spl_nog, ng, 0)
+        same = STADE.io_expr_to_source(n1.plan.host) == STADE.io_expr_to_source(n0.plan.host) && join(STADE.io_expr_to_source.(n1.plan.kernels), "\n") == join(STADE.io_expr_to_source.(n0.plan.kernels), "\n")
+        check(same && !twin(n1), "gather: a contiguous inner loop has the same plan with split_gather = 4 and 0, and runs the plain kernel")
+    catch e
+        check(false, "gather: error " * first(split(sprint(showerror, e), "\n")))
+    end
+    return bad
+end
+
 function spl_unit_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
@@ -670,6 +763,7 @@ function spl_unit_checks()
         check(false, "fallback: error " * first(split(sprint(showerror, e), "\n")))
     end
     bad += spl_coal_checks()
+    bad += spl_gather_checks()
     return bad
 end
 
@@ -787,7 +881,7 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("the register limit is not checked", "fts = Expr(:call, :>=, Expr(:call, Expr(:., :CUDA, QuoteNode(:maxthreads)), tprobe), 32 * tw.lanes)", "fts = true"),
             ("the fallback twin is never launched", "other = Any[emit_if(Expr(:&&, t.cond, fits2), Any[launch2], Any[e])]", "other = Any[e]"),
             ("the register limit of the fallback twin is not checked", "emit_if(Expr(:&&, t.cond, fits2), Any[launch2], Any[e])", "emit_if(Expr(:&&, t.cond, true), Any[launch2], Any[e])"),
-            ("the fallback twin is built with the lanes of the first", "t2 = cgen_split_kernel(k, fallback; min_inner, max_out, coalesce)", "t2 = cgen_split_kernel(k, L; min_inner, max_out, coalesce)"),
+            ("the fallback twin is built with the lanes of the first", "t2 = cgen_split_kernel(k, fallback; min_inner, max_out, coalesce, gather)", "t2 = cgen_split_kernel(k, L; min_inner, max_out, coalesce, gather)"),
             ("the clamp of the thread index is dropped", "Expr(:(=), :__tid, Expr(:call, :min, :__tidr, n_iter))]", "Expr(:(=), :__tid, :__tidr)]"),
             # ---- v0.4.39: accumulators in a storing loop ----
             ("a storing loop: an accumulator may feed a scalar statement", "                            v in cgen_split_vars(s2.args[2]) && return nothing\n                        else", "                            false && return nothing\n                        else"),
@@ -795,6 +889,14 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("a storing loop: the partial sum of an accumulator is not formed", "            accs, newbody = cgen_split_partials(lp)\n            for (v, p) in accs\n                push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, Expr(:if, act", "            accs, newbody = cgen_split_partials(lp)\n            newbody = lp.body; accs = Tuple{Symbol,Symbol}[]\n            for (v, p) in accs\n                push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, Expr(:if, act"),
             ("one array stored by two loops at different indices is accepted", "                                canon0 == canon || return nothing", "                                false && return nothing"),
             ("one array stored by two loops from different starts is accepted", "                                (i0 == i || (lo0 == lp.lo && step0 == lp.step)) || return nothing", "                                false && return nothing"),
+            # ---- v0.4.65: split_gather ----
+            ("gather: no loop is ever a gather", "    isempty(gs) && return false\n    found = false", "    return false\n    found = false"),
+            ("gather: every loop with an array-read scalar is a gather", "    return found\nend\n\n# The split kernel", "    return true\nend\n\n# The split kernel"),
+            ("gather: the inner trip bound is dropped", "Expr(:call, :>=, gmax, gather))", "true)"),
+            ("gather: the output bound of the plain twin applies", "max(max_out, cgen_split_gather_max_out())", "max_out"),
+            ("gather: the gather condition is not added", "        cond = Expr(:||, cond, gcond)", "        cond = cond"),
+            ("gather: the short-trip twin is never preferred", "                        return emit_if(short, Any[launch2], Any[emit_if(Expr(:&&, t.cond, fits), Any[launch], other)])", "                        nothing"),
+            ("gather: the short-trip twin ignores the trip", "Expr(:&&, Expr(:&&, t.cond, Expr(:call, :<=, t.maxtrip, twins2[base].lanes)), fits2)", "Expr(:&&, t.cond, fits2)"),
             # ---- v0.4.61 candidate: an empty loop ----
             ("an empty loop makes the kernel unsplittable", "(s.head === :for && length(s.args) == 2 && s.args[2] isa Expr && all(x -> x isa LineNumberNode, s.args[2].args)) && continue", "false && continue"),
             ("a scalar read of a later loop is not counted", "                        add!(st.args[2], d2)\n                        push!(d2, st.args[1])", "                        push!(d2, st.args[1])"),

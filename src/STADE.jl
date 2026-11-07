@@ -12252,8 +12252,53 @@ function cgen_split_unit_refs(items)
     return n_unit > 0
 end
 
+cgen_split_gather_max_out() = 100000000
+
+# split_gather: true when a lane loop reads or writes an array at an index that comes from an array element (`j = nbr[..]`, then `phi[j]`), directly or through other
+# scalars. Its iterations are dependent loads with no data between them, so lanes hide latency even when the loop has only a few iterations; an index that is affine in
+# the loop variable (a contiguous read) gains nothing from lanes below `split_min_inner`.
+function cgen_split_gather_loop(lp)
+    gs = Set{Symbol}()
+    changed = true
+    while changed
+        changed = false
+        for st in lp.body
+            cgen_split_is_scalar(st) || continue
+            v = st.args[1]
+            v in gs && continue
+            if cgen_expr_has_ref(st.args[2]) || !isdisjoint(cgen_split_vars(st.args[2]), gs)
+                push!(gs, v); changed = true
+            end
+        end
+    end
+    isempty(gs) && return false
+    found = false
+    function visit(e)
+        found && return
+        e isa Expr || return
+        if e.head === :ref && length(e.args) == 2 && !isdisjoint(cgen_split_vars(e.args[2]), gs)
+            found = true
+            return
+        end
+        foreach(visit, e.args)
+    end
+    for st in lp.body
+        site = cgen_atomic_site(st)
+        if site !== nothing
+            !isdisjoint(cgen_split_vars(site.idx), gs) && return true
+            visit(site.val)
+        elseif cgen_split_is_scalar(st)
+            visit(st.args[2])
+        else
+            !isdisjoint(cgen_split_vars(st.args[1].args[2]), gs) && return true
+            visit(st.args[2])
+        end
+    end
+    return found
+end
+
 # The split kernel of a plain kernel, or nothing: (kdef, name, nslots, cond)
-function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out(), coalesce::Bool = false)
+function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out(), coalesce::Bool = false, gather::Int = 0)
     parts = cgen_kernel_parts(kdef)
     parts === nothing && return nothing
     fargs = Symbol[parts.sig.args[2:end]...]
@@ -12321,6 +12366,7 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
     atomic_arrs = Set{Symbol}()
     nslots = 0
     trips = Any[]
+    gtrips = Any[]
     out_items = Any[]
     # the start value of an accumulator: the last scalar assignment before the loop must exist and must not be an integer literal
     function start_ok(i, vs)
@@ -12338,6 +12384,7 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
         elseif kind === :R || kind === :A
             lp = cgen_split_loop(s)
             push!(trips, cgen_trip_count(lp.lo, lp.step, lp.hi))
+            gather >= 1 && cgen_split_gather_loop(lp) && push!(gtrips, trips[end])
             later = reads_after(i)
             assigned = Symbol[st.args[1] for st in lp.body if cgen_split_is_scalar(st)]
             if kind === :R
@@ -12539,10 +12586,16 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
     trips = unique(trips)
     maxtrip = length(trips) == 1 ? trips[1] : Expr(:call, :max, trips...)
     cond = Expr(:&&, Expr(:&&, Expr(:call, :>=, n_iter, 1), Expr(:call, :<=, n_iter, max_out)), Expr(:call, :>=, maxtrip, min_inner))
+    if !isempty(gtrips) && gather < min_inner
+        gtrips = unique(gtrips)
+        gmax = length(gtrips) == 1 ? gtrips[1] : Expr(:call, :max, gtrips...)
+        gcond = Expr(:&&, Expr(:&&, Expr(:call, :>=, n_iter, 1), Expr(:call, :<=, n_iter, max(max_out, cgen_split_gather_max_out()))), Expr(:call, :>=, gmax, gather))
+        cond = Expr(:||, cond, gcond)
+    end
     for c in unique(strides)
         cond = Expr(:&&, cond, Expr(:call, :!=, c, 0))
     end
-    return (kdef = kd, name = name, nslots = nslots, n_iter = n_iter, cond = cond, lanes = L, nout = nout, transposed = tr)
+    return (kdef = kd, name = name, nslots = nslots, n_iter = n_iter, cond = cond, lanes = L, nout = nout, transposed = tr, maxtrip = isempty(gtrips) ? nothing : maxtrip)
 end
 
 # the kernels a launch statement starts, by name
@@ -12588,7 +12641,7 @@ end
 # Adds the split twin of every kernel that has one and wraps its launch statement: the twin when its condition holds, the statement as it was otherwise.
 # Returns (host, kernels). With no twin the arguments come back as they are.
 # fallback: a second twin with that many lanes (v0.4.43), launched when the block of L lanes does not fit the registers of the first and the smaller block does
-function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out(), fallback::Int = 0, coalesce::Bool = false)
+function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out(), fallback::Int = 0, coalesce::Bool = false, gather::Int = 0)
     L >= 2 || return (host, kernels)
     twins = Dict{Symbol,Any}()
     twins2 = Dict{Symbol,Any}()
@@ -12596,10 +12649,10 @@ function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; mi
         k.head === :function || continue
         nm = k.args[1].args[1]
         (cgen_is_coarse_variant(k) || endswith(string(nm), "_p!")) && continue
-        t = cgen_split_kernel(k, L; min_inner, max_out, coalesce)
+        t = cgen_split_kernel(k, L; min_inner, max_out, coalesce, gather)
         t === nothing || (twins[nm] = t)
         if t !== nothing && fallback >= 2 && fallback < L
-            t2 = cgen_split_kernel(k, fallback; min_inner, max_out, coalesce)
+            t2 = cgen_split_kernel(k, fallback; min_inner, max_out, coalesce, gather)
             if t2 !== nothing
                 sn = string(t2.name)
                 n2 = Symbol(endswith(sn, "!") ? sn[1:end-1] * string(fallback) * "!" : sn * string(fallback))
@@ -12637,6 +12690,11 @@ function cgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int, backend; mi
                 if haskey(twins2, base)
                     launch2, fits2 = twin_launch(twins2[base])
                     other = Any[emit_if(Expr(:&&, t.cond, fits2), Any[launch2], Any[e])]
+                    # a kernel with a gather loop and no longer loop: lanes beyond the longest trip idle, so the twin with fewer lanes goes first when it covers the trip
+                    if t.maxtrip !== nothing
+                        short = Expr(:&&, Expr(:&&, t.cond, Expr(:call, :<=, t.maxtrip, twins2[base].lanes)), fits2)
+                        return emit_if(short, Any[launch2], Any[emit_if(Expr(:&&, t.cond, fits), Any[launch], other)])
+                    end
                 end
                 return emit_if(Expr(:&&, t.cond, fits), Any[launch], other)
             end
@@ -16632,8 +16690,171 @@ function cgen_rowblock_apply(host::Expr, kernels::Vector{Expr}, backend; minN::I
     return (newhost, newk)
 end
 
+# ---- column-block twin (CUDA, col_block) ----
+# A push-form layer, the flat loop `for idx = 1:R*N` with `i = div(idx - 1, N) + 1`, `j = mod(idx - 1, N) + 1` and `z[j] += w[idx] * v[i]`, sends every thread to an atomic on its
+# column. The R rows of a column come one after another at one address, and where `z` sits decides how well the atomics of the N columns spread over the memory banks (V100,
+# n = 5120: 384 to 426 us for the middle layer, 250 us for the same reads with the twin). The twin gives a block of 32 columns x TY row lanes a tile of `cgen_colblock_rows()` rows. A thread
+# adds the products of its rows in a register (a warp still reads 32 adjacent weights), the TY lanes add up in shared memory in a fixed order, and one thread per column adds the tile's total.
+# The match is exact and structural (see cgen_colblock_kernel) and the twin is launched only when the run-time condition proves that the flat range is whole rows.
+cgen_colblock_ty() = 8
+cgen_colblock_rows() = 128
+cgen_colblock_min_rows() = 64
+cgen_colblock_max_sites() = 4
+
+# The twin of a flat kernel whose accumulation targets the column, or nothing. Returns (kdef, name, base, cond, blocks, fargs).
+function cgen_colblock_kernel(kdef, backend, minN::Int)
+    parts = cgen_kernel_parts(kdef)
+    parts === nothing && return nothing
+    backend.default_precision === Float64 || return nothing
+    fargs = Symbol[parts.sig.args[2:end]...]
+    params = Set{Symbol}(fargs)
+    n_iter = parts.guard.args[1].args[3]
+    issubset(cgen_split_vars(n_iter), params) || return nothing
+    rest = Any[x for x in parts.rest if !(x isa LineNumberNode)]
+    length(rest) >= 4 || return nothing
+    s1 = rest[1]
+    (s1 isa Expr && s1.head === :(=) && s1.args[1] isa Symbol) || return nothing
+    idxv = s1.args[1]
+    ix = cgen_rowblock_index(s1.args[2])
+    ix === nothing && return nothing
+    ix.step == 1 || return nothing
+    body = rest[2:end]
+    dv = Any[(k, cgen_rowblock_derived(s)) for (k, s) in enumerate(body) if cgen_rowblock_derived(s) !== nothing]
+    length(dv) == 2 || return nothing
+    divs = [d for (_, d) in dv if d.kind === :div]; mods = [d for (_, d) in dv if d.kind === :mod]
+    (length(divs) == 1 && length(mods) == 1) || return nothing
+    iv, jv = divs[1].var, mods[1].var
+    N = divs[1].N
+    (mods[1].N == N && mods[1].r == divs[1].r) || return nothing
+    N isa Symbol && N in params || return nothing
+    r = divs[1].r
+    idxm1 = Expr(:call, :-, idxv, 1)
+    if r isa Symbol
+        ks = findall(s -> s isa Expr && s.head === :(=) && s.args[1] === r && s.args[2] == idxm1, body)
+        length(ks) == 1 || return nothing
+    else
+        r == idxm1 || return nothing
+    end
+    whole = Expr(:block, rest...)
+    asg = Dict{Symbol,Int}()
+    for s in rest
+        (s isa Expr && s.head === :(=) && s.args[1] isa Symbol) && (asg[s.args[1]] = get(asg, s.args[1], 0) + 1)
+    end
+    for v in (idxv, iv, jv)
+        get(asg, v, 0) == 1 || return nothing
+    end
+    # the statements: scalars, stores and atomic sites only; the target of an accumulation is the column itself
+    sites = Any[]
+    keep = Any[]
+    for s in body
+        cgen_rowblock_derived(s) !== nothing && continue
+        if cgen_split_is_scalar(s)
+            push!(keep, s)
+        elseif cgen_atomic_site(s) !== nothing && cgen_split_is_store(s)
+            site = cgen_atomic_site(s)
+            site.idx === jv || return nothing
+            cgen_count_symbol(whole, site.arr) == 1 || return nothing
+            push!(sites, s)
+            push!(keep, s)
+        elseif cgen_split_is_store(s)
+            push!(keep, s)
+        else
+            return nothing
+        end
+    end
+    isempty(sites) && return nothing
+    length(sites) <= cgen_colblock_max_sites() || return nothing
+    for s in keep
+        (s isa Expr && s.head === :(=) && s.args[1] isa Symbol && s.args[1] in params) && return nothing
+    end
+    base = parts.sig.args[1]
+    sn = string(base)
+    name = Symbol(endswith(sn, "!") ? sn[1:end-1] * "_k!" : sn * "_k")
+    nrow = Expr(:call, :div, n_iter, N)
+    conds = Any[Expr(:call, :>=, N, minN), Expr(:call, :>, n_iter, 0), Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0), Expr(:call, :>=, nrow, cgen_colblock_min_rows()), Expr(:call, :<=, nrow, 65535 * cgen_colblock_rows())]
+    cond = foldl((x, y) -> Expr(:&&, x, y), conds)
+    TY = cgen_colblock_ty(); R = cgen_colblock_rows()
+    acc = Symbol[Symbol("__cb_a", k) for k in eachindex(sites)]
+    sh = Symbol[Symbol("__cb_s", k) for k in eachindex(sites)]
+    stmts = Any[]
+    for s in keep
+        k = findfirst(x -> x === s, sites)
+        if k === nothing
+            push!(stmts, s)
+        else
+            push!(stmts, Expr(:(=), acc[k], Expr(:call, :+, acc[k], cgen_atomic_site(s).val)))
+        end
+    end
+    tx = Expr(:call, :Int, Expr(:., Expr(:call, :threadIdx), QuoteNode(:x)))
+    ty = Expr(:call, :Int, Expr(:., Expr(:call, :threadIdx), QuoteNode(:y)))
+    pre = Any[Expr(:(=), jv, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, Expr(:call, :Int, Expr(:., Expr(:call, :blockIdx), QuoteNode(:x))), 1), 32), tx)),
+              Expr(:(=), :__cb_t, ty),
+              Expr(:(=), :__cb_r0, Expr(:call, :*, Expr(:call, :-, Expr(:call, :Int, Expr(:., Expr(:call, :blockIdx), QuoteNode(:y))), 1), R)),
+              Expr(:(=), :__cb_r1, Expr(:call, :min, Expr(:call, :+, :__cb_r0, R), nrow))]
+    for k in eachindex(sites)
+        push!(pre, Expr(:(=), acc[k], 0.0))
+        push!(pre, Expr(:(=), sh[k], Expr(:call, Expr(:., :CUDA, QuoteNode(:CuStaticSharedArray)), :Float64, Expr(:tuple, 32, TY))))
+    end
+    loop = Expr(:for, Expr(:(=), :__cb_i, Expr(:call, :(:), Expr(:call, :+, :__cb_r0, :__cb_t), TY, :__cb_r1)),
+                Expr(:block, Expr(:(=), iv, :__cb_i),
+                     Expr(:(=), idxv, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, iv, 1), N), jv)),
+                     stmts...))
+    guarded = Expr(:if, Expr(:call, :<=, jv, N), Expr(:block, loop))
+    post = Any[Expr(:(=), Expr(:ref, sh[k], tx, :__cb_t), acc[k]) for k in eachindex(sites)]
+    push!(post, Expr(:call, Expr(:., :CUDA, QuoteNode(:sync_threads))))
+    fin = Any[]
+    flush = Any[]
+    for (k, s) in enumerate(sites)
+        v = Symbol("__cb_t", k)
+        terms = Any[Expr(:ref, sh[k], tx, l) for l in 1:TY]
+        push!(fin, Expr(:(=), v, foldl((x, y) -> Expr(:call, :+, x, y), terms)))
+        push!(flush, cgen_atomic_rebuild(s, v))
+    end
+    push!(post, Expr(:if, Expr(:&&, Expr(:call, :(==), :__cb_t, 1), Expr(:call, :<=, jv, N)), Expr(:block, fin..., flush...)))
+    newbody = Expr(:block, pre..., guarded, post..., emit_return_nothing())
+    newsig = Expr(:call, name, parts.sig.args[2:end]...)
+    blocks = Expr(:tuple, Expr(:call, Expr(:., :Base, QuoteNode(:cld)), N, 32), Expr(:call, Expr(:., :Base, QuoteNode(:cld)), nrow, R))
+    return (kdef = Expr(:function, newsig, newbody), name = name, base = base, cond = cond, blocks = blocks, fargs = fargs)
+end
+
+# Adds the column-block twin of every kernel that has one and wraps the launches of the plain kernel: the twin when its condition holds, the launch as it was otherwise.
+function cgen_colblock_apply(host::Expr, kernels::Vector{Expr}, backend; minN::Int = 256)
+    twins = Dict{Symbol,Any}()
+    for k in kernels
+        k.head === :function || continue
+        nm = k.args[1].args[1]
+        (cgen_is_coarse_variant(k) || any(suf -> endswith(string(nm), suf), ("_p!", "_c!", "_r!", "_s!", "_k!"))) && continue
+        t = cgen_colblock_kernel(k, backend, minN)
+        t === nothing || (twins[nm] = t)
+    end
+    isempty(twins) && return (host, kernels)
+    used = Set{Symbol}()
+    function walk(e)
+        e isa Expr || return e
+        if e.head === :macrocall && e.args[1] === backend.launch_macro && e.args[end] isa Expr && e.args[end].head === :call && e.args[end].args[1] in keys(twins)
+            call = e.args[end]
+            t = twins[call.args[1]]
+            if Symbol[x for x in call.args[2:end] if x isa Symbol] == t.fargs && length(call.args) - 1 == length(t.fargs)
+                tcall = Expr(:call, t.name, call.args[2:end]...)
+                lnch = Expr(:macrocall, backend.launch_macro, nothing, Expr(:(=), backend.threads_kw, Expr(:tuple, 32, cgen_colblock_ty())), Expr(:(=), backend.blocks_kw, t.blocks), tcall)
+                push!(used, call.args[1])
+                return emit_if(t.cond, Any[lnch], Any[e])
+            end
+            return e
+        end
+        return Expr(e.head, Any[walk(a) for a in e.args]...)
+    end
+    newhost = walk(host)
+    isempty(used) && return (host, kernels)
+    newk = copy(kernels)
+    for nm in sort(collect(used); by = string)
+        push!(newk, twins[nm].kdef)
+    end
+    return (newhost, newk)
+end
+
 function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(),
-                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0, init_hosts = nothing)
+                   warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, split_gather::Integer = 4, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0, col_block::Integer = 0, init_hosts = nothing)
     shared_private === false && (backend = merge(backend, (shared_private = false,)))
     coarsen > 1 && backend.kernel_tag == "cuda" && (backend = merge(backend, (coarsen = Int(coarsen), coarsen_min = Int(coarsen_min), coarsen_fill = Int(coarsen_fill), coarsen_occ = Float64(coarsen_occ))))
     shared_private isa Bool || (backend = merge(backend, (private_min_ratio = Int(shared_private),)))
@@ -16658,8 +16879,9 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
     fresh = Symbol[]
     backend.kernel_tag == "cuda" && fresh_gradient && ((host, kernels, fresh) = cgen_fresh_gradient(host, kernels, backend))
     backend.kernel_tag == "cuda" && contraction >= 1 && ((host, kernels) = cgen_contraction_apply(host, kernels, backend; cmin = Int(contraction), cublas = Int(cublas)))
-    backend.kernel_tag == "cuda" && split_reduce >= 2 && ((host, kernels) = cgen_split_apply(host, kernels, Int(split_reduce), backend; min_inner = Int(split_min_inner), max_out = Int(split_max_out), fallback = Int(split_fallback), coalesce = split_coalesce))
+    backend.kernel_tag == "cuda" && split_reduce >= 2 && ((host, kernels) = cgen_split_apply(host, kernels, Int(split_reduce), backend; min_inner = Int(split_min_inner), max_out = Int(split_max_out), gather = Int(split_gather), fallback = Int(split_fallback), coalesce = split_coalesce))
     backend.kernel_tag == "cuda" && row_block >= 1 && ((host, kernels) = cgen_rowblock_apply(host, kernels, backend; minN = Int(row_block)))
+    backend.kernel_tag == "cuda" && col_block >= 1 && ((host, kernels) = cgen_colblock_apply(host, kernels, backend; minN = Int(col_block)))
     fresh_check && (host = cgen_fresh_check(host, fresh))
     inbounds && (kernels = Expr[cgen_inbounds_wrap(k) for k in kernels])
     p === Float64 && return (host = host, kernels = kernels, helpers = plan.helpers, dead_stacks = dead_stacks, compact_stacks = compact_stacks, stack_init = stack_init, fresh = fresh, empty_launches = empty_launches)
@@ -16668,8 +16890,8 @@ function stade_gpu(expr::Expr, backend; precision::Union{Nothing, Type{<:Abstrac
 end
 
 stade_cuda(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), warp_atomics::Bool = true,
-           sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0) =
-    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty, row_block)
+           sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, split_gather::Integer = 4, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0, col_block::Integer = 0) =
+    stade_gpu(expr, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, split_gather, contraction, reuse_stored, dead_stack, fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty, row_block, col_block)
 stade_amdgpu(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu(expr, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -16681,7 +16903,7 @@ stade_metal(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothi
 # reduction emits BOTH an atomic-accumulate kernel and a mapreduce call, and picks between them at run time on the
 # loop's own trip count; reduction_threshold sets where that switch happens.
 function stade_gpu_file(in_path::String, out_path::String, backend; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(),
-                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0)
+                        warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, split_gather::Integer = 4, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0, col_block::Integer = 0)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
@@ -16691,7 +16913,7 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
     # two functions that take stacks may share one `initstacks_*`: neither may change it then
     nclaim = count(d -> d isa Expr && d.args[1] isa Expr && !startswith(string(d.args[1].args[1]), "initstacks_") && any(a -> a isa Symbol && endswith(string(a), "_stack"), d.args[1].args[2:end]), defs)
     for expr in defs
-        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty, row_block, init_hosts = (nclaim > 1 ? nothing : inits))
+        plan = stade_gpu(expr, backend; precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, split_gather, contraction, reuse_stored, dead_stack, fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty, row_block, col_block, init_hosts = (nclaim > 1 ? nothing : inits))
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
         for h in plan.helpers
@@ -16711,8 +16933,8 @@ function stade_gpu_file(in_path::String, out_path::String, backend; precision::U
 end
 
 stade_cuda_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), warp_atomics::Bool = true,
-                sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0) =
-    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, contraction, reuse_stored, dead_stack, fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty, row_block)
+                sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, split_gather::Integer = 4, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0, col_block::Integer = 0) =
+    stade_gpu_file(in_path, out_path, cgen_backend_cuda(); precision, reduction_threshold, warp_atomics, sync_free_reduce, reduce_block, hoist_atomics, shared_private, gather_stencil, coarsen, coarsen_min, coarsen_fill, coarsen_occ, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, split_gather, contraction, reuse_stored, dead_stack, fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty, row_block, col_block)
 stade_amdgpu_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), inbounds::Bool = true, dead_scalars::Bool = true) =
     stade_gpu_file(in_path, out_path, cgen_backend_amdgpu(); precision, reduction_threshold, inbounds, dead_scalars)
 stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), inbounds::Bool = true, dead_scalars::Bool = true) =
@@ -17289,7 +17511,7 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
                                   keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                   mode::Symbol = :adjoint,
                                   reduction_threshold::Int = cgen_reduction_threshold_default(),
-                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0)
+                                  warp_atomics::Bool = true, sync_free_reduce::Bool = true, reduce_block::Bool = true, hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, shared_private::Union{Bool,Integer} = true, coarsen::Integer = 1, coarsen_min::Integer = 256, coarsen_fill::Integer = 65536, coarsen_occ::Real = 0.6, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, split_gather::Integer = 4, contraction::Integer = 256, reuse_stored::Integer = 1, dead_stack::Integer = 2, fresh_gradient::Bool = false, fresh_check::Bool = false, split_coalesce::Bool = true, cublas::Int = 67108864, skip_empty::Bool = true, row_block::Integer = 0, col_block::Integer = 0)
     keep_push_pop &&
         error("stade_validate_gpu_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -17303,13 +17525,13 @@ function stade_validate_gpu_file(in_path::String, out_path::String, backend;
 
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
-    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, reduce_block = reduce_block, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, merge_accum = merge_accum, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, fresh_gradient = fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty = skip_empty, row_block = row_block)
+    gpu_init = stade_gpu(gen_out.initstacks, backend; warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, reduce_block = reduce_block, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, merge_accum = merge_accum, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, split_gather, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, fresh_gradient = fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty = skip_empty, row_block = row_block, col_block = col_block)
     # reduction_threshold reaches the GPU parity oracle. Without it the choice had
     # no test that ran on a device: validate_corpus is CPU and
     # validate_offload counts loops. That is how a `dot` call no cuBLAS on
     # this cluster can execute, and a whole-array lowering of a partial
     # range, both survived in emitted code.
-    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, reduce_block = reduce_block, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, merge_accum = merge_accum, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, fresh_gradient = fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty = skip_empty, row_block = row_block, init_hosts = Dict{Symbol,Expr}(gpu_init.host.args[1].args[1] => gpu_init.host))
+    gpu_gen  = stade_gpu(mode == :hvp ? gen_out.hvp : gen_out.adjoint, backend; reduction_threshold = reduction_threshold, warp_atomics = warp_atomics, sync_free_reduce = sync_free_reduce, reduce_block = reduce_block, hoist_atomics = hoist_atomics, shared_private = shared_private, gather_stencil = gather_stencil, coarsen = coarsen, coarsen_min = coarsen_min, coarsen_fill = coarsen_fill, coarsen_occ = coarsen_occ, inbounds = inbounds, dead_scalars = dead_scalars, merge_accum = merge_accum, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, split_gather, contraction = contraction, reuse_stored = reuse_stored, dead_stack = dead_stack, fresh_gradient = fresh_gradient, fresh_check, split_coalesce, cublas, skip_empty = skip_empty, row_block = row_block, col_block = col_block, init_hosts = Dict{Symbol,Expr}(gpu_init.host.args[1].args[1] => gpu_init.host))
     gpu_init = merge(gpu_init, (host = cgen_shrink_stacks(gpu_init.host, gpu_gen.dead_stacks, gpu_gen.compact_stacks),))
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]

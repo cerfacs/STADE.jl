@@ -265,17 +265,17 @@ function validate_rowblock(; phases = (:units, :sabotage), slice = 1:typemax(Int
         text = read(joinpath(abspath(joinpath(@__DIR__, "..")), "src", "STADE.jl"), String)
         cases = [
             ("a literal inner length is accepted", "    isempty(cgen_split_vars(N)) && return nothing\n", ""),
-            ("a row and a column with different lengths are accepted", "    (mods[1].N == N && mods[1].r == divs[1].r) || return nothing\n", ""),
+            ("a row and a column with different lengths are accepted", "    (mods[1].N == N && mods[1].r == divs[1].r) || return nothing\n    issubset(cgen_split_vars(N), params) || return nothing\n", "    issubset(cgen_split_vars(N), params) || return nothing\n"),
             ("an ascending loop may start past 1", "        lo == 1 && return (lo = 1, step = 1)\n        return nothing\n", "        return (lo = lo, step = 1)\n"),
             ("a target that depends on the column is accepted", "            isempty(intersect(cgen_split_vars(site.idx), tainted)) || return nothing\n", ""),
             ("a target that does not use the row is accepted", "            iv in cgen_split_vars(site.idx) || return nothing\n", ""),
-            ("the accumulated array may be used elsewhere", "            cgen_count_symbol(whole, site.arr) == 1 || return nothing\n", ""),
-            ("a statement of any kind is allowed in the body", "        else\n            return nothing\n        end\n    end\n    isempty(sites) && return nothing", "        else\n            push!(keep, s)\n        end\n    end\n    isempty(sites) && return nothing"),
-            ("a kernel without an accumulation gets a twin", "    isempty(sites) && return nothing\n", ""),
-            ("the row, the column or the flat index may be assigned twice", "        get(asg, v, 0) == 1 || return nothing\n", ""),
+            ("the accumulated array may be used elsewhere", "            iv in cgen_split_vars(site.idx) || return nothing\n            cgen_count_symbol(whole, site.arr) == 1 || return nothing\n", "            iv in cgen_split_vars(site.idx) || return nothing\n"),
+            ("a statement of any kind is allowed in the body", "        else\n            return nothing\n        end\n    end\n    isempty(sites) && return nothing\n    length(sites) <= cgen_rowblock_max_sites()", "        else\n            push!(keep, s)\n        end\n    end\n    isempty(sites) && return nothing\n    length(sites) <= cgen_rowblock_max_sites()"),
+            ("a kernel without an accumulation gets a twin", "    isempty(sites) && return nothing\n    length(sites) <= cgen_rowblock_max_sites()", "    length(sites) <= cgen_rowblock_max_sites()"),
+            ("the row, the column or the flat index may be assigned twice", "        get(asg, v, 0) == 1 || return nothing\n    end\n    r isa Symbol", "    end\n    r isa Symbol"),
             ("the descending condition is dropped", "    ix.step == -1 && push!(conds, Expr(:call, :(==), n_iter, ix.lo))\n", ""),
-            ("the whole-rows condition is dropped", "Expr(:call, :>, n_iter, 0), Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0), ", "Expr(:call, :>, n_iter, 0), "),
-            ("the inner length is not tested against the keyword", "Expr(:call, :>=, N, minN), ", ""),
+            ("the whole-rows condition is dropped", "Expr(:call, :(==), Expr(:call, :mod, n_iter, N), 0), Expr(:call, :>=, nrow, cgen_rowblock_min_rows())", "Expr(:call, :>=, nrow, cgen_rowblock_min_rows())"),
+            ("the inner length is not tested against the keyword", "_r!\" : sn * \"_r\")\n    nrow = Expr(:call, :div, n_iter, N)\n    conds = Any[Expr(:call, :>=, N, minN), ", "_r!\" : sn * \"_r\")\n    nrow = Expr(:call, :div, n_iter, N)\n    conds = Any["),
             ("the pass is never applied", "    backend.kernel_tag == \"cuda\" && row_block >= 1 && ((host, kernels) = cgen_rowblock_apply(host, kernels, backend; minN = Int(row_block)))\n", ""),
         ]
         mktempdir() do tmp
