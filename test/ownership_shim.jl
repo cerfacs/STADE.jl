@@ -173,7 +173,7 @@ function probe(f, args...)
     return FakeKernel(string(nameof(f)))
 end
 
-# jdims: a launch through JACC. The kernel takes the global indices first, (i, j, args...) for a two-dimensional range (M, N) or (i, args...) for a one-dimensional
+# jdims: a launch through JACC. The kernel takes the global indices first, (i, j, k, args...) for a three-dimensional range (L, M, N), (i, j, args...) for a two-dimensional range (M, N) or (i, args...) for a one-dimensional
 # range (N,), and a thread outside the range returns at once, as JACC's own kernel wrapper does. A thread that returns early skips every barrier after it, which hangs
 # a real block; EARLY counts such threads so a test can require zero for a kernel with barriers.
 const EARLY = String[]   # name of the kernel, once per thread that returned early
@@ -184,6 +184,11 @@ function jacc_call(f, args::Tuple, jdims::Tuple, nx::Int, ny::Int)
     if length(jdims) == 1
         i > jdims[1] && (push!(EARLY, string(nameof(f))); return nothing)
         return f(i, args...)
+    end
+    if length(jdims) == 3
+        k = ST.gz   # a block of one thread along the third axis
+        (i > jdims[1] || j > jdims[2] || k > jdims[3]) && (push!(EARLY, string(nameof(f))); return nothing)
+        return f(i, j, k, args...)
     end
     (i > jdims[1] || j > jdims[2]) && (push!(EARLY, string(nameof(f))); return nothing)
     return f(i, j, args...)

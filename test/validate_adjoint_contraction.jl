@@ -477,7 +477,7 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
         check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
         text = read(joinpath(abspath(joinpath(@__DIR__, "..")), "src", "STADE.jl"), String)
         cases = [
-            ("a group with residual atomic adds is gated by blocks", "gate = isempty(resid) || a.conv)", "gate = true)"),
+            ("a group with residual atomic adds is gated by blocks", "ts = [cgen_contraction_emit(d2; cmin, sk = true, gate = isempty(resid) || a.conv)", "ts = [cgen_contraction_emit(d2; cmin, sk = true, gate = true)"),
             ("the blocks of a split sum are not counted by the launch test", "        splitk && gate && (tiles = call(:*, tiles, cgen_contraction_splits(d.Mh, d.Nh, d.Kh, TN)))\n", ""),
             ("a loop with a plain store is chosen as the loop of adds", " && all(st -> cgen_atomic_site(st) !== nothing || cgen_split_is_scalar(st), l.body)), rest)", "), rest)"),
             ("the thread index may be offset", " && first_st.args[2] == :(1 + (__tid - 1))\n        X = n_iter", "\n        X = n_iter"),
@@ -544,10 +544,10 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
             ("the stage replaces the wrong statement", "at = fi + 1, scratch = fnames, pure = pure)", "at = fi, scratch = fnames, pure = pure)"),
             ("the register test of the stage is not in the condition", "push!(fitl, fits(A.fs, fprobe))", "nothing"),
             ("the sizes of the stage are not in the condition", "push!(cans, A.fs.can); ", ""),
-            ("the sizes of the twins are not in the condition", "push!(cans, t.can); ", ""),
+            ("the sizes of the twins are not in the condition", "push!(cans, t.can); t.want === nothing || push!(wants, t.want); t.okt === nothing || push!(oks, t.okt); push!(fitl", "t.want === nothing || push!(wants, t.want); t.okt === nothing || push!(oks, t.okt); push!(fitl"),
             ("the register test of a twin is dropped", "push!(fitl, fits(t, probe))", "nothing"),
             ("a group needs every twin to want the tiles", "foldl((a, b) -> Expr(:||, a, b), wants)", "foldl((a, b) -> Expr(:&&, a, b), wants)"),
-            ("a group runs when no twin wants the tiles", "isempty(wants) || (cond = ", "true || (cond = "),
+            ("a group runs when no twin wants the tiles", "isempty(wants) || (cond = Expr(:&&, cond, foldl((a, b) -> ", "true || (cond = Expr(:&&, cond, foldl((a, b) -> "),
             ("a twin does not need a quarter of the tiles", "t.okt === nothing || push!(oks, t.okt); ", ""),
             ("the twin needs all the tiles, not a quarter", "cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 4)", "cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 1)"),
             ("the twin needs a sixteenth of the tiles", "cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 4)", "cld(cgen_contraction_tiles(d, cmin; area = TM * TN), 16)"),

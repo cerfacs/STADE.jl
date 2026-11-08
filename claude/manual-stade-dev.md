@@ -1966,6 +1966,41 @@ Measured on the V100 (41 cases, adjoint, defaults): the geometric-mean gap to JA
 
 `validate_corpus_gpu` has `jacc_split_reduce`, `jacc_split_min_inner`, `jacc_split_max_out`, `jacc_warp` and `truth` keywords. `truth = true` accepts a result that the Float64 CPU comparison rejects when its error against a 192-bit BigFloat run is within `max(rtol, 20 * CPU error, 1e-10)`. Use it for `unet`, `transformer` and `so_tile`, whose CPU result is itself off by 1e-12 to 1e-11.
 
+
+### JACC contraction tile twin (v0.4.72)
+
+The weight-gradient kernels of `transformer_block` and `unet2` were the slow JACC kernels left after v0.4.71: plain `JACC.@parallel_for` kernels with one thread per output and a long inner loop. The CUDA path already tiles these (`cgen_contraction_emit`: a 64 x 64 tile per block of 16 x 16 threads, 4 x 4 outputs per thread, split-K for long inner lengths). v0.4.72 runs the same recognizer and emitter on JACC (`jgen_contraction_apply`, keyword `jacc_contraction`, default 256, 0 is off, 1 forces every shape the recognizer accepts).
+
+**How the CUDA kernel becomes a JACC kernel.** `jgen_split_pseudo` recasts the plain kernel in the CUDA kernel's form, so both targets tile exactly the same loops. The emitted kernel is then recast by `jgen_contraction_recast`:
+- `threadIdx` and `blockIdx` come from the global indices `(i, j[, k])` that JACC hands to the kernel: thread = `mod(g - 1, 16) + 1`, tile = `div(g - 1, 16) + 1`.
+- The one dynamic shared array is `JACC.shared(__jsh)`. `__jsh` is a scratch vector of the needed length; JACC copies it into dynamic shared memory at offset 0 (one shared array per kernel).
+- `sync_threads()` is `JACC.sync_workgroup()`.
+- The recast refuses (and the plain kernel stays) when any of `threadIdx`, `blockIdx`, `blockDim`, `gridDim`, `CuDynamicSharedArray`, `sync_threads` or `CUDA` is left in the text.
+
+**JACC 1.3.1 launch facts that shape the design** (read in the cluster source).
+- A 2-D `launch_spec` launch swaps the two axes when `M < N`, even with explicit `threads`, and the wrapper returns early for indices past `M` or `N`. A thread that skips a barrier hangs the block. So the dimensions are whole blocks, with the larger count first. The kernel receives `__jsw` (1 when the host exchanged the axes) and picks the row and column tile from it.
+- The 3-D launch `(L, M, N)` honors the spec's threads and blocks and does not swap. Split-K and batched products use it; the third axis is the piece or batch number.
+- A launch passes at most 32 arguments (`jgen_contraction_max_args`). JACC calls `f(i, j, k, x...)` and Julia infers a splat only for at most 32 elements; a longer one is a dynamic call (`jl_f__apply_iterate`) that fails with `InvalidIRError` on a device. A doubled HVP seed kernel carried 33. A group with any launch above the limit stays plain. The error cannot show on the CPU stand-in; the V100 corpus run found it.
+- A block is 256 threads and the shared array is at most 48 KB (checked when the text is made), so a launch cannot fail for resources and the twin needs no fallback. An adjoint group overwrites its seeds, so a fallback after a failed launch could not be exact.
+
+**Where it runs.** The twin is gated at run time by `__stade_jcu` (the backend name contains `CUDA`); any other backend runs the plain kernel from the `else` branch. Pass order in `stade_jacc`: dead scalars, `jgen_contraction_apply`, `jgen_split_apply`, `jgen_async_launches`, warp atomics, inbounds. Tile kernels (those with a `__jsh` parameter) are excluded from the warp pass: when it rewrote the tile epilogues the CPU stand-in results disagreed, and the launch check now requires the tiled kernels to keep their plain atomics.
+
+`jacc_contraction = 0` gives the v0.4.71 text byte for byte (survey: 644 of 644 files identical). `split_reduce = 0, warp_atomics = false, jacc_contraction = 0` gives v0.4.70.
+
+**Measured on the V100 (JACC 1.3.1, adjoint device time, plain JACC from v0.4.71 to v0.4.72).**
+
+| case | primal | adjoint |
+|---|---|---|
+| `transformer_block` d512_T512 | 9.3 to 2.17 ms | 39.7 to 6.99 ms |
+| `unet2` c32_n128 | 3.27 to 4.08 ms | 37.8 to 23.1 ms |
+| `mlp3`, `mlp3_push` 13M | unchanged | unchanged |
+
+`unet2` has a cost: five of its forward contractions get slower as tiles (kernels 1, 2, 4, 11, 12: for example 848 to 1170 us), one gets faster. The adjoint gain is 14.7 ms against a forward loss of 0.8 ms, so the net is positive, but the forward threshold is not tuned for JACC. `jacc_contraction` raises both thresholds together.
+
+**Corpus coverage is thin by nature.** Only `transformer` tiles in the corpus (24 adjoint and 22 HVP tile kernels on JACC), even with `jacc_contraction = 1`. The 137 unit cases of `validate_jacc_contraction.jl` (CUDA test shapes, run on the CPU stand-in) cover the other shapes. The V100 corpus run forces the twin for 28 corpus kernels, adjoint and HVP, with `truth = true`.
+
+Tests: `julia validate_jacc_contraction.jl` has three phases. `units` compares the twin with the plain kernel for every case of `validate_contraction.jl` and `validate_adjoint_contraction.jl` on a CPU stand-in for JACC and CUDA (coroutine blocks, barriers, `JACC.shared`, 1-D, 2-D and 3-D launches, a conflict log and an early-return log). `launch` checks the geometry (axes, whole blocks, exchange), the shared memory, the backend test, and the 32-argument boundary (pad a kernel with unused arguments so launches sit at 32 and 33). `sabotage` applies 25 one-line edits of the source, each of which one check must catch. Run the phases in separate processes (`uslice`, `slice`); the whole file under `GC.enable(false)` needs several GB.
+
 ## IV.17 `val_*` — the oracles
 
 **Consumes** a kernel, its generated code, and a baseline. **Produces**
@@ -2847,6 +2882,7 @@ julia validate_int_state.jl              # integer-state restores: values, refus
 julia fuzz_int_state.jl 1 300            # differential fuzzer for integer-state kernels
 julia validate_jacc_split.jl             # JACC split twin: units, coalesced layout, launch spec, fallback, with sabotage, no GPU needed
 julia validate_jacc_warp.jl              # JACC warp atomics: structure over the corpus, with sabotage, no GPU needed
+julia validate_jacc_contraction.jl        # JACC contraction tile twin: units, launch geometry, argument limit, 25 sabotage cases, no GPU needed
 julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```
 

@@ -92,7 +92,7 @@ function jsp_run_body(src::String, entry::Symbol, args, split::Int; fallback::In
     J.OORMSG[] = oormsg === nothing ? "CUDA error: too many resources requested for launch (code 701, ERROR_LAUNCH_OUT_OF_RESOURCES)" : oormsg
     J.BACKEND[] = backend === :cuda ? J.CUDABackend() : J.OtherBackend()
     empty!(J.SPECS)
-    plan = STADE.stade_jacc(Meta.parse(src); inbounds = false, split_reduce = split, split_fallback = fallback, split_min_inner = min_inner, split_max_out = 10^9, split_coalesce = coal, warp_atomics = false, jacc_async = async)
+    plan = STADE.stade_jacc(Meta.parse(src); inbounds = false, split_reduce = split, split_fallback = fallback, split_min_inner = min_inner, split_max_out = 10^9, split_coalesce = coal, warp_atomics = false, jacc_contraction = 0, jacc_async = async)
     for k in plan.kernels; Core.eval(Main, k); end
     Core.eval(Main, plan.host)
     host = plan.host.args[1].args[1]

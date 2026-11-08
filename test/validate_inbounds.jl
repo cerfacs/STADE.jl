@@ -276,7 +276,7 @@ function inb_corpus_checks(dir; names = nothing, report = true)
         for (mode, gen) in (("adjoint", STADE.stade_adjoint), ("hvp", STADE.stade_hvp))
             out = try gen(pe; keep_push_pop = false, fuse_ii_loops = true) catch; continue end
             e = mode == "hvp" ? out.hvp : out.adjoint
-            for (lab, mk) in (("cuda", kw -> STADE.stade_gpu(e, cuda; split_reduce = 0, contraction = 0, row_block = 0, col_block = 0, kw...)), ("jacc", kw -> STADE.stade_jacc(e; split_reduce = 0, warp_atomics = false, kw...)))
+            for (lab, mk) in (("cuda", kw -> STADE.stade_gpu(e, cuda; split_reduce = 0, contraction = 0, row_block = 0, col_block = 0, kw...)), ("jacc", kw -> STADE.stade_jacc(e; split_reduce = 0, warp_atomics = false, jacc_contraction = 0, kw...)))
                 base = try mk((inbounds = false, dead_scalars = false)) catch; continue end
                 nplans += 1
                 id = STADE.cgen_finish_kernels(base.kernels; inbounds = false, dead_scalars = false)

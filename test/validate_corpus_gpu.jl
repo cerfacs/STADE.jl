@@ -340,7 +340,7 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                               int_lo::Int = 3, int_hi::Int = 5, grow_max::Int = 512,
                               reduction_threshold::Int = STADE.cgen_reduction_threshold_default(),
                               fresh_gradient::Bool = false,
-                              jacc_split_min_inner::Int = 256, jacc_split_max_out::Int = 32768, jacc_split_reduce::Int = 16, jacc_warp::Bool = true, truth::Bool = false)
+                              jacc_split_min_inner::Int = 256, jacc_split_max_out::Int = 32768, jacc_split_reduce::Int = 16, jacc_warp::Bool = true, jacc_contraction::Int = 256, truth::Bool = false)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") ||
            endswith(f, ".yaml") || endswith(f, ".gpu.yaml") ||
@@ -381,7 +381,7 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
             gen_out = mode == :hvp ? STADE.stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                                      STADE.stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
         catch e
-            println("  !! ", name, " [", mode, "] ", first(split(sprint(showerror, e), "\n")))
+            println("  !! ", name, " [", mode, "] ", first(sprint(showerror, e), 4000))
             push!(results, (kernel = name, mode = mode, backend = :gen, status = :gen_error, max_rel_err = NaN, elements_changed = 0))
             continue
         end
@@ -427,7 +427,7 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                                         mode, tan_seeds, shtan_seeds, truth)
                 push!(results, (kernel = name, mode = mode, backend = :cuda, status = (r.ok || (truth && r.truth_ok)) ? :ok : (r.vacuous ? :VACUOUS : :FAIL), max_rel_err = r.max_rel_err, elements_changed = r.elements_changed, via_truth = !r.ok && truth && r.truth_ok, tr_cpu = r.tr_cpu, tr_dev = r.tr_dev))
             catch e
-                println("  !! ", name, " [", mode, "/cuda] ", first(split(sprint(showerror, e), "\n")))
+                println("  !! ", name, " [", mode, "/cuda] ", first(sprint(showerror, e), 4000))
                 push!(results, (kernel = name, mode = mode, backend = :cuda, status = :gen_error, max_rel_err = NaN, elements_changed = 0))
             end
         end
@@ -436,8 +436,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         if run_jacc
             try
                 # split_min_inner = 0 and a large split_max_out force the shared-memory twin onto every kernel the split accepts, whatever the corpus sizes
-                plan_init = STADE.stade_jacc(gen_out.initstacks; split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp)
-                plan_gen  = STADE.stade_jacc(gen_expr; reduction_threshold, split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp)
+                plan_init = STADE.stade_jacc(gen_out.initstacks; split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp, jacc_contraction = jacc_contraction)
+                plan_gen  = STADE.stade_jacc(gen_expr; reduction_threshold, split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp, jacc_contraction = jacc_contraction)
                 if write_generated
                     open(joinpath(dir, name * suffix * "_jacc.jl"), "w") do f
                         for h in vcat(plan_init.helpers, plan_gen.helpers)
@@ -459,7 +459,7 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                                         mode, tan_seeds, shtan_seeds, truth)
                 push!(results, (kernel = name, mode = mode, backend = :jacc, status = (r.ok || (truth && r.truth_ok)) ? :ok : (r.vacuous ? :VACUOUS : :FAIL), max_rel_err = r.max_rel_err, elements_changed = r.elements_changed, via_truth = !r.ok && truth && r.truth_ok, tr_cpu = r.tr_cpu, tr_dev = r.tr_dev))
             catch e
-                println("  !! ", name, " [", mode, "/jacc] ", first(split(sprint(showerror, e), "\n")))
+                println("  !! ", name, " [", mode, "/jacc] ", first(sprint(showerror, e), 4000))
                 push!(results, (kernel = name, mode = mode, backend = :jacc, status = :gen_error, max_rel_err = NaN, elements_changed = 0))
             end
         end
