@@ -11000,7 +11000,7 @@ end
 
 # Definitions the helper calls need, in file order. Shuffles move 32 bits at a time, so a Float64 or an index travels as two UInt32 halves. Lane ids
 # assume the one-dimensional blocks cgen_launch_expr emits. The lane is 1-based for shfl_sync.
-function cgen_warp_helper_exprs()
+function cgen_warp_helper_exprs(; jacc::Bool = false)
     src = """
     @inline function __stade_wa_xor(m::UInt32, u::UInt64, k::Int32)
         lo = shfl_xor_sync(m, UInt32(u & 0x00000000ffffffff), k)
@@ -11057,6 +11057,12 @@ function cgen_warp_helper_exprs()
         return nothing
     end
     """
+    # A JACC kernel runs on whatever vendor's arrays JACC was set to: the shuffles belong to CUDA's device arrays only, and any other array gets Atomix's atomic
+    if jacc
+        src = replace(src, "__stade_wa_add!(arr, idx::Integer, val::Float64)" => "__stade_wa_add!(arr::CUDA.CuDeviceArray, idx::Integer, val::Float64)",
+                           "__stade_wa_add!(arr, idx::Integer, val::Float32)" => "__stade_wa_add!(arr::CUDA.CuDeviceArray, idx::Integer, val::Float32)",
+                           "@inline function __stade_wa_add!(arr, idx, val)\n    CUDA.@atomic arr[idx] += val" => "@inline function __stade_wa_add!(arr, idx, val)\n    Atomix.@atomic arr[idx] += val")
+    end
     return Expr[cgen_strip_macro_lines(Base.remove_linenums!(a)) for a in Meta.parseall(src).args if a isa Expr]
 end
 
@@ -12432,7 +12438,7 @@ function cgen_split_gather_loop(lp)
 end
 
 # The split kernel of a plain kernel, or nothing: (kdef, name, nslots, cond)
-function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out(), coalesce::Bool = false, gather::Int = 0)
+function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out(), coalesce::Bool = false, gather::Int = 0, style::Symbol = :cuda)
     parts = cgen_kernel_parts(kdef)
     parts === nothing && return nothing
     fargs = Symbol[parts.sig.args[2:end]...]
@@ -12654,12 +12660,22 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
     nout = tr ? L : 32
     nlane = tr ? 32 : L
     jx, ly, act, shr = :__jx, :__ly, :__act, :__shr
-    body = Any[Expr(:(=), jx, Expr(:., Expr(:call, :threadIdx), QuoteNode(tr ? :y : :x))),
-               Expr(:(=), ly, Expr(:., Expr(:call, :threadIdx), QuoteNode(tr ? :x : :y))),
-               Expr(:(=), :__tidr, Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, Expr(:., Expr(:call, :blockIdx), QuoteNode(:x)), 1), nout), jx)),
+    jacc = style === :jacc
+    # JACC hands the kernel the global indices (i, j) of a launch whose block is 32 x L and whose y extent is one block, so threadIdx().x is
+    # (i - 1) % 32 + 1, threadIdx().y is j and the block number along x is (i - 1) / 32 + 1
+    jti = Expr(:call, :-, :__jacc_i, 1)
+    barrier = jacc ? Expr(:call, Expr(:., :JACC, QuoteNode(:sync_workgroup))) : Expr(:call, :sync_threads)
+    jx_e = jacc ? (tr ? :__jacc_j : Expr(:call, :+, Expr(:call, :mod, jti, 32), 1)) : Expr(:., Expr(:call, :threadIdx), QuoteNode(tr ? :y : :x))
+    ly_e = jacc ? (tr ? Expr(:call, :+, Expr(:call, :mod, jti, 32), 1) : :__jacc_j) : Expr(:., Expr(:call, :threadIdx), QuoteNode(tr ? :x : :y))
+    tidr_e = jacc ? (tr ? Expr(:call, :+, Expr(:call, :*, Expr(:call, :div, jti, 32), nout), jx) : :__jacc_i) :
+                    Expr(:call, :+, Expr(:call, :*, Expr(:call, :-, Expr(:., Expr(:call, :blockIdx), QuoteNode(:x)), 1), nout), jx)
+    body = Any[Expr(:(=), jx, jx_e),
+               Expr(:(=), ly, ly_e),
+               Expr(:(=), :__tidr, tidr_e),
                Expr(:(=), act, Expr(:call, :<=, :__tidr, n_iter)),
                Expr(:(=), :__tid, Expr(:call, :min, :__tidr, n_iter))]
-    nslots > 0 && push!(body, Expr(:(=), shr, Expr(:call, :CuDynamicSharedArray, :Float64, 32 * L * nslots)))
+    # JACC.shared(x) is a writable shared array of length(x) over the launch's dynamic shared memory; the host passes a scratch array of the size
+    nslots > 0 && push!(body, Expr(:(=), shr, jacc ? Expr(:call, Expr(:., :JACC, QuoteNode(:shared)), :__jscr) : Expr(:call, :CuDynamicSharedArray, :Float64, 32 * L * nslots)))
     lane_loop(lp, bodyexprs) = begin
         first_ = lp.step == 1 ? Expr(:call, :+, lp.lo, Expr(:call, :-, ly, 1)) : Expr(:call, :-, lp.lo, Expr(:call, :-, ly, 1))
         Expr(:for, Expr(:(=), lp.var, Expr(:call, :(:), first_, lp.step * nlane, lp.hi)), Expr(:block, bodyexprs...))
@@ -12673,7 +12689,7 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
                       Expr(:call, :+, (slot + k - 1) * 32 * L, Expr(:call, :*, Expr(:call, :-, ly, 1), 32), jx)
             push!(body, Expr(:(=), Expr(:ref, shr, wr), p))
         end
-        push!(body, Expr(:call, :sync_threads))
+        push!(body, copy(barrier))
         for (k, (v, p)) in enumerate(accs)
             terms = tr ? Any[Expr(:ref, shr, Expr(:call, :+, (slot + k - 1) * 32 * L + l, Expr(:call, :*, Expr(:call, :-, jx, 1), 32))) for l in 1:nlane] :
                          Any[Expr(:ref, shr, Expr(:call, :+, (slot + k - 1) * 32 * L + (l - 1) * 32, jx)) for l in 1:nlane]
@@ -12690,7 +12706,7 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
             continue
         end
         g = group(kind)
-        prev !== nothing && g !== prev && push!(body, Expr(:call, :sync_threads))
+        prev !== nothing && g !== prev && push!(body, copy(barrier))
         prev = g
         if kind === :S
             push!(body, s)
@@ -12716,7 +12732,7 @@ function cgen_split_kernel(kdef, L::Int; min_inner::Int = cgen_split_min_inner()
     end
     push!(body, emit_return_nothing())
     name = cgen_split_name(parts.sig.args[1])
-    kd = Expr(:function, Expr(:call, name, fargs...), Expr(:block, body...))
+    kd = Expr(:function, Expr(:call, name, (jacc ? Any[:__jacc_i, :__jacc_j] : Any[])..., fargs..., (jacc && nslots > 0 ? Any[:__jscr] : Any[])...), Expr(:block, body...))
     trips = unique(trips)
     maxtrip = length(trips) == 1 ? trips[1] : Expr(:call, :max, trips...)
     cond = Expr(:&&, Expr(:&&, Expr(:call, :>=, n_iter, 1), Expr(:call, :<=, n_iter, max_out)), Expr(:call, :>=, maxtrip, min_inner))
@@ -14766,6 +14782,276 @@ function jgen_preamble()
     # jgen_-generated file needs CUDA loaded for that to resolve, not just this validator's own
     # script.
     return "import Pkg\nhaskey(Pkg.project().dependencies, \"JACC\") || Pkg.add(name = \"JACC\", version = \"1\")\nhaskey(Pkg.project().dependencies, \"Atomix\") || Pkg.add(\"Atomix\")\nusing CUDA\nimport JACC\nimport Atomix\nJACC.@init_backend\n"
+end
+
+# ---- split reduction (JACC) ----
+# The shared-memory split of the CUDA path (see cgen_split_kernel), on JACC's launch model. A dense layer's thread-per-unit kernel runs n units on n threads and leaves
+# the V100 idle below a few thousand units; the twin gives each unit L lanes. JACC.parallel_for(spec, (M, N), f, args...) with a LaunchSpec fixes the block (32 x L), the
+# block count, and the dynamic shared memory; the kernel gets the global indices (i, j), and JACC.shared / JACC.sync_workgroup are its scratch and barrier. The twin is
+# built by cgen_split_kernel itself (style = :jacc), from the plain kernel recast in the CUDA kernel's form, so both targets split exactly the same kernels.
+#   - only on a backend whose JACC shared memory is real threadgroup memory: CUDA (the host test reads the backend name; AMDGPU has the same semantics but is not run here);
+#   - the range is padded to whole blocks, because JACC returns early for an index outside it and a thread that skips a barrier hangs the block;
+#   - launch errors: a block that is too big for the registers of the twin raises CUDA's out-of-resources error, caught to try the smaller twin and then the plain launch.
+jgen_split_launch_head() = Expr(:., :JACC, QuoteNode(Symbol("@parallel_for")))
+
+# (n_iter, call) of a launch macrocall as jgen_launch_expr builds it, or nothing
+function jgen_split_launch_parts(e)
+    (e isa Expr && e.head === :macrocall && length(e.args) == 4 && e.args[1] == jgen_split_launch_head()) || return nothing
+    r = e.args[3]
+    (r isa Expr && r.head === :(=) && r.args[1] === :range) || return nothing
+    c = e.args[4]
+    (c isa Expr && c.head === :call && c.args[1] isa Symbol) || return nothing
+    return (n_iter = r.args[2], call = c)
+end
+
+# a JACC kernel in the form cgen_split_kernel reads: no launch index parameter, a thread guard, the thread index named `__tid`
+function jgen_split_pseudo(k::Expr, n_iter)
+    (k.head === :function && length(k.args) == 2 && k.args[1] isa Expr && k.args[1].head === :call && k.args[2] isa Expr && k.args[2].head === :block) || return nothing
+    sig = k.args[1]
+    (length(sig.args) >= 2 && sig.args[2] === :__jacc_i) || return nothing
+    fargs = Any[sig.args[3:end]...]
+    :__jargs in fargs && return nothing
+    blk = Any[x for x in k.args[2].args if !(x isa LineNumberNode)]
+    (!isempty(blk) && blk[end] == emit_return_nothing()) || return nothing
+    rest = Any[cgen_reuse_subst(x, Dict{Symbol,Any}(:__jacc_i => :__tid)) for x in blk[1:end-1]]
+    cgen_count_symbol(Expr(:block, rest...), :__jacc_i) == 0 || return nothing
+    return Expr(:function, Expr(:call, sig.args[1], fargs...),
+                Expr(:block, Expr(:(=), :__tid, :__jacc_i),
+                     Expr(:if, Expr(:call, :>, :__tid, n_iter), Expr(:block, emit_return_nothing())),
+                     rest..., emit_return_nothing()))
+end
+
+# ---- warp-aggregated atomics (JACC) ----
+# The CUDA path's helper (see cgen_warp_helper_exprs) on JACC's atomics: `Atomix.@atomic A[i] += v` becomes `__stade_wa_add!(A, i, v)`, which sums the 32 lanes of a warp
+# that agree on `i` with shuffles and lets one lane add. Measured on a V100: contended atomics are 53 to 83 percent of the adjoint time of unet2, transformer and
+# mlp3_push, and the helper takes most of it back. The method for a CUDA device array does the shuffles; any other array (another vendor's) gets Atomix's atomic, so the
+# text stays portable. The sum's order changes, so the last bits differ; stade_jacc(...; warp_atomics = false) restores the plain atomic exactly.
+function jgen_warp_atomics(e)
+    e isa Expr || return e
+    cls = (e.head === :function) ? jgen_warp_classes(e) : Dict{Symbol,Symbol}()
+    return jgen_warp_rewrite(e, cls)
+end
+
+# How an address varies across the 32 lanes of a warp, per kernel. The helper pays when the lanes can all agree (its mask test, two shuffles and a vote are pure cost for an
+# address that is distinct per lane: euler2d_step adjoint +33 to +59 percent, 36 scatter sites). Classes of a scalar:
+#   :U  the same in every lane (no launch index in it)
+#   :S  constant on runs of lanes (div of a lane-dependent value by a uniform one, or an array read at such a position)
+#   :D  different in adjacent lanes (affine in the launch index, or mod of it, plus U or S terms)
+#   :X  anything else (a read at a lane-dependent position, a product of two lane-dependent values, ...)
+# Only :D is skipped: it can never equal in all 32 lanes. A wrong class costs speed, never correctness, because the helper is exact for any addresses.
+function jgen_warp_class(e, cls::Dict{Symbol,Symbol})
+    e isa Number && return :U
+    e isa Symbol && return get(cls, e, :U)
+    e isa Expr || return :U
+    if e.head === :ref
+        c = jgen_warp_join([jgen_warp_class(a, cls) for a in e.args[2:end]])
+        return c === :U ? :U : (c === :S ? :S : :X)
+    end
+    if e.head === :call && !isempty(e.args)
+        f = e.args[1]
+        args = Any[jgen_warp_class(a, cls) for a in e.args[2:end]]
+        all(==(:U), args) && return :U
+        if f === :+ || (f === :- && length(args) == 2)
+            acc = args[1]
+            for y in args[2:end]
+                acc = jgen_warp_add_class(acc, y)
+            end
+            return acc
+        elseif f === :- && length(args) == 1
+            return args[1]
+        elseif f === :*
+            acc = args[1]
+            for y in args[2:end]
+                acc = jgen_warp_mul_class(acc, y)
+            end
+            return acc
+        elseif f === :div && length(args) == 2 && args[2] === :U
+            return args[1] === :X ? :X : :S
+        elseif f === :mod && length(args) == 2 && args[2] === :U
+            return args[1]
+        end
+        return :X
+    end
+    return jgen_warp_join([jgen_warp_class(a, cls) for a in e.args])
+end
+
+function jgen_warp_add_class(x::Symbol, y::Symbol)
+    (x === :X || y === :X) && return :X
+    (x === :D && y === :D) && return :X
+    (x === :D || y === :D) && return :D
+    return (x === :S || y === :S) ? :S : :U
+end
+
+function jgen_warp_mul_class(x::Symbol, y::Symbol)
+    (x === :X || y === :X) && return :X
+    x === :U && return y
+    y === :U && return x
+    return (x === :D || y === :D) ? :X : :S
+end
+
+function jgen_warp_join(cs)
+    isempty(cs) && return :U
+    all(==(first(cs)), cs) && return first(cs)
+    return :X
+end
+
+function jgen_warp_classes(k::Expr)
+    cls = Dict{Symbol,Symbol}(:__jacc_i => :D, :__jacc_j => :D)
+    seen = Dict{Symbol,Vector{Symbol}}()
+    changed = true
+    rounds = 0
+    while changed && rounds < 20
+        changed = false; rounds += 1
+        empty!(seen)
+        function walk(e)
+            e isa Expr || return
+            if e.head === :(=) && length(e.args) == 2 && e.args[1] isa Symbol && !(e.args[1] in (:__jacc_i, :__jacc_j))
+                push!(get!(seen, e.args[1], Symbol[]), jgen_warp_class(e.args[2], cls))
+            elseif e.head === :for && length(e.args) == 2 && e.args[1] isa Expr && e.args[1].head === :(=) && e.args[1].args[1] isa Symbol
+                r = e.args[1].args[2]
+                rc = (r isa Expr && r.head === :call && r.args[1] === :(:)) ? [jgen_warp_class(a, cls) for a in r.args[2:end]] : [jgen_warp_class(r, cls)]
+                push!(get!(seen, e.args[1].args[1], Symbol[]), all(==(:U), rc) ? :U : :X)
+            end
+            foreach(walk, e.args)
+        end
+        walk(k)
+        for (v, cs) in seen
+            c = jgen_warp_join(cs)
+            if get(cls, v, :U) != c
+                cls[v] = c; changed = true
+            end
+        end
+    end
+    return cls
+end
+
+function jgen_warp_rewrite(e, cls::Dict{Symbol,Symbol})
+    e isa Expr || return e
+    atomix = Expr(:., :Atomix, QuoteNode(Symbol("@atomic")))
+    if e.head === :macrocall && length(e.args) == 3 && e.args[1] == atomix
+        site = cgen_atomic_site(e)
+        if site !== nothing && jgen_warp_class(site.idx, cls) !== :D
+            return Expr(:call, cgen_warp_add_name(), site.arr, jgen_warp_rewrite(site.idx, cls), jgen_warp_rewrite(site.val, cls))
+        end
+    end
+    return Expr(e.head, Any[jgen_warp_rewrite(a, cls) for a in e.args]...)
+end
+
+# ---- asynchronous launches (JACC) ----
+# JACC's default launch synchronizes the stream after every kernel (CUDA.@sync). `sync = false` leaves the kernels in the stream; kernels of one stream run in order, so the
+# next launch needs no wait, and any read of a device array from the host (JACC.to_host, Array(x), a scalar read) waits for the stream by itself. What changes is the return of the
+# generated host function: it returns when the last kernel is queued, not finished. A caller that times it, or hands a device array to another stream, synchronizes first.
+# Measured on a V100: 2 to 7 percent of the adjoint of unet2, transformer and mlp3_push, more for a kernel of many short launches.
+function jgen_async_launches(e)
+    e isa Expr || return e
+    if e.head === :macrocall && length(e.args) == 4 && e.args[1] == jgen_split_launch_head()
+        return Expr(:macrocall, e.args[1], e.args[2], e.args[3], Expr(:(=), :sync, false), e.args[4])
+    end
+    if e.head === :call && length(e.args) >= 2 && e.args[1] == Expr(:., :JACC, QuoteNode(:launch_spec)) && e.args[2] isa Expr && e.args[2].head === :parameters
+        return Expr(:call, e.args[1], Expr(:parameters, e.args[2].args..., Expr(:kw, :sync, false)), e.args[3:end]...)
+    end
+    return Expr(e.head, Any[jgen_async_launches(a) for a in e.args]...)
+end
+
+jgen_split_backend_flag() = :__stade_jcu
+
+# The launch of one twin: (statement, whose launch may raise out-of-resources)
+function jgen_split_twin_launch(tw, call::Expr)
+    nblk = Expr(:call, Expr(:., :Base, QuoteNode(:cld)), tw.n_iter, tw.nout)
+    spec = Expr(:call, Expr(:., :JACC, QuoteNode(:launch_spec)),
+                Expr(:parameters,
+                     Expr(:kw, :threads, Expr(:tuple, 32, tw.lanes)),
+                     Expr(:kw, :blocks, Expr(:tuple, nblk, 1)),
+                     Expr(:kw, :shmem_size, 8 * 32 * tw.lanes * tw.nslots)))
+    dims = Expr(:tuple, Expr(:call, :*, 32, nblk), tw.lanes)
+    scr = Symbol("__jscr_", tw.lanes)
+    args = Any[call.args[2:end]...]
+    stmts = Any[]
+    if tw.nslots > 0
+        # the scratch array only gives JACC.shared its length (the twin writes every slot before it reads it), so it is allocated, not filled: JACC.zeros would launch a fill kernel per call
+        push!(stmts, Expr(:(=), scr, Expr(:call, Expr(:curly, Expr(:., :CUDA, QuoteNode(:CuArray)), :Float64), :undef, 32 * tw.lanes * tw.nslots)))
+        push!(args, scr)
+    end
+    push!(stmts, Expr(:call, Expr(:., :JACC, QuoteNode(:parallel_for)), spec, dims, tw.name, args...))
+    return Expr(:block, stmts...)
+end
+
+# A launch error that means "the block asked for more registers than the twin has" is the only one the fallback takes; anything else propagates
+function jgen_split_try(launch::Expr, other)
+    ev = :__jse
+    msg = :__jsm
+    # two spellings of the same refusal: CUDA.jl's own check before the launch ("Block register count exceeds device limit (143 regs/thread * 512 threads/block ..."; measured on a
+    # V100 for transformer_block and mpnn_gather at 16 lanes) and the driver's error code 701 (ERROR_LAUNCH_OUT_OF_RESOURCES)
+    oor = Expr(:||, Expr(:call, :occursin, "register count exceeds", msg), Expr(:call, :occursin, "OUT_OF_RESOURCES", msg))
+    handler = Expr(:block, Expr(:(=), msg, Expr(:call, :sprint, :showerror, ev)), Expr(:||, oor, Expr(:call, :rethrow)), other)
+    return Expr(:try, launch, ev, handler)
+end
+
+function jgen_split_apply(host::Expr, kernels::Vector{Expr}, L::Int; min_inner::Int = cgen_split_min_inner(), max_out::Int = cgen_split_max_out(), fallback::Int = 0, coalesce::Bool = false)
+    (L >= 2 && L <= 32) || return (host, kernels)
+    launches = Dict{Symbol,Any}()
+    function find(e)
+        e isa Expr || return
+        p = jgen_split_launch_parts(e)
+        if p !== nothing
+            haskey(launches, p.call.args[1]) ? (launches[p.call.args[1]] = nothing) : (launches[p.call.args[1]] = p)
+            return
+        end
+        foreach(find, e.args)
+    end
+    find(host)
+    twins = Dict{Symbol,Any}()
+    twins2 = Dict{Symbol,Any}()
+    for k in kernels
+        k.head === :function || continue
+        nm = k.args[1].args[1]
+        p = get(launches, nm, nothing)
+        p === nothing && continue
+        ps = jgen_split_pseudo(k, p.n_iter)
+        ps === nothing && continue
+        t = cgen_split_kernel(ps, L; min_inner, max_out, coalesce, style = :jacc)
+        t === nothing && continue
+        twins[nm] = t
+        if fallback >= 2 && fallback < L
+            t2 = cgen_split_kernel(ps, fallback; min_inner, max_out, coalesce, style = :jacc)
+            if t2 !== nothing
+                sn = string(t2.name)
+                n2 = Symbol(endswith(sn, "!") ? sn[1:end-1] * string(fallback) * "!" : sn * string(fallback))
+                t2.kdef.args[1].args[1] = n2
+                twins2[nm] = merge(t2, (name = n2,))
+            end
+        end
+    end
+    isempty(twins) && return (host, kernels)
+    used = Set{Symbol}()
+    function walk(e)
+        e isa Expr || return e
+        p = jgen_split_launch_parts(e)
+        if p !== nothing && haskey(twins, p.call.args[1])
+            base = p.call.args[1]
+            t = twins[base]
+            push!(used, base)
+            chain = e
+            if haskey(twins2, base)
+                t2 = twins2[base]
+                chain = Expr(:if, t.cond, jgen_split_try(jgen_split_twin_launch(t2, p.call), e), e)
+            end
+            first_launch = jgen_split_twin_launch(t, p.call)
+            return Expr(:if, Expr(:&&, jgen_split_backend_flag(), t.cond), jgen_split_try(first_launch, chain), e)
+        end
+        return Expr(e.head, Any[walk(a) for a in e.args]...)
+    end
+    newhost = walk(host)
+    isempty(used) && return (host, kernels)
+    # the backend test runs once per host call; JACC.default_backend() names the vendor's backend type, and only CUDA's has shared memory this code relies on
+    flag = Expr(:(=), jgen_split_backend_flag(), Expr(:call, :occursin, "CUDA", Expr(:call, :string, Expr(:call, Expr(:., :JACC, QuoteNode(:default_backend))))))
+    newhost = Expr(:function, newhost.args[1], Expr(:block, flag, newhost.args[2].args...))
+    newk = copy(kernels)
+    for nm in sort(collect(used); by = string)
+        push!(newk, twins[nm].kdef)
+        haskey(twins2, nm) && push!(newk, twins2[nm].kdef)
+    end
+    return (newhost, newk)
 end
 
 
@@ -17086,26 +17372,36 @@ stade_metal_file(in_path::String, out_path::String; precision::Union{Nothing, Ty
 # locked default here for the same reason: Float64 unless the caller asks otherwise.
 # On JACC a matched reduction becomes one
 # JACC.@parallel_reduce call instead of @parallel_for + Atomix.@atomic.
-function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true)
+function stade_jacc(expr::Expr; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, split_coalesce::Bool = true, warp_atomics::Bool = true, jacc_async::Bool = false)
     merge_accum && (expr = cgen_merge_accum(expr))
     plan = jgen_emit(cgen_gather_stencil(cgen_ingest(expr), gather_stencil); reduction_threshold, hoist_atomics)
-    kernels = cgen_finish_kernels(plan.kernels; inbounds, dead_scalars)
+    host = plan.host
+    kernels = dead_scalars ? Expr[cgen_dead_scalars(k, inbounds) for k in plan.kernels] : plan.kernels
+    split_reduce >= 2 && ((host, kernels) = jgen_split_apply(host, kernels, Int(split_reduce); min_inner = Int(split_min_inner), max_out = Int(split_max_out), fallback = Int(split_fallback), coalesce = split_coalesce))
+    jacc_async && (host = jgen_async_launches(host))
+    warp_atomics && (kernels = Expr[jgen_warp_atomics(k) for k in kernels])
+    inbounds && (kernels = Expr[cgen_inbounds_wrap(k) for k in kernels])
+    helpers = any(k -> cgen_expr_calls(k, cgen_warp_add_name()), kernels) ? cgen_warp_helper_exprs(; jacc = true) : Expr[]
     p = precision === nothing ? Float64 : precision
-    p === Float64 && return (host = plan.host, kernels = kernels)
-    return (host = cgen_convert_precision(plan.host, p),
-            kernels = Expr[cgen_convert_precision(k, p) for k in kernels])
+    p === Float64 && return (host = host, kernels = kernels, helpers = helpers)
+    return (host = cgen_convert_precision(host, p),
+            kernels = Expr[cgen_convert_precision(k, p) for k in kernels], helpers = helpers)
 end
 
-function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true)
+function stade_jacc_file(in_path::String, out_path::String; precision::Union{Nothing, Type{<:AbstractFloat}} = nothing, reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true, merge_accum::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, split_coalesce::Bool = true, warp_atomics::Bool = true, jacc_async::Bool = false)
     defs = io_read_kernel_bundle(in_path)
     kernels = Expr[]
     hosts = Expr[]
+    helpers = Expr[]
     for expr in defs
-        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics, gather_stencil, inbounds, dead_scalars, merge_accum)
+        plan = stade_jacc(expr; precision, reduction_threshold, hoist_atomics, gather_stencil, inbounds, dead_scalars, merge_accum, split_reduce, split_fallback, split_min_inner, split_max_out, split_coalesce, warp_atomics, jacc_async)
+        for h in plan.helpers
+            any(x -> x == h, helpers) || push!(helpers, h)
+        end
         append!(kernels, plan.kernels)
         push!(hosts, plan.host)
     end
-    io_write_gpu_file(out_path, vcat(kernels, hosts); preamble = jgen_preamble())
+    io_write_gpu_file(out_path, vcat(helpers, kernels, hosts); preamble = jgen_preamble())
     return out_path
 end
 
@@ -17729,7 +18025,7 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
                                    self_check::Bool = true,
                                    keep_push_pop::Bool = false, fuse_ii_loops::Bool = false,
                                    mode::Symbol = :adjoint,
-                                   reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true)
+                                   reduction_threshold::Int = cgen_reduction_threshold_default(), hoist_atomics::Bool = true, gather_stencil::Union{Bool,Integer} = true, inbounds::Bool = true, dead_scalars::Bool = true, split_reduce::Integer = 16, split_fallback::Integer = 8, split_min_inner::Integer = 256, split_max_out::Integer = 32768, split_coalesce::Bool = true, warp_atomics::Bool = true, jacc_async::Bool = false)
     keep_push_pop &&
         error("stade_validate_jacc_file: keep_push_pop=true has no GPU target -- :stack mode's push!/pop! is inherently host-only")
     mode in (:adjoint, :hvp) ||
@@ -17744,8 +18040,8 @@ function stade_validate_jacc_file(in_path::String, out_path::String;
     gen_out = mode == :hvp ? stade_hvp(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops) :
                              stade_adjoint(primal_expr; keep_push_pop = false, fuse_ii_loops = fuse_ii_loops)
     backend = val_jacc_backend()
-    jacc_init = stade_jacc(gen_out.initstacks; hoist_atomics = hoist_atomics, gather_stencil = gather_stencil, inbounds = inbounds, dead_scalars = dead_scalars)
-    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold, hoist_atomics = hoist_atomics, gather_stencil = gather_stencil, inbounds = inbounds, dead_scalars = dead_scalars)
+    jacc_init = stade_jacc(gen_out.initstacks; hoist_atomics = hoist_atomics, gather_stencil = gather_stencil, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, split_coalesce = split_coalesce, warp_atomics = warp_atomics, jacc_async = jacc_async)
+    jacc_gen  = stade_jacc(mode == :hvp ? gen_out.hvp : gen_out.adjoint; reduction_threshold = reduction_threshold, hoist_atomics = hoist_atomics, gather_stencil = gather_stencil, inbounds = inbounds, dead_scalars = dead_scalars, split_reduce = split_reduce, split_fallback = split_fallback, split_min_inner = split_min_inner, split_max_out = split_max_out, split_coalesce = split_coalesce, warp_atomics = warp_atomics, jacc_async = jacc_async)
     stack_arg_names = Symbol[a for a in gen_out.initstacks.args[1].args[2:end]]
     seeds = [val_random_values_like(kernel, baseline.values) for _ in 1:trials]
     tan_seeds   = mode == :hvp ? [val_random_values_like(kernel, baseline.values) for _ in 1:trials] : Any[]

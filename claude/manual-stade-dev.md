@@ -275,7 +275,7 @@ stade_hvp_file(in_path, out_path;     keep_push_pop=true, fuse_ii_loops=false)
 stade_cuda_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, warp_atomics=true, sync_free_reduce=true, reduce_block=true, hoist_atomics=true, gather_stencil=2, shared_private=true, coarsen=1, coarsen_min=256, coarsen_fill=65536, coarsen_occ=0.6, inbounds=true, dead_scalars=true, split_reduce=16, split_min_inner=256, split_max_out=32768, fresh_gradient=false, fresh_check=false)
 stade_amdgpu_file(in_path, out_path; precision=nothing, reduction_threshold=32768)
 stade_metal_file(in_path, out_path;  precision=nothing, reduction_threshold=32768)
-stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768)
+stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=32768, hoist_atomics=true, gather_stencil=true, inbounds=true, dead_scalars=true, merge_accum=true, split_reduce=16, split_fallback=8, split_min_inner=256, split_max_out=32768, split_coalesce=true, warp_atomics=true, jacc_async=false)
 ```
 
 Each `_file` function has an `Expr`-in, `Expr`-out sibling without the
@@ -1948,6 +1948,24 @@ JACC also has no `allowscalar` escape hatch, so a reduction result cannot
 be written back to a device array with a plain host assignment.
 `jgen_reduction_writeback_kernel` synthesizes a `range=1` kernel instead.
 
+### JACC split twin, warp atomics and async launches (v0.4.71)
+
+Three passes run in `stade_jacc` after `dead_scalars` and before `cgen_inbounds_wrap`. Each has a keyword that restores the v0.4.70 text exactly.
+
+**Measured cause (V100, JACC 1.3.1).** Atomic adds dominate the slow JACC kernels: 53 to 83 percent of the time in `unet2`, `transformer_block` and `mlp3_push`. The access pattern comes second. Launch overhead (the stream sync after every default launch) costs 2 to 7 percent.
+
+1. **Warp atomics** (`warp_atomics`, default true; `jgen_warp_atomics`). Lanes of one warp that add to the same index first sum their values with a shuffle. One lane then issues the atomic. The fast method is typed on `CUDA.CuDeviceArray`. Other array types fall back to `Atomix.@atomic`. Float sums reassociate, so the last bits change. A static gate keeps the helper off sites whose address cannot be equal in all 32 lanes. `jgen_warp_classes` gives each scalar of a kernel one of four classes: `:U` (no launch index in it), `:S` (constant on runs of lanes: `div` of a lane-dependent value by a uniform one), `:D` (differs between adjacent lanes: affine in the launch index, or `mod` of it, plus `:U` or `:S` terms) and `:X` (anything else, such as a read at a lane-dependent position). `jgen_warp_rewrite` skips a site only when the class of its index is `:D`. A wrong class costs speed and never correctness, because the helper is exact for any addresses. Without the gate, `euler2d_step` (36 scatter sites with one address per lane) was 33 to 59 percent slower than v0.4.70. Measured before the gate (V100): `unet2` 142.3 to 37.75 ms, `transformer_block` 123.0 to 45.9 ms, `mlp3_push` 5.985 to 0.979 ms.
+2. **Split twin** (`split_reduce = L`, default 16; 0 or 1 is off; `split_fallback = 8`; `split_min_inner`, `split_max_out`, `split_coalesce`; `jgen_split_apply`). `jgen_split_apply` reuses `cgen_split_kernel` with `style = :jacc`. The twin runs with a `JACC.launch_spec(; threads, blocks, shmem_size)`. It uses `JACC.shared` for the lane partial sums and `JACC.sync_workgroup()` for the barriers. The kernel gets the global indices `(i, j)`. The range is padded to whole blocks, and the kernel returns early for `i > M`. JACC swaps the 2-D axes when `M < N`, so the emitter keeps `M >= N` and `L <= 32`. The host takes the twin only when the trip count of the outer loop is in `[1, split_max_out]`, the maximum inner trip count is at least `split_min_inner`, and all strides are nonzero. A guarded `try` falls back to the `split_fallback` twin, and then to the plain launch, when CUDA.jl raises "Block register count exceeds device limit" or the driver raises `OUT_OF_RESOURCES`. Only the CUDA backend has real shared memory, so the twin launch is gated by a runtime check of the backend name. Measured prototypes: 3.57 to 0.27 ms (n=2048, L=16) and 8.65 to 1.59 ms (n=5120, L=8).
+3. **Async launches** (`jacc_async`, default false; `jgen_async_launches`). Adds `sync = false` to every `JACC.@parallel_for` and `JACC.launch_spec` of the host function. Measured (V100, adjoint, after items 1 and 2): 2 to 7 percent for `unet2` and `transformer_block`, 8 to 33 percent for the stencil kernels, 17 to 47 percent for `mlp3_push`. The default stays off because the generated host function then returns before the kernels end. A read of a device array from the host waits by itself. A caller that times the call without its own synchronize would measure the launches only. The CUDA text behaves this way already.
+
+`mlp3_push` kernels have one thread per weight element and no inner loop. The split twin does not apply to them. Warp atomics do.
+
+Pass `split_reduce = 0, warp_atomics = false` (and leave `jacc_async` at false) to get the v0.4.70 text. The corpus text survey (644 files, CUDA and JACC) confirmed this is byte-identical. By default no CUDA file changes. 194 of 322 JACC plans change: 150 with warp calls only and 44 with a twin in 22 kernels.
+
+Measured on the V100 (41 cases, adjoint, defaults): the geometric-mean gap to JAX falls from 3.04 to 1.88. `mlp3` 13M 11.42 to 0.95 ms, `mlp3_push` 79M 54.3 to 4.4, `unet2` c16_n256 284 to 42, `transformer_block` d512 123 to 38.7. No case outside the contraction kernels changes by more than 3.4 percent, which is the noise of a kernel whose text is unchanged. `transformer_block` stays 11.5 to 39 times JAX.
+
+`validate_corpus_gpu` has `jacc_split_reduce`, `jacc_split_min_inner`, `jacc_split_max_out`, `jacc_warp` and `truth` keywords. `truth = true` accepts a result that the Float64 CPU comparison rejects when its error against a 192-bit BigFloat run is within `max(rtol, 20 * CPU error, 1e-10)`. Use it for `unet`, `transformer` and `so_tile`, whose CPU result is itself off by 1e-12 to 1e-11.
+
 ## IV.17 `val_*` — the oracles
 
 **Consumes** a kernel, its generated code, and a baseline. **Produces**
@@ -2827,6 +2845,8 @@ julia validate_elision_coverage.jl       # snapshot-elision branches, no GPU nee
 julia validate_gpu_truth.jl              # BigFloat truth criterion of the parity script, no GPU needed, with sabotage
 julia validate_int_state.jl              # integer-state restores: values, refusals, with sabotage
 julia fuzz_int_state.jl 1 300            # differential fuzzer for integer-state kernels
+julia validate_jacc_split.jl             # JACC split twin: units, coalesced layout, launch spec, fallback, with sabotage, no GPU needed
+julia validate_jacc_warp.jl              # JACC warp atomics: structure over the corpus, with sabotage, no GPU needed
 julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```
 

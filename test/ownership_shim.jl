@@ -65,6 +65,7 @@ TArray(a::Array{T,N}) where {T,N} = TArray{T,N}(a, (NEXTID[] += 1))
 _tundef(::Type{T}, dims...) where {T} = (a = Array{T}(undef, dims...); T <: AbstractFloat && fill!(a, T(NaN)); a)
 TArray{T}(::UndefInitializer, dims::Integer...) where {T} = TArray(_tundef(T, dims...))
 TArray{T}(::UndefInitializer, dims::Tuple) where {T} = TArray(_tundef(T, dims...))
+const CuArray = TArray   # CUDA.CuArray{T}(undef, n), as the JACC twin's host code allocates its scratch
 TArray{T,N}(::UndefInitializer, dims::Integer...) where {T,N} = TArray(_tundef(T, dims...))
 TArray{T,N}(::UndefInitializer, dims::Tuple) where {T,N} = TArray(_tundef(T, dims...))
 Base.size(a::TArray) = size(a.data)
@@ -172,8 +173,25 @@ function probe(f, args...)
     return FakeKernel(string(nameof(f)))
 end
 
-function launch(f, args::Tuple, th::Tuple, bl::Union{Integer,Tuple}, sh::Integer)
+# jdims: a launch through JACC. The kernel takes the global indices first, (i, j, args...) for a two-dimensional range (M, N) or (i, args...) for a one-dimensional
+# range (N,), and a thread outside the range returns at once, as JACC's own kernel wrapper does. A thread that returns early skips every barrier after it, which hangs
+# a real block; EARLY counts such threads so a test can require zero for a kernel with barriers.
+const EARLY = String[]   # name of the kernel, once per thread that returned early
+const JSHIFT = Ref(0)   # how many leading kernel parameters are launch indices, for argname_of
+function jacc_call(f, args::Tuple, jdims::Tuple, nx::Int, ny::Int)
+    i = (ST.gx - 1) * nx + ST.tx
+    j = (ST.gy - 1) * ny + ST.ty
+    if length(jdims) == 1
+        i > jdims[1] && (push!(EARLY, string(nameof(f))); return nothing)
+        return f(i, args...)
+    end
+    (i > jdims[1] || j > jdims[2]) && (push!(EARLY, string(nameof(f))); return nothing)
+    return f(i, j, args...)
+end
+
+function launch(f, args::Tuple, th::Tuple, bl::Union{Integer,Tuple}, sh::Integer; jdims = nothing)
     empty!(ST.log); empty!(ST.detail)
+    JSHIFT[] = jdims === nothing ? 0 : length(jdims)
     LAUNCHES[] += 1
     push!(LAUNCHED, string(nameof(f)))
     nx, ny = th
@@ -191,7 +209,7 @@ function launch(f, args::Tuple, th::Tuple, bl::Union{Integer,Tuple}, sh::Integer
             @async begin
                 take!(resume[k])
                 try
-                    f(args...)
+                    jdims === nothing ? f(args...) : jacc_call(f, args, jdims, nx, ny)
                 catch e
                     push!(errs, e)
                 end
@@ -270,6 +288,7 @@ end
 launch(f, args::Tuple, th::Integer, bl::Integer, sh::Integer) = launch_1d(f, args, th, bl)
 
 function launch_1d(f, args::Tuple, th::Integer, bl::Integer)
+    JSHIFT[] = 0
     empty!(ST.log)
     LAUNCHES[] += 1
     push!(LAUNCHED, string(nameof(f)))
@@ -292,7 +311,7 @@ function launch_1d(f, args::Tuple, th::Integer, bl::Integer)
 end
 
 function argname_of(f, args, aid)
-    names = Base.method_argnames(first(methods(f)))[2:end]
+    names = Base.method_argnames(first(methods(f)))[2+JSHIFT[]:end]
     for (k, x) in enumerate(args)
         x isa TArray && x.id == aid && k <= length(names) && return names[k]
     end

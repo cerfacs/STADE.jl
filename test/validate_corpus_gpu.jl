@@ -339,7 +339,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                               only::Union{Vector{String},Nothing} = nothing,
                               int_lo::Int = 3, int_hi::Int = 5, grow_max::Int = 512,
                               reduction_threshold::Int = STADE.cgen_reduction_threshold_default(),
-                              fresh_gradient::Bool = false)
+                              fresh_gradient::Bool = false,
+                              jacc_split_min_inner::Int = 256, jacc_split_max_out::Int = 32768, jacc_split_reduce::Int = 16, jacc_warp::Bool = true, truth::Bool = false)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") ||
            endswith(f, ".yaml") || endswith(f, ".gpu.yaml") ||
@@ -423,8 +424,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                 r = gval_check_backend(kernel, baseline.int_args, baseline.values, seeds,
                                         gen_out, plan_init, plan_gen, stack_arg_names,
                                         CuArray, Array, cuda_backend.atomic_macro;
-                                        mode, tan_seeds, shtan_seeds)
-                push!(results, (kernel = name, mode = mode, backend = :cuda, status = r.ok ? :ok : (r.vacuous ? :VACUOUS : :FAIL), max_rel_err = r.max_rel_err, elements_changed = r.elements_changed))
+                                        mode, tan_seeds, shtan_seeds, truth)
+                push!(results, (kernel = name, mode = mode, backend = :cuda, status = (r.ok || (truth && r.truth_ok)) ? :ok : (r.vacuous ? :VACUOUS : :FAIL), max_rel_err = r.max_rel_err, elements_changed = r.elements_changed, via_truth = !r.ok && truth && r.truth_ok, tr_cpu = r.tr_cpu, tr_dev = r.tr_dev))
             catch e
                 println("  !! ", name, " [", mode, "/cuda] ", first(split(sprint(showerror, e), "\n")))
                 push!(results, (kernel = name, mode = mode, backend = :cuda, status = :gen_error, max_rel_err = NaN, elements_changed = 0))
@@ -434,10 +435,14 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         # ---- step 2 + 3: JACC codegen, then execute ------------------
         if run_jacc
             try
-                plan_init = STADE.stade_jacc(gen_out.initstacks)
-                plan_gen  = STADE.stade_jacc(gen_expr; reduction_threshold)
+                # split_min_inner = 0 and a large split_max_out force the shared-memory twin onto every kernel the split accepts, whatever the corpus sizes
+                plan_init = STADE.stade_jacc(gen_out.initstacks; split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp)
+                plan_gen  = STADE.stade_jacc(gen_expr; reduction_threshold, split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp)
                 if write_generated
                     open(joinpath(dir, name * suffix * "_jacc.jl"), "w") do f
+                        for h in vcat(plan_init.helpers, plan_gen.helpers)
+                            write(f, STADE.io_expr_to_source(h))
+                        end
                         for k in plan_init.kernels
                             write(f, STADE.io_expr_to_source(k))
                         end
@@ -451,8 +456,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                 r = gval_check_backend(kernel, baseline.int_args, baseline.values, seeds,
                                         gen_out, plan_init, plan_gen, stack_arg_names,
                                         x -> JACC.array(x), x -> JACC.to_host(x), jacc_atomic_macro;
-                                        mode, tan_seeds, shtan_seeds)
-                push!(results, (kernel = name, mode = mode, backend = :jacc, status = r.ok ? :ok : (r.vacuous ? :VACUOUS : :FAIL), max_rel_err = r.max_rel_err, elements_changed = r.elements_changed))
+                                        mode, tan_seeds, shtan_seeds, truth)
+                push!(results, (kernel = name, mode = mode, backend = :jacc, status = (r.ok || (truth && r.truth_ok)) ? :ok : (r.vacuous ? :VACUOUS : :FAIL), max_rel_err = r.max_rel_err, elements_changed = r.elements_changed, via_truth = !r.ok && truth && r.truth_ok, tr_cpu = r.tr_cpu, tr_dev = r.tr_dev))
             catch e
                 println("  !! ", name, " [", mode, "/jacc] ", first(split(sprint(showerror, e), "\n")))
                 push!(results, (kernel = name, mode = mode, backend = :jacc, status = :gen_error, max_rel_err = NaN, elements_changed = 0))

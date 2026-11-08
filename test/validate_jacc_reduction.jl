@@ -160,7 +160,7 @@ function validate_jacc_reduction()
     checks = 0
     for (name, src, rangeof, byte_identical) in vjr_cases()
         expr = Meta.parse(src)
-        ja = STADE.stade_jacc(expr; reduction_threshold = 0, inbounds = false, dead_scalars = false)
+        ja = STADE.stade_jacc(expr; reduction_threshold = 0, inbounds = false, dead_scalars = false, split_reduce = 0, warp_atomics = false)
         cu = STADE.stade_gpu(expr, STADE.cgen_backend_cuda(); reduction_threshold = 0, reduce_block = false, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
         red = vjr_find_reduce(ja.host)
 

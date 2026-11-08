@@ -865,8 +865,8 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
         check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
         text = read(joinpath(abspath(joinpath(@__DIR__, "..")), "src", "STADE.jl"), String)
         cases = [
-            ("no barrier between groups", "prev !== nothing && g !== prev && push!(body, Expr(:call, :sync_threads))", "false && push!(body, Expr(:call, :sync_threads))"),
-            ("no barrier after the partial sums", "        push!(body, Expr(:call, :sync_threads))\n        for (k, (v, p)) in enumerate(accs)\n            terms", "        for (k, (v, p)) in enumerate(accs)\n            terms"),
+            ("no barrier between groups", "prev !== nothing && g !== prev && push!(body, copy(barrier))", "false && push!(body, copy(barrier))"),
+            ("no barrier after the partial sums", "        push!(body, copy(barrier))\n        for (k, (v, p)) in enumerate(accs)\n            terms", "        for (k, (v, p)) in enumerate(accs)\n            terms"),
             ("lane stride is wrong", "Expr(:call, :(:), first_, lp.step * nlane, lp.hi)", "Expr(:call, :(:), first_, lp.step * (nlane - 1), lp.hi)"),
             ("partial sum of a reduction loop starts from the pre-value", "push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, lane_loop(lp, newbody))", "push!(body, Expr(:(=), p, v))\n            end\n            push!(body, lane_loop(lp, newbody))"),
             ("partial sum of a storing loop starts from the pre-value", "push!(body, Expr(:(=), p, Expr(:call, :zero, v)))\n            end\n            push!(body, Expr(:if, act", "push!(body, Expr(:(=), p, v))\n            end\n            push!(body, Expr(:if, act"),
@@ -907,7 +907,7 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("the keyword is ignored", "tr = coalesce && cgen_split_unit_refs(items)", "tr = cgen_split_unit_refs(items)"),
             ("the lane loop keeps the stride of the plain layout", "Expr(:call, :(:), first_, lp.step * nlane, lp.hi)", "Expr(:call, :(:), first_, lp.step * L, lp.hi)"),
             ("the host divides by 32 outputs per block", "tw.n_iter, tw.nout))", "tw.n_iter, 32))"),
-            ("the output index of a block ignores the block width", "QuoteNode(:x)), 1), nout), jx)),", "QuoteNode(:x)), 1), 32), jx)),"),
+            ("the output index of a block ignores the block width", "QuoteNode(:x)), 1), nout), jx)", "QuoteNode(:x)), 1), 32), jx)"),
             ("every lane adds the same partial", "(slot + k - 1) * 32 * L + l, Expr(:call, :*, Expr(:call, :-, jx, 1), 32))) for l in 1:nlane]", "(slot + k - 1) * 32 * L + 1, Expr(:call, :*, Expr(:call, :-, jx, 1), 32))) for l in 1:nlane]"),
             ("update loops run for inactive threads", "push!(body, Expr(:if, act, Expr(:block, lane_loop(lp, newbody))))", "push!(body, lane_loop(lp, newbody))"),
         ]

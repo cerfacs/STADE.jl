@@ -272,7 +272,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
                                  STADE.stade_adjoint(primal; keep_push_pop = false, fuse_ii_loops = true)
             expr = mode == :hvp ? gen.hvp : gen.adjoint
             for (label, host) in (("cuda", STADE.stade_gpu(expr, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0).host),
-                                  ("jacc", STADE.stade_jacc(expr; inbounds = false, dead_scalars = false).host))
+                                  ("jacc", STADE.stade_jacc(expr; inbounds = false, dead_scalars = false, split_reduce = 0, warp_atomics = false).host))
                 assigned = Set{Symbol}()
                 collect_assigned(e) = e isa Expr &&
                     (e.head === :(=) && e.args[1] isa Symbol && push!(assigned, e.args[1]);
