@@ -63,8 +63,11 @@ function car_unit(src::String; ns = (3, 4, 5, 9, 13), steps = (0, 1, 2, 3, 6))
     gk = STADE.cgen_ingest(expr)
     g3 = STADE.cgen_gather_stencil(gk, 3)
     g4 = STADE.cgen_gather_stencil(gk, 4)
-    f0 = Core.eval(Module(), STADE.cgen_gather_function_expr(gk))
-    f4 = Core.eval(Module(), STADE.cgen_gather_function_expr(g4))
+    # Julia 1.11 can crash when a collection runs between a fresh eval and its first call: keep the modules alive and the collector off here.
+    m0, m4 = Module(), Module()
+    GC.enable(false)
+    f0 = Core.eval(m0, STADE.cgen_gather_function_expr(gk))
+    f4 = Core.eval(m4, STADE.cgen_gather_function_expr(g4))
     names = [string(a) for a in gk.args]
     rng = MersenneTwister(hash(src))
     worst = 0.0
@@ -77,6 +80,7 @@ function car_unit(src::String; ns = (3, 4, 5, 9, 13), steps = (0, 1, 2, 3, 6))
             worst = max(worst, maximum(abs.(r0[k] .- r4[k])))
         end
     end
+    GC.enable(true)
     GC.gc()
     t3 = STADE.io_expr_to_source(STADE.cgen_gather_function_expr(g3))
     t4 = STADE.io_expr_to_source(STADE.cgen_gather_function_expr(g4))

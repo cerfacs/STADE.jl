@@ -50,6 +50,7 @@ const VIOLATIONS = NamedTuple[]
 const NEXTID = Ref(0)
 const LAUNCHES = Ref(0)
 const LAUNCHED = String[]   # name of every kernel launched, in order
+const FREED = Any[]   # every array passed to unsafe_free!
 # Order in which one launch runs its logical threads: :ascending, :descending or :shuffled. A kernel whose
 # result depends on it has a race; one that passes under all three is only known to be order-insensitive here.
 const ORDER = Ref(:ascending)
@@ -142,6 +143,8 @@ const REGS = Ref{Function}(name -> (endswith(name, "_c!") || endswith(name, "_c"
 registers(k::FakeKernel) = REGS[](k.name)
 const MAXT = Ref{Function}(name -> 1024)   # limit of threads per block of a compiled kernel, by name; a test can lower it for the split twin
 maxthreads(k::FakeKernel) = MAXT[](k.name)
+# CUDA.unsafe_free!: the host array stays readable, the call is logged so a test can count the frees
+unsafe_free!(x) = (push!(FREED, x); nothing)
 
 macro cuda(args...)
     call = args[end]

@@ -132,6 +132,8 @@ function cub_unit_checks()
     # the scratch arrays: forward sums go to an undefined array with beta 0.0, the seed scratch of an adjoint is undefined; without the keyword both are zeroed
     ft = STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), 1).plan.host); f0 = STADE.io_expr_to_source(cub_run(bc[2], bc[3], bc[4](1), 0).plan.host)
     check(occursin("undef", ft) && occursin("0.0, ", ft) && !occursin("CUDA.zeros", ft) && !occursin("undef", f0), "forward scratch: undefined with beta 0.0 under the keyword, no scratch without")
+    # every scratch array goes back to the pool once its last kernel is queued
+    check(occursin("CUDA.unsafe_free!(__ct_g)", at1) && occursin("CUDA.unsafe_free!(__cfs_", ft) && !occursin("unsafe_free", f0), "scratch arrays are freed after their last use")
     # a recomputed forward value below the threshold: the tile stage fills the scratch array with the sum of the products alone, and the first kernel adds the start value
     for (name, src, entry, mk, must) in ADJ_CASES
         (must isa Integer && must > 0) || continue
@@ -201,6 +203,8 @@ function validate_cublas(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("the start of the forward loop is ignored", "Dict{Symbol,Any}(u => 1, v => lo, cv => 1)", "Dict{Symbol,Any}(u => 1, v => 1, cv => 1)"),
             ("the forward gemm adds into an array nobody zeroed", "cgen_cublas_forward_plan(d, sc, cublas; beta = 0.0)", "cgen_cublas_forward_plan(d, sc, cublas)"),
             ("the seed scratch stays undefined when the keyword is off", "cublas > 0 ? undef_expr : zeros_expr", "undef_expr"),
+            ("the forward scratch is not freed", "cgen_free_scratch(fc.scratch)]", "nothing]"),
+            ("the adjoint scratch is not freed", "for sc in A.a.scratch; push!(body, cgen_free_scratch(sc)); end", ""),
             ("the keyword is ignored", "cp = cublas > 0 ? cgen_cublas_plan(d, cublas) : nothing", "cp = cgen_cublas_plan(d, max(cublas, 1))"),
         ]
         mktempdir() do tmp

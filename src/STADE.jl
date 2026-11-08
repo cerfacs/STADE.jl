@@ -14233,6 +14233,9 @@ function cgen_cublas_forward(kdef, scratch::Symbol)
     return (kdef = Expr(:function, Expr(:call, name, fargs..., scratch), Expr(:block, body...)), name = name)
 end
 
+# Frees a scratch array of a contraction twin at once. The free is ordered on the stream, so the queued kernels still read it.
+cgen_free_scratch(sc::Symbol) = Expr(:call, Expr(:., :CUDA, QuoteNode(:unsafe_free!)), sc)
+
 # Adds the contraction twin of every kernel that has one and wraps the launch statement: the twin when its condition holds, the statement as it was otherwise.
 # A forward product gets one tiled kernel. An adjoint product gets a kernel that stores the seeds in a scratch array (allocated by the host function) and one
 # tiled kernel per atomic statement.
@@ -14320,7 +14323,8 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
                         launch = cgen_contraction_find_launch(e, backend.launch_macro, base)
                         if launch !== nothing
                             fbody = Any[Expr(:(=), fc.scratch, Expr(:call, Expr(:curly, :CuArray, :Float64), :undef, fc.size)), fc.plan.call,
-                                        Expr(:macrocall, backend.launch_macro, nothing, launch.args[3:end-1]..., Expr(:call, fc.name, plain.args[2:end]..., fc.scratch))]
+                                        Expr(:macrocall, backend.launch_macro, nothing, launch.args[3:end-1]..., Expr(:call, fc.name, plain.args[2:end]..., fc.scratch)),
+                                        cgen_free_scratch(fc.scratch)]
                             res = emit_if(fc.plan.cond, fbody, Any[res])
                         end
                     end
@@ -14358,6 +14362,9 @@ function cgen_contraction_apply(host::Expr, kernels::Vector{Expr}, backend; cmin
                         cp = cublas > 0 ? cgen_cublas_plan(d, cublas) : nothing
                         push!(body, cp === nothing ? tiled(t, call) : emit_if(cp.cond, Any[cp.call], Any[tiled(t, call)]))
                     end
+                    # the scratch arrays go back to the pool as soon as the last product has been queued, so the next contraction reuses them
+                    for sc in A.a.scratch; push!(body, cgen_free_scratch(sc)); end
+                    A.fs === nothing || for sc in A.a.fstage.scratch; push!(body, cgen_free_scratch(sc)); end
                     push!(used, base)
                     cond = foldl((a, b) -> Expr(:&&, a, b), cans)
                     isempty(wants) || (cond = Expr(:&&, cond, foldl((a, b) -> Expr(:||, a, b), wants)))
