@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 using Random
 isdefined(Main, :CUDA) || include(joinpath(@__DIR__, "ownership_shim.jl"))
@@ -356,7 +357,7 @@ function validate_fresh_gradient(; only::Union{Nothing,Vector{String}} = nothing
                 Core.eval(STADE, Meta.parse($(repr(redef))))
                 println("RESULT ", try validate_fresh_gradient(; only = $(repr(names)), sabotage = false) catch; 1 end)
             """
-            o = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+            o = sab_read(script)
             m = match(r"RESULT (\d+)", o)
             check(m !== nothing && parse(Int, m.captures[1]) > 0, "sabotage \"$label\": $(join(names, ", ")) fails a check")
         end

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_primal_outputs.jl =====================
 # Checks `primal_outputs = false` of stade_adjoint: the generator drops the forward sweep, and the stores of primal arrays that nothing reads, when the backward sweep
 # does not need them. The primal arrays of the kernel are then left at their input values.
@@ -313,10 +314,10 @@ function validate_primal_outputs(; phases = (:units, :sabotage), slice = 1:typem
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_primal_outputs.jl"))))
-                    n = po_unit_checks() + po_handwritten_checks()
+                    n = sab_phase_sum($(repr("validate_primal_outputs.jl")), $(repr(label)), [po_unit_checks, po_handwritten_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

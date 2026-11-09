@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_conv_contraction.jl =====================
 # Checks the convolution twins (C3 forward, C3b adjoint): cgen_contraction_conv() = true.
 #   - units of cgen_contraction_flatten (a nest of loops as one loop) and cgen_contraction_pixel (the decode of a flat index into pixel and channel)
@@ -251,10 +252,10 @@ function validate_conv_contraction(; phases = (:units, :end, :sabotage), slice =
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_conv_contraction.jl"))))
-                    n = conv_unit_checks() + conv_end_checks()
+                    n = sab_phase_sum($(repr("validate_conv_contraction.jl")), $(repr(label)), [conv_unit_checks, conv_end_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_cublas.jl =====================
 # Checks the cuBLAS offload of the adjoint products (`cublas`, v0.4.60 candidate, opt-in): a product that the adjoint contraction recognizes as
 # C[r, c] += sum_k A[r, k] * B[k, c] over dense operands runs as one CUDA.CUBLAS.gemm! (beta = 1) when M * N * K reaches the keyword, and as its tile twin otherwise.
@@ -204,7 +205,7 @@ function validate_cublas(; phases = (:units, :sabotage), slice = 1:typemax(Int))
             ("the forward gemm adds into an array nobody zeroed", "cgen_cublas_forward_plan(d, sc, cublas; beta = 0.0)", "cgen_cublas_forward_plan(d, sc, cublas)"),
             ("the seed scratch stays undefined when the keyword is off", "cublas > 0 ? undef_expr : zeros_expr", "undef_expr"),
             ("the forward scratch is not freed", "cgen_free_scratch(fc.scratch)]", "nothing]"),
-            ("the adjoint scratch is not freed", "for sc in A.a.scratch; push!(body, cgen_free_scratch(sc)); end", ""),
+            ("the adjoint scratch is not freed", "\n                    for sc in A.a.scratch; push!(body, cgen_free_scratch(sc)); end", "\n"),
             ("the keyword is ignored", "cp = cublas > 0 ? cgen_cublas_plan(d, cublas) : nothing", "cp = cgen_cublas_plan(d, max(cublas, 1))"),
         ]
         mktempdir() do tmp
@@ -220,10 +221,10 @@ function validate_cublas(; phases = (:units, :sabotage), slice = 1:typemax(Int))
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_cublas.jl"))))
-                    n = cub_unit_checks() + cub_direct_checks()
+                    n = sab_phase_sum($(repr("validate_cublas.jl")), $(repr(label)), [cub_unit_checks, cub_direct_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

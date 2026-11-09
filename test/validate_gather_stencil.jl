@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 isdefined(Main, :STADE) || include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 using Random
 
@@ -794,7 +795,7 @@ function validate_gather_stencil(dir::String = joinpath(@__DIR__, "val-corpus");
                     n += gat_corpus_checks($(repr(dir)); names = ["gat_pingpong", "gat_diff1", "gat_two_targets", "gat_reverse", "gat_wide", "lin_pingpong"], modes = (:adjoint,), report = false)
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

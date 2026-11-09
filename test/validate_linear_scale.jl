@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 isdefined(Main, :STADE) || include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 using Random
 
@@ -167,7 +168,7 @@ function validate_linear_scale(dir::String = joinpath(@__DIR__, "val-corpus"); s
                     n += lin_corpus_checks($(repr(dir)); names = ["lin_guard_products", "lin_carried_sum", "lin_then_quad"])
                     println("RESULT ", n)
                 """
-                out = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 println(rpad(caught ? "ok" : "FAIL", 6), "sabotage \"$label\": ", caught ? "a check fails" : "NOT CAUGHT")

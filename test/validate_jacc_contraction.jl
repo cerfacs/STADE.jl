@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_jacc_contraction.jl =============================
 # Checks the JACC contraction twin (`jacc_contraction` of stade_jacc, v0.4.72): the tiled kernels of the CUDA path (a 64 x 64 tile per block of 16 x 16 threads, split sums for a
 # long inner length) recast for JACC: thread and block indices from the global indices (i, j[, k]), the shared array from JACC.shared, the barrier JACC.sync_workgroup.
@@ -361,7 +362,7 @@ function validate_jacc_contraction(; phases = (:units, :launch, :sabotage), slic
                     n = jcn_launch_checks()
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

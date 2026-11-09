@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 #=
     validate_reduce_block(dir="val-corpus"; only=nothing, sabotage=true)
 
@@ -82,7 +83,7 @@ function validate_reduce_block(dir::String = joinpath(@__DIR__, "val-corpus"); o
                 Core.eval(STADE, Meta.parse($(repr(sab))))
                 println("RESULT ", validate_reduce_block($(repr(dir)); only = ["dotprod"], sabotage = false))
             """
-            o = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+            o = sab_read(script)
             m = match(r"RESULT (\d+)", o)
             check(m !== nothing && parse(Int, m.captures[1]) > 0, "sabotage \"$label\": dotprod fails a check")
         end

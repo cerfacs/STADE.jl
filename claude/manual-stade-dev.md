@@ -2030,6 +2030,17 @@ Gradient sums and the number of changed elements equal the plain text in every r
 Tests: `julia validate_jacc_dead_pops.jl` has four phases: `units` (stack stores before and after for every case of `validate_dead_pops.jl`, the restore keywords, `dead_scalars = false`), `file` (the file driver, shared `initstacks_*`), `fill` (a forward product with a short side: plain at fill 64, twin at fill 0, equal outputs on the CPU stand-in) and `sabotage` (8 edits of the new code). The pass itself is checked by `validate_dead_pops.jl`; its runs on a device by `validate_corpus_gpu.jl`.
 
 
+### Test cost (v0.4.74, tests only)
+
+`src/STADE.jl` is the text of v0.4.73. Three changes to the test tree cut the time of a full validation; none of them weakens a check.
+
+**Sabotage runs stop at the first failure.** `test/sabotage_run.jl` holds `sab_read(script)`, which every sabotage loop now calls in place of `read(pipeline(...))`. It reads the output of the sabotaged process as it appears. The first line that starts with `FAIL` ends the run: the case is caught and the checks after it can add nothing. A run that never prints `FAIL` is read to the end, so a case that is NOT caught still runs every check, and `NOT CAUGHT` is reported as before. `SAB_NOFF=1` reads to the end in every case.
+
+**One phase per sabotage case.** Eight test files run several check phases for each sabotaged copy (`validate_colblock`, `_cublas`, `_gather_periodic`, `_rowblock`, `_jacc_split`, `_jacc_dead_pops`, `_split`, `_reuse_stored`, and `_conv_contraction`, `_merge_accum`, `_primal_outputs`). `sab_phase_sum(file, label, phases)` runs the phase that `test/sabotage_phases.tsv` names for that case, and every phase when the case has no entry. `SAB_ALL_PHASES=1` runs every phase for every case. The table is written by `julia sab_phase_map.jl OUT.tsv LOG...` from a run with `SAB_MAP=1 SAB_NOFF=1`: each phase runs alone and prints `SABMAP` lines (failures, seconds); the fastest phase that fails is the entry. Run it again after a case or a phase changes. A stale entry can only select a phase that no longer catches the case, and that shows as `NOT CAUGHT`. A new case has no entry and runs every phase until the table is refreshed.
+
+**Slices of the long tasks.** `validate_corpus_flags.jl`, `validate_zerotrip.jl`, `validate_shared_private.jl` and `validate_ownership.jl` already take kernel names as arguments; a chain task runs a share of the corpus (every k-th kernel of the sorted list). `validate_split` and `validate_reuse_stored` run `phases = (:units,)` in one task and `slice = a:b` of the sabotage cases in others. The layout is built by `rome/chain/mk_chain2.py` and `plan74.py` of the bench kit (not part of the release); the release carries only the pieces above.
+
+
 ## IV.17 `val_*` — the oracles
 
 **Consumes** a kernel, its generated code, and a baseline. **Produces**
@@ -2913,6 +2924,7 @@ julia validate_jacc_split.jl             # JACC split twin: units, coalesced lay
 julia validate_jacc_warp.jl              # JACC warp atomics: structure over the corpus, with sabotage, no GPU needed
 julia validate_jacc_contraction.jl        # JACC contraction tile twin: units, launch geometry, argument limit, 25 sabotage cases, no GPU needed
 julia validate_jacc_dead_pops.jl         # JACC dead stores and tile fill: units, file driver, fill gate, 8 sabotage cases, no GPU needed
+julia sab_phase_map.jl OUT.tsv LOG...    # rebuild test/sabotage_phases.tsv from a SAB_MAP=1 SAB_NOFF=1 sabotage run (v0.4.74)
 julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```
 

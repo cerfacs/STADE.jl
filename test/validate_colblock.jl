@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_colblock.jl =====================
 # Checks the column-block twin (`col_block`, CUDA, v0.4.65): a flat loop `for idx = 1:R*N` with `i = div(idx - 1, N) + 1`, `j = mod(idx - 1, N) + 1` and an accumulation
 # `z[j] = z[j] + e` (the push form of a layer) gets a twin that runs a block of 32 columns x 8 row lanes per tile of 128 rows. The CPU shim has no static shared memory, so
@@ -323,10 +324,10 @@ function validate_colblock(; phases = (:units, :sabotage), slice = 1:typemax(Int
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_colblock.jl"))))
-                    n = cb_unit_checks() + cb_text_checks() + cb_launch_checks()
+                    n = sab_phase_sum($(repr("validate_colblock.jl")), $(repr(label)), [cb_unit_checks, cb_text_checks, cb_launch_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 #=
     validate_skip_empty(dir="val-corpus"; only=nothing, sabotage=true)
 
@@ -60,7 +61,7 @@ function validate_skip_empty(dir::String = joinpath(@__DIR__, "val-corpus"); onl
                 Core.eval(STADE, Meta.parse($(repr(sab))))
                 println("RESULT ", try validate_skip_empty($(repr(dir)); only = $(repr(cases)), sabotage = false) catch; 1 end)
             """
-            o = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+            o = sab_read(script)
             m = match(r"RESULT (\d+)", o)
             check(m !== nothing && parse(Int, m.captures[1]) > 0, "sabotage \"$label\": a check fails")
         end

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_split.jl =============================
 # Checks the split reduction (`split_reduce`, v0.4.33): the twin kernel that gives each output L lanes on its inner loops.
 #
@@ -924,10 +925,10 @@ function validate_split(; phases = (:units, :sabotage), slice = 1:typemax(Int))
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_split.jl"))))
-                    n = spl_unit_checks() + spl_direct_checks()
+                    n = sab_phase_sum($(repr("validate_split.jl")), $(repr(label)), [spl_unit_checks, spl_direct_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

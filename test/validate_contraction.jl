@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_contraction.jl =============================
 # Checks the contraction twin (`contraction`, v0.4.34): a tiled kernel for a loop over the elements of a matrix whose inner loop sums products.
 #
@@ -1333,7 +1334,7 @@ function validate_contraction(; phases = (:units, :sabotage), slice = 1:typemax(
                     n = con_unit_checks()
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

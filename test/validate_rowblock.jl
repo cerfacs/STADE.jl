@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_rowblock.jl =====================
 # Checks the row-block twin (`row_block`, CUDA): a flat loop `for idx = 1:R*N` with `i = div(idx - 1, N) + 1`, `j = mod(idx - 1, N) + 1` and an accumulation into `A[i]` gets a
 # twin that runs one block per row. The CPU cannot run the twin (it uses warp shuffles), so these checks are on the generated text and on the recognizer; the device
@@ -292,10 +293,10 @@ function validate_rowblock(; phases = (:units, :sabotage), slice = 1:typemax(Int
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_rowblock.jl"))))
-                    n = rb_unit_checks() + rb_launch_checks()
+                    n = sab_phase_sum($(repr("validate_rowblock.jl")), $(repr(label)), [rb_unit_checks, rb_launch_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

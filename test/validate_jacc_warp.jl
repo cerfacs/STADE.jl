@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
 """
@@ -110,7 +111,7 @@ function validate_jacc_warp(dir::String = joinpath(@__DIR__, "val-corpus"); only
             Core.eval(STADE, Meta.parse($(repr(sab))))
             println("RESULT ", validate_jacc_warp($(repr(dir)); only = ["idm_tile"], sabotage = false))
         """
-        out = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+        out = sab_read(script)
         m = match(r"RESULT (\d+)", out)
         check(m !== nothing && parse(Int, m.captures[1]) > 0, "sabotage \"index and value swapped\": idm_tile fails the equivalence check")
         script2 = """
@@ -118,7 +119,7 @@ function validate_jacc_warp(dir::String = joinpath(@__DIR__, "val-corpus"); only
             STADE.jgen_warp_classes(k::Expr) = Dict{Symbol,Symbol}()
             println("RESULT ", validate_jacc_warp($(repr(dir)); only = ["idm_tile"], sabotage = false))
         """
-        out2 = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script2`; stderr = devnull), String) catch e; "ERR" end
+        out2 = sab_read(script2)
         m2 = match(r"RESULT (\d+)", out2)
         check(m2 !== nothing && parse(Int, m2.captures[1]) > 0, "sabotage \"no address is lane-distinct\": the gate checks fail")
         script3 = """
@@ -126,7 +127,7 @@ function validate_jacc_warp(dir::String = joinpath(@__DIR__, "val-corpus"); only
             STADE.jgen_warp_classes(k::Expr) = Dict{Symbol,Symbol}(:__jacc_i => :D)
             println("RESULT ", validate_jacc_warp($(repr(dir)); only = ["idm_tile"], sabotage = false))
         """
-        out3 = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script3`; stderr = devnull), String) catch e; "ERR" end
+        out3 = sab_read(script3)
         m3 = match(r"RESULT (\d+)", out3)
         check(m3 !== nothing && parse(Int, m3.captures[1]) > 0, "sabotage \"the class does not follow assignments\": the gate checks fail")
     end

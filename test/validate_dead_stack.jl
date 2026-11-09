@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_dead_stack.jl =====================
 # Checks the deletion of dead stack stores (`dead_stack`, v0.4.44). A forward kernel pushes a running sum to a stack at every step; the backward kernel reads one
 # site back. The stores of the sites no read repeats are dead, and `dead_stack = 1` deletes them.
@@ -266,7 +267,7 @@ function validate_dead_stack(; phases = (:units, :sabotage), slice = 1:typemax(I
                     n = ds_unit_checks()
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_merge_accum.jl =====================
 # Checks `cgen_merge_accum`, the GPU-stage pass that merges two accumulations into one array element (`A[i] = A[i] + e1` ... `A[i] = A[i] + e2` into one statement).
 #   - units: handwritten functions, run before and after the pass on the same random arrays (they must agree to rounding), and the number of accumulation statements
@@ -256,10 +257,10 @@ function validate_merge_accum(; phases = (:units, :sabotage), slice = 1:typemax(
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_merge_accum.jl"))))
-                    n = ma_unit_checks() + ma_gpu_checks()
+                    n = sab_phase_sum($(repr("validate_merge_accum.jl")), $(repr(label)), [ma_unit_checks, ma_gpu_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

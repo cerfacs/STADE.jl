@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_dead_pops.jl =====================
 # Checks cgen_dead_pops: the restores of a scalar that the reverse sweep overwrites before it reads, and the stores of a stack that nothing reads then.
 #   - units: the adjoint function runs before and after the pass on random arrays and every non-stack array must agree exactly. Kernels: a scalar reassigned
@@ -248,7 +249,7 @@ function validate_dead_pops(; phases = (:units, :sabotage), slice = 1:typemax(In
                     n = dp_unit_checks()
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_inbounds.jl ==========================
 # Checks the two kernel-finishing passes of v0.4.32: the `@inbounds` wrap (`inbounds`) and the deletion of dead scalar updates (`dead_scalars`).
 #
@@ -360,7 +361,7 @@ function validate_inbounds(dir::String = joinpath(@__DIR__, "val-corpus"); phase
                     n += inb_corpus_checks($(repr(dir)); names = ["transformer_block", "unet", "mpnn", "heat1d", "advection", "stencil_loss"], report = false)
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

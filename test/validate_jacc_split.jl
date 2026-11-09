@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_jacc_split.jl =============================
 # Checks the JACC split reduction (`split_reduce` of stade_jacc, v0.4.71): the shared-memory twin that gives each output L lanes, launched with a LaunchSpec.
 #
@@ -307,10 +308,10 @@ function validate_jacc_split(; phases = (:units, :launch, :sabotage), slice = 1:
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_jacc_split.jl"))))
-                    n = jsp_unit_checks() + jsp_coal_checks() + jsp_launch_checks()
+                    n = sab_phase_sum($(repr("validate_jacc_split.jl")), $(repr(label)), [jsp_unit_checks, jsp_coal_checks, jsp_launch_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # validate_hfuse.jl
 #
 # Horizontal fusion (cgen_hfuse_*, gather_stencil level 5, the default): adjacent loops that do not depend on each other and cover abutting ranges become
@@ -201,7 +202,7 @@ function validate_hfuse(; sabotage::Bool = true, phases = (:units, :sabotage), s
                     n = hf_checks()
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

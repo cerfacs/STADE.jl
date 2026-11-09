@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_reuse_stored.jl =====================
 # Checks the reuse of a stored value (`reuse_stored`, v0.4.38): a backward kernel that computes a forward sum again, `s = b[j]; for i ...; s = s + w * x[i]; end`, and
 # uses `tanh(s)`, reads `h[j]` instead when a forward kernel launched earlier stored `h[j] = tanh(s)` from the same sum. The dead-scalar pass then deletes the sum.
@@ -309,10 +310,10 @@ function validate_reuse_stored(; phases = (:units, :sabotage), slice = 1:typemax
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_reuse_stored.jl"))))
-                    n = rs_unit_checks() + rs_direct_checks()
+                    n = sab_phase_sum($(repr("validate_reuse_stored.jl")), $(repr(label)), [rs_unit_checks, rs_direct_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

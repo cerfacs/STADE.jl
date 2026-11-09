@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_dead_stack_shadow.jl =============================
 # dead_stack = 2 moves the kept region of a stack to the start of the array. The HVP host allocates the shadow `x_d` of a stack with
 # `length(x)`. When the shadow is still read and written (checked mode: inbounds = false, where the dead reads stay), the shadow keeps the
@@ -81,7 +82,7 @@ function validate_dead_stack_shadow(; phases = (:units, :sabotage))
                     include($(repr(joinpath(@__DIR__, "validate_dead_stack_shadow.jl"))))
                     println("RESULT ", dss_unit_checks())
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

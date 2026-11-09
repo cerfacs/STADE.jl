@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_jacc_dead_pops.jl ================================
 # Checks that the JACC path applies the dead-restore / dead-stack-store pass (`jacc_dead_pops` of stade_jacc, v0.4.73), as the CUDA path always did.
 #   julia validate_jacc_dead_pops.jl        units, file driver, tile fill, sabotage
@@ -172,10 +173,10 @@ function validate_jacc_dead_pops(; phases = (:units, :file, :fill, :sabotage), s
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_jacc_dead_pops.jl"))))
-                    n = jdp_unit_checks() + jdp_file_checks() + jdp_fill_checks()
+                    n = sab_phase_sum($(repr("validate_jacc_dead_pops.jl")), $(repr(label)), [jdp_unit_checks, jdp_file_checks, jdp_fill_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

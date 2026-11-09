@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
 """
@@ -62,7 +63,7 @@ function validate_sync_free_reduce(dir::String = joinpath(@__DIR__, "val-corpus"
             Core.eval(STADE, Meta.parse($(repr(sab))))
             println("RESULT ", validate_sync_free_reduce($(repr(dir)); only = ["dotprod"], sabotage = false))
         """
-        out = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+        out = sab_read(script)
         m = match(r"RESULT (\d+)", out)
         check(m !== nothing && parse(Int, m.captures[1]) > 0, "sabotage \"gate forced off\": dotprod fails the count check")
     end

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_gather_periodic.jl =====================
 # Checks the periodic gather (gather_stencil level 3) and the range reduction of the periodic neighbour (cgen_mod_reduce).
 #   - units: scatter loops whose target is a periodic shift of the cell (1, 2 and 3 coordinates, shifts of one and two steps, several terms on one permutation, a reset scalar)
@@ -499,10 +500,10 @@ function validate_gather_periodic(; phases = (:units, :sabotage), slice = 1:type
                     include($(repr(path)))
                     cd($(repr(@__DIR__)))
                     include($(repr(joinpath(@__DIR__, "validate_gather_periodic.jl"))))
-                    n = gp_unit_checks() + gp_mod_checks()
+                    n = sab_phase_sum($(repr("validate_gather_periodic.jl")), $(repr(label)), [gp_unit_checks, gp_mod_checks])
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
 """
@@ -62,7 +63,7 @@ function validate_warp_atomics(dir::String = joinpath(@__DIR__, "val-corpus"); o
             Core.eval(STADE, Meta.parse($(repr(sab))))
             println("RESULT ", validate_warp_atomics($(repr(dir)); only = ["idm_tile"], sabotage = false))
         """
-        out = try read(pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+        out = sab_read(script)
         m = match(r"RESULT (\d+)", out)
         check(m !== nothing && parse(Int, m.captures[1]) > 0, "sabotage \"index and value swapped\": idm_tile fails the equivalence check")
     end

@@ -1,0 +1,162 @@
+# file<TAB>label<TAB>phase that catches the case (written by sab_phase_map.jl)
+validate_colblock.jl	a descending loop is accepted	1
+validate_colblock.jl	a kernel without an accumulation gets a twin	1
+validate_colblock.jl	a literal inner length is accepted	1
+validate_colblock.jl	a parameter may be reassigned	1
+validate_colblock.jl	a row and a column with different lengths are accepted	1
+validate_colblock.jl	a statement of any kind is allowed in the body	1
+validate_colblock.jl	a target that is not the column is accepted	3
+validate_colblock.jl	any number of accumulations is accepted	1
+validate_colblock.jl	every row lane flushes	2
+validate_colblock.jl	no barrier before the tile sum	2
+validate_colblock.jl	the accumulated array may be used elsewhere	1
+validate_colblock.jl	the grid limit is dropped	3
+validate_colblock.jl	the inner length is not tested against the keyword	3
+validate_colblock.jl	the loop is not guarded by the column	2
+validate_colblock.jl	the minimum row count is dropped	3
+validate_colblock.jl	the pass is never applied	3
+validate_colblock.jl	the row lanes start at the same row	2
+validate_colblock.jl	the row, the column or the flat index may be assigned twice	1
+validate_colblock.jl	the tile runs past the last row	2
+validate_colblock.jl	the tile sum drops a lane	2
+validate_colblock.jl	the whole-rows condition is dropped	3
+validate_cublas.jl	a coefficient that reads a loop variable is accepted	2
+validate_cublas.jl	a stride that is not unit is taken as a leading dimension	2
+validate_cublas.jl	a subtracted sum is offloaded	1
+validate_cublas.jl	an empty product is offloaded	1
+validate_cublas.jl	the beta is zero	1
+validate_cublas.jl	the first kernel overwrites the sum with the scratch	1
+validate_cublas.jl	the forward gemm adds into an array nobody zeroed	1
+validate_cublas.jl	the forward kernel drops the start value	1
+validate_cublas.jl	the forward scratch is not freed	1
+validate_cublas.jl	the guard reads the length of the scratch before it exists	1
+validate_cublas.jl	the keyword is ignored	1
+validate_cublas.jl	the leading dimension may be smaller than the rows	1
+validate_cublas.jl	the output is never swapped	1
+validate_cublas.jl	the seed scratch stays undefined when the keyword is off	1
+validate_cublas.jl	the stage keeps the start value in the scratch	1
+validate_cublas.jl	the start of the columns is ignored	1
+validate_cublas.jl	the start of the forward loop is ignored	1
+validate_cublas.jl	the swap keeps the order of the operands	1
+validate_cublas.jl	the transpose flag is inverted	2
+validate_cublas.jl	the view may end past the array	1
+validate_cublas.jl	the work threshold is ignored	1
+validate_gather_periodic.jl	a coordinate assigned in a branch keeps its bound	2
+validate_gather_periodic.jl	a modulus that differs from the coordinate's is reduced	2
+validate_gather_periodic.jl	a reassigned coordinate keeps its bound	2
+validate_gather_periodic.jl	a reset scalar is not set at the top of the replay	1
+validate_gather_periodic.jl	a scalar assigned twice differently is taken as stable	1
+validate_gather_periodic.jl	a scalar that is not reset is taken as reset	1
+validate_gather_periodic.jl	a scalar-held index is not inlined	1
+validate_gather_periodic.jl	an alias scalar is not resolved	1
+validate_gather_periodic.jl	an assignment after the reset is ignored	1
+validate_gather_periodic.jl	an unshifted target is gathered	1
+validate_gather_periodic.jl	the atomics are free in the scatter work	1
+validate_gather_periodic.jl	the box is not compared with the loop length	1
+validate_gather_periodic.jl	the cost gate is removed	1
+validate_gather_periodic.jl	the inverse shifts the wrong way	1
+validate_gather_periodic.jl	the loop may start above 1	1
+validate_gather_periodic.jl	the modulus of a neighbour is not compared	1
+validate_gather_periodic.jl	the one-step inverse of a shift of -1 is that of +1	1
+validate_gather_periodic.jl	the replay cap is ignored	1
+validate_gather_periodic.jl	the replayed work of one offset only is counted	1
+validate_gather_periodic.jl	the shift -1 form adds one	2
+validate_gather_periodic.jl	the shift -2 form wraps at the wrong place	2
+validate_gather_periodic.jl	the shift 0 form uses a strict comparison	2
+validate_gather_periodic.jl	the stride of a term is not compared	1
+validate_jacc_dead_pops.jl	dead_scalars = false does not stop it	1
+validate_jacc_dead_pops.jl	the JACC forward twin ignores the fill	3
+validate_jacc_dead_pops.jl	the file driver ignores a shared initstacks	2
+validate_jacc_dead_pops.jl	the file driver passes no initstacks	2
+validate_jacc_dead_pops.jl	the fill gate is dropped	3
+validate_jacc_dead_pops.jl	the fill gate looks at one side only	3
+validate_jacc_dead_pops.jl	the pass is not applied in stade_jacc	2
+validate_jacc_dead_pops.jl	the switch is ignored	2
+validate_jacc_split.jl	CUDA.jl's wording of the refusal is not recognised	3
+validate_jacc_split.jl	a kernel launched from two sites is split	3
+validate_jacc_split.jl	a packed kernel is split	3
+validate_jacc_split.jl	every launch error takes the fallback	3
+validate_jacc_split.jl	the backend test is dropped	3
+validate_jacc_split.jl	the barrier of the JACC twin is dropped	3
+validate_jacc_split.jl	the block count ignores the outputs per block	3
+validate_jacc_split.jl	the driver's wording of the refusal is not recognised	3
+validate_jacc_split.jl	the fallback twin is never launched	3
+validate_jacc_split.jl	the lane index of the JACC twin is the block row	3
+validate_jacc_split.jl	the plain launch stays synchronous in async mode	3
+validate_jacc_split.jl	the range of the launch is not padded to whole blocks	3
+validate_jacc_split.jl	the scratch array is not passed	3
+validate_jacc_split.jl	the shared array is not taken from the scratch	3
+validate_jacc_split.jl	the shared memory is not sized	3
+validate_jacc_split.jl	the thread index of the transposed twin ignores the block number	2
+validate_jacc_split.jl	the twin's launch spec stays synchronous in async mode	3
+validate_reuse_stored.jl	a coarse variant is described	2
+validate_reuse_stored.jl	a host scalar of the sum may change between the launches	1
+validate_reuse_stored.jl	a kernel between may write an array the sum reads	1
+validate_reuse_stored.jl	a kernel between may write the stored array	1
+validate_reuse_stored.jl	a kernel that keeps the sum is accepted	1
+validate_reuse_stored.jl	tanh of the sum may be used after the sum changed	1
+validate_reuse_stored.jl	the backward kernel may write the stored array	1
+validate_reuse_stored.jl	the dead-scalar pass is not required	1
+validate_reuse_stored.jl	the forward kernel may write an array the sum reads	1
+validate_reuse_stored.jl	the keyword is not tested	1
+validate_reuse_stored.jl	the scalars of the sum may be defined differently	1
+validate_reuse_stored.jl	the stored array may be written twice	1
+validate_reuse_stored.jl	the stored index may be an expression and the function may read more than the sum	1
+validate_reuse_stored.jl	the sum may be assigned after the store	1
+validate_reuse_stored.jl	the sums may differ	1
+validate_reuse_stored.jl	the thread guards may differ	1
+validate_reuse_stored.jl	the thread indexes may differ	2
+validate_rowblock.jl	a kernel without an accumulation gets a twin	1
+validate_rowblock.jl	a literal inner length is accepted	1
+validate_rowblock.jl	a row and a column with different lengths are accepted	1
+validate_rowblock.jl	a statement of any kind is allowed in the body	1
+validate_rowblock.jl	a target that depends on the column is accepted	1
+validate_rowblock.jl	a target that does not use the row is accepted	1
+validate_rowblock.jl	an ascending loop may start past 1	1
+validate_rowblock.jl	the accumulated array may be used elsewhere	1
+validate_rowblock.jl	the descending condition is dropped	2
+validate_rowblock.jl	the inner length is not tested against the keyword	2
+validate_rowblock.jl	the pass is never applied	2
+validate_rowblock.jl	the row, the column or the flat index may be assigned twice	1
+validate_rowblock.jl	the whole-rows condition is dropped	2
+validate_split.jl	a loop temporary may be read after the loop	1
+validate_split.jl	a loop with no unit reference is accepted	2
+validate_split.jl	a scalar read of a later loop is not counted	1
+validate_split.jl	a store index without the loop variable is accepted	1
+validate_split.jl	a storing loop: an accumulator may feed a scalar statement	1
+validate_split.jl	a storing loop: an accumulator may feed a store	1
+validate_split.jl	a storing loop: the partial sum of an accumulator is not formed	1
+validate_split.jl	a stride reference is accepted as unit	2
+validate_split.jl	an accumulator may feed another statement	1
+validate_split.jl	an empty loop makes the kernel unsplittable	1
+validate_split.jl	an index through a scalar of the loop body is accepted	2
+validate_split.jl	an inner bound computed in the kernel is accepted	1
+validate_split.jl	an integer start is accepted	1
+validate_split.jl	every lane adds the same partial	1
+validate_split.jl	every lane runs the top-level stores	1
+validate_split.jl	every lane starts at the first iteration	1
+validate_split.jl	gather: every loop with an array-read scalar is a gather	1
+validate_split.jl	gather: no loop is ever a gather	1
+validate_split.jl	gather: the gather condition is not added	1
+validate_split.jl	gather: the inner trip bound is dropped	1
+validate_split.jl	gather: the output bound of the plain twin applies	1
+validate_split.jl	gather: the short-trip twin ignores the trip	1
+validate_split.jl	gather: the short-trip twin is never preferred	1
+validate_split.jl	lane stride is wrong	1
+validate_split.jl	no barrier after the partial sums	1
+validate_split.jl	no barrier between groups	1
+validate_split.jl	one array stored by two loops at different indices is accepted	2
+validate_split.jl	one array stored by two loops from different starts is accepted	1
+validate_split.jl	partial sum of a reduction loop starts from the pre-value	1
+validate_split.jl	partial sum of a storing loop starts from the pre-value	1
+validate_split.jl	the clamp of the thread index is dropped	1
+validate_split.jl	the fallback twin is built with the lanes of the first	1
+validate_split.jl	the fallback twin is never launched	1
+validate_split.jl	the host divides by 32 outputs per block	1
+validate_split.jl	the keyword is ignored	1
+validate_split.jl	the lane loop keeps the stride of the plain layout	1
+validate_split.jl	the output index of a block ignores the block width	1
+validate_split.jl	the register limit is not checked	1
+validate_split.jl	the register limit of the fallback twin is not checked	1
+validate_split.jl	the stride test is dropped	1
+validate_split.jl	update loops run for inactive threads	1

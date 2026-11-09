@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 # ==================== validate_adjoint_contraction.jl =====================
 # Checks the adjoint contraction (`contraction`, v0.4.35): a loop over the elements of a matrix whose inner loop adds products into two arrays by atomic adds
 # (the adjoint of a matrix product) becomes a kernel that stores the seed of each element, and one tiled kernel per atomic statement.
@@ -576,7 +577,7 @@ function validate_adjoint_contraction(; phases = (:units, :sabotage), slice = 1:
                     n = adj_unit_checks()
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "sabotage_run.jl"))
 isdefined(Main, :STADE) || include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 using Random
 # the shim is loaded at the top level so that the functions below are defined in a later world than it (a script run would otherwise hit a world-age error)
@@ -522,7 +523,7 @@ function validate_coarsen(dir::String = joinpath(@__DIR__, "val-corpus"); sabota
                     n = crs_unit_checks()
                     println("RESULT ", n)
                 """
-                out = try read(Base.pipeline(`$(Base.julia_cmd()) --startup-file=no -e $script`; stderr = devnull), String) catch e; "ERR" end
+                out = sab_read(script)
                 m = match(r"RESULT (\d+)", out)
                 caught = out == "ERR" || m === nothing || parse(Int, m.captures[1]) > 0
                 check(caught, "sabotage \"$label\": " * (caught ? "a check fails" : "NOT CAUGHT"))
