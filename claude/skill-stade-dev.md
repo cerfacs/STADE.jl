@@ -453,6 +453,11 @@ Count elements changed. GPU baselines live in their own `.gpu.yaml`
 namespace, because `.yaml` is gitignored and `validate_zerotrip.jl`
 deliberately draws integers from `[0, 2]`.
 
+`validate_backend_agreement.jl` compares kernel counts between CUDA and JACC, so every CUDA-only twin variant that is on by default
+(`reduce_block`, `row_block`, `shared_private`, ...) must be pinned off in its CUDA call, and an unpinned one fails 30 pairs at once
+(it did in every chain on record, v0.4.71 to v0.5.2, unnoticed because the script returned 0). A new twin gets a pin and an entry in its "pins still
+matter" block.
+
 A loop-invariant atomic is hoisted (`cgen_hoistable_atomic_keys`) only after
 its index passes four tests: no array read, no variable assigned in the loop,
 not the loop variable, and every use of the array in the loop is a site. The

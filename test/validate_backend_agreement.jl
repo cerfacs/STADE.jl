@@ -65,6 +65,16 @@ on CUDA. This script checks that no JACC kernel keeps more than the ceiling of
 positional parameters, and that a packed kernel unpacks as many variables as the
 CUDA twin takes arguments.
 
+The CUDA plan is built with every CUDA-only twin variant off (`inbounds`, `dead_scalars`, `split_reduce`,
+`contraction`, `shared_private`, `reduce_block`, `row_block`), as the JACC plan is built with its own off. A twin adds a
+device kernel on one backend only and says nothing about which loops leave the host. `reduce_block` (v0.4.47) and
+`row_block` were missing from that list, so 31 of the 322 pairs reported one more kernel on CUDA than on JACC (30 pairs
+for the block-sum kernel of a large reduction, 2 for the row-block twin of `matvec_loss`; its adjoint has both).
+The mismatch was in
+the test, not in an offload decision. When a CUDA-only variant is added with a default of on, it must be added to that
+call. The last block of this script checks that the two pins still matter (the twin still adds a kernel with the default
+on), so a pin that has become empty fails instead of passing unnoticed.
+
 One class of divergence is BY DESIGN and is excluded from the kernel count, after
 being mistaken for a defect. The idiomatic scalar reduction lowers differently on
 the two backends: CUDA reduces with `mapreduce`/`sum` and folds the result into
@@ -184,7 +194,8 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
             gen = mode == :hvp ? STADE.stade_hvp(primal; keep_push_pop = false, fuse_ii_loops = true) :
                                  STADE.stade_adjoint(primal; keep_push_pop = false, fuse_ii_loops = true)
             expr = mode == :hvp ? gen.hvp : gen.adjoint
-            cu = STADE.stade_gpu(expr, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0, shared_private = false)
+            cu = STADE.stade_gpu(expr, STADE.cgen_backend_cuda(); inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0, shared_private = false,
+                                 reduce_block = false, row_block = 0)
             ja = STADE.stade_jacc(expr; inbounds = false, dead_scalars = false, split_reduce = 0, warp_atomics = false, jacc_contraction = 0)
 
             problems = String[]
@@ -249,9 +260,26 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
         end
     end
 
-    println("\n", checks - bad, "/", checks, " (kernel, mode) pairs agree across backends",
+    # The pins above must still do something: with the variant on, CUDA has more kernels than with it off.
+    for (kname, kw) in (("dotprod", :reduce_block), ("matvec_loss", :row_block))
+        pr = STADE.io_read_corpus_entry(joinpath(dir, kname * ".jl"))
+        ex = STADE.stade_adjoint(pr; keep_push_pop = false, fuse_ii_loops = true).adjoint
+        common = (inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0, shared_private = false)
+        off = STADE.stade_gpu(ex, STADE.cgen_backend_cuda(); common..., NamedTuple{(kw,)}((kw === :row_block ? 0 : false,))...)
+        on  = STADE.stade_gpu(ex, STADE.cgen_backend_cuda(); common...)
+        checks += 1
+        if length(on.kernels) > length(off.kernels)
+            println("twin pin ", kw, " [", kname, "]", " ok  kernels on=", length(on.kernels), " off=", length(off.kernels))
+        else
+            println("twin pin ", kw, " [", kname, "] FAIL  the variant adds no kernel with its default on; the pin is empty")
+            bad += 1
+        end
+    end
+
+    println("\n", checks - bad, "/", checks, " checks pass ((kernel, mode) pairs agree across backends, and the twin pins hold)",
             bad == 0 ? "" : "   *** $bad NOT OK ***")
     return bad
 end
 
-validate_backend_agreement()
+# a failing run must not return 0: the chain reads the return code
+validate_backend_agreement() == 0 || exit(1)
