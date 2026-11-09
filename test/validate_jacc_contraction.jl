@@ -117,7 +117,7 @@ function jcn_launch_checks()
     for (label, m, n) in shapes
         try
             k = 19
-            mk(sd) = (r = MersenneTwister(sd); Any[randn(r, m * k), randn(r, k * n), randn(r, n), zeros(m * n), m, n, k])
+            mk(sd) = (r = Random.Xoshiro(sd); Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, n), zeros(m * n), m, n, k])
             args = mk(1)
             a = jcn_run(bsrc, bentry, args, 1)
             b = jcn_run(bsrc, bentry, args, 0)

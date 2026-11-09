@@ -91,7 +91,7 @@ function lin_corpus_checks(dir::String; names = lin_corpus_names(), oracles::Boo
                 check(got == want_stacks[name], "$name [fuse=$(Int(fuse))]: stacks $(sort(collect(got))), want $(sort(collect(want_stacks[name])))")
             end
             oracles || continue
-            Random.seed!(hash(name))
+            Random.seed!(STADE.val_stable_seed(name))
             for (lab, fn) in (("tangent", STADE.stade_validate_tangent_file), ("adjoint", STADE.stade_validate_adjoint_file), ("hvp", STADE.stade_validate_hvp_file))
                 r = fn(path; trials = 8, keep_push_pop = false, fuse_ii_loops = fuse, int_lo = 3, int_hi = 5)
                 check(r.ok, "$name [fuse=$(Int(fuse))] $lab oracle: max rel err $(round(r.max_rel_err, sigdigits = 3))")
@@ -104,7 +104,7 @@ function lin_corpus_checks(dir::String; names = lin_corpus_names(), oracles::Boo
         for fuse in (false, true)
             ok = try
                 STADE.stade_adjoint_file(wpath, joinpath(tmp, "w_$(Int(fuse))_b.jl"); keep_push_pop = true, fuse_ii_loops = fuse)
-                Random.seed!(hash("while_carried_cond"))
+                Random.seed!(STADE.val_stable_seed("while_carried_cond"))
                 r = STADE.stade_validate_adjoint_file(wpath; trials = 3, keep_push_pop = true, fuse_ii_loops = fuse, int_lo = 0, int_hi = 4)
                 r.ok
             catch

@@ -181,7 +181,7 @@ end
 # scalars assigned in the outer loop body, so both go on the trip-count stack and must come off in the reverse order.
 # A bound that is read before the other is assigned, a float branch in the body and a second ragged loop vary the shape.
 function fz_range_kernel(seed::Int)
-    rng = MersenneTwister(seed)
+    rng = Random.Xoshiro(seed)
     order_hi_first = rand(rng) < 0.5
     inner = fz_pick(rng, ["t += x[e] * x[e]", "t += x[e] * x[v]", "t += x[e] * x[e] * x[v]"])
     branch = rand(rng) < 0.3
@@ -222,7 +222,7 @@ function fz_kernel(seed::Int)
     seed >= 3000 && return fz_range_kernel(seed)
     gpu = 1000 <= seed < 2000
     ext = seed >= 2000
-    rng = MersenneTwister(seed)
+    rng = Random.Xoshiro(seed)
     names = fz_pick(rng, [["j", "jj"], ["j", "j"], ["j", "q", "jj"]])
     k_used = [false, false]
     uses = Dict{Symbol,Bool}()
@@ -302,7 +302,7 @@ function fz_kernel(seed::Int)
 end
 
 function fz_args(seed::Int, args)
-    rng = MersenneTwister(seed + 7919)
+    rng = Random.Xoshiro(seed + 7919)
     x = zeros(NXF)
     for i in 1:NXF
         while true

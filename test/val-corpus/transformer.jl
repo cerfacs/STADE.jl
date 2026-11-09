@@ -41,9 +41,11 @@
 #    (the model width d is derived in the body as h*dk, not passed)
 # dff: feed-forward hidden width
 # n_layers: number of stacked encoder layers
-# eps: layer-norm epsilon
+# eps: layer-norm epsilon (squared in use, so the variance shift is never negative)
 function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, b1, w2, b2, ln2_gain, ln2_bias, q, k, v, scores, probs, ctx, attn_out, resid1, normed1, ff_hidden, ff_out, resid2, x_next, n, dk, h, dff, n_layers, eps)
     d = h * dk
+    # layer-norm divisor: d itself would give 0/0 in a row-mean when the width is 0
+    d_div = max(d, 1)
     inv_sqrt_dk = 1.0 / sqrt(dk)
     n_d = n * d
     n_dff = n * dff
@@ -181,15 +183,15 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             for i_j = 1:d
                 s = s + resid1[(i - 1) * d + i_j]
             end
-            row_mean = s / d
+            row_mean = s / d_div
             s2 = 0.0
             # variance likewise accumulates sequentially
             for i_j = 1:d
                 diff = resid1[(i - 1) * d + i_j] - row_mean
                 s2 = s2 + diff * diff
             end
-            row_var = s2 / d
-            denom = sqrt(row_var + eps)
+            row_var = s2 / d_div
+            denom = sqrt(row_var + eps * eps)
             # the final rescale is independent across columns
             for j = 1:d
                 kk = (i - 1) * d + j
@@ -230,14 +232,14 @@ function transformer(x, wq, bq, wk, bk, wv, bv, wo, bo, ln1_gain, ln1_bias, w1, 
             for i_j = 1:d
                 s = s + resid2[(i - 1) * d + i_j]
             end
-            row_mean = s / d
+            row_mean = s / d_div
             s2 = 0.0
             for i_j = 1:d
                 diff = resid2[(i - 1) * d + i_j] - row_mean
                 s2 = s2 + diff * diff
             end
-            row_var = s2 / d
-            denom = sqrt(row_var + eps)
+            row_var = s2 / d_div
+            denom = sqrt(row_var + eps * eps)
             for j = 1:d
                 kk = (i - 1) * d + j
                 x_next[kk] = (resid2[kk] - row_mean) / denom * ln2_gain[ln2_offset + j] + ln2_bias[ln2_offset + j]

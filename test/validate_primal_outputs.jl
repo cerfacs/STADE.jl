@@ -144,7 +144,7 @@ function po_run(adj, kpp::Bool, n::Int, seed)
     stk = stk === nothing ? Any[] : stk isa Tuple ? collect(stk) : Any[stk]
     names = kpp ? Symbol[] : po_stack_names(init)
     args = fexpr.args[1].args[2:end]
-    rng = MersenneTwister(seed)
+    rng = Random.Xoshiro(seed)
     vals = Any[]
     after = Pair{Symbol,Any}[]
     before = Pair{Symbol,Any}[]
@@ -156,7 +156,7 @@ function po_run(adj, kpp::Bool, n::Int, seed)
             si += 1
             push!(vals, stk[si])
         else
-            arr = randn(rng, max(n, 1))
+            arr = STADE.val_randn(rng, max(n, 1))
             push!(vals, arr)
             push!(before, a => copy(arr))
             push!(after, a => arr)

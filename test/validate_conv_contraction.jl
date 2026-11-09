@@ -76,14 +76,14 @@ const SKIP_SRC = """function cvs(xa, xb, w, b, outp, n, n2, c1, c2, co)
     return nothing
 end"""
 function skip_fargs(sd; n = 8, c1 = 3, c2 = 2, co = 5)
-    r = MersenneTwister(sd)
-    return Any[randn(r, c1 * (n ÷ 2)^2), randn(r, c2 * n * n), randn(r, 9 * co * (c1 + c2)), randn(r, co), zeros(co * n * n), n, n ÷ 2, c1, c2, co]
+    r = Random.Xoshiro(sd)
+    return Any[STADE.val_randn(r, c1 * (n ÷ 2)^2), STADE.val_randn(r, c2 * n * n), STADE.val_randn(r, 9 * co * (c1 + c2)), STADE.val_randn(r, co), zeros(co * n * n), n, n ÷ 2, c1, c2, co]
 end
 function skip_aargs(sd; n = 8, c1 = 3, c2 = 2, co = 5)
-    r = MersenneTwister(sd); n2 = n ÷ 2
+    r = Random.Xoshiro(sd); n2 = n ÷ 2
     sz = co * n * n * (4 * (c1 + c2) + 1)
-    return Any[randn(r, c1 * n2 * n2), zeros(c1 * n2 * n2), randn(r, c2 * n * n), zeros(c2 * n * n), randn(r, 9 * co * (c1 + c2)), zeros(9 * co * (c1 + c2)), randn(r, co), zeros(co),
-               zeros(co * n * n), randn(r, co * n * n), n, n2, c1, c2, co, zeros(sz)]
+    return Any[STADE.val_randn(r, c1 * n2 * n2), zeros(c1 * n2 * n2), STADE.val_randn(r, c2 * n * n), zeros(c2 * n * n), STADE.val_randn(r, 9 * co * (c1 + c2)), zeros(9 * co * (c1 + c2)), STADE.val_randn(r, co), zeros(co),
+               zeros(co * n * n), STADE.val_randn(r, co * n * n), n, n2, c1, c2, co, zeros(sz)]
 end
 conv_is_twin(n) = occursin(r"_t\d*!$", n) || occursin(r"_n(16|32)_t\d*!$", n) || occursin(r"_f_t!$", n)
 
@@ -95,13 +95,13 @@ function conv_sources(; flag = true)
     return (fwd = CONV_SRC, adj = STADE.io_expr_to_source(adj.adjoint), adjname = Symbol(adj.adjoint.args[1].args[1]))
 end
 function conv_fargs(sd; n = 10, c0 = 3, c = 5, co = 4)
-    r = MersenneTwister(sd)
-    return Any[randn(r, c0 * n * n), randn(r, 9 * c * c0), randn(r, c), randn(r, 9 * co * c), randn(r, co), zeros(c * n * n), zeros(co * n * n), n, c0, c, co]
+    r = Random.Xoshiro(sd)
+    return Any[STADE.val_randn(r, c0 * n * n), STADE.val_randn(r, 9 * c * c0), STADE.val_randn(r, c), STADE.val_randn(r, 9 * co * c), STADE.val_randn(r, co), zeros(c * n * n), zeros(co * n * n), n, c0, c, co]
 end
 function conv_aargs(sd; n = 10, c0 = 3, c = 5, co = 4)
-    r = MersenneTwister(sd)
-    return Any[randn(r, c0 * n * n), zeros(c0 * n * n), randn(r, 9 * c * c0), zeros(9 * c * c0), randn(r, c), zeros(c), randn(r, 9 * co * c), zeros(9 * co * c), randn(r, co), zeros(co),
-               zeros(c * n * n), zeros(c * n * n), zeros(co * n * n), randn(r, co * n * n), n, c0, c, co, zeros(c * n * n * (4c0 + 1)), zeros(co * n * n * (4c + 1))]
+    r = Random.Xoshiro(sd)
+    return Any[STADE.val_randn(r, c0 * n * n), zeros(c0 * n * n), STADE.val_randn(r, 9 * c * c0), zeros(9 * c * c0), STADE.val_randn(r, c), zeros(c), STADE.val_randn(r, 9 * co * c), zeros(9 * co * c), STADE.val_randn(r, co), zeros(co),
+               zeros(c * n * n), zeros(c * n * n), zeros(co * n * n), STADE.val_randn(r, co * n * n), n, c0, c, co, zeros(c * n * n * (4c0 + 1)), zeros(co * n * n * (4c + 1))]
 end
 
 function conv_unit_checks()

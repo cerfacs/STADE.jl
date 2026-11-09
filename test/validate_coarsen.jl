@@ -23,7 +23,7 @@ isdefined(Main, :CUDA) || include(joinpath(@__DIR__, "ownership_shim.jl"))
 
 # (label, expect jammed, merged sites, source, kernel name, sizes, builder)
 function crs_units()
-    rn(rng, k) = randn(rng, max(k, 0))
+    rn(rng, k) = STADE.val_randn(rng, max(k, 0))
     return [
         ("key address under a loop (a weight gradient)", true, 1, """
 function jam_wgrad(x, g, W, n, m, nk)
@@ -334,7 +334,7 @@ function crs_unit_checks(; execute::Bool = true, only::Union{Nothing,Vector{Stri
         if execute
             worst = 0.0; flagged = 0; seen_change = true; forced_ok = true; declined_ok = true
             for K in (2, 3, 4), order in (:ascending, :shuffled), sz in sizes
-                rng = MersenneTwister(hash((fname, sz)))
+                rng = Random.Xoshiro(STADE.val_stable_seed(string(fname, sz)))
                 args = mk(rng, sz)
                 r = try crs_exec(src, fname, args, K, order) catch err; (err = Inf, flagged = 0, changed = 0, coarse = 0, launches = 0, msg = first(sprint(showerror, err), 120)) end
                 worst = max(worst, r.err); flagged += r.flagged
@@ -344,7 +344,7 @@ function crs_unit_checks(; execute::Bool = true, only::Union{Nothing,Vector{Stri
             end
             # a threshold nobody reaches launches plain kernels only, and gives the plain answer
             for sz in sizes
-                rng = MersenneTwister(hash((fname, sz)))
+                rng = Random.Xoshiro(STADE.val_stable_seed(string(fname, sz)))
                 r = try crs_exec(src, fname, mk(rng, sz), 2, :ascending; cmin = 2^30) catch err; (err = Inf, flagged = 0, changed = 0, coarse = 1, launches = 0) end
                 r.coarse == 0 && r.err <= 1e-12 || (declined_ok = false)
             end
@@ -399,7 +399,7 @@ function crs_unit_checks(; execute::Bool = true, only::Union{Nothing,Vector{Stri
                  (84, 122, 0.8, true, "2 -> 2 blocks against a 0.8 gate"), (48, 99, 0.0, true, "gate off")]
         ok_all = true; detail = String[]
         for (rp, rv, occ, want, what) in cases
-            r = try crs_exec(src, fname, mk(MersenneTwister(7), sz), 2, :ascending; occ = occ, regs = (rp, rv)) catch err; (err = Inf, flagged = 0, changed = 0, coarse = -1, launches = 0, probes = String[]) end
+            r = try crs_exec(src, fname, mk(Random.Xoshiro(7), sz), 2, :ascending; occ = occ, regs = (rp, rv)) catch err; (err = Inf, flagged = 0, changed = 0, coarse = -1, launches = 0, probes = String[]) end
             launched = r.coarse > 0
             probed = any(n -> endswith(n, "_c!"), r.probes) && any(n -> !endswith(n, "_c!"), r.probes)
             good = launched == want && r.err <= 1e-12 && r.flagged == 0 && r.changed > 0 && probed == (occ > 0)

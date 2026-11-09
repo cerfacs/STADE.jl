@@ -174,15 +174,15 @@ function fg_args(host::Expr, kinds, mk, sz; adj_start::Symbol = :zero, rng)
             elseif kinds[a] == :array_float
                 v = mk(a, rng)
             else
-                v = randn(rng)
+                v = STADE.val_randn(rng)
             end
             prim[a] = v; push!(args, v)
         elseif endswith(s, "b") && haskey(kinds, Symbol(chop(s)))
             base = prim[Symbol(chop(s))]
             if base isa AbstractArray
-                push!(args, adj_start == :zero ? zeros(length(base)) : randn(rng, length(base)))
+                push!(args, adj_start == :zero ? zeros(length(base)) : STADE.val_randn(rng, length(base)))
             else
-                push!(args, adj_start == :zero ? 0.0 : randn(rng))
+                push!(args, adj_start == :zero ? 0.0 : STADE.val_randn(rng))
             end
         else
             error("fg_args: no value for $a")
@@ -301,8 +301,8 @@ function validate_fresh_gradient(; only::Union{Nothing,Vector{String}} = nothing
         end
         execute || continue
         for sz in sizes
-            mk = (a, rng) -> kinds[a] == :array_int ? rand(rng, 1:max(1, 6), 6) : randn(rng, fg_len(a, sz, fname))
-            rng0 = Random.MersenneTwister(7)
+            mk = (a, rng) -> kinds[a] == :array_int ? rand(rng, 1:max(1, 6), 6) : STADE.val_randn(rng, fg_len(a, sz, fname))
+            rng0 = Random.Xoshiro(7)
             z1 = fg_args(e, kinds, mk, sz; rng = rng0)
             rp = fg_run(plain, fname, z1)
             rf = fg_run(fresh, fname, z1)
@@ -310,7 +310,7 @@ function validate_fresh_gradient(; only::Union{Nothing,Vector{String}} = nothing
             check(same, "$fname $(sz): from zero gradients the two plans agree")
             check(rp.flagged == 0 && rf.flagged == 0, "$fname $(sz): no ownership violation")
             # 3. non-zero start: a flagged array loses its old value, every other array agrees
-            rng1 = Random.MersenneTwister(7)
+            rng1 = Random.Xoshiro(7)
             n1 = fg_args(e, kinds, mk, sz; adj_start = :random, rng = rng1)
             qp = fg_run(plain, fname, n1)
             qf = fg_run(fresh, fname, n1)

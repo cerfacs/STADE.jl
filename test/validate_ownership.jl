@@ -68,7 +68,7 @@ function validate_ownership(dir::String = joinpath(@__DIR__, "val-corpus");
     # One draw of inputs, then one emulated run per thread order. Violations come from the first order:
     # they describe the access pattern, which does not depend on order.
     function one_draw(name, mode, path)
-        Random.seed!(hash(name))   # reproducible draws per kernel: the global RNG otherwise differs from run to run
+        Random.seed!(STADE.val_stable_seed(name))   # reproducible draws per kernel: the global RNG otherwise differs from run to run
         yp = STADE.io_gpu_yaml_path(path)
         baseline_fn === nothing && (isfile(yp) || STADE.stade_generate_baseline_file(path; yaml_path = yp, int_lo = int_lo, int_hi = int_hi, grow_max = 512))
         primal = STADE.io_read_corpus_entry(path)

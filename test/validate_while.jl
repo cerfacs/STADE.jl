@@ -31,7 +31,7 @@ function validate_while(; trials::Int = 3, int_lo::Int = 0, int_hi::Int = 4)
         println("--- oracles, fuse_ii_loops = ", fuse)
         for name in subjects
             path = joinpath(WHILE_DIR, name * ".jl")
-            Random.seed!(hash(name))
+            Random.seed!(STADE.val_stable_seed(name))
             for (mode, gen, suffix, val) in (
                     (:tangent, STADE.stade_tangent_file, "_d.jl", STADE.stade_validate_tangent_file),
                     (:adjoint, STADE.stade_adjoint_file, "_b.jl", STADE.stade_validate_adjoint_file),

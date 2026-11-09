@@ -32,7 +32,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_bias, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, n), zeros(m * n), m, n, k]), true),
+    end""", :con_bias, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, n), zeros(m * n), m, n, k]), true),
     ("residual, tanh and two stores", """function con_res(x, w, b, res, y, z, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -45,7 +45,7 @@ const CON_CASES = [
             z[idx] = s
         end
         return nothing
-    end""", :con_res, sd -> (r = MersenneTwister(sd); n = 66; m = 65; k = 33; Any[randn(r, m * k), randn(r, k * n), randn(r, n), randn(r, m * n), zeros(m * n), zeros(m * n), m, n, k]), true),
+    end""", :con_res, sd -> (r = Random.Xoshiro(sd); n = 66; m = 65; k = 33; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, n), STADE.val_randn(r, m * n), zeros(m * n), zeros(m * n), m, n, k]), true),
     ("subtracted product", """function con_sub(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -57,7 +57,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_sub, sd -> (r = MersenneTwister(sd); n = 71; m = 66; k = 17; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    end""", :con_sub, sd -> (r = Random.Xoshiro(sd); n = 71; m = 66; k = 17; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("operands in the other order", """function con_swap(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -69,7 +69,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_swap, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 21; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    end""", :con_swap, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 21; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("loop starts at a parameter", """function con_lo(x, w, y, m, n, k, c0)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -81,7 +81,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_lo, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 25; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k, 4]), true),
+    end""", :con_lo, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 25; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k, 4]), true),
     ("one row", """function con_row(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -93,7 +93,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_row, sd -> (r = MersenneTwister(sd); n = 70; m = 1; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    end""", :con_row, sd -> (r = Random.Xoshiro(sd); n = 70; m = 1; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("same array on both sides", """function con_gram(x, y, m, k)
         for idx = 1:m * m
             o = mod(idx - 1, m) + 1
@@ -105,7 +105,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_gram, sd -> (r = MersenneTwister(sd); m = 69; k = 19; Any[randn(r, m * k), zeros(m * m), m, k]), true),
+    end""", :con_gram, sd -> (r = Random.Xoshiro(sd); m = 69; k = 19; Any[STADE.val_randn(r, m * k), zeros(m * m), m, k]), true),
     ("left operand read across the inner index", """function con_tn(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -117,7 +117,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_tn, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    end""", :con_tn, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("the start value is read from an array of the output index", """function con_start(x, w, b, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -129,7 +129,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_start, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, m * n), zeros(m * n), m, n, k]), true),
+    end""", :con_start, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, m * n), zeros(m * n), m, n, k]), true),
     # ---- refusals ----
     ("left operand depends on the column", """function con_adep(x, w, y, m, n, k)
         for idx = 1:m * n
@@ -142,7 +142,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_adep, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, max(n, m) * k), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_adep, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, max(n, m) * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("right operand depends on the row", """function con_bdep(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -154,7 +154,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_bdep, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n + m), zeros(m * n), m, n, k]), false),
+    end""", :con_bdep, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n + m), zeros(m * n), m, n, k]), false),
     ("a parameter has the loop variable's name and is read after the loop", """function con_cafter(x, w, y, m, n, k, c)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -166,7 +166,7 @@ const CON_CASES = [
             y[idx] = s + c
         end
         return nothing
-    end""", :con_cafter, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k, 0.25]), false),
+    end""", :con_cafter, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k, 0.25]), false),
     ("a parameter has the loop variable's name and is read before the loop", """function con_cbefore(x, w, y, m, n, k, c)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -178,7 +178,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_cbefore, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k, 0.25]), false),
+    end""", :con_cbefore, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k, 0.25]), false),
     ("sum of one array, no product", """function con_sum(x, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -190,7 +190,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_sum, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), zeros(m * n), m, n, k]), false),
+    end""", :con_sum, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), zeros(m * n), m, n, k]), false),
     ("product of three", """function con_three(x, w, v, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -202,7 +202,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_three, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, k), zeros(m * n), m, n, k]), false),
+    end""", :con_three, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k), zeros(m * n), m, n, k]), false),
     ("a partial last row", """function con_part(x, w, y, m, n, k)
         for idx = 1:m * n + 5
             o = mod(idx - 1, n) + 1
@@ -214,7 +214,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_part, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, (m + 1) * k), randn(r, k * n), zeros(m * n + 5), m, n, k]), :plain),
+    end""", :con_part, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, (m + 1) * k), STADE.val_randn(r, k * n), zeros(m * n + 5), m, n, k]), :plain),
     ("a factor that is a scalar", """function con_scal(x, w, y, m, n, k, a)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -226,7 +226,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_scal, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k, 0.5]), false),
+    end""", :con_scal, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k, 0.5]), false),
     ("a factor that is a function of an element", """function con_fn(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -238,7 +238,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_fn, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_fn, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("two inner loops", """function con_two(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -253,7 +253,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_two, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_two, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("branch in the inner loop", """function con_branch(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -267,7 +267,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_branch, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_branch, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("descending inner loop", """function con_down(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -279,7 +279,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_down, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_down, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("operand array stored in the kernel", """function con_stored(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -291,7 +291,7 @@ const CON_CASES = [
             x[(t - 1) * k + 1] = s
         end
         return nothing
-    end""", :con_stored, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_stored, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("matrix-vector loop, no flat index", """function con_mv(w, x, y, n, k)
         for o = 1:n
             s = 0.0
@@ -301,7 +301,7 @@ const CON_CASES = [
             y[o] = s
         end
         return nothing
-    end""", :con_mv, sd -> (r = MersenneTwister(sd); n = 70; k = 19; Any[randn(r, k * n), randn(r, k), zeros(n), n, k]), false),
+    end""", :con_mv, sd -> (r = Random.Xoshiro(sd); n = 70; k = 19; Any[STADE.val_randn(r, k * n), STADE.val_randn(r, k), zeros(n), n, k]), false),
     ("inner bound computed in the kernel", """function con_kin(x, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -314,7 +314,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_kin, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_kin, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     # products batched over a third index (heads), v0.4.36: the flat index decodes into a column, a row and a batch
     ("batched product", """function con_bat(q, kk, y, nb, m, n, k)
         for idx = 1:nb * m * n
@@ -328,7 +328,7 @@ const CON_CASES = [
             y[idx] = exp(0.1 * s)
         end
         return nothing
-    end""", :con_bat, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k), randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), true),
+    end""", :con_bat, sd -> (r = Random.Xoshiro(sd); nb = 3; n = 70; m = 67; k = 19; Any[STADE.val_randn(r, nb * m * k), STADE.val_randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), true),
     ("batched product, one array with strided heads", """function con_bat2(qkv, y, nh, tt, dh, scale)
         d = nh * dh
         d3 = 3 * d
@@ -343,7 +343,7 @@ const CON_CASES = [
             y[idx] = exp(ss * scale)
         end
         return nothing
-    end""", :con_bat2, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; Any[randn(r, tt * 3 * nh * dh), zeros(nh * tt * tt), nh, tt, dh, 0.1]), true),
+    end""", :con_bat2, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; Any[STADE.val_randn(r, tt * 3 * nh * dh), zeros(nh * tt * tt), nh, tt, dh, 0.1]), true),
     ("batched product, divisor written the other way", """function con_bat3(q, kk, y, nb, m, n, k)
         for idx = 1:nb * m * n
             o = mod(idx - 1, n) + 1
@@ -356,7 +356,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_bat3, sd -> (r = MersenneTwister(sd); nb = 2; n = 66; m = 65; k = 33; Any[randn(r, nb * m * k), randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), true),
+    end""", :con_bat3, sd -> (r = Random.Xoshiro(sd); nb = 2; n = 66; m = 65; k = 33; Any[STADE.val_randn(r, nb * m * k), STADE.val_randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), true),
     ("batched, the batch size is not rows times columns", """function con_batn(q, kk, y, nb, m, n, k)
         for idx = 1:nb * m * n
             o = mod(idx - 1, n) + 1
@@ -369,7 +369,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_batn, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k + 4000), randn(r, nb * n * k + 4000), zeros(nb * m * n), nb, m, n, k]), false),
+    end""", :con_batn, sd -> (r = Random.Xoshiro(sd); nb = 3; n = 70; m = 67; k = 19; Any[STADE.val_randn(r, nb * m * k + 4000), STADE.val_randn(r, nb * n * k + 4000), zeros(nb * m * n), nb, m, n, k]), false),
     ("batched, the row decode uses another size than the column", """function con_batr(q, kk, y, nb, m, n, k)
         for idx = 1:nb * m * n
             o = mod(idx - 1, n) + 1
@@ -382,7 +382,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_batr, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k + 4000), randn(r, nb * n * k + 4000), zeros(nb * m * n), nb, m, n, k]), false),
+    end""", :con_batr, sd -> (r = Random.Xoshiro(sd); nb = 3; n = 70; m = 67; k = 19; Any[STADE.val_randn(r, nb * m * k + 4000), STADE.val_randn(r, nb * n * k + 4000), zeros(nb * m * n), nb, m, n, k]), false),
     ("batched, the batch is changed after its decode", """function con_batc(q, kk, y, nb, m, n, k)
         for idx = 1:nb * m * n
             o = mod(idx - 1, n) + 1
@@ -396,7 +396,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_batc, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k), randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), false),
+    end""", :con_batc, sd -> (r = Random.Xoshiro(sd); nb = 3; n = 70; m = 67; k = 19; Any[STADE.val_randn(r, nb * m * k), STADE.val_randn(r, nb * n * k), zeros(nb * m * n), nb, m, n, k]), false),
     ("batched, a partial last batch", """function con_batp(q, kk, y, nb, m, n, k)
         for idx = 1:nb * m * n + 7
             o = mod(idx - 1, n) + 1
@@ -409,7 +409,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_batp, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, (nb + 1) * m * k), randn(r, (nb + 1) * n * k), zeros(nb * m * n + 7), nb, m, n, k]), :plain),
+    end""", :con_batp, sd -> (r = Random.Xoshiro(sd); nb = 3; n = 70; m = 67; k = 19; Any[STADE.val_randn(r, (nb + 1) * m * k), STADE.val_randn(r, (nb + 1) * n * k), zeros(nb * m * n + 7), nb, m, n, k]), :plain),
     ("batched, a product of three factors", """function con_batx(q, kk, hh, y, nb, m, n, k)
         for idx = 1:nb * m * n
             o = mod(idx - 1, n) + 1
@@ -422,7 +422,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_batx, sd -> (r = MersenneTwister(sd); nb = 3; n = 70; m = 67; k = 19; Any[randn(r, nb * m * k), randn(r, nb * n * k), randn(r, 1), zeros(nb * m * n), nb, m, n, k]), false),
+    end""", :con_batx, sd -> (r = Random.Xoshiro(sd); nb = 3; n = 70; m = 67; k = 19; Any[STADE.val_randn(r, nb * m * k), STADE.val_randn(r, nb * n * k), STADE.val_randn(r, 1), zeros(nb * m * n), nb, m, n, k]), false),
     # products whose head is a part of the column index (v0.4.37): the flat index decodes into a column and a row, the head is `div(column - 1, dh) + 1`
     ("head in the column", """function con_hc(sc, v, den, y, d, dh, tt)
         for idx = 1:tt * d
@@ -436,7 +436,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
+    end""", :con_hc, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
     ("head in the column, one array with strided columns", """function con_hc2(sc, qkv, den, y, d, dh, tt)
         d3 = 3 * d
         for idx = 1:tt * d
@@ -450,7 +450,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc2, sd -> (r = MersenneTwister(sd); nh = 3; tt = 66; dh = 25; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * 3 * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
+    end""", :con_hc2, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 66; dh = 25; d = nh * dh; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * 3 * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
     ("head in the column, an epilogue that reads the head and the column", """function con_hc3(sc, v, w2, den, y, d, dh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -463,7 +463,7 @@ const CON_CASES = [
             y[idx] = s * w2[c] + den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc3, sd -> (r = MersenneTwister(sd); nh = 4; tt = 33; dh = 20; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), randn(r, d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
+    end""", :con_hc3, sd -> (r = Random.Xoshiro(sd); nh = 4; tt = 33; dh = 20; d = nh * dh; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), STADE.val_randn(r, d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
     ("head in the column, the operands do not read the head", """function con_hc4(sc, v, den, y, d, dh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -476,7 +476,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc4, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
+    end""", :con_hc4, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[STADE.val_randn(r, tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), true),
     ("head in the column, the head width does not divide the width", """function con_hc5(sc, v, den, y, d, dh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -489,7 +489,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc5, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = 50; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), :plain),
+    end""", :con_hc5, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = 50; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), :plain),
     ("head in the column, the head is changed after its decode", """function con_hc6(sc, v, den, y, d, dh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -503,7 +503,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc6, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
+    end""", :con_hc6, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
     ("head in the column, the head is derived from the row", """function con_hc8(sc, v, den, y, d, dh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -516,7 +516,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc8, sd -> (r = MersenneTwister(sd); nh = 5; tt = 70; dh = 17; d = 51; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
+    end""", :con_hc8, sd -> (r = Random.Xoshiro(sd); nh = 5; tt = 70; dh = 17; d = 51; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
     ("head in the column, the head width is assigned in the kernel", """function con_hc9(sc, v, den, y, d, nh, tt)
         for idx = 1:tt * d
             dw = div(d, nh)
@@ -530,7 +530,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc9, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, nh, tt]), false),
+    end""", :con_hc9, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, nh, tt]), false),
     ("head in the column, two different head decodes", """function con_hc10(sc, v, den, y, d, dh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -544,7 +544,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t] + 0.0 * g
         end
         return nothing
-    end""", :con_hc10, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
+    end""", :con_hc10, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
     ("head in the column, the loop variable has the head's name", """function con_hc11(sc, v, den, y, d, dh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -557,7 +557,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_hc11, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
+    end""", :con_hc11, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[STADE.val_randn(r, tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]), false),
     ("head in the column, a head width computed from parameters", """function con_hc7(sc, v, den, y, d, nh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -570,7 +570,7 @@ const CON_CASES = [
             y[idx] = s / den[(h - 1) * tt + t]
         end
         return nothing
-    end""", :con_hc7, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, nh, tt]), true),
+    end""", :con_hc7, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, nh, tt]), true),
     # ---- v0.4.41: a loop with two sums or a sum of two products (the primal and the tangent of a product in an HVP) ----
     ("two sums: a value and its tangent, operand reads shared through temporaries", """function con_tan(x, xd, w, wd, bd, b, yd, y, m, n, k)
         for idx = 1:m * n
@@ -588,7 +588,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_tan, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), randn(r, n), randn(r, n), zeros(m * n), zeros(m * n), m, n, k]), true),
+    end""", :con_tan, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), STADE.val_randn(r, n), STADE.val_randn(r, n), zeros(m * n), zeros(m * n), m, n, k]), true),
     ("two sums, no temporaries, one subtracted, an epilogue that reads both", """function con_tan2(x, xd, w, wd, yd, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -603,7 +603,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_tan2, sd -> (r = MersenneTwister(sd); n = 66; m = 65; k = 33; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), true),
+    end""", :con_tan2, sd -> (r = Random.Xoshiro(sd); n = 66; m = 65; k = 33; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), true),
     ("one sum of two products", """function con_sum2(x, xd, w, wd, yd, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -615,7 +615,7 @@ const CON_CASES = [
             yd[idx] = sd
         end
         return nothing
-    end""", :con_sum2, sd -> (r = MersenneTwister(sd); n = 71; m = 66; k = 17; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    end""", :con_sum2, sd -> (r = Random.Xoshiro(sd); n = 71; m = 66; k = 17; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("two sums of the same product, one subtracted", """function con_same2(x, w, y, z, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -630,7 +630,7 @@ const CON_CASES = [
             z[idx] = s2
         end
         return nothing
-    end""", :con_same2, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), true),
+    end""", :con_same2, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), true),
     ("two sums, batched over heads, one array with strided heads", """function con_bat4(qkv, qkvd, y, yd, nh, tt, dh, scale)
         d = nh * dh
         d3 = 3 * d
@@ -650,7 +650,7 @@ const CON_CASES = [
             y[idx] = ss * scale
         end
         return nothing
-    end""", :con_bat4, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; Any[randn(r, tt * 3 * nh * dh), randn(r, tt * 3 * nh * dh), zeros(nh * tt * tt), zeros(nh * tt * tt), nh, tt, dh, 0.1]), true),
+    end""", :con_bat4, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; Any[STADE.val_randn(r, tt * 3 * nh * dh), STADE.val_randn(r, tt * 3 * nh * dh), zeros(nh * tt * tt), zeros(nh * tt * tt), nh, tt, dh, 0.1]), true),
     ("two sums, a head in the column", """function con_hc12(sc, scd, v, vd, y, yd, d, dh, tt)
         for idx = 1:tt * d
             c = mod(idx - 1, d) + 1
@@ -668,7 +668,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_hc12, sd -> (r = MersenneTwister(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[randn(r, nh * tt * tt), randn(r, nh * tt * tt), randn(r, tt * d), randn(r, tt * d), zeros(tt * d), zeros(tt * d), d, dh, tt]), true),
+    end""", :con_hc12, sd -> (r = Random.Xoshiro(sd); nh = 3; tt = 70; dh = 17; d = nh * dh; Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), STADE.val_randn(r, tt * d), zeros(tt * d), zeros(tt * d), d, dh, tt]), true),
     ("three sums", """function con_acc3(x, xd, w, wd, y, yd, z, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -686,7 +686,7 @@ const CON_CASES = [
             z[idx] = sz
         end
         return nothing
-    end""", :con_acc3, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    end""", :con_acc3, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), zeros(m * n), m, n, k]), false),
     ("two statements add to one sum", """function con_acc2s(x, xd, w, wd, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -699,7 +699,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_acc2s, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_acc2s, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("a sum of three products", """function con_p3(x, xd, w, wd, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -711,7 +711,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_p3, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_p3, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("a sum of a product and an array element", """function con_pe(x, w, bb, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -723,7 +723,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_pe, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, k), zeros(m * n), m, n, k]), false),
+    end""", :con_pe, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k), zeros(m * n), m, n, k]), false),
     ("three distinct left operands", """function con_a3(x, xd, x2, w, wd, y, z, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -738,7 +738,7 @@ const CON_CASES = [
             z[idx] = sz
         end
         return nothing
-    end""", :con_a3, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    end""", :con_a3, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
     ("a temporary of the loop is read after it", """function con_tmpout(x, xd, w, wd, y, yd, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -755,7 +755,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_tmpout, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    end""", :con_tmpout, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
     ("a sum is a factor of another sum", """function con_accf(x, xd, w, wd, y, yd, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -770,7 +770,7 @@ const CON_CASES = [
             yd[idx] = sd
         end
         return nothing
-    end""", :con_accf, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    end""", :con_accf, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
     ("two sums, an operand array stored in the kernel", """function con_tst(x, xd, w, wd, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -785,7 +785,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_tst, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * n), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), false),
+    end""", :con_tst, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * n), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), false),
     ("a sum is also assigned from an array element in the loop", """function con_accas(x, xd, w, wd, y, yd, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -801,7 +801,7 @@ const CON_CASES = [
             yd[idx] = sd
         end
         return nothing
-    end""", :con_accas, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    end""", :con_accas, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
     ("one sum, one left operand and two right operands", """function con_l1r2(x, w, wd, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -813,7 +813,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_l1r2, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    end""", :con_l1r2, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("one sum, two left operands and one right operand", """function con_l2r1(x, xd, w, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -825,7 +825,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_l2r1, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    end""", :con_l2r1, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("two left operands of one array at two offsets", """function con_off(x, w, w2, y, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -837,7 +837,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_off, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k + 8), randn(r, k * n), randn(r, k * n), zeros(m * n), m, n, k]), true),
+    end""", :con_off, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k + 8), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), m, n, k]), true),
     ("a store in the loop", """function con_stl(x, w, y, z, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -850,7 +850,7 @@ const CON_CASES = [
             y[idx] = s
         end
         return nothing
-    end""", :con_stl, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    end""", :con_stl, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
     ("the start of the second sum is assigned twice", """function con_st2(x, xd, w, wd, y, yd, m, n, k)
         for idx = 1:m * n
             o = mod(idx - 1, n) + 1
@@ -867,7 +867,7 @@ const CON_CASES = [
             yd[idx] = sd
         end
         return nothing
-    end""", :con_st2, sd -> (r = MersenneTwister(sd); n = 70; m = 67; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
+    end""", :con_st2, sd -> (r = Random.Xoshiro(sd); n = 70; m = 67; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), zeros(m * n), zeros(m * n), m, n, k]), false),
 ]
 
 # The recognizer on hand-written kernel text, for the guards that STADE's own gates make unreachable from source: a store into an operand array, and a parameter that has the
@@ -1022,7 +1022,7 @@ function con_narrow_checks()
         end
         return nothing
     end"""
-    mk(n, m, k, sd) = (r = MersenneTwister(sd); Any[randn(r, m * k), randn(r, k * n), randn(r, n), zeros(m * n), m, n, k])
+    mk(n, m, k, sd) = (r = Random.Xoshiro(sd); Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, n), zeros(m * n), m, n, k])
     for (n, want) in ((16, "_n16_t!"), (17, "_n32_t!"), (24, "_n32_t!"), (32, "_n32_t!"), (33, "_t!"), (70, "_t!"))
         args = mk(n, 131, 37, n)
         a = con_run(src, :con_nb, args, 1); b = con_run(src, :con_nb, args, 0)
@@ -1157,10 +1157,10 @@ function con_unit_checks()
     try
         ran(a) = any(n -> endswith(n, "_t!"), a.launched)
         name, src, entry, mk, _ = first(c for c in CON_CASES if startswith(c[1], "two sums: a value and its tangent"))
-        mkn(n) = (r = MersenneTwister(3); m = 260; k = 19; Any[randn(r, m * k), randn(r, m * k), randn(r, k * n), randn(r, k * n), randn(r, n), randn(r, n), zeros(m * n), zeros(m * n), m, n, k])
+        mkn(n) = (r = Random.Xoshiro(3); m = 260; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, k * n), STADE.val_randn(r, n), STADE.val_randn(r, n), zeros(m * n), zeros(m * n), m, n, k])
         check(ran(con_run(src, entry, mkn(40), 32)) && !ran(con_run(src, entry, mkn(24), 32)), "$name: 40 columns run the twin at contraction 32 and 24 do not (the floor of two sums is min(contraction, 64))")
         bname, bsrc, bentry, _, _ = CON_CASES[1]
-        bargs(n) = (r = MersenneTwister(3); m = 260; k = 19; Any[randn(r, m * k), randn(r, k * n), randn(r, n), zeros(m * n), m, n, k])
+        bargs(n) = (r = Random.Xoshiro(3); m = 260; k = 19; Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, n), zeros(m * n), m, n, k])
         check(ran(con_run(bsrc, bentry, bargs(24), 32)), "$bname: one sum with 24 columns runs the twin at contraction 32 (the floor of one sum is min(contraction, 16))")
         hs = STADE.io_expr_to_source(con_run(src, entry, mkn(40), 256).plan.host)
         check(occursin(">= 64", hs), "$name: the host test asks for 64 columns at the default")
@@ -1205,10 +1205,10 @@ function con_unit_checks()
         hostsrc = STADE.io_expr_to_source(con_run(src, entry, args, 1).plan.host)
         check(occursin("div(d, dh)", hostsrc) && occursin("mod(d, dh) == 0", hostsrc) && occursin("dh > 0 &&", hostsrc), "$name: the host test and the grid count heads, and the head width is tested before it divides")
         check(ran(con_run(src, entry, args, 70)) && !ran(con_run(src, entry, args, 71)), "$name: the twin runs at 70 rows (the rows reach contraction) and not at 71")
-        r = MersenneTwister(5); tt = 9; nh = 3; dh = 17; d = nh * dh
-        argw = Any[randn(r, nh * tt * tt), randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]
+        r = Random.Xoshiro(5); tt = 9; nh = 3; dh = 17; d = nh * dh
+        argw = Any[STADE.val_randn(r, nh * tt * tt), STADE.val_randn(r, tt * d), rand(r, nh * tt) .+ 1.0, zeros(tt * d), d, dh, tt]
         check(ran(con_run(src, entry, argw, 17)) && !ran(con_run(src, entry, argw, 18)), "$name: with 9 rows and 17 columns per head the twin runs at contraction 17 (the columns reach it) and not at 18")
-        argh = Any[randn(r, 5 * 70 * 70), randn(r, 70 * 51), rand(r, 5 * 70) .+ 1.0, zeros(70 * 51), 51, 12, 70]       # 51 columns are not a whole number of heads of 12
+        argh = Any[STADE.val_randn(r, 5 * 70 * 70), STADE.val_randn(r, 70 * 51), rand(r, 5 * 70) .+ 1.0, zeros(70 * 51), 51, 12, 70]       # 51 columns are not a whole number of heads of 12
         check(!ran(con_run(src, entry, argh, 1)), "$name: a head width that does not divide the width takes the plain kernel")
         w = con_run(src, entry, argw, 17); wb = con_run(src, entry, argw, 0)
         check(con_relerr(w, wb) <= 1e-12 && any(!iszero, w.outs[4]), "$name: the twin agrees with the plain kernel on 9 rows (error $(round(con_relerr(w, wb), sigdigits = 3)))")

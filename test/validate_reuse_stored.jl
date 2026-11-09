@@ -103,9 +103,9 @@ end
 
 # random arguments: sizes n0 = 5, n1 = 7, n2 = 6, n3 = 4; gradients start from random values (the adjoint adds to them)
 function rs_args(sd)
-    r = MersenneTwister(sd)
+    r = Random.Xoshiro(sd)
     n0, n1, n2, n3 = 5, 7, 6, 4
-    R(n) = randn(r, n)
+    R(n) = STADE.val_randn(r, n)
     return Any[R(n0), R(8), R(n0 * n1), R(n0 * n1), R(n1 + 1), R(n1 + 1), R(n1 * n2), R(n1 * n2), R(n2 + 1), R(n2 + 1), R(n2 * n3), R(n2 * n3), R(n3 + 1), R(n3 + 1),
                R(n1 + 1), R(n1 + 1), R(n2 + 1), R(n2 + 1), R(n3 + 1), R(n3 + 1), n0, n1, n2, n3]
 end

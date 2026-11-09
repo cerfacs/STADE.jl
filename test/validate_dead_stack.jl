@@ -60,9 +60,9 @@ end
 
 # n = 4 inputs, m = 5 units; the stack holds the two regions
 function ds_args(sd)
-    r = MersenneTwister(sd)
+    r = Random.Xoshiro(sd)
     n, m = 4, 5
-    R(k) = randn(r, k)
+    R(k) = STADE.val_randn(r, k)
     return Any[R(n), R(n), R(n * m), R(n * m), R(m), R(m), R(m), R(m), zeros(m * n + m), zeros(m), n, m]
 end
 

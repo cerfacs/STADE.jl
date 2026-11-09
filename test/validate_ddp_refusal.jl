@@ -62,7 +62,7 @@ function validate_ddp_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
     # is never reused, so a missing reset is invisible.
     checks += 1
     begin
-        Random.seed!(hash("sabotage_reset_local"))
+        Random.seed!(STADE.val_stable_seed("sabotage_reset_local"))
         name = "ddp_affine"
         primal = STADE.io_read_corpus_entry(joinpath(dir, name * ".jl"))
         kernel = STADE.parse_kernel(primal)

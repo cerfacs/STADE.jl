@@ -46,8 +46,8 @@ const CUB_LD_LOOP = """for c = 1:k
                 wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + x[(t - 1) * ld + c] * gs
             end"""
 function cub_ld_args(sd; m = 67, n = 70, k = 19, ld = 25, cut = true)
-    r = MersenneTwister(sd); xl = cut ? (m - 1) * ld + k : m * ld + k; L = k * n + n + 8
-    return Any[randn(r, m * n + 8), randn(r, xl), randn(r, L), randn(r, xl), randn(r, L), randn(r, n), m, n, k, ld]
+    r = Random.Xoshiro(sd); xl = cut ? (m - 1) * ld + k : m * ld + k; L = k * n + n + 8
+    return Any[STADE.val_randn(r, m * n + 8), STADE.val_randn(r, xl), STADE.val_randn(r, L), STADE.val_randn(r, xl), STADE.val_randn(r, L), STADE.val_randn(r, n), m, n, k, ld]
 end
 
 function cub_unit_checks()
@@ -116,7 +116,7 @@ function cub_unit_checks()
     end
     # a loop that starts at a parameter, the array long enough for the view: the gemm runs with the start offset
     lc = first(c for c in CON_CASES if c[1] == "loop starts at a parameter")
-    args = lc[4](1); args[1] = vcat(args[1], randn(MersenneTwister(5), args[7]))
+    args = lc[4](1); args[1] = vcat(args[1], STADE.val_randn(Random.Xoshiro(5), args[7]))
     a = cub_run(lc[2], lc[3], args, 1); b = cub_run(lc[2], lc[3], args, 0)
     check(cub_ngemm(a) == 1 && con_relerr(a, b) <= 1e-12, "forward, a loop that starts at a parameter with a long array: $(cub_ngemm(a)) gemm, error $(round(con_relerr(a, b), sigdigits = 3))")
     # a subtracted sum is never offloaded
@@ -146,7 +146,7 @@ function cub_unit_checks()
     src2 = adj_src(params = ", ld", loop = """for c = 1:k
                 xb[((t - 1) * ld + c - 1) * 2 + 1] = xb[((t - 1) * ld + c - 1) * 2 + 1] + w[(c - 1) * n + o] * gs
             end""")
-    args = cub_ld_args(5; cut = false); args[2] = randn(MersenneTwister(1), 2 * length(args[2])); args[4] = randn(MersenneTwister(2), 2 * length(args[4]))
+    args = cub_ld_args(5; cut = false); args[2] = STADE.val_randn(Random.Xoshiro(1), 2 * length(args[2])); args[4] = STADE.val_randn(Random.Xoshiro(2), 2 * length(args[4]))
     a = cub_run(src2, :con_adj, args, 1); b = cub_run(src2, :con_adj, args, 0)
     check(cub_ngemm(a) == 0 && cub_ntile(a) == 1 && con_relerr(a, b) <= 1e-12, "a doubled stride keeps the tile twin ($(cub_ngemm(a)) gemm, $(cub_ntile(a)) tile)")
     return bad

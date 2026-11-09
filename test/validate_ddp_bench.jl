@@ -56,8 +56,8 @@ function bench_batch(path::String = bb_default_kernel(); nsamples::Int = 32, dim
     ints = Dict{Symbol,Any}(:n0 => n0, :n1 => n1, :n2 => n2, :n3 => n3)
     len = Dict(:x => n0, :w1 => n0 * n1, :b1 => n1, :w2 => n1 * n2, :b2 => n2, :w3 => n2 * n3, :b3 => n3, :h1 => n1, :h2 => n2, :y => n3)
     Random.seed!(7)                                          # the same draw on every rank
-    values = Dict{Symbol,Any}(a => (a in (:w1, :w2, :w3) ? 0.05 .* randn(len[a]) : randn(len[a])) for a in keys(len))
-    xs = [randn(n0) for _ in 1:nsamples]
+    values = Dict{Symbol,Any}(a => (a in (:w1, :w2, :w3) ? 0.05 .* STADE.val_randn(len[a]) : STADE.val_randn(len[a])) for a in keys(len))
+    xs = [STADE.val_randn(n0) for _ in 1:nsamples]
     seed = STADE.val_zeros_like(kernel, values)
     for d in sig.dependents
         sig.kinds[d] == :array_float && (seed[d] = ones(length(values[d])))

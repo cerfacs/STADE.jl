@@ -226,7 +226,7 @@ function validate_int_state(; trials::Int = 3)
             kname == "kepler" && continue
             src = joinpath(INT_DIR, kname * ".jl")
             yp = int_state_baseline(kname, mk(), mktempdir())
-            Random.seed!(hash(label))
+            Random.seed!(STADE.val_stable_seed(label))
             for (what, f) in (("tangent", () -> STADE.stade_validate_tangent_file(src; yaml_path = yp, trials = trials,
                                     keep_push_pop = true, fuse_ii_loops = fuse)),
                               ("dotprod", () -> STADE.stade_validate_dotprod_file(src; yaml_path = yp, trials = trials,
@@ -302,7 +302,7 @@ function validate_int_state(; trials::Int = 3)
         mk = Dict("bound_from_array_branch" => () -> Pair{Symbol,Any}[:x => X6V, :cnt => [4, 2, 1], :out => zeros(1)],
                   "bound_shared_toplevel" => () -> [:x => [0.5, 0.7, 0.9, 1.1], :n => 4, :m => 2, :out => zeros(1)])[kname]
         yp = int_state_baseline(kname, mk(), mktempdir())
-        Random.seed!(hash(kname))
+        Random.seed!(STADE.val_stable_seed(kname))
         r = try
             STADE.stade_validate_adjoint_file(joinpath(INT_DIR, kname * ".jl"); yaml_path = yp, trials = 3,
                                               keep_push_pop = false, fuse_ii_loops = false)

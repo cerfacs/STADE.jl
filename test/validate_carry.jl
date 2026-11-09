@@ -70,11 +70,11 @@ function car_unit(src::String; ns = (3, 4, 5, 9, 13), steps = (0, 1, 2, 3, 6))
     f0 = Core.eval(m0, STADE.cgen_gather_function_expr(gk))
     f4 = Core.eval(m4, STADE.cgen_gather_function_expr(g4))
     names = [string(a) for a in gk.args]
-    rng = MersenneTwister(hash(src))
+    rng = Random.Xoshiro(STADE.val_stable_seed(src))
     worst = 0.0
     for n in ns, nst in steps
         len = n + 4
-        arrs = Dict("ub" => randn(rng, len), "vb" => randn(rng, len))
+        arrs = Dict("ub" => STADE.val_randn(rng, len), "vb" => STADE.val_randn(rng, len))
         scal = Dict{String,Any}("n" => n, "nsteps" => nst, "c" => 0.7, "m" => [1])
         r0, r4 = gat_call(f0, names, arrs, scal), gat_call(f4, names, arrs, scal)
         for k in sort(collect(keys(r0)))

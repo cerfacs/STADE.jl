@@ -40,7 +40,7 @@ const SPL_CASES = [
             y[j] = tanh(s)
         end
         return nothing
-    end""", :spl_mv, sd -> (r = MersenneTwister(sd); n = 37; m = 19; Any[randn(r, n * m), randn(r, m), randn(r, n), zeros(n), n, m]), true),
+    end""", :spl_mv, sd -> (r = Random.Xoshiro(sd); n = 37; m = 19; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), STADE.val_randn(r, n), zeros(n), n, m]), true),
     ("an empty loop before the reduction loop (the adjoint of a loop whose statements are dead)", """function spl_emp(w, x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -52,7 +52,7 @@ const SPL_CASES = [
             y[j] = s
         end
         return nothing
-    end""", :spl_emp, sd -> (r = MersenneTwister(sd); n = 35; m = 13; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), true),
+    end""", :spl_emp, sd -> (r = Random.Xoshiro(sd); n = 35; m = 13; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), n, m]), true),
     ("a temporary that a later loop assigns before it reads it", """function spl_tmp(w, x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -68,7 +68,7 @@ const SPL_CASES = [
             y[j] = s + q
         end
         return nothing
-    end""", :spl_tmp, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), true),
+    end""", :spl_tmp, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), n, m]), true),
     ("a later loop reads the temporary of the first (its value after the last iteration)", """function spl_tmp2(w, x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -84,7 +84,7 @@ const SPL_CASES = [
             y[j] = s + q
         end
         return nothing
-    end""", :spl_tmp2, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), false),
+    end""", :spl_tmp2, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), n, m]), false),
     ("a later loop that may not run assigns the temporary that is read after it", """function spl_tmp3(w, x, y, n, m, m2)
         for j = 1:n
             s = 0.0
@@ -99,7 +99,7 @@ const SPL_CASES = [
             y[j] = s + t
         end
         return nothing
-    end""", :spl_tmp3, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n), n, m, 0]), false),
+    end""", :spl_tmp3, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), n, m, 0]), false),
     ("subtracted sum", """function spl_sub(w, x, y, n, m)
         for j = 1:n
             s = 1.5
@@ -109,7 +109,7 @@ const SPL_CASES = [
             y[j] = s
         end
         return nothing
-    end""", :spl_sub, sd -> (r = MersenneTwister(sd); n = 33; m = 11; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), true),
+    end""", :spl_sub, sd -> (r = Random.Xoshiro(sd); n = 33; m = 11; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), n, m]), true),
     ("two accumulators in one loop", """function spl_two(x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -122,7 +122,7 @@ const SPL_CASES = [
             y[j] = q / m - (s / m) * (s / m)
         end
         return nothing
-    end""", :spl_two, sd -> (r = MersenneTwister(sd); n = 40; m = 13; Any[randn(r, n * m), zeros(n), n, m]), true),
+    end""", :spl_two, sd -> (r = Random.Xoshiro(sd); n = 40; m = 13; Any[STADE.val_randn(r, n * m), zeros(n), n, m]), true),
     ("two reduction loops", """function spl_loops(x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -136,7 +136,7 @@ const SPL_CASES = [
             y[j] = q
         end
         return nothing
-    end""", :spl_loops, sd -> (r = MersenneTwister(sd); n = 35; m = 9; Any[randn(r, n * m), zeros(n), n, m]), true),
+    end""", :spl_loops, sd -> (r = Random.Xoshiro(sd); n = 35; m = 9; Any[STADE.val_randn(r, n * m), zeros(n), n, m]), true),
     ("descending inner loop", """function spl_rev(w, x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -146,7 +146,7 @@ const SPL_CASES = [
             y[j] = s
         end
         return nothing
-    end""", :spl_rev, sd -> (r = MersenneTwister(sd); n = 34; m = 17; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), true),
+    end""", :spl_rev, sd -> (r = Random.Xoshiro(sd); n = 34; m = 17; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), n, m]), true),
     ("reduction, epilogue and update loop", """function spl_upd(w, x, g, gx, b, n, m)
         for j = 1:n
             s = b[j]
@@ -160,7 +160,7 @@ const SPL_CASES = [
             end
         end
         return nothing
-    end""", :spl_upd, sd -> (r = MersenneTwister(sd); n = 37; m = 21; Any[randn(r, n * m), randn(r, m), randn(r, n * m), randn(r, m), randn(r, n), n, m]), true),
+    end""", :spl_upd, sd -> (r = Random.Xoshiro(sd); n = 37; m = 21; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), STADE.val_randn(r, n * m), STADE.val_randn(r, m), STADE.val_randn(r, n), n, m]), true),
     ("weight stride zero at run time", """function spl_ld(w, x, g, b, n, m, ld)
         for j = 1:n
             s = b[j]
@@ -172,7 +172,7 @@ const SPL_CASES = [
             end
         end
         return nothing
-    end""", :spl_ld, sd -> (r = MersenneTwister(sd); n = 35; m = 6; Any[randn(r, n), randn(r, m), zeros(n * m), randn(r, n), n, m, n]), true),
+    end""", :spl_ld, sd -> (r = Random.Xoshiro(sd); n = 35; m = 6; Any[STADE.val_randn(r, n), STADE.val_randn(r, m), zeros(n * m), STADE.val_randn(r, n), n, m, n]), true),
     ("store, then reread it in a later reduction", """function spl_reread2(w, x, y, z, n, m)
         for j = 1:n
             s = 0.0
@@ -187,7 +187,7 @@ const SPL_CASES = [
             z[j] = q
         end
         return nothing
-    end""", :spl_reread2, sd -> (r = MersenneTwister(sd); n = 37; m = 15; Any[randn(r, n * m), randn(r, m), zeros(n), zeros(n), n, m]), true),
+    end""", :spl_reread2, sd -> (r = Random.Xoshiro(sd); n = 37; m = 15; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), zeros(n), n, m]), true),
     # ---- refusals ----
     ("loop temporary read after the loop", """function spl_tempafter(x, y, n, m)
         for j = 1:n
@@ -200,7 +200,7 @@ const SPL_CASES = [
             y[j] = s + a
         end
         return nothing
-    end""", :spl_tempafter, sd -> (r = MersenneTwister(sd); n = 35; m = 9; Any[randn(r, n * m), zeros(n), n, m]), false),
+    end""", :spl_tempafter, sd -> (r = Random.Xoshiro(sd); n = 35; m = 9; Any[STADE.val_randn(r, n * m), zeros(n), n, m]), false),
     ("second update loop reads the first one's array at another index", """function spl_twoupd(w, x, y, g, n, m)
         for j = 1:n
             s = 0.0
@@ -216,7 +216,7 @@ const SPL_CASES = [
             end
         end
         return nothing
-    end""", :spl_twoupd, sd -> (r = MersenneTwister(sd); n = 33; m = 8; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n * m), n, m]), false),
+    end""", :spl_twoupd, sd -> (r = Random.Xoshiro(sd); n = 33; m = 8; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n * m), n, m]), false),
     ("carried scalar that is not a sum", """function spl_carry(x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -226,7 +226,7 @@ const SPL_CASES = [
             y[j] = s
         end
         return nothing
-    end""", :spl_carry, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), zeros(n), n, m]), false),
+    end""", :spl_carry, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), zeros(n), n, m]), false),
     ("running sum feeding a second sum", """function spl_prefix(x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -238,7 +238,7 @@ const SPL_CASES = [
             y[j] = q
         end
         return nothing
-    end""", :spl_prefix, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), zeros(n), n, m]), false),
+    end""", :spl_prefix, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), zeros(n), n, m]), false),
     ("integer counter", """function spl_count(x, y, n, m)
         for j = 1:n
             c = 0
@@ -248,7 +248,7 @@ const SPL_CASES = [
             y[j] = x[j] * c
         end
         return nothing
-    end""", :spl_count, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n), zeros(n), n, m]), false),
+    end""", :spl_count, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n), zeros(n), n, m]), false),
     ("branch in the inner loop", """function spl_branch(x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -260,7 +260,7 @@ const SPL_CASES = [
             y[j] = s
         end
         return nothing
-    end""", :spl_branch, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), zeros(n), n, m]), false),
+    end""", :spl_branch, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), zeros(n), n, m]), false),
     ("triangular inner bound", """function spl_tri(x, y, n)
         for j = 1:n
             s = 0.0
@@ -271,7 +271,7 @@ const SPL_CASES = [
             y[j] = s
         end
         return nothing
-    end""", :spl_tri, sd -> (r = MersenneTwister(sd); n = 36; Any[randn(r, n), zeros(n), n]), false),
+    end""", :spl_tri, sd -> (r = Random.Xoshiro(sd); n = 36; Any[STADE.val_randn(r, n), zeros(n), n]), false),
     ("last store wins", """function spl_last(x, y, n, m)
         for j = 1:n
             for i = 1:m
@@ -279,7 +279,7 @@ const SPL_CASES = [
             end
         end
         return nothing
-    end""", :spl_last, sd -> (r = MersenneTwister(sd); n = 33; m = 7; Any[randn(r, m), zeros(n), n, m]), false),
+    end""", :spl_last, sd -> (r = Random.Xoshiro(sd); n = 33; m = 7; Any[STADE.val_randn(r, m), zeros(n), n, m]), false),
     ("array stored in the loop read elsewhere", """function spl_reread(w, x, y, z, n, m)
         for j = 1:n
             s = 0.0
@@ -292,7 +292,7 @@ const SPL_CASES = [
             z[j] = y[j] + s
         end
         return nothing
-    end""", :spl_reread, sd -> (r = MersenneTwister(sd); n = 33; m = 7; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n), n, m]), false),
+    end""", :spl_reread, sd -> (r = Random.Xoshiro(sd); n = 33; m = 7; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), n, m]), false),
     # ---- v0.4.39: an accumulator in a loop that also stores ----
     ("mixed loop: one accumulator and a plain store", """function spl_mixed1(w, x, y, z, b, n, m)
         for j = 1:n
@@ -305,7 +305,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_mixed1, sd -> (r = MersenneTwister(sd); n = 37; m = 19; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n), randn(r, n), n, m]), true),
+    end""", :spl_mixed1, sd -> (r = Random.Xoshiro(sd); n = 37; m = 19; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), STADE.val_randn(r, n), n, m]), true),
     ("mixed loop: layer-norm backward", """function spl_lnb(x, xb, mu, rs, n, d)
         for t = 1:n
             sm = 0.0
@@ -341,7 +341,7 @@ const SPL_CASES = [
             end
         end
         return nothing
-    end""", :spl_lnb, sd -> (r = MersenneTwister(sd); n = 35; d = 21; Any[randn(r, n * d), randn(r, n * d), randn(r, n), randn(r, n), n, d]), true),
+    end""", :spl_lnb, sd -> (r = Random.Xoshiro(sd); n = 35; d = 21; Any[STADE.val_randn(r, n * d), STADE.val_randn(r, n * d), STADE.val_randn(r, n), STADE.val_randn(r, n), n, d]), true),
     ("mixed loop: subtracted accumulator and two stores to different arrays", """function spl_mixed2(w, x, y, g, z, n, m)
         for j = 1:n
             s = 1.5
@@ -354,7 +354,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_mixed2, sd -> (r = MersenneTwister(sd); n = 34; m = 17; Any[randn(r, n * m), randn(r, m), randn(r, n * m), zeros(n * m), zeros(n), n, m]), true),
+    end""", :spl_mixed2, sd -> (r = Random.Xoshiro(sd); n = 34; m = 17; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), STADE.val_randn(r, n * m), zeros(n * m), zeros(n), n, m]), true),
     ("mixed loop: the same array stored in two loops from the same start", """function spl_twostore(w, x, g, z, n, m)
         for j = 1:n
             s = 0.5
@@ -369,7 +369,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_twostore, sd -> (r = MersenneTwister(sd); n = 36; m = 15; Any[randn(r, n * m), randn(r, m), randn(r, n * m), zeros(n), n, m]), true),
+    end""", :spl_twostore, sd -> (r = Random.Xoshiro(sd); n = 36; m = 15; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), STADE.val_randn(r, n * m), zeros(n), n, m]), true),
     # ---- refusals of v0.4.39 ----
     ("mixed loop: accumulator read by another scalar statement", """function spl_mxread(w, x, y, z, n, m)
         for j = 1:n
@@ -383,7 +383,7 @@ const SPL_CASES = [
             end
         end
         return nothing
-    end""", :spl_mxread, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n), n, m]), false),
+    end""", :spl_mxread, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), n, m]), false),
     ("mixed loop: accumulator read by another accumulate statement", """function spl_mxacc(w, x, y, z, n, m)
         for j = 1:n
             s = 0.5
@@ -397,7 +397,7 @@ const SPL_CASES = [
             z[j] = q
         end
         return nothing
-    end""", :spl_mxacc, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n), n, m]), false),
+    end""", :spl_mxacc, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), n, m]), false),
     ("mixed loop: accumulator also assigned by a plain statement", """function spl_mxtwice(w, x, y, z, n, m)
         for j = 1:n
             s = 0.5
@@ -410,7 +410,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_mxtwice, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n), n, m]), false),
+    end""", :spl_mxtwice, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), n, m]), false),
     ("mixed loop: integer literal start", """function spl_mxint(w, x, y, z, n, m)
         for j = 1:n
             c = 0
@@ -421,7 +421,7 @@ const SPL_CASES = [
             z[j] = w[j] * c
         end
         return nothing
-    end""", :spl_mxint, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n), n, m]), false),
+    end""", :spl_mxint, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), n, m]), false),
     ("mixed loop: store at an index without the loop variable", """function spl_mxlast(w, x, y, z, n, m)
         for j = 1:n
             s = 0.5
@@ -433,7 +433,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_mxlast, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n), zeros(n), n, m]), false),
+    end""", :spl_mxlast, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), zeros(n), n, m]), false),
     ("mixed loop: the stored array is read at another index", """function spl_mxother(w, x, y, z, n, m)
         for j = 1:n
             s = 0.5
@@ -445,7 +445,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_mxother, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), randn(r, n * m), zeros(n), n, m]), false),
+    end""", :spl_mxother, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), STADE.val_randn(r, n * m), zeros(n), n, m]), false),
     ("mixed loop: scalar that reads itself and is not a sum", """function spl_mxself(w, x, y, z, n, m)
         for j = 1:n
             s = 0.5
@@ -457,7 +457,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_mxself, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n), n, m]), false),
+    end""", :spl_mxself, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), n, m]), false),
     ("mixed loop: accumulator read by the loop's own store", """function spl_mxstore(w, x, y, z, n, m)
         for j = 1:n
             s = 0.5
@@ -469,7 +469,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_mxstore, sd -> (r = MersenneTwister(sd); n = 33; m = 9; Any[randn(r, n * m), randn(r, m), zeros(n * m), zeros(n), n, m]), false),
+    end""", :spl_mxstore, sd -> (r = Random.Xoshiro(sd); n = 33; m = 9; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), n, m]), false),
     ("one array stored in two loops with different starts", """function spl_twostart(w, x, g, z, n, m)
         for j = 1:n
             s = 0.5
@@ -484,7 +484,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_twostart, sd -> (r = MersenneTwister(sd); n = 35; m = 11; Any[randn(r, n * m), randn(r, m), randn(r, n * m), zeros(n), n, m]), false),
+    end""", :spl_twostart, sd -> (r = Random.Xoshiro(sd); n = 35; m = 11; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), STADE.val_randn(r, n * m), zeros(n), n, m]), false),
     ("one array stored in two loops at different indices", """function spl_twoidx(w, x, g, z, n, m)
         for j = 1:n
             s = 0.5
@@ -499,7 +499,7 @@ const SPL_CASES = [
             z[j] = s
         end
         return nothing
-    end""", :spl_twoidx, sd -> (r = MersenneTwister(sd); n = 35; m = 11; Any[randn(r, n * m), randn(r, m), randn(r, n * m), zeros(n), n, m]), false),
+    end""", :spl_twoidx, sd -> (r = Random.Xoshiro(sd); n = 35; m = 11; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), STADE.val_randn(r, n * m), zeros(n), n, m]), false),
 ]
 
 # (name, source, entry, args, transposed): the twin must have the lanes on threadIdx().x exactly when `transposed`
@@ -513,7 +513,7 @@ const SPL_COAL_CASES = [
             end
         end
         return nothing
-    end""", :spl_bcast, sd -> (r = MersenneTwister(sd); n = 37; m = 41; Any[randn(r, n), randn(r, n * m), n, m]), true),
+    end""", :spl_bcast, sd -> (r = Random.Xoshiro(sd); n = 37; m = 41; Any[STADE.val_randn(r, n), STADE.val_randn(r, n * m), n, m]), true),
     ("row sum along the contiguous index", """function spl_rowsum(x, y, n, m)
         for t = 1:n
             s = 0.0
@@ -523,7 +523,7 @@ const SPL_COAL_CASES = [
             y[t] = s
         end
         return nothing
-    end""", :spl_rowsum, sd -> (r = MersenneTwister(sd); n = 35; m = 43; Any[randn(r, n * m), zeros(n), n, m]), true),
+    end""", :spl_rowsum, sd -> (r = Random.Xoshiro(sd); n = 35; m = 43; Any[STADE.val_randn(r, n * m), zeros(n), n, m]), true),
     ("row mean, then a store along the row, descending", """function spl_center(x, y, n, m)
         for t = 1:n
             s = 0.0
@@ -536,7 +536,7 @@ const SPL_COAL_CASES = [
             end
         end
         return nothing
-    end""", :spl_center, sd -> (r = MersenneTwister(sd); n = 33; m = 29; Any[randn(r, n * m), zeros(n * m), n, m]), true),
+    end""", :spl_center, sd -> (r = Random.Xoshiro(sd); n = 33; m = 29; Any[STADE.val_randn(r, n * m), zeros(n * m), n, m]), true),
     ("index with a coefficient of minus one", """function spl_back(x, y, n, m)
         for t = 1:n
             s = 0.0
@@ -546,7 +546,7 @@ const SPL_COAL_CASES = [
             y[t] = s
         end
         return nothing
-    end""", :spl_back, sd -> (r = MersenneTwister(sd); n = 34; m = 31; Any[randn(r, n * m), zeros(n), n, m]), true),
+    end""", :spl_back, sd -> (r = Random.Xoshiro(sd); n = 34; m = 31; Any[STADE.val_randn(r, n * m), zeros(n), n, m]), true),
     ("matvec: the weight moves by a stride", """function spl_mvc(w, x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -556,7 +556,7 @@ const SPL_COAL_CASES = [
             y[j] = s
         end
         return nothing
-    end""", :spl_mvc, sd -> (r = MersenneTwister(sd); n = 37; m = 19; Any[randn(r, n * m), randn(r, m), zeros(n), n, m]), false),
+    end""", :spl_mvc, sd -> (r = Random.Xoshiro(sd); n = 37; m = 19; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n), n, m]), false),
     ("mixed: one reference by a stride, one contiguous", """function spl_mixu(w, x, y, n, m)
         for j = 1:n
             s = 0.0
@@ -566,7 +566,7 @@ const SPL_COAL_CASES = [
             y[j] = s
         end
         return nothing
-    end""", :spl_mixu, sd -> (r = MersenneTwister(sd); n = 37; m = 19; Any[randn(r, n * m), randn(r, n * m), zeros(n), n, m]), false),
+    end""", :spl_mixu, sd -> (r = Random.Xoshiro(sd); n = 37; m = 19; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, n * m), zeros(n), n, m]), false),
 ]
 
 const SPL_INIT = Ref(false)
@@ -644,7 +644,7 @@ end
 function spl_gather_checks()
     bad = 0
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
-    gargs(n, deg) = (r = MersenneTwister(7); Any[rand(r, 1:n, n * deg), randn(r, n), zeros(n), n, deg])
+    gargs(n, deg) = (r = Random.Xoshiro(7); Any[rand(r, 1:n, n * deg), STADE.val_randn(r, n), zeros(n), n, deg])
     twin(r) = any(nm -> endswith(nm, "_s!"), r.launched)
     try
         # direct: the recognizer on handmade loops
@@ -680,7 +680,7 @@ function spl_gather_checks()
         check(tw8(f8) && !tw16(f8), "gather: 8 neighbours run the 8-lane twin")
         check(tw16(f12) && !tw8(f12) && e12 <= 1e-12 && isempty(f12.conflicts), "gather: 12 neighbours run the 16-lane twin (error $(round(e12, sigdigits = 3)))")
         # a kernel without a gather keeps the very same plan
-        ng = Any[randn(MersenneTwister(3), 37 * 9), randn(MersenneTwister(4), 9), zeros(37), 37, 9]
+        ng = Any[STADE.val_randn(Random.Xoshiro(3), 37 * 9), STADE.val_randn(Random.Xoshiro(4), 9), zeros(37), 37, 9]
         n1 = spl_run_g(SPL_NOGATHER_SRC, :spl_nog, ng, 4)
         n0 = spl_run_g(SPL_NOGATHER_SRC, :spl_nog, ng, 0)
         same = STADE.io_expr_to_source(n1.plan.host) == STADE.io_expr_to_source(n0.plan.host) && join(STADE.io_expr_to_source.(n1.plan.kernels), "\n") == join(STADE.io_expr_to_source.(n0.plan.kernels), "\n")

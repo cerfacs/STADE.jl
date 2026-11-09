@@ -334,7 +334,15 @@ cancels, so it complements rather than replaces.
   different mode's math than the one under test, and the flagged path
   goes unexercised.
 - Run in halves — `validate_corpus.jl` take kernel names.
-  Backgrounded runs get reaped.
+- **Seed and draw so that Julia 1.10 and 1.11 give the same data.** Seed with `STADE.val_stable_seed(name)` (FNV-1a of the
+  name), draw normals with `STADE.val_randn` and shuffle with `STADE.val_shuffle!`, and use `Random.Xoshiro(seed)` for an
+  explicit generator. Never `hash`, `MersenneTwister`, `randn` or `shuffle!`. Measured on 1.10.11 and 1.11.9 (rome runs 1.11,
+  the build host 1.10): every `MersenneTwister` stream differs, `randn(n)` differs for a large n, even a loop of scalar `randn`
+  diverges after a few thousand draws, and `shuffle!` gives another permutation. `rand` of the default generator and of
+  `Xoshiro` (floats, integer ranges, `randperm`) and `hash` of a String agree, and `val_randn` builds on `rand` only. A
+  validator that uses the unstable forms tests other data on each machine, so a defect that one draw exposes can stay hidden
+  on the other. `test/validate_seed_stable.jl` holds fixed values, fails if a Julia version changes one, and scans `test/` for
+  the four forms.
 - The baseline generator draws random integer arguments and retries.
   It gates candidates on the `keep_push_pop=false` `initstacks_*`, so a
   dimensionally incoherent draw is redrawn automatically — generic, with

@@ -192,11 +192,11 @@ function gp_run(gk; level::Int = 3, reduce::Bool = true, ns = (0, 1, 2, 3, 4, 5,
         m0, m1 = Module(), Module()
         f0 = Core.eval(m0, STADE.cgen_gather_function_expr(gk))
         f1 = Core.eval(m1, STADE.cgen_gather_function_expr(g))
-        rng = MersenneTwister(hash(string(gk.name, level, reduce)))
+        rng = Random.Xoshiro(STADE.val_stable_seed(string(gk.name, level, reduce)))
         worst = 0.0
         for n in ns
             len = three ? n^3 : n * n
-            base = [randn(rng, len) for _ in 1:max(arrays, 1)]
+            base = [STADE.val_randn(rng, len) for _ in 1:max(arrays, 1)]
             a0 = Any[[copy(b) for b in base]..., n, n]
             a1 = Any[[copy(b) for b in base]..., n, n]
             three && (a0 = a0[1:end-1]; a1 = a1[1:end-1])
@@ -225,8 +225,8 @@ function gp_adj_run(gk, lv::Int, reduce::Bool)
         f1 = Core.eval(m1, STADE.cgen_gather_function_expr(g))
         narr = length(gk.args) - 1
         GC.@preserve m0 m1 for n in (1, 2, 3, 4, 5)
-            rng = MersenneTwister(n)
-            base = [randn(rng, n^3 + 64 * n^2 + 64) for _ in 1:narr]  # stack arrays of an adjoint need up to a few dozen slots per cell
+            rng = Random.Xoshiro(n)
+            base = [STADE.val_randn(rng, n^3 + 64 * n^2 + 64) for _ in 1:narr]  # stack arrays of an adjoint need up to a few dozen slots per cell
             a0 = Any[[copy(b) for b in base]..., n]
             a1 = Any[[copy(b) for b in base]..., n]
             Base.invokelatest(f0, a0...); Base.invokelatest(f1, a1...)

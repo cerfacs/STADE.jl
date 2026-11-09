@@ -368,7 +368,8 @@ step, same gradients in every case:
 | `stade_ddp` pattern, 8 ranks on the one GPU | 71.5 ms (63 ms Allreduce) |
 | `stade_ddp` pattern, 32 ranks on the one GPU | 116.8 ms (106 ms Allreduce) |
 
-Each job had one CPU core, which inflates the Allreduce.
+Each job had one CPU core, which inflates the Allreduce. The two rank rows are the best of 3 steps after one warm-up step. The Allreduce can stay slow for
+many more steps after a process starts (see below), so treat them as upper bounds.
 
 **One GPU: put the batch loop in the kernel.** Write each layer as one
 independent loop over samples and units together (the flattened nest of
@@ -381,18 +382,34 @@ several ranks on one GPU: they gain no speed on the device (8 ranks took
 32) and add the Allreduce.
 
 **Several GPUs: one rank per GPU, with `stade_ddp_file`.** It runs the
-kernel unchanged and sums the parameter gradients across MPI ranks, so a
-one-sample kernel needs no batch loop and no offset arithmetic. The
-Allreduce moves the whole gradient (about 15 MB for the MLP above) at
-every step, whatever the batch size. On two nodes with one V100 each, the
-same MLP and 1024 samples took 41.6 ms per step (39 ms Allreduce) against
-3.6 ms for the whole batch on one GPU. By extrapolation the two GPUs win
-only at tens of thousands of samples per step, or when one sample costs far
-more than its gradient does to exchange. Use ranks when the batch or the
-model's activations no longer fit on one GPU, not to speed up a small
-model. These runs gave each rank a batch-loop kernel on its half of the
-samples and the Allreduce written by hand; a batch-loop kernel has not
-been run through the generated epilogue yet.
+kernel unchanged and sums the parameter gradients across MPI ranks. The
+Allreduce moves the whole gradient (about 15 MB for the MLP above) at every
+step, whatever the batch size, so it is a fixed cost per step. A batch-loop
+kernel on each rank goes through the generated epilogue without change:
+each rank calls `reset_accum!`, `reset_local!`, the seeds, one adjoint call
+on its samples, then `allreduce_accum!`. Measured on two nodes with one V100
+each (the same MLP, sample `s` on rank `mod(s - 1, 2)`; gradients agree with
+one GPU to 3e-14, and the generated Allreduce costs the same as a
+hand-written loop of `MPI.Allreduce!`):
+
+| Samples per step | Two ranks | One GPU, whole batch |
+|---|---|---|
+| 1024 | 13.9 ms | 3.4 ms |
+| 8192 | 23.5 ms | 20.8 ms |
+| 32768 | 53.9 ms | 78.3 ms |
+| 131072 | 170.7 ms | 313.7 ms |
+
+The Allreduce takes about 11.5 ms after the first steps. Time it after a few
+warm-up steps: in one run it stayed at 50 to 85 ms for the first sizes and
+fell to 11.5 ms later, and in a run that started with the large batch it was
+11 to 12 ms at every size. So two GPUs win from about 10 000 to 30 000
+samples per step for this MLP (the one-GPU time grows by about 0.0024 ms per
+sample, half of that is saved, and the Allreduce costs 11.5 ms), or when one
+sample costs more than its gradient does to exchange. Use ranks when the
+batch or the model's activations no longer fit on one GPU, or when the batch
+is that large; not to speed up a small batch. The GPU-aware path was used
+(the buffers go to MPI as device arrays); a CPU core per job was the only
+host resource.
 
 The one fact the tool cannot derive is which read-only arrays change from
 one sample to the next. In `a[i] * u[i]` the two factors are symmetric,

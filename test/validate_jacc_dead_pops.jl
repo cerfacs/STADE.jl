@@ -108,8 +108,8 @@ function jdp_fill_checks()
     check(ok, msg) = (println(rpad(ok ? "ok" : "FAIL", 6), msg); ok || (bad += 1))
     name, src, entry, mk, _ = CON_CASES[1]          # "bias product": x (m, k), w (k, n), b (n), y (m, n)
     function args_for(m, n, k, sd)
-        r = MersenneTwister(sd)
-        Any[randn(r, m * k), randn(r, k * n), randn(r, n), zeros(m * n), m, n, k]
+        r = Random.Xoshiro(sd)
+        Any[STADE.val_randn(r, m * k), STADE.val_randn(r, k * n), STADE.val_randn(r, n), zeros(m * n), m, n, k]
     end
     ran(r) = any(nm -> endswith(nm, "_t!"), r.launched)
     # cmin = 64 so that the tile counts of these small products are enough; the fill is min(cmin, fill) = 64

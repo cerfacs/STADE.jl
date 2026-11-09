@@ -34,11 +34,11 @@ function adj_src(; params = "", dec = "o = mod(idx - 1, n) + 1\n            t = 
     end"""
 end
 # random arguments for adj_src kernels: n columns, m rows, k inner length
-adj_args(sd; n = 70, m = 67, k = 19, extra = Any[]) = (r = MersenneTwister(sd); L = (m + 1) * k + k * n + n; Any[randn(r, m * n + 8), randn(r, L), randn(r, L), randn(r, L), randn(r, L), randn(r, n), m, n, k, extra...])
+adj_args(sd; n = 70, m = 67, k = 19, extra = Any[]) = (r = Random.Xoshiro(sd); L = (m + 1) * k + k * n + n; Any[STADE.val_randn(r, m * n + 8), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, n), m, n, k, extra...])
 
 # batched kernels (the adjoint of a product over heads): nb batches, m rows, n columns, k inner length; the head is the slowest index
 const ADJ_BDEC = "o = mod(idx - 1, n) + 1\n            t = mod(div(idx - 1, n), m) + 1\n            h = div(idx - 1, m * n) + 1"
-adj_bargs(sd; nb = 3, n = 70, m = 67, k = 19, extra = Any[]) = (r = MersenneTwister(sd); L = (nb + 1) * max(m, n) * k + 8; Any[randn(r, nb * m * n + 8), randn(r, L), randn(r, L), randn(r, L), randn(r, L), randn(r, n), m, n, k, nb, extra...])
+adj_bargs(sd; nb = 3, n = 70, m = 67, k = 19, extra = Any[]) = (r = Random.Xoshiro(sd); L = (nb + 1) * max(m, n) * k + 8; Any[STADE.val_randn(r, nb * m * n + 8), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, n), m, n, k, nb, extra...])
 const ADJ_BLOOP = """for c = 1:k
                 xb[((h - 1) * m + t - 1) * k + c] = xb[((h - 1) * m + t - 1) * k + c] + w[((h - 1) * n + o - 1) * k + c] * gs
                 wb[((h - 1) * n + o - 1) * k + c] = wb[((h - 1) * n + o - 1) * k + c] + x[((h - 1) * m + t - 1) * k + c] * gs
@@ -58,10 +58,10 @@ function adj_hsrc(; pre = "gs = g[idx] / den[(h - 1) * tt + t]", loop = nothing,
         return nothing
     end"""
 end
-adj_hargs(sd; nh = 3, dh = 17, tt = 70, d = nh * dh) = (r = MersenneTwister(sd); Any[randn(r, tt * d + 8), randn(r, 3 * tt * d + 8), randn(r, nh * tt * tt + 8), randn(r, 3 * tt * d + 8), randn(r, nh * tt * tt + 8), rand(r, nh * tt) .+ 1.0, d, 3 * d, dh, tt])
+adj_hargs(sd; nh = 3, dh = 17, tt = 70, d = nh * dh) = (r = Random.Xoshiro(sd); Any[STADE.val_randn(r, tt * d + 8), STADE.val_randn(r, 3 * tt * d + 8), STADE.val_randn(r, nh * tt * tt + 8), STADE.val_randn(r, 3 * tt * d + 8), STADE.val_randn(r, nh * tt * tt + 8), rand(r, nh * tt) .+ 1.0, d, 3 * d, dh, tt])
 
 # the adjoint of a product in an HVP (v0.4.40): the value and the tangent of the seed (`gs`, `gd`) and the shadow arrays; a statement is one product or a sum of two
-tang_args(sd; kw...) = (a = adj_args(sd; kw...); r = MersenneTwister(sd + 50); L = length(a[2]); Any[a..., randn(r, length(a[1])), randn(r, L), randn(r, L), randn(r, L), randn(r, L)])
+tang_args(sd; kw...) = (a = adj_args(sd; kw...); r = Random.Xoshiro(sd + 50); L = length(a[2]); Any[a..., STADE.val_randn(r, length(a[1])), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, L)])
 const TANG_PARAMS = ", gg, wd, xd, xbd, wbd"
 const TANG_PRE = "gs = g[idx] * 2.0\n gd = gg[idx] * 3.0"
 const TANG_LOOP = """for c = 1:k
@@ -102,7 +102,7 @@ const ADJ_CASES = [
                 a2 = w[(c - 1) * n + o]
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + a2 * gs
                 wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + a1 * gs
-            end""", params = ", b0"), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(99); Any[a..., randn(r, 70)]), 2),
+            end""", params = ", b0"), :con_adj, sd -> (a = adj_args(sd); r = Random.Xoshiro(99); Any[a..., STADE.val_randn(r, 70)]), 2),
     ("a bias term after the loop", adj_src(post = "bb[o] = bb[o] + gs"), :con_adj, adj_args, 2),
     ("two loops, the second stays", adj_src(loop = """for c = 1:k
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs
@@ -111,7 +111,7 @@ const ADJ_CASES = [
             for c = 1:k
                 x2b[(t - 1) * k + c] = x2b[(t - 1) * k + c] + w2[(c - 1) * n + o] * gs
                 w2b[(c - 1) * n + o] = w2b[(c - 1) * n + o] + x2[(t - 1) * k + c] * gs
-            end""", params = ", x2, w2, x2b, w2b"), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(98); Any[a..., randn(r, 67 * 19), randn(r, 19 * 70), zeros(67 * 19), zeros(19 * 70)]), 2),
+            end""", params = ", x2, w2, x2b, w2b"), :con_adj, sd -> (a = adj_args(sd); r = Random.Xoshiro(98); Any[a..., STADE.val_randn(r, 67 * 19), STADE.val_randn(r, 19 * 70), zeros(67 * 19), zeros(19 * 70)]), 2),
     ("a start value for the loop start", adj_src(params = ", c0", loop = """for c = c0:k
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs
             end"""), :con_adj, sd -> adj_args(sd; k = 25, extra = Any[1]), 1),
@@ -123,7 +123,7 @@ const ADJ_CASES = [
             for c = 1:k
                 x2b[(t - 1) * k + c] = x2b[(t - 1) * k + c] + w2[(c - 1) * n + o] * gs
                 w2b[(c - 1) * n + o] = w2b[(c - 1) * n + o] + x2[(t - 1) * k + c] * gs
-            end""", params = ", x2, w2, x2b, w2b"), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(97); Any[a..., randn(r, 67 * 19), randn(r, 19 * 70), zeros(67 * 19), zeros(19 * 70)]), 2),
+            end""", params = ", x2, w2, x2b, w2b"), :con_adj, sd -> (a = adj_args(sd); r = Random.Xoshiro(97); Any[a..., STADE.val_randn(r, 67 * 19), STADE.val_randn(r, 19 * 70), zeros(67 * 19), zeros(19 * 70)]), 2),
     ("a temporary is assigned twice, used between and after", adj_src(loop = """for c = 1:k
                 a1 = x[(t - 1) * k + c]
                 wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + a1 * gs
@@ -203,22 +203,22 @@ const ADJ_CASES = [
             end"""), :con_adj, adj_args, 2),
     ("a sum of two products with the same seed", adj_src(params = ", w2", loop = """for c = 1:k
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + w2[(c - 1) * n + o] * gs)
-            end"""), :con_adj, sd -> (a = adj_args(sd); Any[a..., randn(MersenneTwister(51), length(a[3]))]), 1),
+            end"""), :con_adj, sd -> (a = adj_args(sd); Any[a..., STADE.val_randn(Random.Xoshiro(51), length(a[3]))]), 1),
     ("tangent pair, a recomputed forward value of one product", adj_src(params = TANG_PARAMS, pre = "s = 0.5\n for c = 1:k\n s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]\n end\n gs = tanh(s) * g[idx]\n gd = gg[idx] * 3.0", loop = TANG_LOOP), :con_adj, tang_args, 4),
     ("tangent pair, a recomputed forward value with two sums (the HVP shape)", adj_src(params = TANG_PARAMS, pre = "sd = 0.1\n s = 0.5\n for c = 1:k\n a1 = w[(c - 1) * n + o]\n a2 = x[(t - 1) * k + c]\n sd = sd + (a1 * xd[(t - 1) * k + c] + a2 * wd[(c - 1) * n + o])\n s = s + a2 * a1\n end\ngs = tanh(s) * g[idx]\n gd = sd * gg[idx]", loop = TANG_LOOP), :con_adj, tang_args, 4),
     ("tangent pair, a temporary of the forward loop is read after it", adj_src(params = TANG_PARAMS, pre = "a1 = 0.0\n sd = 0.1\n s = 0.5\n for c = 1:k\n a1 = w[(c - 1) * n + o]\n a2 = x[(t - 1) * k + c]\n sd = sd + (a1 * xd[(t - 1) * k + c] + a2 * wd[(c - 1) * n + o])\n s = s + a2 * a1\n end\ngs = tanh(s) * g[idx] + a1\n gd = sd * gg[idx]", loop = TANG_LOOP), :con_adj, tang_args, 4),
     ("tangent pair, a forward loop with three sums", adj_src(params = TANG_PARAMS, pre = "sd = 0.1\n s = 0.5\n s3 = 0.2\n for c = 1:k\n a1 = w[(c - 1) * n + o]\n a2 = x[(t - 1) * k + c]\n sd = sd + (a1 * xd[(t - 1) * k + c] + a2 * wd[(c - 1) * n + o])\n s = s + a2 * a1\n s3 = s3 + xd[(t - 1) * k + c] * wd[(c - 1) * n + o]\n end\n gs = tanh(s) * g[idx]\n gd = (sd + s3) * gg[idx]", loop = TANG_LOOP), :con_adj, tang_args, 4),
     ("batched, a sum of two products", adj_src(params = ", nb, gg, wd, xbd", head = "for idx = 1:nb * m * n", dec = ADJ_BDEC, pre = TANG_PRE, loop = """for c = 1:k
                 xbd[((h - 1) * m + t - 1) * k + c] = xbd[((h - 1) * m + t - 1) * k + c] + (gs * wd[((h - 1) * n + o - 1) * k + c] + w[((h - 1) * n + o - 1) * k + c] * gd)
-            end"""), :con_adj, sd -> (a = adj_bargs(sd); r = MersenneTwister(sd + 60); L = length(a[2]); Any[a[1:10]..., randn(r, length(a[1])), randn(r, L), randn(r, L)]), 1),
+            end"""), :con_adj, sd -> (a = adj_bargs(sd); r = Random.Xoshiro(sd + 60); L = length(a[2]); Any[a[1:10]..., STADE.val_randn(r, length(a[1])), STADE.val_randn(r, L), STADE.val_randn(r, L)]), 1),
     ("three seeds", adj_src(params = ", gg, hh, xbd, wbd, wd", pre = "gs = g[idx] * 2.0\n gt = gg[idx] * 3.0\n gu = hh[idx] * 4.0", loop = """for c = 1:k
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + w[(c - 1) * n + o] * gs
                 wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + x[(t - 1) * k + c] * gt
                 xbd[(t - 1) * k + c] = xbd[(t - 1) * k + c] + w[(c - 1) * n + o] * gu
-            end"""), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(52); L = length(a[2]); Any[a..., randn(r, length(a[1])), randn(r, length(a[1])), randn(r, L), randn(r, L), randn(r, L)]), 0),
+            end"""), :con_adj, sd -> (a = adj_args(sd); r = Random.Xoshiro(52); L = length(a[2]); Any[a..., STADE.val_randn(r, length(a[1])), STADE.val_randn(r, length(a[1])), STADE.val_randn(r, L), STADE.val_randn(r, L), STADE.val_randn(r, L)]), 0),
     ("a sum of three products", adj_src(params = ", w2, w3", loop = """for c = 1:k
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + w2[(c - 1) * n + o] * gs + w3[(c - 1) * n + o] * gs)
-            end"""), :con_adj, sd -> (a = adj_args(sd); Any[a..., randn(MersenneTwister(53), length(a[3])), randn(MersenneTwister(54), length(a[3]))]), 0),
+            end"""), :con_adj, sd -> (a = adj_args(sd); Any[a..., STADE.val_randn(Random.Xoshiro(53), length(a[3])), STADE.val_randn(Random.Xoshiro(54), length(a[3]))]), 0),
     ("a sum whose second term is not a product", adj_src(loop = """for c = 1:k
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + gs)
             end"""), :con_adj, adj_args, 0),
@@ -226,10 +226,10 @@ const ADJ_CASES = [
                 xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + (w[(c - 1) * n + o] * gs + x[(t - 1) * k + c] * gs)
             end"""), :con_adj, adj_args, 0),
     ("a sum whose second operand is stored", adj_src(params = TANG_PARAMS, pre = TANG_PRE, post = "w[o] = gs", loop = TANG_ONE), :con_adj, tang_args, 0),
-    ("a sum whose second seed is a parameter", adj_src(params = ", gd, wd, xbd", pre = "gs = g[idx] * 2.0", loop = TANG_ONE), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(55); L = length(a[2]); Any[a..., 0.5, randn(r, L), randn(r, L)]), 0),
+    ("a sum whose second seed is a parameter", adj_src(params = ", gd, wd, xbd", pre = "gs = g[idx] * 2.0", loop = TANG_ONE), :con_adj, sd -> (a = adj_args(sd); r = Random.Xoshiro(55); L = length(a[2]); Any[a..., 0.5, STADE.val_randn(r, L), STADE.val_randn(r, L)]), 0),
     ("a sum whose second operand is also a target", adj_src(params = ", gg, wd, xbd", pre = TANG_PRE, loop = """for c = 1:k
                 xbd[(t - 1) * k + c] = xbd[(t - 1) * k + c] + (gs * wd[(c - 1) * n + o] + xbd[(c - 1) * n + o] * gd)
-            end"""), :con_adj, sd -> (a = adj_args(sd); r = MersenneTwister(56); L = length(a[2]); Any[a..., randn(r, length(a[1])), randn(r, L), randn(r, L)]), 0),
+            end"""), :con_adj, sd -> (a = adj_args(sd); r = Random.Xoshiro(56); L = length(a[2]); Any[a..., STADE.val_randn(r, length(a[1])), STADE.val_randn(r, L), STADE.val_randn(r, L)]), 0),
     ("a temporary is read after the loop", adj_src(pre = "gs = g[idx] * 2.0\n a1 = 0.0", post = "bb[o] = bb[o] + a1", loop = """for c = 1:k
                 a1 = x[(t - 1) * k + c]
                 wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + a1 * gs
@@ -429,7 +429,7 @@ function adj_unit_checks()
         # a forward loop shorter than the loop of adds, on 260 x 260 outputs (5 x 5 tiles): the stage is below the floor of 16 while the twins are not
         fsrc = adj_src(params = ", b0, kf", pre = "s = b0[o]\n for c = 1:kf\n s = s + x[(t - 1) * k + c] * w[(c - 1) * n + o]\n end\n o = mod(idx - 1, n) + 1\n t = div(idx - 1, n) + 1\n gs = tanh(s) * g[idx]",
                        loop = "for c = 1:k\n a1 = x[(t - 1) * k + c]\n a2 = w[(c - 1) * n + o]\n xb[(t - 1) * k + c] = xb[(t - 1) * k + c] + a2 * gs\n wb[(c - 1) * n + o] = wb[(c - 1) * n + o] + a1 * gs\n end")
-        fargs = Any[adj_args(1; m = 260, n = 260)..., randn(MersenneTwister(99), 260), 10]
+        fargs = Any[adj_args(1; m = 260, n = 260)..., STADE.val_randn(Random.Xoshiro(99), 260), 10]
         fbase = con_run(fsrc, :con_adj, fargs, 0)
         fall = con_run(fsrc, :con_adj, fargs, 1)
         check(count(adj_is_twin, fall.launched) == 2 && count(adj_is_stage, fall.launched) == 1 && con_relerr(fall, fbase) <= 1e-12, "a shorter forward loop: with the threshold 1 the stage and both twins run")
@@ -457,7 +457,7 @@ function adj_unit_checks()
         nhost = STADE.io_expr_to_source(con_run(nsrc, nentry, nmk(1), 1).plan.host)
         check(!occursin("div(d, dh)", nhost) && !occursin("mod(d, dh)", nhost), "$nname: the tiles are not batched over heads")
         # 9 rows and 17 columns per head: the second product has 17 rows and 9 columns, so the twins run at contraction 17 through the columns' side only for the first
-        r = MersenneTwister(5)
+        r = Random.Xoshiro(5)
         argw = adj_hargs(5; tt = 9)
         wa = con_run(src, entry, argw, 9); wb = con_run(src, entry, argw, 0)
         check(count(adj_is_twin, wa.launched) == 2 && con_relerr(wa, wb) <= 1e-12 && isempty(wa.conflicts), "$name: 9 rows run both twins at contraction 9 and agree (error $(round(con_relerr(wa, wb), sigdigits = 3)))")

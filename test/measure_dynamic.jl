@@ -79,7 +79,7 @@ for f in sort(filter(f -> endswith(f, ".jl") &&
     kernel = STADE.parse_kernel(primal)
     STADE.val_coerce_int_arrays!(kernel, baseline.values)
 
-    Random.seed!(hash(name))
+    Random.seed!(STADE.val_stable_seed(name))
     seed = STADE.val_random_values_like(kernel, baseline.values)
 
     # tangent

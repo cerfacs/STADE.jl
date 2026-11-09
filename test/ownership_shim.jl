@@ -204,7 +204,7 @@ function launch(f, args::Tuple, th::Tuple, bl::Union{Integer,Tuple}, sh::Integer
     nbx, nby, nbz = bl isa Tuple ? (bl..., ntuple(_ -> 1, 3 - length(bl))...) : (bl, 1, 1)
     blocks = collect(1:nbx * nby * nbz)
     ORDER[] == :descending && reverse!(blocks)
-    ORDER[] == :shuffled && Random.shuffle!(RNG[], blocks)
+    ORDER[] == :shuffled && Main.STADE.val_shuffle!(RNG[], blocks)
     for b in blocks
         ST.shared = zeros(Float64, sh ÷ 8)
         resume = [Channel{Nothing}(1) for _ in 1:n]
@@ -227,7 +227,7 @@ function launch(f, args::Tuple, th::Tuple, bl::Union{Integer,Tuple}, sh::Integer
         while any(alive)
             order = collect(1:n)
             ORDER[] == :descending && reverse!(order)
-            ORDER[] == :shuffled && Random.shuffle!(RNG[], order)
+            ORDER[] == :shuffled && Main.STADE.val_shuffle!(RNG[], order)
             for k in order
                 alive[k] || continue
                 ST.k = k
@@ -299,7 +299,7 @@ function launch_1d(f, args::Tuple, th::Integer, bl::Integer)
     push!(LAUNCHED, string(nameof(f)))
     tids = collect(1:(th * bl))
     ORDER[] == :descending && reverse!(tids)
-    ORDER[] == :shuffled && Random.shuffle!(RNG[], tids)
+    ORDER[] == :shuffled && Main.STADE.val_shuffle!(RNG[], tids)
     for tid in tids
         ST.tid = tid
         ST.bx = (tid - 1) ÷ th + 1

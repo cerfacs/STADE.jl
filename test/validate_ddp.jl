@@ -120,7 +120,7 @@ function validate_ddp(; dir::String = joinpath(@__DIR__, "val-corpus"),
     isempty(ARGS) || (subjects = [s for s in subjects if s[1] in ARGS])
     checks = 0; bad = 0
     for (name, per_sample, reduced) in subjects
-        Random.seed!(hash(name))
+        Random.seed!(STADE.val_stable_seed(name))
         primal = STADE.io_read_corpus_entry(joinpath(dir, name * ".jl"))
         kernel = STADE.parse_kernel(primal)
         # The baseline MUST be generated before the adjoint is compiled.
@@ -235,7 +235,7 @@ function validate_ddp(; dir::String = joinpath(@__DIR__, "val-corpus"),
     # Nothing else reaches this: with one period the two are the same run.
     for (name, per_sample, reduced) in subjects
         name in ("ddp_affine", "ddp_batch_hist") || continue
-        Random.seed!(hash(name * "window"))
+        Random.seed!(STADE.val_stable_seed(name * "window"))
         primal = STADE.io_read_corpus_entry(joinpath(dir, name * ".jl"))
         kernel = STADE.parse_kernel(primal)
         baseline = STADE.val_generate_baseline(kernel, primal)

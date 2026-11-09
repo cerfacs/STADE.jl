@@ -39,7 +39,7 @@ function validate_corpus(dir::String = "val-corpus"; trials::Int = 8, keep_push_
     )
         name = splitext(f)[1]
         path = joinpath(dir, f)
-        Random.seed!(hash(name))   # gives a reproducible baseline per kernel across runs
+        Random.seed!(STADE.val_stable_seed(name))   # gives a reproducible baseline per kernel across runs
         for mode in (:tangent, :adjoint, :hvp)
             gen_fn, suffix = generators[mode]
             out_path = joinpath(dir, name * suffix)

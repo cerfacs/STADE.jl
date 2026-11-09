@@ -133,14 +133,14 @@ end
 function ma_run(fexpr::Expr, n::Int, seed)
     m = Module()
     f = Core.eval(m, fexpr)
-    rng = MersenneTwister(seed)
+    rng = Random.Xoshiro(seed)
     args = Any[]
     out = Any[]
     for a in fexpr.args[1].args[2:end]
         if a === :n
             push!(args, n)
         else
-            arr = randn(rng, n)
+            arr = STADE.val_randn(rng, n)
             push!(args, arr)
             push!(out, arr)
         end

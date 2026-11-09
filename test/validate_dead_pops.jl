@@ -100,7 +100,7 @@ function dp_run(fexpr::Expr, init::Expr, n::Int, len::Function, seed)
     fi = Core.eval(m2, init)
     names = dp_stack_names(init)
     args = fexpr.args[1].args[2:end]
-    rng = MersenneTwister(seed)
+    rng = Random.Xoshiro(seed)
     stk = Base.invokelatest(fi, n)
     stk = stk isa Tuple ? collect(stk) : [stk]
     vals = Any[]
@@ -113,7 +113,7 @@ function dp_run(fexpr::Expr, init::Expr, n::Int, len::Function, seed)
             si += 1
             push!(vals, stk[findfirst(==(a), names)])
         else
-            arr = randn(rng, len(n))
+            arr = STADE.val_randn(rng, len(n))
             push!(vals, arr)
             push!(kept, a => arr)
         end

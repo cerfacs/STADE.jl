@@ -251,12 +251,12 @@ function gat_run_unit(src::String; ns = (0, 1, 2, 3, 4, 5, 6, 9, 13, 20))
     m1, m2 = Module(), Module()
     f1 = Core.eval(m1, STADE.cgen_gather_function_expr(gk))
     f2 = Core.eval(m2, STADE.cgen_gather_function_expr(gk2))
-    rng = MersenneTestRNG(src)
+    rng = GatherTestRNG(src)
     worst = 0.0
     for n in ns
         len = 2 * n + 12
-        base = [randn(rng, len) for _ in 1:3]
-        a = randn(rng)
+        base = [STADE.val_randn(rng, len) for _ in 1:3]
+        a = STADE.val_randn(rng)
         r1 = [copy(b) for b in base]
         r2 = [copy(b) for b in base]
         Base.invokelatest(f1, r1..., a, n)
@@ -270,7 +270,7 @@ function gat_run_unit(src::String; ns = (0, 1, 2, 3, 4, 5, 6, 9, 13, 20))
     GC.gc()
     return loops, worst
 end
-MersenneTestRNG(src) = MersenneTwister(hash(src))
+GatherTestRNG(src) = Random.Xoshiro(STADE.val_stable_seed(src))
 
 function gat_unit_checks()
     bad = 0
@@ -587,13 +587,13 @@ function gat_run_fuse_unit(src::String; ns = (0, 1, 2, 3, 4, 5, 6, 9, 13, 20), n
     f1 = Core.eval(m1, STADE.cgen_gather_function_expr(g1))
     f2 = Core.eval(m2, STADE.cgen_gather_function_expr(g2))
     names = [string(a) for a in gk.args]
-    rng = MersenneTwister(hash(src))
+    rng = Random.Xoshiro(STADE.val_stable_seed(src))
     worst = 0.0
     exact = true
     for n in ns
         len = 2 * n + 12
-        arrs = Dict("ub" => randn(rng, len), "vb" => randn(rng, len), "wb" => randn(rng, len))
-        scal = Dict{String,Any}("a" => randn(rng), "n" => n, "nt" => 3)
+        arrs = Dict("ub" => STADE.val_randn(rng, len), "vb" => STADE.val_randn(rng, len), "wb" => STADE.val_randn(rng, len))
+        scal = Dict{String,Any}("a" => STADE.val_randn(rng), "n" => n, "nt" => 3)
         r0, r1, r2 = gat_call(f0, names, arrs, scal), gat_call(f1, names, arrs, scal), gat_call(f2, names, arrs, scal)
         for k in sort(collect(keys(r0)))
             worst = max(worst, maximum(abs.(r0[k] .- r2[k])))
@@ -628,7 +628,7 @@ function gat_kernel_check(path::String, fuse::Bool, mode::Symbol, scratch::Strin
     primal_expr = STADE.io_read_corpus_entry(path)
     kernel = STADE.parse_kernel(primal_expr)
     yp = joinpath(scratch, name * ".yaml")
-    Random.seed!(hash(name))
+    Random.seed!(STADE.val_stable_seed(name))
     isfile(yp) || STADE.stade_generate_baseline_file(path; yaml_path = yp, int_lo = int_lo, int_hi = int_hi)
     baseline = STADE.io_read_baseline_yaml(yp)
     STADE.val_coerce_int_arrays!(kernel, baseline.values)

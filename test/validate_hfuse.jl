@@ -118,11 +118,11 @@ function hf_unit(src::String; ns = 0:12)
     f0 = Core.eval(m0, STADE.cgen_gather_function_expr(gk))
     f5 = Core.eval(m5, STADE.cgen_gather_function_expr(g5))
     names = [string(a) for a in gk.args]
-    rng = MersenneTwister(hash(src))
+    rng = Random.Xoshiro(STADE.val_stable_seed(src))
     worst = 0.0
     for n in ns
         len = n + 8
-        arrs = Dict("u" => randn(rng, len), "v" => randn(rng, len), "w" => randn(rng, len))
+        arrs = Dict("u" => STADE.val_randn(rng, len), "v" => STADE.val_randn(rng, len), "w" => STADE.val_randn(rng, len))
         r0, r5 = hf_call(f0, names, arrs, Dict{String,Any}("n" => n)), hf_call(f5, names, arrs, Dict{String,Any}("n" => n))
         for k in sort(collect(keys(r0)))
             worst = max(worst, maximum(abs.(r0[k] .- r5[k])))
