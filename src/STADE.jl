@@ -15364,7 +15364,7 @@ function val_finite_diff_check(f_eval::Function, f_grad::Function, x0::Vector{Fl
     results = NamedTuple[]
     worst_rel_err = 0.0
     for t in 1:trials
-        d = randn(n)
+        d = val_randn(n)
         d = d ./ sqrt(sum(d .^ 2))
         fd = (f_eval(x0 .+ epsilon .* d) - f_eval(x0 .- epsilon .* d)) / (2 * epsilon)
         ad = sum(g .* d)
@@ -15405,7 +15405,7 @@ function val_finite_diff_check_jvp(f_eval_vec::Function, f_jvp::Function, x0::Ve
     results = NamedTuple[]
     worst_rel_err = 0.0
     for t in 1:trials
-        d = randn(n)
+        d = val_randn(n)
         d = d ./ sqrt(sum(d .^ 2))
         fd = (f_eval_vec(x0 .+ epsilon .* d) .- f_eval_vec(x0 .- epsilon .* d)) ./ (2 * epsilon)
         jv = f_jvp(x0, d)
@@ -15633,6 +15633,62 @@ function val_scan_expr_divisors!(expr, found::Set{Symbol})
     return nothing
 end
 
+# ---- draws that are the same on every Julia version ----
+# `hash`, `randn` and `MersenneTwister` are not promised to give the same result on another Julia version, and they do not (measured on
+# 1.10.11 and 1.11.9): `randn(n)` for a large n differs, a loop of scalar `randn` differs after a few thousand draws (a rare branch of the
+# normal sampler), and every MersenneTwister stream differs. A validator that uses them tests other data on a machine with another Julia,
+# so a defect that one draw exposes can stay hidden on the other. `rand` of the default generator and of Random.Xoshiro(seed) is the same
+# (floats, integer ranges, randperm), so these functions build on it only. val_shuffle! replaces shuffle!.
+# val_stable_seed is FNV-1a over the UTF-8 bytes of a name. val_normal is one standard normal from two uniform draws (Box-Muller, the
+# cosine branch only, so it keeps no state). val_randn fills an array with them. Use Random.Xoshiro(seed) for an explicit generator.
+# validate_seed_stable.jl holds fixed values of all of these and fails if a Julia version changes one.
+function val_stable_seed(s::AbstractString)
+    h = 0xcbf29ce484222325
+    for b in codeunits(s)
+        h = (h ⊻ UInt64(b)) * 0x00000100000001b3
+    end
+    return h
+end
+val_stable_seed(s::Symbol) = val_stable_seed(string(s))
+
+function val_normal()
+    u1 = 1.0 - rand()
+    u2 = rand()
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * pi * u2)
+end
+function val_normal(rng)
+    u1 = 1.0 - rand(rng)
+    u2 = rand(rng)
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * pi * u2)
+end
+
+# Fisher-Yates with rand(rng, 1:i). Julia's own shuffle! gives another permutation on Julia 1.11 than on 1.10 (measured).
+function val_shuffle!(rng, v::AbstractVector)
+    for i in length(v):-1:2
+        j = rand(rng, 1:i)
+        v[i], v[j] = v[j], v[i]
+    end
+    return v
+end
+
+val_randn() = val_normal()
+function val_randn(n::Integer, dims::Integer...)
+    A = Array{Float64}(undef, n, dims...)
+    for i in eachindex(A)
+        A[i] = val_normal()
+    end
+    return A
+end
+# the first argument is a generator; with no dimensions it is one scalar draw
+function val_randn(rng, dims::Integer...)
+    isempty(dims) && return val_normal(rng)
+    A = Array{Float64}(undef, dims...)
+    for i in eachindex(A)
+        A[i] = val_normal(rng)
+    end
+    return A
+end
+
 function val_random_values(kernel, shapes::Dict, int_args::Dict{Symbol,Int};
                             scale::Float64 = 1.0, idx_cap::Union{Int,Nothing} = nothing)
     sig = kernel.sig
@@ -15653,9 +15709,9 @@ function val_random_values(kernel, shapes::Dict, int_args::Dict{Symbol,Int};
     for a in sig.args
         k = sig.kinds[a]
         if k == :scalar_float
-            values[a] = a in divisors ? scale * (1.0 + 0.1 * randn()) : scale * randn()
+            values[a] = a in divisors ? scale * (1.0 + 0.1 * val_randn()) : scale * val_randn()
         elseif k == :array_float
-            values[a] = a in divisors ? scale .* (1.0 .+ 0.1 .* randn(shapes[a]...)) : scale .* randn(shapes[a]...)
+            values[a] = a in divisors ? scale .* (1.0 .+ 0.1 .* val_randn(shapes[a]...)) : scale .* val_randn(shapes[a]...)
         elseif k == :array_int
             values[a] = rand(1:cap, shapes[a]...)
         end
@@ -15851,7 +15907,7 @@ function val_random_values_like(kernel, values::Dict; scale::Float64 = 1.0)
     out = Dict{Symbol,Any}()
     for a in val_float_arg_order(kernel.sig)
         v = values[a]
-        out[a] = v isa Number ? scale * randn() : scale .* randn(size(v)...)
+        out[a] = v isa Number ? scale * val_randn() : scale .* val_randn(size(v)...)
     end
     # see val_zeros_like's own comment just above -- same contract.
     for a in kernel.sig.args
