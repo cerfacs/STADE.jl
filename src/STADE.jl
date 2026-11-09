@@ -16138,7 +16138,7 @@ function val_coerce_int_arrays!(kernel, values::Dict)
 end
 
 
-# ==================== bgen_* (data-parallel epilogue) =============
+# ==================== ddpgen_* (data-parallel epilogue) ===========
 # Every rank runs the unmodified single-sample kernel on its own
 # samples. This stage derives which buffers must be summed across ranks
 # and which must not, then generates the reset and collective functions
@@ -16153,28 +16153,28 @@ end
 
 # Array-valued float arguments the kernel never writes. Only these can
 # be named in `per_sample`; everything else already has a derived role.
-function bgen_readonly_float_args(kernel)
+function ddpgen_readonly_float_args(kernel)
     written = Set{Symbol}()
-    bgen_collect_written!(kernel.body, written)
+    ddpgen_collect_written!(kernel.body, written)
     return [a for a in kernel.sig.args
             if kernel.sig.kinds[a] == :array_float && !(a in written)]
 end
 
 # Union collector: an unexecuted loop can only leave names out, never
 # add a false one, so no runs-once proof is needed here.
-function bgen_collect_written!(body::Vector{NamedTuple}, out::Set{Symbol})
+function ddpgen_collect_written!(body::Vector{NamedTuple}, out::Set{Symbol})
     for st in body
         if st.kind == :assign
             lhs = st.lhs
             lhs isa Symbol && push!(out, lhs)
             lhs isa Expr && lhs.head == :ref && push!(out, lhs.args[1])
         elseif st.kind == :for
-            bgen_collect_written!(st.body, out)
+            ddpgen_collect_written!(st.body, out)
         elseif st.kind == :while
-            bgen_collect_written!(st.body, out)
+            ddpgen_collect_written!(st.body, out)
         elseif st.kind == :if
-            bgen_collect_written!(st.then, out)
-            bgen_collect_written!(st.els, out)
+            ddpgen_collect_written!(st.then, out)
+            ddpgen_collect_written!(st.els, out)
         end
     end
     return out
@@ -16185,40 +16185,40 @@ end
 # write it, and to :scratch when it does. Both get no reset and no
 # collective, and only the read-only one can be checked for differing
 # across ranks, so keeping them one class would overload it.
-function bgen_check_declaration(kernel, per_sample::Vector{Symbol},
+function ddpgen_check_declaration(kernel, per_sample::Vector{Symbol},
                                 reduced::Vector{Symbol} = Symbol[])
     args = Set(kernel.sig.args)
     written = Set{Symbol}()
-    bgen_collect_written!(kernel.body, written)
-    _, ambiguous = bgen_reduced_outputs(kernel)
+    ddpgen_collect_written!(kernel.body, written)
+    _, ambiguous = ddpgen_reduced_outputs(kernel)
     amb = Set(ambiguous)
 
     for (kw, names) in (("per_sample", per_sample), ("reduced", reduced))
         not_args = [p for p in names if !(p in args)]
-        isempty(not_args) || error("bgen_check_declaration: $kw names `" *
+        isempty(not_args) || error("ddpgen_check_declaration: $kw names `" *
             join(not_args, "`, `") * "`, which " * (length(not_args) == 1 ? "is" : "are") *
             " not an argument of $(kernel.sig.name)")
         not_float_array = [p for p in names if kernel.sig.kinds[p] != :array_float]
-        isempty(not_float_array) || error("bgen_check_declaration: $kw names `" *
+        isempty(not_float_array) || error("ddpgen_check_declaration: $kw names `" *
             join(not_float_array, "`, `") * "`, which is not a float array argument")
         dups = [p for p in unique(names) if count(==(p), names) > 1]
-        isempty(dups) || error("bgen_check_declaration: $kw names `" *
+        isempty(dups) || error("ddpgen_check_declaration: $kw names `" *
             join(dups, "`, `") * "` more than once")
     end
 
     both = [p for p in per_sample if p in reduced]
-    isempty(both) || error("bgen_check_declaration: `" * join(both, "`, `") *
+    isempty(both) || error("ddpgen_check_declaration: `" * join(both, "`, `") *
         "` appears in per_sample and in reduced. An array is one or the other")
 
     # A written array may be named only when its shape is genuinely
     # ambiguous. A plain overwrite already has one derived role, so naming
     # it would give it two.
     bad_ps = [p for p in per_sample if p in written && !(p in amb)]
-    isempty(bad_ps) || error("bgen_check_declaration: per_sample names `" *
+    isempty(bad_ps) || error("ddpgen_check_declaration: per_sample names `" *
         join(bad_ps, "`, `") * "`, which the kernel writes by plain overwrite. " *
         "That array already takes a derived role, so naming it here would give it two")
     bad_rd = [p for p in reduced if !(p in amb)]
-    isempty(bad_rd) || error("bgen_check_declaration: reduced names `" *
+    isempty(bad_rd) || error("ddpgen_check_declaration: reduced names `" *
         join(bad_rd, "`, `") * "`, whose role is already derived. `reduced` " *
         "resolves an array whose writes are all additive at an index that varies " *
         "with an enclosing loop, and no other")
@@ -16227,7 +16227,7 @@ function bgen_check_declaration(kernel, per_sample::Vector{Symbol},
     # this refusal exists to catch: both readings run without complaint and
     # only one is right.
     unresolved = [a for a in ambiguous if !(a in per_sample) && !(a in reduced)]
-    isempty(unresolved) || error("bgen_check_declaration: `" *
+    isempty(unresolved) || error("ddpgen_check_declaration: `" *
         join(unresolved, "`, `") * "` takes only additive writes at an index that " *
         "varies with an enclosing loop. Two readings fit that shape and the kernel " *
         "does not say which. Name it in `per_sample` if it holds one sample's own " *
@@ -16249,9 +16249,9 @@ end
 # caller-zeroed storage and holds a per-sample result. The two have the
 # same write shape and differ only here, so an index test is the only
 # thing separating a quantity to sum from one to keep local.
-function bgen_reduced_outputs(kernel)
+function ddpgen_reduced_outputs(kernel)
     acc = Dict{Symbol,Symbol}()   # array => :reduced | :ambiguous | :scratch
-    bgen_classify_writes!(kernel.body, Set{Symbol}(), acc)
+    ddpgen_classify_writes!(kernel.body, Set{Symbol}(), acc)
     return sort([a for (a, v) in acc if v == :reduced]),
            sort([a for (a, v) in acc if v == :ambiguous])
 end
@@ -16268,16 +16268,16 @@ end
 # analysis over-approximates dependence and errs toward :ambiguous, which
 # refuses. That is the safe direction: a refusal is read by a human, and
 # a wrong :reduced sums a per-sample result across ranks in silence.
-function bgen_classify_writes!(body::Vector{NamedTuple}, dep::Set{Symbol},
+function ddpgen_classify_writes!(body::Vector{NamedTuple}, dep::Set{Symbol},
                                acc::Dict{Symbol,Symbol})
     for st in body
         if st.kind == :assign
             lhs = st.lhs
             if lhs isa Expr && lhs.head == :ref
                 arr = lhs.args[1]
-                verdict = if !bgen_adds_to_itself(lhs, st.rhs)
+                verdict = if !ddpgen_adds_to_itself(lhs, st.rhs)
                     :scratch
-                elseif bgen_expr_uses_any(lhs.args[2:end], dep)
+                elseif ddpgen_expr_uses_any(lhs.args[2:end], dep)
                     :ambiguous
                 else
                     :reduced
@@ -16287,53 +16287,53 @@ function bgen_classify_writes!(body::Vector{NamedTuple}, dep::Set{Symbol},
                 prev = get(acc, arr, nothing)
                 acc[arr] = (prev === :scratch || verdict === :scratch) ? :scratch :
                            (prev === :ambiguous || verdict === :ambiguous) ? :ambiguous : :reduced
-            elseif lhs isa Symbol && bgen_expr_uses_any(Any[st.rhs], dep)
+            elseif lhs isa Symbol && ddpgen_expr_uses_any(Any[st.rhs], dep)
                 push!(dep, lhs)
             end
         elseif st.kind == :for
             inner = copy(dep)
             push!(inner, st.var)
-            bgen_classify_writes!(st.body, inner, acc)
+            ddpgen_classify_writes!(st.body, inner, acc)
         elseif st.kind == :while
-            bgen_classify_writes!(st.body, inner, acc)
+            ddpgen_classify_writes!(st.body, inner, acc)
         elseif st.kind == :if
-            bgen_classify_writes!(st.then, copy(dep), acc)
-            bgen_classify_writes!(st.els, copy(dep), acc)
+            ddpgen_classify_writes!(st.then, copy(dep), acc)
+            ddpgen_classify_writes!(st.els, copy(dep), acc)
         end
     end
     return acc
 end
 
 # True when `rhs` is a sum with `lhs` as one of its terms.
-function bgen_adds_to_itself(lhs, rhs)
-    terms = bgen_flatten_sum(rhs)
+function ddpgen_adds_to_itself(lhs, rhs)
+    terms = ddpgen_flatten_sum(rhs)
     return any(t -> t == lhs, terms)
 end
 
-function bgen_flatten_sum(expr)
+function ddpgen_flatten_sum(expr)
     if expr isa Expr && expr.head == :call && expr.args[1] == :+
         out = Any[]
         for a in expr.args[2:end]
-            append!(out, bgen_flatten_sum(a))
+            append!(out, ddpgen_flatten_sum(a))
         end
         return out
     end
     return Any[expr]
 end
 
-function bgen_expr_uses_any(exprs, names)
+function ddpgen_expr_uses_any(exprs, names)
     isempty(names) && return false
     for e in exprs
-        bgen_expr_uses_any_one(e, names) && return true
+        ddpgen_expr_uses_any_one(e, names) && return true
     end
     return false
 end
 
-function bgen_expr_uses_any_one(expr, names)
+function ddpgen_expr_uses_any_one(expr, names)
     expr isa Symbol && return expr in names
     if expr isa Expr
         for a in expr.args
-            bgen_expr_uses_any_one(a, names) && return true
+            ddpgen_expr_uses_any_one(a, names) && return true
         end
     end
     return false
@@ -16344,9 +16344,9 @@ end
 # argument, and hvp appends tgen_shadow(a) and tgen_shadow(agen_shadow(a))
 # for each. Building the names from those helpers keeps this stage
 # correct if the shadow spelling ever changes.
-function bgen_companion_map(sig, mode::Symbol)
+function ddpgen_companion_map(sig, mode::Symbol)
     mode in (:tangent, :adjoint, :hvp) ||
-        error("bgen_companion_map: mode must be :tangent, :adjoint or :hvp, got $mode")
+        error("ddpgen_companion_map: mode must be :tangent, :adjoint or :hvp, got $mode")
     out = Dict{Symbol,NamedTuple}()
     for a in sig.args
         sig.kinds[a] in (:scalar_float, :array_float) || continue
@@ -16371,13 +16371,13 @@ end
 # :shared and :reduced swap columns, which is the duality this design
 # rests on: the adjoint of a broadcast is a sum, and the adjoint of a sum
 # is a broadcast.
-function bgen_roles(kernel, per_sample::Vector{Symbol}, mode::Symbol;
+function ddpgen_roles(kernel, per_sample::Vector{Symbol}, mode::Symbol;
                    reduced::Vector{Symbol} = Symbol[])
-    bgen_check_declaration(kernel, per_sample, reduced)
-    derived_reduced, _ = bgen_reduced_outputs(kernel)
-    readonly = bgen_readonly_float_args(kernel)
+    ddpgen_check_declaration(kernel, per_sample, reduced)
+    derived_reduced, _ = ddpgen_reduced_outputs(kernel)
+    readonly = ddpgen_readonly_float_args(kernel)
     written = Set{Symbol}()
-    bgen_collect_written!(kernel.body, written)
+    ddpgen_collect_written!(kernel.body, written)
     all_reduced = union(Set(derived_reduced), Set(reduced))
     class = Dict{Symbol,Symbol}()
     for a in kernel.sig.args
@@ -16390,7 +16390,7 @@ function bgen_roles(kernel, per_sample::Vector{Symbol}, mode::Symbol;
                    a in all_reduced                     ? :reduced :
                    a in readonly                        ? :shared : :scratch
     end
-    companions = bgen_companion_map(kernel.sig, mode)
+    companions = ddpgen_companion_map(kernel.sig, mode)
     roles = Dict{Symbol,Symbol}()
     for (a, c) in class
         cm = companions[a]
@@ -16413,24 +16413,24 @@ end
 
 # Buffers carrying one role, in signature order. The epilogue needs a
 # deterministic argument order, and the roles Dict has none.
-function bgen_role_args(kernel, roles::Dict{Symbol,Symbol}, mode::Symbol, want::Symbol;
+function ddpgen_role_args(kernel, roles::Dict{Symbol,Symbol}, mode::Symbol, want::Symbol;
                         arrays_only::Bool = false)
     layout = mode == :tangent ? tgen_signature_args(kernel.sig) :
              mode == :adjoint ? agen_signature_args(kernel.sig) :
-             bgen_hvp_signature_args(kernel.sig)
+             ddpgen_hvp_signature_args(kernel.sig)
     out = [b for b in layout if get(roles, b, nothing) === want]
     arrays_only || return out
-    scalars = bgen_scalar_float_buffers(kernel.sig, mode)
+    scalars = ddpgen_scalar_float_buffers(kernel.sig, mode)
     return [b for b in out if !(b in scalars)]
 end
 
 # Every buffer that is a scalar rather than an array, in this mode's
 # layout. fill! and Allreduce! both need an array.
-function bgen_scalar_float_buffers(sig, mode::Symbol)
+function ddpgen_scalar_float_buffers(sig, mode::Symbol)
     out = Set{Symbol}()
     for a in sig.args
         sig.kinds[a] == :scalar_float || continue
-        cm = bgen_companion_map(sig, mode)[a]
+        cm = ddpgen_companion_map(sig, mode)[a]
         push!(out, cm.primal)
         cm.tangent === nothing || push!(out, cm.tangent)
         cm.adjoint === nothing || push!(out, cm.adjoint)
@@ -16439,7 +16439,7 @@ function bgen_scalar_float_buffers(sig, mode::Symbol)
     return out
 end
 
-function bgen_hvp_signature_args(sig)
+function ddpgen_hvp_signature_args(sig)
     seed_args = Symbol[]
     for a in sig.args
         sig.kinds[a] in (:scalar_float, :array_float) || continue
@@ -16450,7 +16450,7 @@ function bgen_hvp_signature_args(sig)
 end
 
 # ---- phase 5: an optimization, not a requirement ------------------
-# bgen_reset_local! already makes a stale :local buffer unrepresentable.
+# ddpgen_reset_local! already makes a stale :local buffer unrepresentable.
 # This proves the write unnecessary for a buffer the sweep leaves at
 # zero, so the epilogue can skip one fill!.
 #
@@ -16467,24 +16467,24 @@ end
 # of 0.0 somewhere. This proves that only when EVERY write to the array
 # is a zeroing write, which removes the need to compare index ranges: if
 # nothing ever writes a non-zero, no touched element can hold one.
-function bgen_array_left_zeroed(body::Vector{NamedTuple}, arr::Symbol)
-    bgen_all_writes_are_zero(body, arr) || return false
-    return bgen_zero_write_reached(body, arr)
+function ddpgen_array_left_zeroed(body::Vector{NamedTuple}, arr::Symbol)
+    ddpgen_all_writes_are_zero(body, arr) || return false
+    return ddpgen_zero_write_reached(body, arr)
 end
 
-function bgen_all_writes_are_zero(body::Vector{NamedTuple}, arr::Symbol)
+function ddpgen_all_writes_are_zero(body::Vector{NamedTuple}, arr::Symbol)
     for st in body
         if st.kind == :assign && st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == arr
             (st.rhs isa Number && st.rhs == 0.0) || return false
         elseif st.kind == :assign && st.lhs isa Symbol && st.lhs == arr
             return false
         elseif st.kind == :for
-            bgen_all_writes_are_zero(st.body, arr) || return false
+            ddpgen_all_writes_are_zero(st.body, arr) || return false
         elseif st.kind == :while
-            bgen_all_writes_are_zero(st.body, arr) || return false
+            ddpgen_all_writes_are_zero(st.body, arr) || return false
         elseif st.kind == :if
-            bgen_all_writes_are_zero(st.then, arr) || return false
-            bgen_all_writes_are_zero(st.els, arr) || return false
+            ddpgen_all_writes_are_zero(st.then, arr) || return false
+            ddpgen_all_writes_are_zero(st.els, arr) || return false
         end
     end
     return true
@@ -16495,7 +16495,7 @@ end
 # element, not the array, and an earlier version of this function read it
 # as a whole-array proof. An index that merely mentions a loop variable
 # does not count either, since vb[i + 1] leaves an element behind.
-function bgen_zero_write_reached(body::Vector{NamedTuple}, arr::Symbol,
+function ddpgen_zero_write_reached(body::Vector{NamedTuple}, arr::Symbol,
                                  loopvars::Vector{Symbol} = Symbol[])
     found = false
     for st in body
@@ -16504,38 +16504,38 @@ function bgen_zero_write_reached(body::Vector{NamedTuple}, arr::Symbol,
             found = st.rhs isa Number && st.rhs == 0.0 &&
                     length(idx) == 1 && idx[1] isa Symbol && idx[1] in loopvars
         elseif st.kind == :for
-            if bgen_writes_array(st.body, arr)
+            if ddpgen_writes_array(st.body, arr)
                 found = cgen_loop_runs_once(st) &&
-                        bgen_zero_write_reached(st.body, arr, vcat(loopvars, st.var))
+                        ddpgen_zero_write_reached(st.body, arr, vcat(loopvars, st.var))
             end
         elseif st.kind == :while
             # A while has no literal bounds, so cgen_loop_runs_once can never
             # prove it runs. Rule 11: a loop that may not run has not run.
-            if bgen_writes_array(st.body, arr)
+            if ddpgen_writes_array(st.body, arr)
                 found = false
             end
         elseif st.kind == :if
-            tw = bgen_writes_array(st.then, arr)
-            ew = bgen_writes_array(st.els, arr)
+            tw = ddpgen_writes_array(st.then, arr)
+            ew = ddpgen_writes_array(st.els, arr)
             if tw || ew
-                found = tw && ew && bgen_zero_write_reached(st.then, arr, loopvars) &&
-                        bgen_zero_write_reached(st.els, arr, loopvars)
+                found = tw && ew && ddpgen_zero_write_reached(st.then, arr, loopvars) &&
+                        ddpgen_zero_write_reached(st.els, arr, loopvars)
             end
         end
     end
     return found
 end
 
-function bgen_writes_array(body::Vector{NamedTuple}, arr::Symbol)
+function ddpgen_writes_array(body::Vector{NamedTuple}, arr::Symbol)
     for st in body
         if st.kind == :assign && st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] == arr
             return true
         elseif st.kind == :for
-            bgen_writes_array(st.body, arr) && return true
+            ddpgen_writes_array(st.body, arr) && return true
         elseif st.kind == :while
-            bgen_writes_array(st.body, arr) && return true
+            ddpgen_writes_array(st.body, arr) && return true
         elseif st.kind == :if
-            (bgen_writes_array(st.then, arr) || bgen_writes_array(st.els, arr)) && return true
+            (ddpgen_writes_array(st.then, arr) || ddpgen_writes_array(st.els, arr)) && return true
         end
     end
     return false
@@ -16545,15 +16545,15 @@ end
 # The epilogue never names the function it wraps. It operates on buffers
 # only, so one generated file serves the CPU, CUDA and JACC targets.
 
-bgen_fname(name::Symbol, mode::Symbol, suffix::String) =
-    Symbol(string(name) * bgen_mode_suffix(mode) * suffix)
+ddpgen_fname(name::Symbol, mode::Symbol, suffix::String) =
+    Symbol(string(name) * ddpgen_mode_suffix(mode) * suffix)
 
-bgen_mode_suffix(mode::Symbol) =
+ddpgen_mode_suffix(mode::Symbol) =
     mode == :tangent ? "_d" : mode == :adjoint ? "_b" : "_hv"
 
 # `fill!` and not a loop: the buffer may be a host Array or a device
 # array, and `fill!` is defined for both.
-function bgen_fill_fn(fname::Symbol, bufs::Vector{Symbol}, doc::String)
+function ddpgen_fill_fn(fname::Symbol, bufs::Vector{Symbol}, doc::String)
     body = Any[]
     for b in bufs
         push!(body, Expr(:call, :fill!, b, 0.0))
@@ -16562,25 +16562,25 @@ function bgen_fill_fn(fname::Symbol, bufs::Vector{Symbol}, doc::String)
     return (doc = doc, expr = Expr(:function, Expr(:call, fname, bufs...), Expr(:block, body...)))
 end
 
-function bgen_reset_accum_expr(kernel, roles, mode)
-    bufs = bgen_role_args(kernel, roles, mode, :accum; arrays_only = true)
-    return bgen_fill_fn(bgen_fname(kernel.sig.name, mode, "_reset_accum!"), bufs,
+function ddpgen_reset_accum_expr(kernel, roles, mode)
+    bufs = ddpgen_role_args(kernel, roles, mode, :accum; arrays_only = true)
+    return ddpgen_fill_fn(ddpgen_fname(kernel.sig.name, mode, "_reset_accum!"), bufs,
         "Zero the :accum buffers. Call once per step, on every rank. The " *
         "Allreduce sums each rank's contribution, so a buffer entering the step " *
         "non-zero is counted once per rank. fresh_gradient assumes one adjoint call " *
         "per reset_accum: it makes the adjoint write some of these buffers, not add to them.")
 end
 
-function bgen_reset_reduced_expr(kernel, roles, mode)
-    bufs = bgen_role_args(kernel, roles, mode, :reduced; arrays_only = true)
-    return bgen_fill_fn(bgen_fname(kernel.sig.name, mode, "_reset_reduced!"), bufs,
+function ddpgen_reset_reduced_expr(kernel, roles, mode)
+    bufs = ddpgen_role_args(kernel, roles, mode, :reduced; arrays_only = true)
+    return ddpgen_fill_fn(ddpgen_fname(kernel.sig.name, mode, "_reset_reduced!"), bufs,
         "Zero the :reduced buffers. Separate from the :accum reset because the " *
         "two roles may take two reset periods; their communication is the same.")
 end
 
-function bgen_reset_local_expr(kernel, roles, mode)
-    bufs = bgen_role_args(kernel, roles, mode, :local; arrays_only = true)
-    return bgen_fill_fn(bgen_fname(kernel.sig.name, mode, "_reset_local!"), bufs,
+function ddpgen_reset_local_expr(kernel, roles, mode)
+    bufs = ddpgen_role_args(kernel, roles, mode, :local; arrays_only = true)
+    return ddpgen_fill_fn(ddpgen_fname(kernel.sig.name, mode, "_reset_local!"), bufs,
         "Zero the :local buffers. Call before each local sample, or one sample's " *
         "intermediate adjoints seed the next one's reverse sweep. Only " *
         "adjoint-valued buffers appear here: a tangent-valued companion is an " *
@@ -16596,9 +16596,9 @@ end
 # every batch and again at the window boundary, which multiplies them by
 # the window length and raises nothing. Two collectives make the period
 # an explicit choice at the call site.
-function bgen_allreduce_accum_expr(kernel, roles, mode)
-    bufs = bgen_role_args(kernel, roles, mode, :accum; arrays_only = true)
-    fname = bgen_fname(kernel.sig.name, mode, "_allreduce_accum!")
+function ddpgen_allreduce_accum_expr(kernel, roles, mode)
+    bufs = ddpgen_role_args(kernel, roles, mode, :accum; arrays_only = true)
+    fname = ddpgen_fname(kernel.sig.name, mode, "_allreduce_accum!")
     args = vcat(bufs, [:n_local, :comm])
     body = Any[]
     for b in bufs
@@ -16614,9 +16614,9 @@ function bgen_allreduce_accum_expr(kernel, roles, mode)
             expr = Expr(:function, Expr(:call, fname, args...), Expr(:block, body...)))
 end
 
-function bgen_allreduce_reduced_expr(kernel, roles, mode)
-    bufs = bgen_role_args(kernel, roles, mode, :reduced; arrays_only = true)
-    fname = bgen_fname(kernel.sig.name, mode, "_allreduce_reduced!")
+function ddpgen_allreduce_reduced_expr(kernel, roles, mode)
+    bufs = ddpgen_role_args(kernel, roles, mode, :reduced; arrays_only = true)
+    fname = ddpgen_fname(kernel.sig.name, mode, "_allreduce_reduced!")
     args = vcat(bufs, [:comm])
     body = Any[]
     for b in bufs
@@ -16632,10 +16632,10 @@ end
 # Two checksums per buffer, compared by min against max across ranks.
 # Agreement is evidence and not proof: this finds a mis-declared array or
 # a failed broadcast, not a crafted collision.
-function bgen_check_expr(kernel, roles, mode)
-    bufs = vcat(bgen_role_args(kernel, roles, mode, :shared; arrays_only = true),
-                bgen_role_args(kernel, roles, mode, :seed; arrays_only = true))
-    fname = bgen_fname(kernel.sig.name, mode, "_check_replicas")
+function ddpgen_check_expr(kernel, roles, mode)
+    bufs = vcat(ddpgen_role_args(kernel, roles, mode, :shared; arrays_only = true),
+                ddpgen_role_args(kernel, roles, mode, :seed; arrays_only = true))
+    fname = ddpgen_fname(kernel.sig.name, mode, "_check_replicas")
     args = vcat(bufs, [:comm])
     pairs = Any[Expr(:tuple, string(b), b) for b in bufs]
     body = Any[
@@ -16665,10 +16665,10 @@ function bgen_check_expr(kernel, roles, mode)
             expr = Expr(:function, Expr(:call, fname, args...), Expr(:block, body...)))
 end
 
-function bgen_preamble(kernel, roles, per_sample, reduced, mode)
+function ddpgen_preamble(kernel, roles, per_sample, reduced, mode)
     layout = mode == :tangent ? tgen_signature_args(kernel.sig) :
              mode == :adjoint ? agen_signature_args(kernel.sig) :
-             bgen_hvp_signature_args(kernel.sig)
+             ddpgen_hvp_signature_args(kernel.sig)
     treat = Dict(:returned => "none. Returned by value; sum it yourself.",
                  :shared => "none. Must match on every rank.",
                  :seed => "none. Must match on every rank.",
@@ -16679,7 +16679,7 @@ function bgen_preamble(kernel, roles, per_sample, reduced, mode)
                  :scratch => "none. The kernel overwrites it.")
     lines = ["# Generated by STADE.jl -- do not edit.",
              "#",
-             "# Data-parallel epilogue for $(bgen_fname(kernel.sig.name, mode, "")). Every rank runs the",
+             "# Data-parallel epilogue for $(ddpgen_fname(kernel.sig.name, mode, "")). Every rank runs the",
              "# unmodified single-sample kernel on its own samples. These functions",
              "# zero the buffers between calls and sum what must be summed.",
              "#",
@@ -17650,13 +17650,13 @@ function stade_gpu_report_file(in_path::String, backend = cgen_backend_cuda(); r
 end
 
 
-# stade_batch_file writes the six functions of stade_batch to a file. Each keeps its one-line contract as a comment above it. The
+# stade_ddp_file writes the six functions of stade_ddp to a file. Each keeps its one-line contract as a comment above it. The
 # generated file is read by whoever writes the training loop, and a role table with no statement of what to call when is half a plan.
-function stade_batch_file(in_path::String, out_path::String;
+function stade_ddp_file(in_path::String, out_path::String;
                           per_sample::Vector{Symbol}, mode::Symbol,
                           reduced::Vector{Symbol} = Symbol[])
     primal = io_read_corpus_entry(in_path)
-    r = stade_batch(primal; per_sample = per_sample, mode = mode, reduced = reduced)
+    r = stade_ddp(primal; per_sample = per_sample, mode = mode, reduced = reduced)
     parts = String[]
     for f in (r.reset_accum, r.reset_reduced, r.reset_local,
               r.allreduce_accum, r.allreduce_reduced, r.check)
@@ -17668,17 +17668,17 @@ function stade_batch_file(in_path::String, out_path::String;
     return r.roles
 end
 
-function stade_batch(primal::Expr; per_sample::Vector{Symbol}, mode::Symbol,
+function stade_ddp(primal::Expr; per_sample::Vector{Symbol}, mode::Symbol,
                      reduced::Vector{Symbol} = Symbol[])
     kernel = parse_kernel(primal)
-    roles = bgen_roles(kernel, per_sample, mode; reduced = reduced)
-    return (reset_accum   = bgen_reset_accum_expr(kernel, roles, mode),
-            reset_reduced = bgen_reset_reduced_expr(kernel, roles, mode),
-            reset_local   = bgen_reset_local_expr(kernel, roles, mode),
-            allreduce_accum   = bgen_allreduce_accum_expr(kernel, roles, mode),
-            allreduce_reduced = bgen_allreduce_reduced_expr(kernel, roles, mode),
-            check         = bgen_check_expr(kernel, roles, mode),
-            preamble      = bgen_preamble(kernel, roles, per_sample, reduced, mode),
+    roles = ddpgen_roles(kernel, per_sample, mode; reduced = reduced)
+    return (reset_accum   = ddpgen_reset_accum_expr(kernel, roles, mode),
+            reset_reduced = ddpgen_reset_reduced_expr(kernel, roles, mode),
+            reset_local   = ddpgen_reset_local_expr(kernel, roles, mode),
+            allreduce_accum   = ddpgen_allreduce_accum_expr(kernel, roles, mode),
+            allreduce_reduced = ddpgen_allreduce_reduced_expr(kernel, roles, mode),
+            check         = ddpgen_check_expr(kernel, roles, mode),
+            preamble      = ddpgen_preamble(kernel, roles, per_sample, reduced, mode),
             roles         = roles)
 end
 
