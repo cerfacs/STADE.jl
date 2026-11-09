@@ -340,7 +340,7 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
                               int_lo::Int = 3, int_hi::Int = 5, grow_max::Int = 512,
                               reduction_threshold::Int = STADE.cgen_reduction_threshold_default(),
                               fresh_gradient::Bool = false,
-                              jacc_split_min_inner::Int = 256, jacc_split_max_out::Int = 32768, jacc_split_reduce::Int = 16, jacc_warp::Bool = true, jacc_contraction::Int = 256, truth::Bool = false)
+                              jacc_split_min_inner::Int = 256, jacc_split_max_out::Int = 32768, jacc_split_reduce::Int = 16, jacc_warp::Bool = true, jacc_contraction::Int = 256, jacc_dead_pops::Bool = true, jacc_tile_fill::Int = 64, truth::Bool = false)
     for f in readdir(dir)
         if endswith(f, "_b.jl") || endswith(f, "_d.jl") || endswith(f, "_hv.jl") ||
            endswith(f, ".yaml") || endswith(f, ".gpu.yaml") ||
@@ -436,8 +436,8 @@ function validate_corpus_gpu(dir::String = "val-corpus"; trials::Int = 3,
         if run_jacc
             try
                 # split_min_inner = 0 and a large split_max_out force the shared-memory twin onto every kernel the split accepts, whatever the corpus sizes
-                plan_init = STADE.stade_jacc(gen_out.initstacks; split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp, jacc_contraction = jacc_contraction)
-                plan_gen  = STADE.stade_jacc(gen_expr; reduction_threshold, split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp, jacc_contraction = jacc_contraction)
+                plan_init = STADE.stade_jacc(gen_out.initstacks; split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp, jacc_contraction = jacc_contraction, jacc_tile_fill = jacc_tile_fill)
+                plan_gen  = STADE.stade_jacc(gen_expr; reduction_threshold, split_reduce = jacc_split_reduce, split_min_inner = jacc_split_min_inner, split_max_out = jacc_split_max_out, warp_atomics = jacc_warp, jacc_contraction = jacc_contraction, jacc_dead_pops = jacc_dead_pops, jacc_tile_fill = jacc_tile_fill, init_hosts = Dict{Symbol,Expr}(gen_out.initstacks.args[1].args[1] => gen_out.initstacks))
                 if write_generated
                     open(joinpath(dir, name * suffix * "_jacc.jl"), "w") do f
                         for h in vcat(plan_init.helpers, plan_gen.helpers)

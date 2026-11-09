@@ -22,13 +22,13 @@ isdefined(Main, :CON_CASES) || include(joinpath(@__DIR__, "validate_contraction.
 isdefined(Main, :ADJ_CASES) || include(joinpath(@__DIR__, "validate_adjoint_contraction.jl"))
 
 jcn_run(args...; kw...) = (jsp_init!(); Base.invokelatest(jcn_run_body, args...; kw...))
-function jcn_run_body(src::String, entry::Symbol, args, contraction::Int; split::Int = 0, backend = :cuda, mutate = nothing, warp::Bool = false)
+function jcn_run_body(src::String, entry::Symbol, args, contraction::Int; split::Int = 0, backend = :cuda, mutate = nothing, warp::Bool = false, fill::Int = 0)
     J = Main.JACC
     J.MAXT[] = name -> 1024
     J.FAIL[] = nothing
     J.BACKEND[] = backend === :cuda ? J.CUDABackend() : J.OtherBackend()
     empty!(J.SPECS)
-    plan = STADE.stade_jacc(Meta.parse(src); inbounds = false, split_reduce = split, split_fallback = 0, split_min_inner = 0, split_max_out = 10^9, warp_atomics = warp, jacc_contraction = contraction)
+    plan = STADE.stade_jacc(Meta.parse(src); inbounds = false, split_reduce = split, split_fallback = 0, split_min_inner = 0, split_max_out = 10^9, warp_atomics = warp, jacc_contraction = contraction, jacc_tile_fill = fill)
     kernels = mutate === nothing ? plan.kernels : mutate(plan.kernels)
     for k in kernels; Core.eval(Main, k); end
     Core.eval(Main, plan.host)

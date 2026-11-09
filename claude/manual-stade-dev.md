@@ -2001,6 +2001,35 @@ The weight-gradient kernels of `transformer_block` and `unet2` were the slow JAC
 
 Tests: `julia validate_jacc_contraction.jl` has three phases. `units` compares the twin with the plain kernel for every case of `validate_contraction.jl` and `validate_adjoint_contraction.jl` on a CPU stand-in for JACC and CUDA (coroutine blocks, barriers, `JACC.shared`, 1-D, 2-D and 3-D launches, a conflict log and an early-return log). `launch` checks the geometry (axes, whole blocks, exchange), the shared memory, the backend test, and the 32-argument boundary (pad a kernel with unused arguments so launches sit at 32 and 33). `sabotage` applies 25 one-line edits of the source, each of which one check must catch. Run the phases in separate processes (`uslice`, `slice`); the whole file under `GC.enable(false)` needs several GB.
 
+### JACC dead stores and tile fill (v0.4.73)
+
+Two changes to the JACC path, both generic. Neither names a kernel.
+
+**`jacc_dead_pops` (default on).** The CUDA path has always run `cgen_dead_pops` first (`stade_gpu`, under `dead_scalars`): an `Expr` to `Expr` pass that deletes the restores of a scalar that the reverse sweep overwrites before it reads them, and the stores into a stack that no read has the index formula of. `stade_jacc` did not run it. A taped forward sweep therefore kept one `s_stack[...] = s` store per iteration of its inner loops (`unet2` kernel `b_11`: 7 stores per thread against 1 in the CUDA text), and those stores also hid the contraction shape from the tile recognizer, so 10 forward kernels stayed plain. `stade_jacc` now runs the pass first, under `dead_scalars && jacc_dead_pops`, given `init_hosts` (the `initstacks_*` function of the adjoint, which says which arguments are stacks).
+- `stade_jacc_file` reads the `initstacks_*` functions of the bundle. When two functions that take stacks share one `initstacks_*` it passes nothing (the same rule as `stade_gpu_file`: neither may change the shared allocation). `stade_validate_jacc_file` and `validate_corpus_gpu.jl` pass `gen_out.initstacks`.
+- `stade_jacc(expr)` called without `init_hosts` does nothing new: the pass needs to know the stacks.
+- The pass shrinks no allocation (CUDA's `cgen_dead_stack_apply` does that; it is not ported).
+- `STADE_DEAD_POPS=0` switches the pass off for both backends.
+
+**`jacc_tile_fill` (default 64).** The 64 x 64 forward twin of v0.4.72 ran slower than the plain kernel when the product has a short side: a 32-channel convolution fills half of every tile (`unet2` kernels 1, 2, 11, 12; the CUDA path has 16 and 32 wide variants, the JACC twin does not). The run-time gate of a forward twin now also requires `min(M, N) >= min(cmin, jacc_tile_fill)`. The adjoint groups and the batched products keep their gates. `jacc_tile_fill = 0` is the v0.4.72 gate.
+
+Restore keywords: `jacc_dead_pops = false, jacc_tile_fill = 0` gives the v0.4.72 text (survey: 322 plans, identical); `jacc_contraction = 0` as before.
+
+**Measured on the V100 (JACC 1.3.1), `unet2` c32_n128.**
+
+| text | primal | adjoint | device busy, adjoint |
+|---|---|---|---|
+| plain, v0.4.72 | 3.66 ms | 37.8 ms | |
+| plain, dead pops on | | 30.7 ms | |
+| twin, v0.4.72 | 5.09 ms | 26.4 ms | 23.13 ms |
+| twin, dead pops on | 4.8 ms | 20.3 ms | 17.64 ms |
+| twin, dead pops on, fill 64 | 3.91 ms | 19.1 ms | 16.60 ms |
+
+Gradient sums and the number of changed elements equal the plain text in every row. `transformer_block` has no stack stores to remove and its forward products are wider than 64: the text of the gate changes, the launches at the bench size do not.
+
+Tests: `julia validate_jacc_dead_pops.jl` has four phases: `units` (stack stores before and after for every case of `validate_dead_pops.jl`, the restore keywords, `dead_scalars = false`), `file` (the file driver, shared `initstacks_*`), `fill` (a forward product with a short side: plain at fill 64, twin at fill 0, equal outputs on the CPU stand-in) and `sabotage` (8 edits of the new code). The pass itself is checked by `validate_dead_pops.jl`; its runs on a device by `validate_corpus_gpu.jl`.
+
+
 ## IV.17 `val_*` — the oracles
 
 **Consumes** a kernel, its generated code, and a baseline. **Produces**
@@ -2883,6 +2912,7 @@ julia fuzz_int_state.jl 1 300            # differential fuzzer for integer-state
 julia validate_jacc_split.jl             # JACC split twin: units, coalesced layout, launch spec, fallback, with sabotage, no GPU needed
 julia validate_jacc_warp.jl              # JACC warp atomics: structure over the corpus, with sabotage, no GPU needed
 julia validate_jacc_contraction.jl        # JACC contraction tile twin: units, launch geometry, argument limit, 25 sabotage cases, no GPU needed
+julia validate_jacc_dead_pops.jl         # JACC dead stores and tile fill: units, file driver, fill gate, 8 sabotage cases, no GPU needed
 julia validate_corpus_gpu.jl             # live device parity -- needs a real GPU
 ```
 
