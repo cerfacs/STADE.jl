@@ -213,13 +213,18 @@ function validate_ddp(; dir::String = joinpath(@__DIR__, "val-corpus"),
                 r0_partial[b] = copy(bank[b])
             end
         end
-        inert = [b for b in sort(collect(keys(r0))) if maximum(abs, r0_partial[b] .- r0[b]) == 0.0]
-        if isempty(inert)
+        # A buffer whose reference gradient is zero in this draw (a loop that did not run) carries no signal: rank-0's partial equals it
+        # whatever the collective does, so it is neither inert nor proof. The check needs every buffer with a signal to change.
+        names_all = sort(collect(keys(r0)))
+        quiet = [b for b in names_all if maximum(abs, r0[b]) == 0.0]
+        inert = [b for b in names_all if !(b in quiet) && maximum(abs, r0_partial[b] .- r0[b]) == 0.0]
+        nchange = length(names_all) - length(quiet) - length(inert)
+        if isempty(inert) && nchange > 0
             println(rpad("$name [collectives do work]", 42), " ok  ",
-                    length(keys(r0)), " buffers all change")
+                    nchange, " buffers change", isempty(quiet) ? "" : ", $(length(quiet)) without signal in this draw: $quiet")
         else
             bad += 1
-            println(rpad("$name [collectives do work]", 42), " FAIL  ", inert,
+            println(rpad("$name [collectives do work]", 42), " FAIL  ", isempty(inert) ? "no buffer changes" : inert,
                     " identical without summing")
         end
     end

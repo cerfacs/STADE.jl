@@ -355,16 +355,44 @@ backward sweep never evaluates it at all. A condition that reads nothing
 the body writes is refused as a loop that cannot end. STADE does not prove
 termination; it checks only that the condition can change.
 
-## Mini-batch training needs no batch loop
+## Mini-batch training: a batch loop in the kernel, or one sample per rank
 
-Write the kernel for **one** sample. Do not add a loop over samples, and
-do not add offset arithmetic to index into a batch.
+There are two ways to get a mini-batch gradient. Measured on one V100 with
+a three-layer MLP (512, 1024, 1024, 256 units), 32 samples, one adjoint
+step, same gradients in every case:
 
-`stade_ddp_file` runs the kernel unchanged, once per sample, and sums
-the parameter gradients across MPI ranks. Adding a batch loop yourself
-costs more than it gives: the reverse sweep snapshots every iteration, so
-the tape grows with the batch count, and the loop must then be sharded
-before it can run on more than one rank.
+| How | Time per step |
+|---|---|
+| One call of a kernel that loops over the 32 samples | 1.1 ms |
+| 32 calls of the one-sample adjoint in a loop | 7.1 ms |
+| `stade_ddp` pattern, 8 ranks on the one GPU | 71.5 ms (63 ms Allreduce) |
+| `stade_ddp` pattern, 32 ranks on the one GPU | 116.8 ms (106 ms Allreduce) |
+
+Each job had one CPU core, which inflates the Allreduce.
+
+**One GPU: put the batch loop in the kernel.** Write each layer as one
+independent loop over samples and units together (the flattened nest of
+rule 2), so every sample and unit is a GPU thread and all samples share the
+weights. The weight gradients are sums over samples, which
+STADE compiles to atomic adds, so the loops still fuse. The stacks are
+sized by the batch count, so size them for the whole batch. Do not put
+several ranks on one GPU: they gain no speed on the device (8 ranks took
+8.3 ms of adjoint for 4 samples each, about one process looping over all
+32) and add the Allreduce.
+
+**Several GPUs: one rank per GPU, with `stade_ddp_file`.** It runs the
+kernel unchanged and sums the parameter gradients across MPI ranks, so a
+one-sample kernel needs no batch loop and no offset arithmetic. The
+Allreduce moves the whole gradient (about 15 MB for the MLP above) at
+every step, whatever the batch size. On two nodes with one V100 each, the
+same MLP and 1024 samples took 41.6 ms per step (39 ms Allreduce) against
+3.6 ms for the whole batch on one GPU. By extrapolation the two GPUs win
+only at tens of thousands of samples per step, or when one sample costs far
+more than its gradient does to exchange. Use ranks when the batch or the
+model's activations no longer fit on one GPU, not to speed up a small
+model. These runs gave each rank a batch-loop kernel on its half of the
+samples and the Allreduce written by hand; a batch-loop kernel has not
+been run through the generated epilogue yet.
 
 The one fact the tool cannot derive is which read-only arrays change from
 one sample to the next. In `a[i] * u[i]` the two factors are symmetric,

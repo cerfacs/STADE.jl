@@ -9,7 +9,9 @@
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 using Random
 
-const HAVE_MPI = try
+# MPI is used only when the process was started by an MPI launcher (or STADE_BENCH_MPI=1). MPI.Init in a plain process can crash or hang
+# on a cluster node, so a single process falls back to two serial ranks.
+const HAVE_MPI = (haskey(ENV, "OMPI_COMM_WORLD_SIZE") || haskey(ENV, "PMI_SIZE") || get(ENV, "STADE_BENCH_MPI", "") == "1") && try
     @eval using MPI
     true
 catch

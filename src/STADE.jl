@@ -7802,16 +7802,16 @@ function cgen_hfuse_independent(Ls, infos)
     return true
 end
 
-hfuse_abuts(hi, lo) = (e = Expr(:call, :+, hi, 1); cgen_gather_ge(e, lo) && cgen_gather_ge(lo, e))
+cgen_hfuse_abuts(hi, lo) = (e = Expr(:call, :+, hi, 1); cgen_gather_ge(e, lo) && cgen_gather_ge(lo, e))
 
 # the loops in order of position, or nothing when they do not abut into one range
 function cgen_hfuse_order(Ls)
     m = length(Ls)
-    starts = [k for k in 1:m if !any(j -> j != k && hfuse_abuts(Ls[j].hi, Ls[k].lo), 1:m)]
+    starts = [k for k in 1:m if !any(j -> j != k && cgen_hfuse_abuts(Ls[j].hi, Ls[k].lo), 1:m)]
     length(starts) == 1 || return nothing
     order = [starts[1]]
     while length(order) < m
-        nxt = [j for j in 1:m if !(j in order) && hfuse_abuts(Ls[order[end]].hi, Ls[j].lo)]
+        nxt = [j for j in 1:m if !(j in order) && cgen_hfuse_abuts(Ls[order[end]].hi, Ls[j].lo)]
         length(nxt) == 1 || return nothing
         push!(order, nxt[1])
     end
