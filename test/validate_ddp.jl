@@ -9,7 +9,7 @@ using Random
 #
 # The reset functions are called as generated, not reimplemented. They
 # contain no MPI, and section 2.2 puts the entire per-sample zeroing
-# contract inside bgen_reset_local!, so a reimplementation here would
+# contract inside ddpgen_reset_local!, so a reimplementation here would
 # test this file instead of the stage.
 
 """
@@ -57,8 +57,8 @@ function batch_run(kernel, adjoint_fn, initstacks_fn, stack_names, roles,
                    reset_accum!, reset_reduced!, reset_local!,
                    int_args, sample_values, shared_values, seed, nranks::Int)
     sig = kernel.sig
-    accum   = STADE.bgen_role_args(kernel, roles, :adjoint, :accum)
-    reduced = STADE.bgen_role_args(kernel, roles, :adjoint, :reduced)
+    accum   = STADE.ddpgen_role_args(kernel, roles, :adjoint, :accum)
+    reduced = STADE.ddpgen_role_args(kernel, roles, :adjoint, :reduced)
     total = Dict{Symbol,Any}()
     for r in 0:(nranks - 1)
         mine = [s for s in 1:length(sample_values) if mod(s - 1, nranks) == r]
@@ -72,7 +72,7 @@ function batch_run(kernel, adjoint_fn, initstacks_fn, stack_names, roles,
             for (k, v) in sample_values[s]
                 bank[k] = v isa Number ? v : copy(v)
             end
-            local_bufs = STADE.bgen_role_args(kernel, roles, :adjoint, :local)
+            local_bufs = STADE.ddpgen_role_args(kernel, roles, :adjoint, :local)
             Base.invokelatest(reset_local!, [bank[b] for b in local_bufs]...)
             # Seed only the buffers the caller owns. Writing every shadow
             # here would clear the :accum and :reduced buffers on each
@@ -93,7 +93,7 @@ function batch_run(kernel, adjoint_fn, initstacks_fn, stack_names, roles,
     return total
 end
 
-function validate_batch(; dir::String = joinpath(@__DIR__, "val-corpus"),
+function validate_ddp(; dir::String = joinpath(@__DIR__, "val-corpus"),
                           nsamples::Int = 6, rtol::Float64 = 1e-12)
     # Declarations are per kernel and carry the one fact the stage cannot
     # derive: which read-only arrays change from one sample to the next.
@@ -137,7 +137,7 @@ function validate_batch(; dir::String = joinpath(@__DIR__, "val-corpus"),
         adjoint_fn = STADE.val_compile(out.adjoint)
         initstacks_fn = STADE.val_compile(out.initstacks)
 
-        ep = STADE.stade_batch(primal; per_sample = per_sample, mode = :adjoint, reduced = reduced)
+        ep = STADE.stade_ddp(primal; per_sample = per_sample, mode = :adjoint, reduced = reduced)
         reset_accum!   = STADE.val_compile(ep.reset_accum.expr)
         reset_reduced! = STADE.val_compile(ep.reset_reduced.expr)
         reset_local!   = STADE.val_compile(ep.reset_local.expr)
@@ -187,8 +187,8 @@ function validate_batch(; dir::String = joinpath(@__DIR__, "val-corpus"),
                        int_args, sample_values, shared_values, seed, 1)
         r0_partial = Dict{Symbol,Any}()
         begin
-            accum = STADE.bgen_role_args(kernel, ep.roles, :adjoint, :accum)
-            reduced_b = STADE.bgen_role_args(kernel, ep.roles, :adjoint, :reduced)
+            accum = STADE.ddpgen_role_args(kernel, ep.roles, :adjoint, :accum)
+            reduced_b = STADE.ddpgen_role_args(kernel, ep.roles, :adjoint, :reduced)
             mine = [s for s in 1:nsamples if mod(s - 1, 2) == 0]
             values = merge(shared_values, sample_values[mine[1]])
             bank = batch_bank(kernel, int_args, values, seed)
@@ -200,7 +200,7 @@ function validate_batch(; dir::String = joinpath(@__DIR__, "val-corpus"),
                 for (k, v) in sample_values[s]
                     bank[k] = v isa Number ? v : copy(v)
                 end
-                Base.invokelatest(reset_local!, [bank[b] for b in STADE.bgen_role_args(kernel, ep.roles, :adjoint, :local)]...)
+                Base.invokelatest(reset_local!, [bank[b] for b in STADE.ddpgen_role_args(kernel, ep.roles, :adjoint, :local)]...)
                 for d in kernel.sig.dependents
                     kernel.sig.kinds[d] == :array_float || continue
                     b = STADE.agen_shadow(d)
@@ -238,7 +238,7 @@ function validate_batch(; dir::String = joinpath(@__DIR__, "val-corpus"),
         stack_names = Symbol[a for a in out.initstacks.args[1].args[2:end]]
         adjoint_fn = STADE.val_compile(out.adjoint)
         initstacks_fn = STADE.val_compile(out.initstacks)
-        ep = STADE.stade_batch(primal; per_sample = per_sample, mode = :adjoint, reduced = reduced)
+        ep = STADE.stade_ddp(primal; per_sample = per_sample, mode = :adjoint, reduced = reduced)
         ra = STADE.val_compile(ep.reset_accum.expr)
         rr = STADE.val_compile(ep.reset_reduced.expr)
         rl = STADE.val_compile(ep.reset_local.expr)
@@ -254,7 +254,7 @@ function validate_batch(; dir::String = joinpath(@__DIR__, "val-corpus"),
                         ra, rr, rl, baseline.int_args, sv, shared_values, seed, 2)
         # three windows of 2 samples: reset :accum only at the start, sum
         # only at the end, which is what the two collectives allow
-        accum = STADE.bgen_role_args(kernel, ep.roles, :adjoint, :accum; arrays_only = true)
+        accum = STADE.ddpgen_role_args(kernel, ep.roles, :adjoint, :accum; arrays_only = true)
         win = Dict{Symbol,Any}()
         for w in 1:3
             part = batch_run(kernel, adjoint_fn, initstacks_fn, stack_names, ep.roles,
@@ -284,4 +284,4 @@ function validate_batch(; dir::String = joinpath(@__DIR__, "val-corpus"),
     return bad
 end
 
-validate_batch()
+validate_ddp()

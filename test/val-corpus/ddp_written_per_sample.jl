@@ -1,6 +1,6 @@
 # ddp_written_per_sample(loss, u, a, v, i_n)
 #
-# Negative subject for bgen_check_declaration. Array v is scratch: the
+# Negative subject for ddpgen_check_declaration. Array v is scratch: the
 # kernel writes it by plain overwrite. Naming v in per_sample must be
 # refused, because per_sample classifies read-only arrays only, and a
 # written array already has a derived role.

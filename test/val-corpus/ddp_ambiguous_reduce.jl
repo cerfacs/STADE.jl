@@ -5,7 +5,7 @@
 # That makes it structurally identical to a :reduced output such as loss,
 # yet it holds a per-sample result and must not be summed across ranks.
 #
-# No analysis of the kernel separates the two. bgen_reduced_outputs must
+# No analysis of the kernel separates the two. ddpgen_reduced_outputs must
 # therefore refuse this shape and name the array, rather than guess.
 # matvec_loss carries the same shape and serves as a second witness.
 #

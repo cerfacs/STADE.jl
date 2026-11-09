@@ -1,7 +1,7 @@
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
-# bgen_array_left_zeroed is an optimization: it proves the fill! in
-# bgen_reset_local! unnecessary for a buffer the sweep leaves at zero.
+# ddpgen_array_left_zeroed is an optimization: it proves the fill! in
+# ddpgen_reset_local! unnecessary for a buffer the sweep leaves at zero.
 #
 # Its branches cannot be reached from a corpus kernel. A :local buffer in
 # a generated adjoint is accumulated and then zeroed, and every loop bound
@@ -15,11 +15,11 @@ fr(v, lo, hi, step, body) = (kind = :for, var = v, lo = lo, hi = hi, step = step
 iff(c, t, e) = (kind = :if, cond = c, then = t, els = e)
 ref(a, i) = Expr(:ref, a, i)
 
-function validate_batch_zeroed(dir::String = joinpath(@__DIR__, "val-corpus"))
+function validate_ddp_zeroed(dir::String = joinpath(@__DIR__, "val-corpus"))
     checks = 0; bad = 0
     function expect(label, want::Bool, body)
         checks += 1
-        got = STADE.bgen_array_left_zeroed(NamedTuple[body...], :vb)
+        got = STADE.ddpgen_array_left_zeroed(NamedTuple[body...], :vb)
         if got == want
             println(rpad(label, 52), " ok  ", got)
         else
@@ -78,12 +78,12 @@ function validate_batch_zeroed(dir::String = joinpath(@__DIR__, "val-corpus"))
     for (name, ps, rd) in subjects
         p = STADE.io_read_corpus_entry(joinpath(dir, name * ".jl"))
         k = STADE.parse_kernel(p)
-        ep = STADE.stade_batch(p; per_sample = ps, mode = :adjoint, reduced = rd)
+        ep = STADE.stade_ddp(p; per_sample = ps, mode = :adjoint, reduced = rd)
         out = STADE.stade_adjoint(p; keep_push_pop = false, fuse_ii_loops = true)
         ak = STADE.cgen_ingest(out.adjoint)
-        for b in STADE.bgen_role_args(k, ep.roles, :adjoint, :local)
+        for b in STADE.ddpgen_role_args(k, ep.roles, :adjoint, :local)
             tot += 1
-            STADE.bgen_array_left_zeroed(ak.body, b) && (prov += 1)
+            STADE.ddpgen_array_left_zeroed(ak.body, b) && (prov += 1)
         end
     end
     checks += 1
@@ -92,7 +92,7 @@ function validate_batch_zeroed(dir::String = joinpath(@__DIR__, "val-corpus"))
     else
         bad += 1
         println(rpad("no corpus :local buffer is provably zeroed", 52), " FAIL  ", prov, "/", tot,
-                " -- wiring this into bgen_reset_local! is now worth doing")
+                " -- wiring this into ddpgen_reset_local! is now worth doing")
     end
 
     println("\n", checks - bad, "/", checks, " checks passed",
@@ -100,4 +100,4 @@ function validate_batch_zeroed(dir::String = joinpath(@__DIR__, "val-corpus"))
     return bad
 end
 
-validate_batch_zeroed()
+validate_ddp_zeroed()

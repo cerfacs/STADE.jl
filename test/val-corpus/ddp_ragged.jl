@@ -5,7 +5,7 @@
 # it has no closed-form trip count and resolves into per-ancestor-iteration
 # prefix and value tables.
 #
-# The bgen_ epilogue never touches a stack. Each rank calls initstacks_*
+# The ddpgen_ epilogue never touches a stack. Each rank calls initstacks_*
 # with its own arguments, exactly as a single-process run does. This
 # kernel is the witness for that claim: if a stack ever needed a rank
 # index, a ragged one would need it first.

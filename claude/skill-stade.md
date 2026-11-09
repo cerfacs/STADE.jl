@@ -360,7 +360,7 @@ termination; it checks only that the condition can change.
 Write the kernel for **one** sample. Do not add a loop over samples, and
 do not add offset arithmetic to index into a batch.
 
-`stade_batch_file` runs the kernel unchanged, once per sample, and sums
+`stade_ddp_file` runs the kernel unchanged, once per sample, and sums
 the parameter gradients across MPI ranks. Adding a batch loop yourself
 costs more than it gives: the reverse sweep snapshots every iteration, so
 the tape grows with the batch count, and the loop must then be sharded

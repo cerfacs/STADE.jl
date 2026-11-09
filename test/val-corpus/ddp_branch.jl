@@ -5,7 +5,7 @@
 # makes a :branch snapshot site, and the site is written on every local
 # call rather than once per process.
 #
-# This is the shape that breaks if bgen_reset_local! misses a buffer:
+# This is the shape that breaks if ddpgen_reset_local! misses a buffer:
 # sample 2 would take its own arm while reading sample 1's adjoint.
 #
 # loss: length-1 output array, accumulated in place

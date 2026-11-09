@@ -1,9 +1,9 @@
 include(joinpath(@__DIR__, "..", "src", "STADE.jl"))
 
 """
-    validate_batch_roles()
+    validate_ddp_roles()
 
-Phase 1 gate for the `bgen_` stage. Checks the derived role of every
+Phase 1 gate for the `ddpgen_` stage. Checks the derived role of every
 buffer against a table written by hand, and checks that every negative
 subject refuses.
 
@@ -11,7 +11,7 @@ The expected tables below are written from the primal signature and the
 two axes of section 1.5 of the plan, not from a run. A table that agrees
 with the code because it was copied from the code proves nothing.
 """
-function validate_batch_roles(dir::String = joinpath(@__DIR__, "val-corpus"))
+function validate_ddp_roles(dir::String = joinpath(@__DIR__, "val-corpus"))
     # subject => (per_sample, adjoint-mode role of every float buffer)
     expected = Dict(
         "ddp_affine" => ([:u], Dict(
@@ -81,7 +81,7 @@ function validate_batch_roles(dir::String = joinpath(@__DIR__, "val-corpus"))
     for (name, ps, rd, arr, want) in resolutions
         k = STADE.parse_kernel(STADE.io_read_corpus_entry(joinpath(dir, name * ".jl")))
         checks += 1
-        got = try STADE.bgen_roles(k, ps, :adjoint; reduced = rd)[arr] catch e; Symbol(sprint(showerror, e)) end
+        got = try STADE.ddpgen_roles(k, ps, :adjoint; reduced = rd)[arr] catch e; Symbol(sprint(showerror, e)) end
         if got === want
             println(rpad(name * " [resolve " * string(arr) * "]", 34), " ok  ", want)
         else
@@ -94,7 +94,7 @@ function validate_batch_roles(dir::String = joinpath(@__DIR__, "val-corpus"))
         per_sample, want = expected[name]
         reduced = name == "ddp_batch_hist" ? [:hist] : Symbol[]
         k = STADE.parse_kernel(STADE.io_read_corpus_entry(joinpath(dir, name * ".jl")))
-        got = STADE.bgen_roles(k, per_sample, :adjoint; reduced = reduced)
+        got = STADE.ddpgen_roles(k, per_sample, :adjoint; reduced = reduced)
         checks += 1
         # every expected buffer present with the expected role, and no extras
         missing_k = [b for b in sort(collect(keys(want))) if !haskey(got, b)]
@@ -120,7 +120,7 @@ function validate_batch_roles(dir::String = joinpath(@__DIR__, "val-corpus"))
         per_sample, _ = expected[name]
         reduced = name == "ddp_batch_hist" ? [:hist] : Symbol[]
         k = STADE.parse_kernel(STADE.io_read_corpus_entry(joinpath(dir, name * ".jl")))
-        rs = Dict(m => STADE.bgen_roles(k, per_sample, m; reduced = reduced) for m in (:tangent, :adjoint, :hvp))
+        rs = Dict(m => STADE.ddpgen_roles(k, per_sample, m; reduced = reduced) for m in (:tangent, :adjoint, :hvp))
         checks += 1
         prim = [a for a in k.sig.args if k.sig.kinds[a] in (:scalar_float, :array_float)]
         diff = [a for a in prim if !(rs[:tangent][a] == rs[:adjoint][a] == rs[:hvp][a])]
@@ -139,7 +139,7 @@ function validate_batch_roles(dir::String = joinpath(@__DIR__, "val-corpus"))
         per_sample, _ = expected[name]
         reduced = name == "ddp_batch_hist" ? [:hist] : Symbol[]
         k = STADE.parse_kernel(STADE.io_read_corpus_entry(joinpath(dir, name * ".jl")))
-        roles = STADE.bgen_roles(k, per_sample, :hvp; reduced = reduced)
+        roles = STADE.ddpgen_roles(k, per_sample, :hvp; reduced = reduced)
         checks += 1
         wrong = [STADE.tgen_shadow(p) for p in per_sample
                  if roles[STADE.tgen_shadow(p)] === :local]
@@ -155,7 +155,7 @@ function validate_batch_roles(dir::String = joinpath(@__DIR__, "val-corpus"))
         k = STADE.parse_kernel(STADE.io_read_corpus_entry(joinpath(dir, name * ".jl")))
         checks += 1
         msg = try
-            STADE.bgen_roles(k, per_sample, :adjoint; reduced = rd)
+            STADE.ddpgen_roles(k, per_sample, :adjoint; reduced = rd)
             ""
         catch e
             sprint(showerror, e)
@@ -176,4 +176,4 @@ function validate_batch_roles(dir::String = joinpath(@__DIR__, "val-corpus"))
     return bad
 end
 
-validate_batch_roles()
+validate_ddp_roles()

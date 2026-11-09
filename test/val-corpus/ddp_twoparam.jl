@@ -1,7 +1,7 @@
 # ddp_twoparam(loss, u, w, b, h, o, i_n, i_m)
 #
 # Two parameter groups of different shapes: a dense weight w of length
-# i_m * i_n and a bias b of length i_m. bgen_ must emit one collective
+# i_m * i_n and a bias b of length i_m. ddpgen_ must emit one collective
 # per group, so the delete-one-collective measurement has more than one
 # call to remove. A single-parameter kernel cannot distinguish "the
 # collectives work" from "the one collective works".

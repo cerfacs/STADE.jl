@@ -7,13 +7,13 @@ using Random
 # kernel improved.
 
 """
-    validate_batch_refusal()
+    validate_ddp_refusal()
 
-Sabotage each `bgen_` guard and check it refuses, with the right reason.
+Sabotage each `ddpgen_` guard and check it refuses, with the right reason.
 Matching on a message fragment and not merely on "an error was thrown"
 catches a guard that fires for an unrelated cause.
 """
-function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
+function validate_ddp_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
     checks = 0; bad = 0
 
     read_k(n) = STADE.parse_kernel(STADE.io_read_corpus_entry(joinpath(dir, n * ".jl")))
@@ -39,21 +39,21 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
 
     # ---- declaration guards ----
     expect_refusal("per_sample names a non-argument", "not an argument",
-        () -> STADE.bgen_roles(read_k("ddp_affine"), [:nosuch], :adjoint))
+        () -> STADE.ddpgen_roles(read_k("ddp_affine"), [:nosuch], :adjoint))
     expect_refusal("per_sample names an int", "not a float array",
-        () -> STADE.bgen_roles(read_k("ddp_affine"), [:i_n], :adjoint))
+        () -> STADE.ddpgen_roles(read_k("ddp_affine"), [:i_n], :adjoint))
     expect_refusal("per_sample names a plain-overwrite array", "plain overwrite",
-        () -> STADE.bgen_roles(read_k("ddp_written_per_sample"), [:v], :adjoint))
+        () -> STADE.ddpgen_roles(read_k("ddp_written_per_sample"), [:v], :adjoint))
     expect_refusal("per_sample repeats a name", "more than once",
-        () -> STADE.bgen_roles(read_k("ddp_affine"), [:u, :u], :adjoint))
+        () -> STADE.ddpgen_roles(read_k("ddp_affine"), [:u, :u], :adjoint))
     expect_refusal("reduced names an already-derived array", "already derived",
-        () -> STADE.bgen_roles(read_k("ddp_affine"), [:u], :adjoint; reduced = [:loss]))
+        () -> STADE.ddpgen_roles(read_k("ddp_affine"), [:u], :adjoint; reduced = [:loss]))
     expect_refusal("a name in both lists", "per_sample and in reduced",
-        () -> STADE.bgen_roles(read_k("ddp_batch_hist"), [:hist], :adjoint; reduced = [:hist]))
+        () -> STADE.ddpgen_roles(read_k("ddp_batch_hist"), [:hist], :adjoint; reduced = [:hist]))
     expect_refusal("an ambiguous array left unresolved", "does not say which",
-        () -> STADE.bgen_roles(read_k("ddp_batch_hist"), [:u], :adjoint))
+        () -> STADE.ddpgen_roles(read_k("ddp_batch_hist"), [:u], :adjoint))
     expect_refusal("mode is not a derivative mode", "must be :tangent",
-        () -> STADE.bgen_roles(read_k("ddp_affine"), [:u], :forward))
+        () -> STADE.ddpgen_roles(read_k("ddp_affine"), [:u], :forward))
 
     # ---- reset_local! must cover every :local buffer ----
     # Delete one fill! from the generated function and check the
@@ -66,7 +66,7 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
         name = "ddp_affine"
         primal = STADE.io_read_corpus_entry(joinpath(dir, name * ".jl"))
         kernel = STADE.parse_kernel(primal)
-        ep = STADE.stade_batch(primal; per_sample = [:u], mode = :adjoint)
+        ep = STADE.stade_ddp(primal; per_sample = [:u], mode = :adjoint)
         full = ep.reset_local.expr
         # drop the first fill! line
         body = full.args[2].args
@@ -92,11 +92,11 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
     begin
         primal = STADE.io_read_corpus_entry(joinpath(dir, "ddp_batch_hist.jl"))
         kernel = STADE.parse_kernel(primal)
-        ep = STADE.stade_batch(primal; per_sample = [:u], mode = :adjoint, reduced = [:hist])
+        ep = STADE.stade_ddp(primal; per_sample = [:u], mode = :adjoint, reduced = [:hist])
         ga = Set(ep.allreduce_accum.expr.args[1].args[2:end-2])   # drop n_local, comm
         gr = Set(ep.allreduce_reduced.expr.args[1].args[2:end-1]) # drop comm
-        wa = Set(STADE.bgen_role_args(kernel, ep.roles, :adjoint, :accum; arrays_only = true))
-        wr = Set(STADE.bgen_role_args(kernel, ep.roles, :adjoint, :reduced; arrays_only = true))
+        wa = Set(STADE.ddpgen_role_args(kernel, ep.roles, :adjoint, :accum; arrays_only = true))
+        wr = Set(STADE.ddpgen_role_args(kernel, ep.roles, :adjoint, :reduced; arrays_only = true))
         if ga == wa && gr == wr && isempty(intersect(ga, gr))
             println(rpad("collectives disjoint and complete", 46), " ok  accum=",
                     sort(collect(ga)), " reduced=", sort(collect(gr)))
@@ -112,7 +112,7 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
     checks += 1
     begin
         primal = STADE.io_read_corpus_entry(joinpath(dir, "ddp_batch_hist.jl"))
-        ep = STADE.stade_batch(primal; per_sample = [:u], mode = :adjoint, reduced = [:hist])
+        ep = STADE.stade_ddp(primal; per_sample = [:u], mode = :adjoint, reduced = [:hist])
         pa = Set(ep.reset_accum.expr.args[1].args[2:end])
         ca = Set(ep.allreduce_accum.expr.args[1].args[2:end-2])
         pr = Set(ep.reset_reduced.expr.args[1].args[2:end])
@@ -133,7 +133,7 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
     checks += 1
     begin
         primal = STADE.io_read_corpus_entry(joinpath(dir, "ddp_affine.jl"))
-        ep = STADE.stade_batch(primal; per_sample = [:u], mode = :adjoint)
+        ep = STADE.stade_ddp(primal; per_sample = [:u], mode = :adjoint)
         body = vcat(ep.allreduce_accum.expr.args[2].args,
                     ep.allreduce_reduced.expr.args[2].args)
         conds = count(x -> x isa Expr && x.head in (:if, :&&, :||), body)
@@ -155,7 +155,7 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
     checks += 1
     begin
         primal = STADE.io_read_corpus_entry(joinpath(dir, "ddp_twoparam.jl"))
-        ep = STADE.stade_batch(primal; per_sample = [:u], mode = :adjoint)
+        ep = STADE.stade_ddp(primal; per_sample = [:u], mode = :adjoint)
         argsof(e) = Set(e.args[1].args[2:end])
         a = argsof(ep.reset_accum.expr); r = argsof(ep.reset_reduced.expr); l = argsof(ep.reset_local.expr)
         overlaps = union(intersect(a, l), intersect(r, l), intersect(a, r))
@@ -172,11 +172,11 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
     checks += 1
     begin
         primal = STADE.io_read_corpus_entry(joinpath(dir, "ddp_affine.jl"))
-        ep = STADE.stade_batch(primal; per_sample = [:u], mode = :adjoint)
+        ep = STADE.stade_ddp(primal; per_sample = [:u], mode = :adjoint)
         got = Set(ep.check.expr.args[1].args[2:end-1])   # drop comm
         want = Set(vcat(
-            STADE.bgen_role_args(STADE.parse_kernel(primal), ep.roles, :adjoint, :shared),
-            STADE.bgen_role_args(STADE.parse_kernel(primal), ep.roles, :adjoint, :seed)))
+            STADE.ddpgen_role_args(STADE.parse_kernel(primal), ep.roles, :adjoint, :shared),
+            STADE.ddpgen_role_args(STADE.parse_kernel(primal), ep.roles, :adjoint, :seed)))
         if got == want
             println(rpad("check_replicas covers :shared and :seed", 46), " ok  ", sort(collect(got)))
         else
@@ -201,7 +201,7 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
         checks += 1
         primal = STADE.io_read_corpus_entry(joinpath(dir, "ddp_tangent_input.jl"))
         kernel = STADE.parse_kernel(primal)
-        ep = STADE.stade_batch(primal; per_sample = [:u], mode = mode)
+        ep = STADE.stade_ddp(primal; per_sample = [:u], mode = mode)
         reset_all = union(Set(ep.reset_accum.expr.args[1].args[2:end]),
                           Set(ep.reset_reduced.expr.args[1].args[2:end]),
                           Set(ep.reset_local.expr.args[1].args[2:end]))
@@ -221,4 +221,4 @@ function validate_batch_refusal(dir::String = joinpath(@__DIR__, "val-corpus"))
     return bad
 end
 
-validate_batch_refusal()
+validate_ddp_refusal()

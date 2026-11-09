@@ -2,11 +2,11 @@
 #   rule 1: one `module STADE ... end` that wraps the file and no other module
 #   rule 2 and 3: no struct, @enum or other type definition and no global const or global at the top level
 #   rule 4: every top-level function carries the prefix of a stage
-#   placement: every `stade_` function sits under a `# ==== stade_*` banner, and every `norm_`, `bgen_`, `inl_` and `jgen_` function under the banner of its own stage
+#   placement: every `stade_` function sits under a `# ==== stade_*` banner, and every `norm_`, `ddpgen_`, `inl_` and `jgen_` function under the banner of its own stage
 #   julia test/validate_house_rules.jl
 
-hr_prefixes() = ("parse_", "shape_", "der_", "emit_", "act_", "snap_", "lin_", "tgen_", "agen_", "hvp_", "cgen_", "jgen_", "ii_", "val_", "io_", "stade_", "inl_", "norm_", "bgen_")
-hr_strict() = ("stade_", "norm_", "bgen_", "inl_", "jgen_")
+hr_prefixes() = ("parse_", "shape_", "der_", "emit_", "act_", "snap_", "lin_", "tgen_", "agen_", "hvp_", "cgen_", "jgen_", "ii_", "val_", "io_", "stade_", "inl_", "norm_", "ddpgen_")
+hr_strict() = ("stade_", "norm_", "ddpgen_", "inl_", "jgen_")
 
 # the name a top-level definition defines: `function f(`, `f(args) = ` or nothing
 function hr_defname(l)
@@ -52,7 +52,7 @@ function validate_house_rules()
     src = read(joinpath(abspath(joinpath(@__DIR__, "..")), "src", "STADE.jl"), String)
     v = hr_violations(src)
     for (k, label) in ((:rule1, "rule 1: one module that wraps the file"), (:rule23, "rules 2 and 3: no top-level const, global, struct or @enum"),
-                       (:rule4, "rule 4: every function carries a stage prefix"), (:place, "placement: stade_, norm_, bgen_, inl_ and jgen_ functions under their own banner"))
+                       (:rule4, "rule 4: every function carries a stage prefix"), (:place, "placement: stade_, norm_, ddpgen_, inl_ and jgen_ functions under their own banner"))
         vk = filter(x -> x[1] == k, v)
         check(isempty(vk), "src/STADE.jl, " * label * (isempty(vk) ? "" : " (first: line $(vk[1][2]): $(first(vk[1][3], 70)))"))
     end

@@ -1,10 +1,10 @@
 # ddp_affine(loss, u, a, b, v, i_n)
 #
-# Minimal subject for the bgen_ stage. One affine layer followed by a
-# squared-error loss. Every bgen_ role appears exactly once, which is
+# Minimal subject for the ddpgen_ stage. One affine layer followed by a
+# squared-error loss. Every ddpgen_ role appears exactly once, which is
 # what makes this the kernel to read first when a role table looks wrong.
 #
-# With per_sample = [:u], bgen_ derives:
+# With per_sample = [:u], ddpgen_ derives:
 #   a, b   :shared   read-only, not named per_sample
 #   loss   :reduced  every write adds to loss itself
 #   v      :scratch  written by plain overwrite

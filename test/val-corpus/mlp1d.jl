@@ -4,7 +4,7 @@
 # single sample. 1 -> n_h -> n_h -> 1 with tanh activations and a squared
 # error against the target.
 #
-# There is no batch loop here on purpose. bgen_ runs this kernel once per
+# There is no batch loop here on purpose. ddpgen_ runs this kernel once per
 # sample and accumulates the parameter gradients, so a batch loop would
 # only grow the tape.
 #

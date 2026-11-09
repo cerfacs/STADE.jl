@@ -47,8 +47,8 @@ subsequent `bash_tool` call needing Julia.
    `cgen_`, `jgen_`, `ii_`, `val_`, `io_`, `stade_`, and three stages
    added in v0.4.46 for code that was already there: `inl_` (kernel
    inlining), `norm_` (kernel-to-kernel normalisation: a pure rewrite of
-   a kernel that states a fact the analyses cannot see) and `bgen_` (the
-   data-parallel epilogue). `io_` is the only prefix permitted to touch
+   a kernel that states a fact the analyses cannot see) and `ddpgen_` (the
+   data-parallel epilogue, called `bgen_` until v0.5.0). `io_` is the only prefix permitted to touch
    the filesystem. A function sits under the banner of its own stage,
    and every `stade_` function under a `stade_*` banner (the public API);
    a one-line helper may sit next to the code it serves. This replaces namespacing —

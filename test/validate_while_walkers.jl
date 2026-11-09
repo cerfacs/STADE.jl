@@ -120,10 +120,10 @@ function validate_while_walkers()
         println(rpad("lin_ carries the while body", 46), " FAIL  ", lw.kind)
     end
 
-    # --- cgen_ / bgen_ / val_ collectors, run on the primal body ---
+    # --- cgen_ / ddpgen_ / val_ collectors, run on the primal body ---
     let out = Set{Symbol}()
-        STADE.bgen_collect_written!(kernel.body, out)
-        expect("bgen_collect_written! descends", :wonly_s, out)
+        STADE.ddpgen_collect_written!(kernel.body, out)
+        expect("ddpgen_collect_written! descends", :wonly_s, out)
     end
     let out = Set{Symbol}()
         STADE.cgen_collect_all_assigned!(kernel.body, out)
