@@ -279,8 +279,7 @@ stade_jacc_file(in_path, out_path;   precision=nothing, reduction_threshold=3276
 ```
 
 Each `_file` function has an `Expr`-in, `Expr`-out sibling without the
-suffix, and a `_corpus` sibling that takes a `Dict{Symbol,Expr}` of
-several kernels. The `_file` wrappers are the only code allowed to touch
+suffix. The `_file` wrappers are the only code allowed to touch
 the filesystem, through the `io_*` stage.
 
 The differentiation entry points take **exactly two** flags. Do not add a

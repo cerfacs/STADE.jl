@@ -102,10 +102,10 @@ subsequent `bash_tool` call needing Julia.
 
 ## Public flag surface
 
-`stade_tangent`/`stade_adjoint`/`stade_hvp` (and `_file`/`_corpus`
+`stade_tangent`/`stade_adjoint`/`stade_hvp` (and the `_file`
 wrappers) take exactly two: `keep_push_pop::Bool = true` and
 `fuse_ii_loops::Bool = false`. Site-level TBR is unconditional.
-`stade_adjoint` (and its `_file`/`_corpus` wrappers) takes one more,
+`stade_adjoint` (and its `_file` wrapper) takes one more,
 `primal_outputs::Bool = true`; see below. Tangent and HVP do not take it.
 
 Any new snapshot-exclusion mechanism must go through

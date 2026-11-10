@@ -64,7 +64,7 @@ end
 
 - `stade_tangent/adjoint/hvp_file(in_path::String, out_path::String; ...)`: writes to `out_path` a Julia source result of differentiation by STADE of the (multi-)kernel file at `in_path`. In the multi-kernel case, inlining is performed in the kernel which is not called by any other one in the file (named root kernel). The inlined root kernel is the one subject to differentiation.
 
-  `stade_adjoint`, `stade_adjoint_file` and `stade_adjoint_corpus` take `primal_outputs::Bool = true`. With `false` the generated adjoint does not update the primal outputs of the kernel: it drops the forward sweep when the backward sweep does not read what the forward sweep writes (a linear update, such as a stencil step), and the stores into arrays that nothing in the adjoint reads. The arrays that the kernel writes then keep their input values, and the gradients are identical. A kernel with nothing to drop is generated as with `true` (the `_file` form prints a note). A store is kept when it reads a scalar that an inner loop accumulates beside an adjoint increment (the output layer of a perceptron): that sum is what lets the GPU stage split the gradient loop, and dropping it made the adjoint 2 to 3 times slower. On the GPU the result is usually faster (1.1 to 1.7 times on the stencil, scatter and solver kernels of the benchmark set). Time both settings.
+  `stade_adjoint` and `stade_adjoint_file` take `primal_outputs::Bool = true`. With `false` the generated adjoint does not update the primal outputs of the kernel: it drops the forward sweep when the backward sweep does not read what the forward sweep writes (a linear update, such as a stencil step), and the stores into arrays that nothing in the adjoint reads. The arrays that the kernel writes then keep their input values, and the gradients are identical. A kernel with nothing to drop is generated as with `true` (the `_file` form prints a note). A store is kept when it reads a scalar that an inner loop accumulates beside an adjoint increment (the output layer of a perceptron): that sum is what lets the GPU stage split the gradient loop, and dropping it made the adjoint 2 to 3 times slower. On the GPU the result is usually faster (1.1 to 1.7 times on the stencil, scatter and solver kernels of the benchmark set). Time both settings.
 
 - `stade_cuda/amdgpu/metal/jacc_file(in_path::String, out_path::String; ...)`: writes to `out_path` a Julia source result of GPU porting by STADE of the (multi-)kernel file at `in_path`.
 
@@ -83,22 +83,6 @@ end
   CUDA only: `split_coalesce` (default `true`) gives the split-reduction twin a coalesced layout when its lane loops are unit-stride (transformer adjoint d2048, V100: 82.9 to 77.0 ms). CUDA only: `cublas = W` (default `2^26` from v0.4.62; `0` turns it off) runs an adjoint product as one `CUDA.CUBLAS.gemm!` when M * N * K >= W (same kernel, d2048: 76.9 to 62.3 ms; W = 2^28 is a safe value). With `cublas > 0` the scratch of a gemm product is an uninitialized array (beta = 0) and the seed scratch of an adjoint is not zeroed (d2048: 62.3 to 61.6 ms). The split twin is now also built for the adjoint of a loop with an empty loop or a reused temporary (`ufv_gather_step`; opt-in `split_reduce = 8, split_min_inner = 4, split_max_out = 10^8`: 1e6 cells 1.88 to 1.35 ms; slower for `mlp3` and `mpnn_gather`, so per kernel). CUDA only, opt-in: `row_block = M` (default `0`) adds a row-block twin for a flat loop `for idx = 1:R*N` with `i = div(idx - 1, N) + 1`, `j = mod(idx - 1, N) + 1` and an accumulation into `A[i]` (one block per row, one add per row instead of one per warp); the host launches it when `N >= M`, the range is whole rows and there are at least 64 rows (mlp3_push adjoint, 79M weights, V100: 3.11 to 2.61 ms).
 
 - `stade_ddp_file(in_path::String, out_path::String; per_sample, mode, reduced = Symbol[])`: writes to `out_path` a Julia source epilogue that runs the kernel at `in_path` data-parallel over a mini-batch with GPU-aware MPI, the pattern of PyTorch DistributedDataParallel. The kernel needs no batch loop and no rewriting: sample `s` goes to rank `mod(s - 1, P)`, every rank runs the kernel unchanged on its own samples, and the epilogue sums the parameter gradients across ranks. It differs from DistributedDataParallel in three ways: the gradients are summed, not averaged, so a 1/N factor belongs in the loss or the seed; the replicated parameters are a contract (the `:shared` buffers must hold the same values on every rank) and are not broadcast; and the Allreduce runs after the adjoint, without overlap. The stage does not batch a kernel: it only reduces the gradients. `per_sample` names the read-only arrays whose values change from one sample to the next; every other read-only array is treated as replicated. The generated file carries the derived role of every buffer as a comment, so the communication plan is auditable without re-running STADE.
-
-## Multi-kernel files
-
-A file may define several kernels. The one no other kernel calls is the entry
-point, and every call in its body is inlined before differentiation.
-
-A call argument must be a bare symbol when the parameter is an array, or when the
-callee assigns to it, because the callee returns through it. A read-only scalar
-parameter takes any expression: `stage(t, w, x, i_n - 1)` and `stage(t, w, x, 3)`
-are both accepted, and the expression is bound to a temporary at the call site so
-it is evaluated once per call.
-
-Recursion is refused, directly or through a cycle. Inlining a recursive call
-would need a depth that is not known before the code runs, so its tape has no
-closed-form size. Write the recursion as a loop over an explicit level index, as
-`mg_vcycle` does.
 
 ## Wishlist 💡
 
