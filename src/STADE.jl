@@ -17164,25 +17164,6 @@ function stade_hvp(expr::Expr; independents::Union{Vector{Symbol},Nothing}=nothi
     return (hvp = hvp_expr, initstacks = initstacks_expr)
 end
 
-# Multi-kernel entry points: inline the whole corpus's call graph away (inl_inline_calls),
-# then defer to the existing single-kernel function above, unchanged, per kernel.
-# Independents/dependents overrides still don't belong here -- a caller who needs them can
-# run inl_inline_calls directly and call stade_tangent/stade_adjoint/stade_hvp per kernel.
-function stade_tangent_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
-    inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_tangent(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
-end
-
-function stade_adjoint_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false, primal_outputs::Bool=true)
-    inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_adjoint(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops, primal_outputs = primal_outputs) for (name, expr) in inlined)
-end
-
-function stade_hvp_corpus(kernels::Dict{Symbol,Expr}; keep_push_pop::Bool=true, fuse_ii_loops::Bool=false)
-    inlined = inl_inline_calls(kernels)
-    return Dict(name => stade_hvp(expr; keep_push_pop = keep_push_pop, fuse_ii_loops = fuse_ii_loops) for (name, expr) in inlined)
-end
-
 # Reads any number of kernels from one file (a lone kernel, or a corpus that call each other),
 # differentiates only the corpus's entry kernel against its whole call graph inlined away, and writes
 # back out just that one kernel: its generated derivative parts, followed by its own inlined primal --
