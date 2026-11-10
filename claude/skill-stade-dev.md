@@ -401,6 +401,8 @@ multiple of the host's: the ratio ran from 0.01 to 87 on 192 V100 trials, and a
 per-trial 20x rule failed a deterministic draw. A new GPU claim needs both
 `validate_gpu_truth.jl` (no GPU) and a device run.
 
+**Known limit (B6).** With `fuse_ii_loops = false`, an independent loop that rewrites a local scalar keeps a snapshot stack for it: the forward loop saves the scalar before assigning it (the previous iteration's value) and the reverse loop reads the restored one, so both loops carry a value between iterations and stay on the host. That is correct, not a gate defect. Offloading it would give wrong gradients. `fuse_ii_loops = true` proves the stack unnecessary and offloads. Do not teach `cgen_`/`jgen_` to recompute such a stack: that is a third copy of the `snap_ii_plan`/`agen_ii_plan` proof. `test/validate_scalar_stack_limit.jl` pins both sides. Of the 111 battle subjects only `f1_scalar_priv` differs between the two settings.
+
 Measure **loops offloaded**, never device-kernel count — adjacent
 splittable loops merge, so fewer kernels can mean more offloaded.
 
