@@ -162,6 +162,12 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
                     a.args[2].value === mac), e.args)) ? 1 : 0
         return here + sum(a -> count_macro(a, mac), e.args; init = 0)
     end
+    # the number of `Array(__jgen_lred_*)` calls: the host readbacks of the JACC reductions into local scalars
+    function count_readbacks(e)
+        e isa Expr || return 0
+        here = (e.head === :call && length(e.args) == 2 && e.args[1] === :Array && e.args[2] isa Symbol && startswith(string(e.args[2]), "__jgen_lred_")) ? 1 : 0
+        return here + sum(count_readbacks, e.args; init = 0)
+    end
 
     # A JACC reduction write-back kernel, recognised by the synthetic `__jgen_redval` parameter
     # jgen_reduction_writeback_kernel gives it. See the header note on why these are excluded from the
@@ -221,8 +227,10 @@ function validate_backend_agreement(dir::String = joinpath(@__DIR__, "val-corpus
                 # @parallel_reduce result, so their counts must match exactly.
                 n_wb = length(ja.kernels) - length(ja_cmp)
                 n_red = count_macro(ja.host, Symbol("@parallel_reduce"))
-                n_wb == n_red ||
-                    push!(problems, "jacc reduction write-backs=$(n_wb) but @parallel_reduce calls=$(n_red)")
+                # A reduction into a local scalar has no kernel: its result is read back with Array(..)[1] (v0.5.6), one call per reduction.
+                n_rb = count_readbacks(ja.host)
+                n_wb + n_rb == n_red ||
+                    push!(problems, "jacc reduction write-backs=$(n_wb) and host readbacks=$(n_rb) but @parallel_reduce calls=$(n_red)")
             end
 
             # Every JACC kernel keeps at most the ceiling of positional parameters; a wider one is packed. A packed kernel must have

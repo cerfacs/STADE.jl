@@ -44,7 +44,8 @@ function bt_verdict(expected::Symbol, observed::Dict{Symbol,Int}, backend::Symbo
     obs = Set(keys(observed))
     # a lane-strided inner loop (:L) belongs to a twin variant of a kernel: it does not change the decision of the loop
     length(obs) > 1 && :L in obs && (obs = setdiff(obs, [:L]))
-    (backend === :cuda && expected === :K && obs == Set([:R])) && return :ok
+    (expected === :K && obs == Set([:R])) && return :ok      # a host loop below the threshold, a device reduction above it (CUDA mapreduce, JACC @parallel_reduce)
+    expected === :K && :R in obs && (obs = Set(o === :R ? :K : o for o in obs))   # a reduction twin is a thread loop above the threshold
     obs == Set([expected]) && return :ok
     :X in obs && return :absent
     if expected === :H

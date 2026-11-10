@@ -95,6 +95,19 @@ subsequent `bash_tool` call needing Julia.
     descending loop `n_iter == lo`), keeping the plain kernel as the
     fallback, (d) be a twin or an opt-in keyword first, and (e) have a
     sabotage case for each guard. `cgen_rowblock_kernel` is the model.
+    A recognizer that only decides WHETHER a loop may be offloaded, and
+    does not rewrite it, may replace (c) and (d) with a symbolic proof,
+    because the loop then runs as written and nothing is rewritten:
+    `cgen_array_sliced_by_decoded_loopvar` (v0.5.6, `cgen_split_loop_gate`
+    only; `cgen_array_ok_strict` stays untouched, because the AD
+    ii-classification shares it). It accepts only when each digit is
+    `mod(div(v - 1, P_k), R_k) + 1` (or `mod(v - 1, R_k) + 1` for the
+    last), set once before its use, each `P_k` is the product of the later
+    radices, each `R_k` is a kernel parameter or a literal that the loop
+    does not assign, the range is exactly `1:` or `:-1:1` over the product
+    of all radices, and every access holds all digits at fixed
+    dimensions. Any other shape stays on the host, and each guard has a
+    sabotage case in `test/validate_decode_gate.jl`.
 11. **`snap_*`/`agen_*` duplicated pairs must be changed identically.**
     `stade_ii_plan_check` and `stade_site_level_tbr_check` assert exact
     equality between the two copies; treat a disagreement as a

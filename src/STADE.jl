@@ -8963,10 +8963,124 @@ function cgen_collect_ref_exprs(e, out::Vector{Any} = Any[])
     return out
 end
 
+# ---- a loop variable that is decoded into indices (the flat loop of skill-stade rule 2) ----
+# skill-stade rule 2 fuses a rectangular nest of independent loops into `for v = 1:n1 * n2 * n3` and recovers the indices as
+#     l3 = mod(v - 1, n3) + 1;  l2 = mod(div(v - 1, n3), n2) + 1;  l1 = mod(div(v - 1, n2 * n3), n1) + 1
+# Two iterations of v touch different elements when every access holds all of these decoded indices at fixed dimensions, because the
+# digits identify v. That holds only when the range is exactly 1:n1 * n2 * n3, the same radices as the decode. This recognizer serves the
+# offload gate only. It rebuilds no nest, and no other stage reads it (skill-stade-dev rule 10).
+function cgen_factor_list(e)
+    e isa Symbol && return Any[e]
+    e isa Integer && return Any[e]
+    e isa Expr && e.head == :call && e.args[1] === :* || return nothing
+    out = Any[]
+    for a in e.args[2:end]
+        f = cgen_factor_list(a)
+        f === nothing && return nothing
+        append!(out, f)
+    end
+    return out
+end
+
+# `sym` is assigned exactly once in the loop body, by a top-level statement, and no statement before it mentions `sym`. Then every use in
+# the body sees the value of this iteration's assignment, which is what the definition map (top-level statements only) records.
+function cgen_set_once_before_use(body::Vector{NamedTuple}, sym::Symbol)
+    pos = 0
+    for (k, st) in enumerate(body)
+        if st.kind == :assign && st.lhs === sym
+            pos == 0 || return false
+            pos = k
+        end
+    end
+    pos == 0 && return false
+    total = 0
+    count_assigns(b) = for st in b
+        st.kind == :assign && st.lhs === sym && (total += 1)
+        st.kind == :for && count_assigns(st.body)
+        st.kind == :while && count_assigns(st.body)
+        st.kind == :if && (count_assigns(st.then); count_assigns(st.els))
+    end
+    count_assigns(body)
+    total == 1 || return false
+    before = Set{Symbol}()
+    cgen_stmt_symbols!(body[1:pos - 1], before)
+    return !(sym in before)
+end
+
+# `v - 1`, written out or through a scalar the loop body defines as exactly that (the common-subexpression temporary `__icse_0 = v - 1`).
+function cgen_is_loopvar_offset(x, v::Symbol, defs::Dict{Symbol,Any}, body::Vector{NamedTuple})
+    x == Expr(:call, :-, v, 1) && return true
+    return x isa Symbol && haskey(defs, x) && defs[x] == Expr(:call, :-, v, 1) && cgen_set_once_before_use(body, x)
+end
+
+# `mod(div(v - 1, P), R) + 1` or `mod(v - 1, R) + 1`: returns (factors of P, factors of R), or nothing.
+function cgen_decoded_digit(e, v::Symbol, defs::Dict{Symbol,Any}, body::Vector{NamedTuple})
+    e isa Expr && e.head == :call && e.args[1] === :+ && length(e.args) == 3 && e.args[3] == 1 || return nothing
+    m = e.args[2]
+    m isa Expr && m.head == :call && m.args[1] === :mod && length(m.args) == 3 || return nothing
+    r = cgen_factor_list(m.args[3])
+    r === nothing && return nothing
+    a = m.args[2]
+    cgen_is_loopvar_offset(a, v, defs, body) && return (Any[], r)
+    a isa Expr && a.head == :call && a.args[1] === :div && length(a.args) == 3 && cgen_is_loopvar_offset(a.args[2], v, defs, body) || return nothing
+    p = cgen_factor_list(a.args[3])
+    p === nothing && return nothing
+    return (p, r)
+end
+
+function cgen_array_sliced_by_decoded_loopvar(widxs, ridxs, body::Vector{NamedTuple}, defs::Dict{Symbol,Any}, loopvar::Symbol, bounds, params::Set{Symbol})
+    bounds === nothing && return false
+    (lo, step, hi) = bounds
+    # the range visits 1..N once: `1:N`, or `N:-1:1` (the reversed sweep of an adjoint)
+    if lo == 1 && step == 1
+        top = hi
+    elseif hi == 1 && step == -1
+        top = lo
+    else
+        return false
+    end
+    idxs = vcat(collect(widxs), collect(ridxs))
+    isempty(idxs) && return false
+    n = length(first(idxs))
+    all(v -> length(v) == n, idxs) || return false
+    digits = Tuple{Symbol,Vector{Any},Vector{Any}}[]
+    for d in 1:n
+        sym = idxs[1][d]
+        sym isa Symbol || continue
+        all(v -> v[d] === sym, idxs) || continue
+        haskey(defs, sym) && cgen_set_once_before_use(body, sym) || continue
+        dg = cgen_decoded_digit(defs[sym], loopvar, defs, body)
+        dg === nothing && continue
+        push!(digits, (sym, dg[1], dg[2]))
+    end
+    isempty(digits) && return false
+    length(unique(d[1] for d in digits)) == length(digits) || return false
+    sort!(digits; by = d -> -length(d[2]))
+    k = length(digits)
+    srt(f) = sort(collect(f); by = string)
+    # digit j divides by the product of the radices of the digits after it; the last divides by nothing
+    for j in 1:k
+        later = Any[]
+        for i in (j + 1):k; append!(later, digits[i][3]); end
+        srt(digits[j][2]) == srt(later) || return false
+    end
+    radices = Any[]
+    for d in digits; append!(radices, d[3]); end
+    hif = cgen_factor_list(top)
+    hif === nothing && return false
+    srt(hif) == srt(radices) || return false
+    # the radices are kernel parameters (or literals), and the loop does not change them
+    for f in radices
+        f isa Symbol && (f in params) || f isa Integer || return false
+        f isa Symbol && cgen_var_assigned_anywhere(body, f) && return false
+    end
+    return true
+end
+
 # Gate for the GPU split. The strict predicate runs first, so every loop that cgen_reduction_only_loop accepts is accepted here
 # with the same synth. The idiom predicate only relaxes the array check. A refusal names the smallest failing array.
 # `idiom` is true when an accepted loop needed the idiom predicate for at least one array.
-function cgen_split_loop_gate(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(); root_body = nothing, protect = Set{Symbol}())
+function cgen_split_loop_gate(body::Vector{NamedTuple}, loopvar::Symbol, known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(); root_body = nothing, protect = Set{Symbol}(), bounds = nothing)
     body = cgen_fold_accumulates(body)
     synth = cgen_loop_scalar_synth(body, known_consts)
     saveonly = Set{Symbol}()
@@ -8981,6 +9095,7 @@ function cgen_split_loop_gate(body::Vector{NamedTuple}, loopvar::Symbol, known_c
     for (arr, widxs) in summary.writes
         ridxs = get(summary.reads, arr, Any[])
         cgen_array_ok_strict(body, arr, widxs, ridxs, loopvar, summary.defs) && continue
+        cgen_array_sliced_by_decoded_loopvar(widxs, ridxs, body, summary.defs, loopvar, bounds, protect) && continue
         if arr isa Symbol && cgen_array_ok_idiom(body, arr)
             idiom = true
             continue
@@ -9339,6 +9454,96 @@ function cgen_idiomatic_scalar_reduction(body::Vector{NamedTuple}, loopvar::Symb
     cgen_bare_var_outside_index(term, loopvar) && return nothing
     sort!(arrs; by = string)   # deterministic output only, doesn't affect correctness
     return (target, op, arrs, term)
+end
+
+# Replaces every symbol of `e` found in `env` by its value. Used to inline the single-assignment temporaries of a loop body into
+# the terms of its accumulations.
+function cgen_inline_temps(e, env::Dict{Symbol,Any})
+    e isa Symbol && return get(env, e, e)
+    e isa Expr || return e
+    e.head == :call && return Expr(:call, e.args[1], Any[cgen_inline_temps(a, env) for a in e.args[2:end]]...)
+    return Expr(e.head, Any[cgen_inline_temps(a, env) for a in e.args]...)
+end
+
+# Every symbol that occurs in the statements, read or written, at any depth.
+function cgen_stmt_symbols!(body, acc::Set{Symbol}, skip = nothing)
+    for st in body
+        st === skip && continue
+        if st.kind == :assign
+            cgen_collect_expr_vars!(st.lhs, acc); cgen_collect_expr_vars!(st.rhs, acc)
+        elseif st.kind == :for
+            push!(acc, st.var)
+            for e in (st.lo, st.hi, st.step); cgen_collect_expr_vars!(e, acc); end
+            cgen_stmt_symbols!(st.body, acc, skip)
+        elseif st.kind == :while
+            cgen_collect_expr_vars!(st.cond, acc); cgen_stmt_symbols!(st.body, acc, skip)
+        elseif st.kind == :if
+            cgen_collect_expr_vars!(st.cond, acc); cgen_stmt_symbols!(st.then, acc, skip); cgen_stmt_symbols!(st.els, acc, skip)
+        elseif st.kind == :stackpush
+            push!(acc, st.stack); cgen_collect_expr_vars!(st.value, acc)
+        else
+            push!(acc, :__unknown_statement__)
+        end
+    end
+    return acc
+end
+
+# The scalar accumulations of a loop, as a vector of what cgen_idiomatic_scalar_reduction returns for one. A body of one statement is that
+# function's own case. A longer body is accepted only when every statement is a plain scalar assignment and each one is either
+#   - a temporary (`t = e`), assigned once, that reads no accumulator and no name assigned later in the body, or
+#   - an accumulation (`s = s + term`, `s = term + s`, `s = s - term`) into a scalar that no term reads.
+# The temporaries are inlined into the terms, and each accumulation is then checked as a body of its own. A temporary must not occur
+# outside the loop: the reduction does not leave it set. `root_body === nothing` refuses any temporary.
+# Every target must be a local scalar (not in `fn_args`); a mix with a boxed accumulator is left to the kernel path.
+function cgen_local_scalar_reductions(body::Vector{NamedTuple}, loopvar::Symbol, loop_stmt, root_body, fn_args::Set{Symbol})
+    if length(body) == 1
+        r = cgen_idiomatic_scalar_reduction(body, loopvar)
+        return (r !== nothing && r[1] isa Symbol && !(r[1] in fn_args)) ? [r] : nothing
+    end
+    all(st -> st.kind == :assign && st.lhs isa Symbol, body) || return nothing
+    assigned = Symbol[st.lhs for st in body]
+    length(unique(assigned)) == length(assigned) || return nothing
+    accs = Any[]
+    temps = Symbol[]
+    env = Dict{Symbol,Any}()
+    for (k, st) in enumerate(body)
+        later = Set{Symbol}(assigned[k:end])
+        rhs_vars = Set{Symbol}(); cgen_collect_expr_vars!(st.rhs, rhs_vars)
+        if st.lhs in rhs_vars
+            # an accumulation: the target appears once, as a bare operand of + or -
+            push!(accs, (k, st))
+        else
+            isempty(intersect(rhs_vars, later)) || return nothing
+            push!(temps, st.lhs)
+            env[st.lhs] = cgen_inline_temps(st.rhs, env)
+        end
+    end
+    isempty(accs) && return nothing
+    targets = Set{Symbol}(st.lhs for (k, st) in accs)
+    out = Any[]
+    for (k, st) in accs
+        st.lhs in fn_args && return nothing
+        rhs = st.rhs
+        rhs isa Expr && rhs.head == :call && length(rhs.args) == 3 || return nothing
+        # the temporaries the accumulation reads must come from before it
+        used = Set{Symbol}(); cgen_collect_expr_vars!(rhs, used)
+        any(t -> t in used && findfirst(==(t), assigned) > k, temps) && return nothing
+        inl = Expr(:call, rhs.args[1], Any[cgen_inline_temps(a, env) for a in rhs.args[2:end]]...)
+        inl_vars = Set{Symbol}(); cgen_collect_expr_vars!(inl, inl_vars)
+        any(t -> t in inl_vars && t != st.lhs, targets) && return nothing   # an accumulator read by a term
+        count(==(st.lhs), (inl.args[2], inl.args[3])) == 1 || return nothing
+        r = cgen_idiomatic_scalar_reduction(NamedTuple[(kind = :assign, lhs = st.lhs, rhs = inl)], loopvar)
+        r === nothing && return nothing
+        push!(out, r)
+    end
+    # a temporary must not occur anywhere outside this loop
+    root_body === nothing && !isempty(temps) && return nothing
+    if !isempty(temps)
+        outside = Set{Symbol}()
+        cgen_stmt_symbols!(root_body, outside, loop_stmt)
+        any(t -> t in outside, temps) && return nothing
+    end
+    return out
 end
 
 # True iff `loopvar` occurs anywhere in `e` outside of a :ref's index position -- the per-
@@ -9730,7 +9935,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # loop boundary (a reverse-mode reduction shadow reset each iteration but never freshly initialized at the
             # first). Running the check unconditionally costs nothing when no such scalar exists, and otherwise either
             # recovers it via synth or refuses to split -- never silently emitting a kernel reading an undefined value.
-            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs; root_body, protect = Set{Symbol}(fn_args))
+            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs; root_body, protect = Set{Symbol}(fn_args), bounds = (stmt.lo, stmt.step, stmt.hi))
             synth = gate.synth
             # A var cgen_scalar_reduction_vars calls reduction-worthy is only safe for cgen_emit's global box-once/unbox-once treatment when it's a
             # whole-function-lifetime entity (a top-level argument like `cb`). An internal scratch scalar can satisfy the same shape by accident when
@@ -9755,8 +9960,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # mapreduce's 72.6 us on a V100.
             local_red = nothing
             if !safe_scope && !cgen_contains_stackop(stmt.body)
-                cand = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
-                cand !== nothing && cand[1] isa Symbol && (local_red = cand)
+                local_red = cgen_local_scalar_reductions(stmt.body, stmt.var, stmt, root_body, fn_args)
             end
             # `stage` names the first gate that refuses the loop, in the order the gates run
             stage = synth === nothing ? gate.reason : !safe_scope ? :scope : cgen_contains_stackop(stmt.body) ? :stackop : :ok
@@ -9829,8 +10033,6 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 end
             elseif local_red !== nothing
                 verdict = :reduction
-                lt, lop, larrs, lterm = local_red
-                lvalue = cgen_idiomatic_reduction_value(larrs, lterm, stmt.var, stmt.lo, stmt.step, stmt.hi)
                 # Same run-time test as the array-element case, against the
                 # host loop rather than an atomic kernel. An earlier version
                 # lowered this unconditionally, on the reasoning that a
@@ -9850,12 +10052,13 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                                                      outer_known_consts = known_consts, root_body, decisions, depth = depth + 1))
                 # the target is a host scalar and every array is read through
                 # a view, so this branch needs no allowscalar
-                red_branch = Expr(:(=), lt, Expr(:call, lop, lt, lvalue))
+                red_branch = Any[Expr(:(=), lt, Expr(:call, lop, lt, cgen_idiomatic_reduction_value(larrs, lterm, stmt.var, stmt.lo, stmt.step, stmt.hi)))
+                                 for (lt, lop, larrs, lterm) in local_red]
                 flush_pending!()
                 push!(exprs, emit_if(Expr(:call, :<,
                                           cgen_trip_count(stmt.lo, stmt.step, stmt.hi),
                                           reduction_threshold),
-                                     Any[loop_branch], Any[red_branch]))
+                                     Any[loop_branch], red_branch))
             else
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
             end
@@ -14612,10 +14815,16 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             end
         elseif stmt.kind == :for
             flush_pending!()
-            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs; root_body, protect = Set{Symbol}(fn_args))
+            gate = cgen_split_loop_gate(stmt.body, stmt.var, known_consts, outer_defs; root_body, protect = Set{Symbol}(fn_args), bounds = (stmt.lo, stmt.step, stmt.hi))
             synth = gate.synth
             loop_reduce_vars = synth === nothing ? Set{Symbol}() : cgen_scalar_reduction_vars(stmt.body)
             safe_scope = issubset(loop_reduce_vars, fn_args)
+            # A local accumulator was never boxed into a device array, so no kernel can write it. cgen_body reaches it through mapreduce, which
+            # returns a host value. JACC.@parallel_reduce returns a one-element device array instead, so the value is read back with Array(...)[1].
+            local_red = nothing
+            if !safe_scope && !cgen_contains_stackop(stmt.body)
+                local_red = cgen_local_scalar_reductions(stmt.body, stmt.var, stmt, root_body, fn_args)
+            end
             # `stage` names the first gate that refuses the loop, in the order the gates run
             stage = synth === nothing ? gate.reason : !safe_scope ? :scope : cgen_contains_stackop(stmt.body) ? :stackop : :ok
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
@@ -14697,6 +14906,22 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth, hoist_atomics))
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
+            elseif local_red !== nothing
+                verdict = :reduction
+                n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
+                # The same run-time choice cgen_body makes: the host loop below the threshold, the device reduction above it. The reduction is its
+                # own top-level host statement (see the array-element case), and the guard keeps JACC away from a zero range, which it raises on.
+                loop_branch = emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step,
+                                           jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs,
+                                                     outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics))
+                red_stmts = Any[]
+                for (j, (lt, lop, larrs, lterm)) in enumerate(local_red)
+                    redvar = Symbol("__jgen_lred_", cgen_kernel_count(kernels), "_", length(exprs), "_", depth, "_", j)
+                    push!(red_stmts, Expr(:(=), redvar, jgen_idiomatic_reduction_value(larrs, lterm, stmt.var, stmt.lo, stmt.step, n_iter)))
+                    push!(red_stmts, Expr(:(=), lt, Expr(:call, lop, lt, Expr(:ref, Expr(:call, :Array, redvar), 1))))
+                end
+                red_branch = emit_if(Expr(:call, :>, n_iter, 0), red_stmts, Any[])
+                push!(exprs, emit_if(Expr(:call, :<, n_iter, reduction_threshold), Any[loop_branch], Any[red_branch]))
             else
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics)))
             end

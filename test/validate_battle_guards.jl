@@ -2,7 +2,7 @@
 #   G1  every launch survives a zero-trip loop (CUDA: guard in the kernel, JACC: guard in the host)
 #   G2  no call to a banned vendor routine in any kernel or host
 #   G3  generation is deterministic: two runs give the same text
-#   G4  CUDA and JACC agree on which loops leave the host (K or R on CUDA, K on JACC)
+#   G4  CUDA and JACC agree on which loops leave the host (K or R on either)
 #   G5  size: generated nodes against primal nodes, by loop depth
 # Reads generated code only.  See STADE_offload_battle_plan_2026-11-09.md.
 include(joinpath(@__DIR__, "validate_battle_status.jl"))

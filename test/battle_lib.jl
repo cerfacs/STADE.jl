@@ -331,7 +331,7 @@ bt_mentions_tid(e) = e isa Symbol ? (e in (:__tid, :__tidr, :__rb_t, :__jacc_i, 
 bt_mentions_thread(e) = e isa Symbol ? (e in BT_THREAD) : (e isa Expr ? any(bt_mentions_thread, e.args) : false)
 bt_count(d, v, s) = (d[v][s] = get(d[v], s, 0) + 1)
 
-bt_has_mapreduce(e) = e isa Expr && ((e.head === :call && e.args[1] === :mapreduce) || any(bt_has_mapreduce, e.args))
+bt_has_mapreduce(e) = e isa Expr && ((e.head === :call && e.args[1] === :mapreduce) || (e.head === :macrocall && e.args[1] isa Expr && e.args[1].head === :. && String(e.args[1].args[2].value) == "@parallel_reduce") || any(bt_has_mapreduce, e.args))
 function bt_scan_host!(obs, e, vars, whilevars, allow; in_allow = false, rmode = false)
     e isa Expr || return
     if e.head === :if && length(e.args) == 3 && bt_has_mapreduce(e.args[3]) && !bt_has_mapreduce(e.args[2])
