@@ -8868,6 +8868,93 @@ function cgen_rmw_walk!(body::Vector{NamedTuple}, held::Dict{Symbol,Any}, gather
     return hazard
 end
 
+# An array that the loop accumulates into (`A[e] = A[e] + x`) and also reads outside that accumulation. Each
+# add is atomic, but a read sees a thread-order-dependent partial sum, so the loop is sequential. Exempt: every access of the array
+# has one dimension whose subscript holds the loop variable, or a scalar computed from it without an array read (the thread's
+# own slice). A dimension that is fixed, an inner loop variable, or gathered from an array can be reached by two threads.
+function cgen_acc_read_hazard_arrays(body::Vector{NamedTuple}, loopvar::Symbol)
+    gathered = Set{Symbol}()
+    assigned = cgen_all_assigned_scalars(body)
+    while cgen_collect_gathered!(body, gathered); end
+    accs = Dict{Symbol,Vector{Any}}()
+    others = Dict{Symbol,Vector{Any}}()
+    cgen_acc_walk!(body, accs, others)
+    hazard = Set{Symbol}()
+    for (arr, aidx) in accs
+        sites = vcat(aidx, get(others, arr, Any[]))
+        length(sites) == length(aidx) && continue
+        nd = minimum(length, sites)
+        private = any(1:nd) do d
+            all(sites) do x
+                syms = cgen_expr_symbols(x[d])
+                loopvar in syms || any(q -> q in assigned && !(q in gathered) && cgen_scalar_from_var(body, q, loopvar), syms)
+            end
+        end
+        private || push!(hazard, arr)
+    end
+    return hazard
+end
+
+# Is scalar q computed from the loop variable alone (through arithmetic, no array read)?
+function cgen_scalar_from_var(body::Vector{NamedTuple}, q::Symbol, loopvar::Symbol)
+    ok = false
+    function walk(sts)
+        for st in sts
+            if st.kind == :assign && st.lhs === q
+                !cgen_expr_has_ref(st.rhs) && (loopvar in cgen_expr_symbols(st.rhs) || any(x -> x !== q && cgen_scalar_from_var(body, x, loopvar), cgen_expr_symbols(st.rhs))) && (ok = true)
+            elseif st.kind == :if; walk(st.then); walk(st.els)
+            elseif st.kind == :for || st.kind == :while; walk(st.body); end
+        end
+    end
+    walk(body)
+    return ok
+end
+
+function cgen_collect_gathered!(body::Vector{NamedTuple}, gathered::Set{Symbol})
+    grew = false
+    for st in body
+        if st.kind == :assign && st.lhs isa Symbol
+            if !(st.lhs in gathered) && (cgen_expr_has_ref(st.rhs) || any(x -> x in gathered, cgen_expr_symbols(st.rhs)))
+                push!(gathered, st.lhs); grew = true
+            end
+        elseif st.kind == :if
+            cgen_collect_gathered!(st.then, gathered) && (grew = true)
+            cgen_collect_gathered!(st.els, gathered) && (grew = true)
+        elseif st.kind == :for || st.kind == :while
+            cgen_collect_gathered!(st.body, gathered) && (grew = true)
+        end
+    end
+    return grew
+end
+
+function cgen_acc_walk!(body::Vector{NamedTuple}, accs, others)
+    addrefs(e) = for r in cgen_collect_ref_exprs(e); r.args[1] isa Symbol && push!(get!(others, r.args[1], Any[]), r.args[2:end]); end
+    for st in body
+        if st.kind == :assign
+            if st.lhs isa Expr && st.lhs.head == :ref && st.lhs.args[1] isa Symbol
+                arr = st.lhs.args[1]
+                terms = cgen_flatten_sum(st.rhs)
+                k = findfirst(t -> t == st.lhs, terms)
+                if k === nothing
+                    addrefs(st.rhs)
+                else
+                    push!(get!(accs, arr, Any[]), st.lhs.args[2:end])
+                    for (j, t) in enumerate(terms); j == k || addrefs(t); end
+                end
+                foreach(addrefs, st.lhs.args[2:end])
+            else
+                addrefs(st.rhs)
+            end
+        elseif st.kind == :if
+            addrefs(st.cond); cgen_acc_walk!(st.then, accs, others); cgen_acc_walk!(st.els, accs, others)
+        elseif st.kind == :for
+            addrefs(st.lo); addrefs(st.hi); addrefs(st.step); cgen_acc_walk!(st.body, accs, others)
+        elseif st.kind == :while
+            addrefs(st.cond); cgen_acc_walk!(st.body, accs, others)
+        end
+    end
+end
+
 function cgen_collect_ref_exprs(e, out::Vector{Any} = Any[])
     if e isa Expr
         e.head == :ref && push!(out, e)
@@ -8904,6 +8991,7 @@ function cgen_split_loop_gate(body::Vector{NamedTuple}, loopvar::Symbol, known_c
     overlap = cgen_overlap_proven_arrays(body, loopvar)
     isempty(overlap) || return (synth = nothing, reason = :overlap, array = minimum(overlap), idiom = false, saveonly = saveonly)
     rmw = cgen_rmw_hazard_arrays(body)
+    union!(rmw, cgen_acc_read_hazard_arrays(body, loopvar))
     isempty(rmw) || return (synth = nothing, reason = :rmw, array = minimum(rmw), idiom = false, saveonly = saveonly)
     return (synth = synth, reason = :ok, array = nothing, idiom = idiom, saveonly = saveonly)
 end

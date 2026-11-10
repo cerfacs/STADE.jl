@@ -86,7 +86,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         # because the name of its snapshot stack would collide with the array m_snap.
         "asnap_readbefore" => 7, "asnap_selfnl" => 9, "asnap_readbetween" => 11, "asnap_nameclash" => 7, "asnap_ragged" => 11,
         # Cost refusals: the snapshot would be correct and would not pay (guards G5, G10, G13).
-        "asnap_condread" => 11, "asnap_direct" => 2, "asnap_slice" => 2,
+        "asnap_condread" => 11, "asnap_direct" => 3, "asnap_slice" => 3,  # v0.5.4: the primal loops of both are order-dependent (B1, B2 of the battle test) and stay on the host
         "advection" => 3, "advection_multi" => 3, "affine_loss" => 0,
         "bilinear" => 0, "bnd_branch" => 3, "bnd_carried" => 1,
         "bnd_nested_only" => 5, "bnd_readfirst" => 6,
