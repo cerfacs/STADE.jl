@@ -34,7 +34,7 @@ ph_lap1d(n) = Matrix(SymTridiagonal(fill(2.0, n), fill(-1.0, n - 1)))
 # each spec: file, int_args, values (all float and int-array args), frozen, ref(values)->Dict out, jref(values,d)->Dict out, outs (compared args)
 function ph_spec_jacobi2d()
     nint = 5; n = nint + 2
-    f = zeros(n, n); f[2:nint+1, 2:nint+1] = randn(nint, nint)
+    f = zeros(n, n); f[2:nint+1, 2:nint+1] = STADE.val_randn(nint, nint)
     h2 = 0.07
     vals = Dict{Symbol,Any}(:u => zeros(n, n), :v => zeros(n, n), :f => f, :h2 => h2, :tol => 1e-26, :its => zeros(Int, 1))
     A = ph_lap2d(nint)
@@ -48,7 +48,7 @@ end
 
 function ph_spec_cg()
     nint = 5; n = nint + 2
-    b = zeros(n, n); b[2:nint+1, 2:nint+1] = randn(nint, nint)
+    b = zeros(n, n); b[2:nint+1, 2:nint+1] = STADE.val_randn(nint, nint)
     vals = Dict{Symbol,Any}(:x => zeros(n, n), :b => b, :r => zeros(n, n), :p => zeros(n, n), :ap => zeros(n, n), :tol => 1e-22, :its => zeros(Int, 1))
     A = ph_lap2d(nint)
     ref = V -> Dict(:x => ph_pad(A \ ph_inner(V[:b], nint), nint))
@@ -70,7 +70,7 @@ end
 
 function ph_spec_gs1d()
     n = 12
-    f = randn(n); f[1] = 0.0; f[n] = 0.0
+    f = STADE.val_randn(n); f[1] = 0.0; f[n] = 0.0
     h2 = 0.05
     vals = Dict{Symbol,Any}(:u => zeros(n), :f => f, :h2 => h2, :tol => 1e-24, :its => zeros(Int, 1))
     A = ph_lap1d(n - 2)
@@ -142,7 +142,7 @@ end
 
 function ph_spec_heat()
     n = 10; ns = 3; lam = 0.4
-    u0 = randn(n)
+    u0 = STADE.val_randn(n)
     vals = Dict{Symbol,Any}(:u => u0, :w => zeros(n), :wn => zeros(n), :lam => lam, :tol => 1e-26, :its => zeros(Int, 1))
     function Afull(lam)
         A = zeros(n, n); A[1, 1] = 1.0; A[n, n] = 1.0
@@ -165,7 +165,7 @@ end
 function ph_spec_mg()
     L = 4; nfine = 16; nm = nfine - 1
     h1 = 1.0 / nfine
-    f = zeros(nm, L); f[:, 1] = randn(nm)
+    f = zeros(nm, L); f[:, 1] = STADE.val_randn(nm)
     vals = Dict{Symbol,Any}(:u => zeros(nm, L), :f => f, :r => zeros(nm, L), :h1 => h1, :tol => 1e-22, :its => zeros(Int, 1))
     A = ph_lap1d(nm)
     ref = V -> (u = zeros(nm, L); u[:, 1] = V[:h1]^2 .* (A \ V[:f][:, 1]); Dict(:u => u))
@@ -233,7 +233,7 @@ function ph_check(spec; verbose = true)
     end
     e2 = 0.0; e3 = 0.0
     for t in 1:3
-        d = ph_proj(spec, kernel, I, V, randn(length(x0)) .* mask)
+        d = ph_proj(spec, kernel, I, V, STADE.val_randn(length(x0)) .* mask)
         D = STADE.val_unflatten(kernel, I, STADE.val_zeros_like(kernel, V), d)
         yd = STADE.val_unflatten(kernel, I, V, jvp(x0, d))
         jr = spec.jref(V, D)
@@ -255,7 +255,7 @@ function ph_check(spec; verbose = true)
     grad(x) = STADE.val_call_adjoint(adf, isf, kernel, I, STADE.val_unflatten(kernel, I, V, x), seed)
     e4 = 0.0
     for t in 1:3
-        xd = ph_proj(spec, kernel, I, V, randn(length(x0)) .* mask)
+        xd = ph_proj(spec, kernel, I, V, STADE.val_randn(length(x0)) .* mask)
         yb = STADE.val_random_values_like(kernel, V)
         ydv = jvp(x0, xd)
         xb = STADE.val_call_adjoint(adf, isf, kernel, I, STADE.val_unflatten(kernel, I, V, x0), yb)
@@ -266,7 +266,7 @@ function ph_check(spec; verbose = true)
     e5 = 0.0; e6 = 0.0
     g0 = grad(x0)
     for t in 1:3
-        d = ph_proj(spec, kernel, I, V, randn(length(x0)) .* mask)
+        d = ph_proj(spec, kernel, I, V, STADE.val_randn(length(x0)) .* mask)
         h = 1e-6
         fd = (sum(f_eval(x0 .+ h .* d) .* seedf) - sum(f_eval(x0 .- h .* d) .* seedf)) / (2h)
         e5 = max(e5, abs(fd - sum(g0 .* d)) / max(abs(fd), 1e-12))

@@ -50,8 +50,8 @@ end
 hdr(n) = "# $n\n# case\n"
 # accepted cases: (name, source, args builder)
 function rf_cases()
-    rng = MersenneTwister(11)
-    mk(dims...) = randn(rng, dims...)
+    rng = Random.Xoshiro(11)
+    mk(dims...) = STADE.val_randn(rng, dims...)
     L = Any[]
     push!(L, ("plain a[i]*b[i]", hdr("a1") * "function a1(x, y, out, n)\n    s = 0.0\n    for i = 1:n\n        s = s + x[i] * y[i]\n    end\n    out[1] = s\n    return nothing\nend\n",
         n -> Dict(:x => mk(n + 4), :y => mk(n + 4), :out => zeros(1), :n => n)))
