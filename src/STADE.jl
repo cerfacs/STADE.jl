@@ -12642,11 +12642,22 @@ function cgen_dead_stack_apply(host::Expr, kernels::Vector{Expr}, backend; inbou
     end
     isempty(touched) && return (host, kernels, Symbol[], Dict{Symbol,Any}(), iname)
     newk = Expr[k.head === :function && k.args[1].args[1] in touched ? kdefs[k.args[1].args[1]] : k for k in kernels]
-    gone = Symbol[x for x in sort!(collect(stripped)) if !any(((kn, i),) -> cgen_dstack_uses(kdefs[kn].args[2], kdefs[kn].args[1].args[1+i]), get(bind, x, Tuple{Symbol,Int}[]))]
+    # A stack the host itself still indexes (a scalar read in an `@allowscalar` block) keeps its size, and so does the stack it shadows or is shadowed by:
+    # the HVP host allocates `x_d` as `length(x)`, so shrinking x alone puts a host read of `x_d` out of bounds (measured on a V100: a counted loop with a guard)
+    hostref(x) = cgen_dstack_indexes(host.args[2], x) || cgen_dstack_indexes(host.args[2], Symbol(string(x), "_d")) ||
+                 (endswith(string(x), "_stack_d") && cgen_dstack_indexes(host.args[2], Symbol(string(x)[1:end-2])))
+    gone = Symbol[x for x in sort!(collect(stripped)) if !any(((kn, i),) -> cgen_dstack_uses(kdefs[kn].args[2], kdefs[kn].args[1].args[1+i]), get(bind, x, Tuple{Symbol,Int}[])) && !hostref(x)]
     # a shadow stack the host allocates itself shrinks here; the stacks of the `initstacks_*` host are shrunk by the caller
     own = Symbol[x for x in gone if endswith(string(x), "_stack_d")]
     isempty(own) || (host = cgen_shrink_stacks(host, own))
     return (host, newk, Symbol[x for x in gone if !(x in own)], compact, iname)
+end
+
+# true when `e` contains an index expression `x[...]`
+function cgen_dstack_indexes(e, x::Symbol)
+    e isa Expr || return false
+    e.head === :ref && e.args[1] === x && return true
+    return any(a -> cgen_dstack_indexes(a, x), e.args)
 end
 
 function cgen_dstack_uses(e, p::Symbol)
