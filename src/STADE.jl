@@ -8244,7 +8244,8 @@ function cgen_deep_array_occurrences!(stmts, arr::Symbol, chain::Vector{Tuple{Sy
             cgen_deep_array_occurrences!(stmt.body, arr, vcat(chain, [(stmt.var, up ? stmt.hi : stmt.lo)]), out) === nothing && return nothing
         elseif stmt.kind == :while
             # A while contributes no index variable, so the chain of
-            # (loopvar, bound) pairs to strip is unchanged.
+            # (loopvar, bound) pairs to strip is unchanged. A read of the array in its condition is not an occurrence this walk can strip.
+            cgen_expr_reads_array(stmt.cond, arr) && return nothing
             cgen_deep_array_occurrences!(stmt.body, arr, chain, out) === nothing && return nothing
         elseif stmt.kind == :if
             writes = Dict{Any,Vector{Any}}(); reads = Dict{Any,Vector{Any}}()
@@ -8338,7 +8339,8 @@ function cgen_array_private_to_loop(body::Vector{NamedTuple}, arr::Symbol, defs:
         raw = Tuple{Symbol,Any,Vector{Tuple{Symbol,Any}}}[]
         if stmt.kind in (:assign, :for)
             cgen_deep_array_occurrences!([stmt], arr, Tuple{Symbol,Any}[], raw) === nothing && return nothing
-        elseif stmt.kind == :if
+        elseif stmt.kind == :if || stmt.kind == :while
+            # a `while` has no trip count to strip, so any touch of the array inside it (its condition included) refuses
             writes = Dict{Any,Vector{Any}}(); reads = Dict{Any,Vector{Any}}()
             cgen_collect_array_accesses!(NamedTuple[stmt], writes, reads)
             (haskey(writes, arr) || haskey(reads, arr)) && return nothing
@@ -8863,6 +8865,8 @@ function cgen_rmw_walk!(body::Vector{NamedTuple}, held::Dict{Symbol,Any}, gather
             union!(hazard, cgen_rmw_walk!(st.els, copy(held), copy(gathered), acc, other))
         elseif st.kind == :for
             union!(hazard, cgen_rmw_walk!(st.body, copy(held), copy(gathered), acc, other))
+        elseif st.kind == :while
+            union!(hazard, cgen_rmw_walk!(st.body, copy(held), copy(gathered), acc, other))
         end
     end
     return hazard
@@ -9235,6 +9239,8 @@ function cgen_use_before_def(body::Vector{NamedTuple}, local_names::Set{Symbol},
             ok, _ = cgen_use_before_def(stmt.body, local_names, synth, union(defined, Set([stmt.var])); save_ok)
             ok || return (false, defined)
         elseif stmt.kind == :while
+            # the condition reads before the body has run, so it sees only what is defined on entry
+            flagged(cgen_read_vars(stmt.cond)) && return (false, defined)
             # no loop variable to add to the defined set
             ok, _ = cgen_use_before_def(stmt.body, local_names, synth, defined; save_ok)
             ok || return (false, defined)
@@ -9261,6 +9267,7 @@ function cgen_collect_array_accesses!(body::Vector{NamedTuple}, writes::Dict, re
         elseif stmt.kind == :for
             cgen_collect_array_accesses!(stmt.body, writes, reads)
         elseif stmt.kind == :while
+            cgen_collect_refs!(stmt.cond, reads)
             cgen_collect_array_accesses!(stmt.body, writes, reads)
         end
     end
@@ -9292,6 +9299,7 @@ function cgen_collect_vars!(body::Vector{NamedTuple}, vars::Set{Symbol})
             cgen_collect_vars!(stmt.body, vars)
             push!(vars, stmt.var)
         elseif stmt.kind == :while
+            cgen_collect_expr_vars!(stmt.cond, vars)
             cgen_collect_vars!(stmt.body, vars)
         elseif stmt.kind == :if
             cgen_collect_expr_vars!(stmt.cond, vars)
@@ -10804,6 +10812,7 @@ function cgen_collect_subst_accesses!(body::Vector{NamedTuple}, subst::Dict{Symb
                 delete!(inner, v)
                 delete!(subst, v)
             end
+            stmt.kind == :while && cgen_collect_subst_refs!(stmt.cond, inner, reads, nothing, Ref(false))
             cgen_collect_subst_accesses!(stmt.body, inner, writes, reads)
         end
     end
@@ -10863,10 +10872,10 @@ function cgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, backend,
         elseif stmt.kind == :for
             append!(exprs, cgen_emit_device_loop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep)), cgen_hoist_atomics_on(backend)))
         elseif stmt.kind == :while
-            # A while has no trip count, so no launch can size itself around
-            # it and no thread can be assigned an iteration. cgen_body must
-            # have kept the enclosing loop on the host before reaching here.
-            error("cgen_device_body: a `while` cannot run inside a device kernel")
+            # A `while` INSIDE a thread runs sequentially in that thread, like an inner `for` with an unknown trip count. The enclosing
+            # loop was admitted by cgen_split_loop_gate, whose scalar and array proofs already walk the `while` body and its condition.
+            # A `while` that is not inside a split loop never reaches here: cgen_body keeps it on the host.
+            push!(exprs, emit_while(stmt.cond, cgen_device_body(stmt.body, thread_var, backend, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep))))
         end
     end
     return exprs
@@ -15019,10 +15028,8 @@ function jgen_device_body(body::Vector{NamedTuple}, thread_var::Symbol, reduce_v
         elseif stmt.kind == :for
             append!(exprs, cgen_emit_device_loop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_device_body(stmt.body, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep), hoist), hoist))
         elseif stmt.kind == :while
-            # A while has no trip count, so no launch can size itself around
-            # it and no thread can be assigned an iteration. jgen_body must
-            # have kept the enclosing loop on the host before reaching here.
-            error("jgen_device_body: a `while` cannot run inside a device kernel")
+            # see cgen_device_body: a sequential `while` inside one thread
+            push!(exprs, emit_while(stmt.cond, jgen_device_body(stmt.body, thread_var, reduce_vars, race_arrays, copy(thread_dep), copy(injective_dep), hoist)))
         end
     end
     return exprs
