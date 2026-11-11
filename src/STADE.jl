@@ -501,10 +501,22 @@ function parse_kernel(expr::Expr)
     name, args = parse_signature(expr.args[1])
     body = parse_hoist_array_bounds(parse_statements(parse_strip_lines(expr.args[2])), Ref(0))
     kinds = shape_infer((name = name, args = args), body)
+    parse_check_shadow_names(name, kinds)
     indep, dep = parse_infer_indep_dep(args, kinds)
     sig = (name = name, args = args, kinds = kinds,
            independents = indep, dependents = dep)
     return (sig = sig, body = body)
+end
+
+# A shadow is its primal name plus b, d or bd. A float variable named like another float variable's shadow (`w` and `wd`) makes the
+# generated code assign one name for two things, silently. Refuse it here, where the message can name both variables.
+function parse_check_shadow_names(name::Symbol, kinds::Dict{Symbol,Symbol})
+    floats = Set(v for (v, k) in kinds if k in (:scalar_float, :array_float))
+    for v in sort!(collect(floats); by = string), suffix in ("b", "d", "bd")
+        w = Symbol(string(v), suffix)
+        w in floats && error("parse_kernel: `$(w)` in `$(name)` has the name of the shadow of `$(v)` (`$(v)` plus `$(suffix)`); rename one of the two variables")
+    end
+    return nothing
 end
 
 function parse_infer_indep_dep(args::Vector{Symbol}, kinds::Dict{Symbol,Symbol})
