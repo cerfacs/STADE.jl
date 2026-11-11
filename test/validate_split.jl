@@ -306,7 +306,7 @@ const SPL_CASES = [
         end
         return nothing
     end""", :spl_mixed1, sd -> (r = Random.Xoshiro(sd); n = 37; m = 19; Any[STADE.val_randn(r, n * m), STADE.val_randn(r, m), zeros(n * m), zeros(n), STADE.val_randn(r, n), n, m]), true),
-    ("mixed loop: layer-norm backward", """function spl_lnb(x, xb, mu, rs, n, d)
+    ("mixed loop: layer-norm backward", """function spl_lnb(x, gx, mu, rs, n, d)
         for t = 1:n
             sm = 0.0
             for c = 1:d
@@ -328,16 +328,16 @@ const SPL_CASES = [
             for c = 1:d
                 a2 = x[(t - 1) * d + c] - mean
                 g = a2 * sb
-                xb[(t - 1) * d + c] = xb[(t - 1) * d + c] + g
+                gx[(t - 1) * d + c] = gx[(t - 1) * d + c] + g
                 q = -g
                 mb = mb + q
-                xb[(t - 1) * d + c] = xb[(t - 1) * d + c] + g
+                gx[(t - 1) * d + c] = gx[(t - 1) * d + c] + g
                 mb = mb + q
             end
             old = mb
-            smb = old / d
+            sdb = old / d
             for c = 1:d
-                xb[(t - 1) * d + c] = xb[(t - 1) * d + c] + smb
+                gx[(t - 1) * d + c] = gx[(t - 1) * d + c] + sdb
             end
         end
         return nothing

@@ -5,6 +5,7 @@
 # LOOP i2 I K
 # LOOP i3 I K
 # LOOP i4 I K
+# LOOP i5 I K
 # WHILE dd H
 function ph_heat_steps(u, w, wn, lam, tol, n, nsteps, its)
     tot = 0
@@ -24,7 +25,9 @@ function ph_heat_steps(u, w, wn, lam, tol, n, nsteps, its)
             dd = 0.0
             for i3 = 1:n
                 dd = dd + (wn[i3] - w[i3]) * (wn[i3] - w[i3])
-                w[i3] = wn[i3]
+            end
+            for i5 = 1:n
+                w[i5] = wn[i5]
             end
             tot = tot + 1
         end

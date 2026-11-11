@@ -11,6 +11,7 @@
 # LOOP jq I K
 # LOOP sk2 S H
 # LOOP sj2 S H
+# LOOP jm I K
 # LOOP jn I K
 # WHILE rn H
 function ph_mg_solve(u, f, r, nfine, num_levels, h1, nu1, nu2, tol, its)
@@ -103,20 +104,23 @@ function ph_mg_solve(u, f, r, nfine, num_levels, h1, nu1, nu2, tol, its)
                 end
             end
         end
-        # squared residual on the fine grid: a scalar reduction
+        # fine-grid residual into r (column 1), then its squared norm as a scalar reduction
         hf2 = h1 * h1
         nfm = nfine - 1
-        rn = 0.0
-        for jn = 1:nfm
+        for jm = 1:nfm
             left = 0.0
-            if jn > 1
-                left = u[jn - 1, 1]
+            if jm > 1
+                left = u[jm - 1, 1]
             end
             right = 0.0
-            if jn < nfm
-                right = u[jn + 1, 1]
+            if jm < nfm
+                right = u[jm + 1, 1]
             end
-            rn = rn + (f[jn, 1] - ((2.0 * u[jn, 1] - left) - right) / hf2) * (f[jn, 1] - ((2.0 * u[jn, 1] - left) - right) / hf2)
+            r[jm, 1] = f[jm, 1] - ((2.0 * u[jm, 1] - left) - right) / hf2
+        end
+        rn = 0.0
+        for jn = 1:nfm
+            rn = rn + r[jn, 1] * r[jn, 1]
         end
         cyc = cyc + 1
     end

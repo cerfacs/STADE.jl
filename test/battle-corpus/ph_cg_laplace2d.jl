@@ -6,17 +6,23 @@
 # LOOP i4 I K
 # LOOP i5 I K
 # LOOP i6 I K
+# LOOP i7 I K
 # WHILE rr H
 function ph_cg_laplace2d(x, b, r, p, ap, tol, nint, its)
     # start: x = 0, r = b, p = r
-    rr = 0.0
     for i1 = 1:nint * nint
         r1 = div(i1 - 1, nint) + 2
         c1 = mod(i1 - 1, nint) + 2
         x[r1, c1] = 0.0
         r[r1, c1] = b[r1, c1]
         p[r1, c1] = b[r1, c1]
-        rr = rr + b[r1, c1] * b[r1, c1]
+    end
+    # squared norm of the start residual, in a loop of its own: a loop that also writes arrays cannot hold a local sum
+    rr = 0.0
+    for i7 = 1:nint * nint
+        r7 = div(i7 - 1, nint) + 2
+        c7 = mod(i7 - 1, nint) + 2
+        rr = rr + b[r7, c7] * b[r7, c7]
     end
     k = 0
     while rr > tol
