@@ -60,9 +60,11 @@ subsequent `bash_tool` call needing Julia.
      kinds ∈ `:scalar_float :scalar_int :array_float :array_int`;
      independents/dependents auto-derived by `parse_kernel`, never
      required from a caller
-   - statement `(kind=:assign|:for|:if, ...)`. **`:while` is
-     deliberately unsupported** — wait for a kernel that needs it
-   - snapshot site `(kind=:value|:array|:branch|:tripcount, array, at)`
+   - statement `(kind=:assign|:for|:if|:while, ...)`; a `while` is
+     `(kind=:while, cond, body)`. The derivative stages support it
+     (adjoint and HVP refuse it with `keep_push_pop = false`), and every
+     walker must read its `cond` as well as its `body`
+   - snapshot site `(kind=:value|:array|:branch|:tripcount|:whilecount|:whilecarry, array, at)`
    - linearization node `(op, args, darg_exprs)`
    - `ii_plan` `Dict{site_key => :independent|:reduction|:mixed|:recompute}`
 6. **Expressions are raw `Expr`/`Symbol`/`Number`** — never a custom AST.
@@ -555,7 +557,7 @@ on one GPU model. `test/validate_coarsen.jl` sabotage-tests each guard, the sele
 
 - [ ] No `module` but the one that wraps the file, no `struct`, `@enum`, top-level `const`, or shared state
 - [ ] Correct stage prefix on every function, under the banner of its stage; no filesystem outside `io_*`
-- [ ] `NamedTuple`s match the frozen shapes; no `:while`; no ad hoc keys
+- [ ] `NamedTuple`s match the frozen shapes; a `:while` handled by every walker, its condition included; no ad hoc keys
 - [ ] Plain `Expr`/`Symbol`/`Number`, never a custom type
 - [ ] Only documented upstream shapes as inputs
 - [ ] No caller-supplied independents/dependents

@@ -9927,8 +9927,9 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             #
             # A missing clause here would be silent: the statement would fall
             # through and vanish from the generated host function.
+            # A condition that reads a device array needs the allowscalar wrap, as an `if` condition does (v0.5.8).
             flush_pending!()
-            push!(exprs, emit_while(stmt.cond, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
+            push!(exprs, emit_while(cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
@@ -14808,7 +14809,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # A missing clause here would be silent: the statement would fall
             # through and vanish from the generated host function.
             flush_pending!()
-            push!(exprs, emit_while(stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics)))
+            push!(exprs, emit_while(cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ? Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics)))
         elseif stmt.kind == :if
             flush_pending!()
             # A host-side branch condition that reads a device array element needs the same @allowscalar

@@ -49,6 +49,18 @@ function validate_while_in_thread(; verbose = true)
     pl = bt_plan(Meta.parse(WT_CASES[1][2]), :cuda, :pinned)
     checks += 1
     occursin("tol", string(pl.kernels[1].args[1])) || (bad += 1; verbose && println("NOT OK the device kernel does not take `tol`"))
+    # a host-kept `while` whose condition reads a device array is wrapped in the allowscalar macro (the first random device run crashed on it)
+    hostsrc = "function g(x, y, tol, n)\n for i1 = 1:n-1\n r1 = x[i1]\n while r1 > y[i1 + 1]\n r1 = 0.5 * r1\n end\n y[i1] = r1\n end\n return nothing\nend"
+    function while_cond_wrapped(e)
+        e isa Expr || return false
+        e.head === :while && return occursin("allowscalar", string(e.args[1]))
+        return any(while_cond_wrapped, e.args)
+    end
+    for be in (:cuda, :jacc)
+        checks += 1
+        pl = bt_plan(Meta.parse(hostsrc), be, :pinned)
+        while_cond_wrapped(pl.host) || (bad += 1; verbose && println("NOT OK ", be, ": a host while with an array in its condition is not wrapped in allowscalar"))
+    end
     println(bad == 0 ? "all $checks while-in-thread checks passed" : "$bad of $checks while-in-thread checks NOT OK")
     return bad == 0
 end
