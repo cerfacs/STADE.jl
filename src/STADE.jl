@@ -9435,7 +9435,7 @@ end
 # already proven safe to split -- a bare dot-product-style `loss[1]=loss[1]+u[i]*v[i]`, not a case with an :if picking the term (a second
 # statement, so this declines, falling back to today's atomic-kernel codegen). Returns `(target, op, arrs, term)` or `nothing`; the caller
 # turns `(arrs, term, loopvar)` into a replacement expression, which differs by target.
-function cgen_idiomatic_scalar_reduction(body::Vector{NamedTuple}, loopvar::Symbol)
+function cgen_idiomatic_scalar_reduction(body::Vector{NamedTuple}, loopvar::Symbol; hdr = nothing)
     length(body) == 1 || return nothing
     stmt = body[1]
     stmt.kind == :assign || return nothing
@@ -9460,20 +9460,139 @@ function cgen_idiomatic_scalar_reduction(body::Vector{NamedTuple}, loopvar::Symb
     else
         return nothing
     end
+    # `s = s + s * x[i]` is not a reduction: each term reads the running value
+    target isa Symbol && cgen_expr_contains(term, target) && return nothing
     refs = Dict{Any,Vector{Any}}()
     cgen_collect_refs!(term, refs)
     isempty(refs) && return nothing
     arrs = Symbol[]
     for (arr, idxs) in refs
         arr isa Symbol || return nothing
-        for idx in idxs
-            length(idx) == 1 && idx[1] === loopvar || return nothing
-        end
         push!(arrs, arr)
     end
+    cgen_reduction_term_views(term, loopvar, target; hdr = hdr) === nothing && return nothing
     cgen_bare_var_outside_index(term, loopvar) && return nothing
     sort!(arrs; by = string)   # deterministic output only, doesn't affect correctness
     return (target, op, arrs, term)
+end
+
+# ---- index forms a reduction term may read ----
+# A reduction is lowered to a mapreduce over views, so every array read in the term must be a view of the range the loop visits:
+#   :lin  one index is `loopvar`, `loopvar + c` or `loopvar - c`, every other index is loop-invariant (`x[i]`, `x[i + 1]`, `r[j, 1]`);
+#   :dec  a flattened 2D nest (skill rule 2): `x[div(i - 1, M) + a, mod(i - 1, M) + b]`, which needs the loop `for i = 1:K * M`.
+# `c`, `a`, `b` and the invariant indices are integer literals or symbols (sums and products of them), never the loop variable; a term that reads its own accumulator is refused first. Everything else
+# is refused, so the loop stays on the host. cgen_idiomatic_scalar_reduction is the only gate; both backends read its answer.
+function cgen_reduction_invariant(e, loopvar::Symbol, target)
+    e isa Integer && return true
+    e isa Symbol && return e !== loopvar
+    e isa Expr && e.head == :call && e.args[1] in (:+, :-, :*) &&
+        return all(a -> cgen_reduction_invariant(a, loopvar, target), e.args[2:end])
+    return false
+end
+
+# a +/- spine as signed terms: `x + a - (b + c)` -> [(1, x), (1, a), (-1, b), (-1, c)]
+function cgen_reduction_signed_terms(e, sign::Int = 1)
+    if e isa Expr && e.head == :call && e.args[1] === :+ && length(e.args) >= 2
+        return reduce(vcat, [cgen_reduction_signed_terms(a, sign) for a in e.args[2:end]])
+    elseif e isa Expr && e.head == :call && e.args[1] === :- && length(e.args) == 3
+        return vcat(cgen_reduction_signed_terms(e.args[2], sign), cgen_reduction_signed_terms(e.args[3], -sign))
+    elseif e isa Expr && e.head == :call && e.args[1] === :- && length(e.args) == 2
+        return cgen_reduction_signed_terms(e.args[2], -sign)
+    end
+    return Any[(sign, e)]
+end
+
+# `e` is one core term (picked by `matches`) plus loop-invariant terms. Returns (match, offset) with the invariant terms summed
+# (an Integer when they are all literals), or nothing when there is not exactly one core term or a remaining term is not invariant.
+function cgen_reduction_core_offset(e, matches::Function, loopvar::Symbol, target)
+    terms = cgen_reduction_signed_terms(e)
+    core = nothing; ncore = 0
+    lit = 0; syms = Any[]
+    for (sg, t) in terms
+        m = sg == 1 ? matches(t) : nothing
+        if m !== nothing
+            ncore += 1; core = m
+        elseif t isa Integer
+            lit += sg * t
+        elseif cgen_reduction_invariant(t, loopvar, target)
+            push!(syms, sg == 1 ? t : Expr(:call, :-, t))
+        else
+            return nothing
+        end
+    end
+    ncore == 1 || return nothing
+    off = isempty(syms) ? lit : Expr(:call, :+, Any[lit == 0 ? nothing : lit; syms]...)
+    off isa Expr && (off = Expr(:call, :+, Any[a for a in off.args[2:end] if a !== nothing]...))
+    return (core, off)
+end
+
+# `loopvar` plus an invariant offset -> the offset (0 for the bare variable); nothing otherwise
+function cgen_reduction_lin_offset(e, loopvar::Symbol, target)
+    r = cgen_reduction_core_offset(e, t -> t === loopvar ? true : nothing, loopvar, target)
+    return r === nothing ? nothing : r[2]
+end
+
+# `div(loopvar - 1, M)` or `mod(loopvar - 1, M)` plus an invariant offset -> (M, offset); nothing otherwise
+function cgen_reduction_dec_form(e, fn::Symbol, loopvar::Symbol, target)
+    matcher = t -> (t isa Expr && t.head == :call && length(t.args) == 3 && t.args[1] === fn && t.args[2] == Expr(:call, :-, loopvar, 1) &&
+                    cgen_reduction_invariant(t.args[3], loopvar, target)) ? t.args[3] : nothing
+    r = cgen_reduction_core_offset(e, matcher, loopvar, target)
+    return r === nothing ? nothing : (r[1], r[2])
+end
+
+# The distinct array reads of `term`, each with the view that holds exactly the elements the loop reads: a vector of
+# (ref, kind, view_indices). nothing when any read is outside the two forms, when the forms mix, or when the :dec header does not prove
+# that the nest is K rows of M. `hdr` is the loop statement (lo, step, hi).
+function cgen_reduction_term_views(term, loopvar::Symbol, target; hdr = nothing)
+    refs = Any[]
+    cgen_reduction_collect_refs!(term, refs) || return nothing
+    isempty(refs) && return nothing
+    out = Any[]
+    kinds = Set{Symbol}()
+    mods = Any[]
+    for r in refs
+        idx = r.args[2:end]
+        lin = Any[cgen_reduction_lin_offset(i, loopvar, target) for i in idx]
+        nlin = count(x -> x !== nothing, lin)
+        if nlin == 1 && all(k -> lin[k] !== nothing || (!cgen_expr_contains(idx[k], loopvar) && cgen_reduction_invariant(idx[k], loopvar, target)), eachindex(idx))
+            push!(kinds, :lin)
+            push!(out, (ref = r, kind = :lin, idx = idx, lin = lin))
+        elseif length(idx) == 2 && cgen_reduction_dec_form(idx[1], :div, loopvar, target) !== nothing &&
+               cgen_reduction_dec_form(idx[2], :mod, loopvar, target) !== nothing
+            d1 = cgen_reduction_dec_form(idx[1], :div, loopvar, target); d2 = cgen_reduction_dec_form(idx[2], :mod, loopvar, target)
+            d1[1] == d2[1] || return nothing
+            push!(kinds, :dec); push!(mods, d1[1])
+            push!(out, (ref = r, kind = :dec, idx = idx, a = d1[2], b = d2[2], m = d1[1]))
+        else
+            return nothing
+        end
+    end
+    length(kinds) == 1 || return nothing
+    if :dec in kinds
+        hdr === nothing && return nothing
+        all(m -> m == mods[1], mods) || return nothing
+        hdr.lo == 1 && hdr.step == 1 || return nothing
+        cgen_reduction_rows(hdr.hi, mods[1]) === nothing && return nothing
+    end
+    return out
+end
+
+# K for a trip count written `K * M` or `M * K`; nothing for any other header
+function cgen_reduction_rows(hi, m)
+    hi isa Expr && hi.head == :call && length(hi.args) == 3 && hi.args[1] === :* || return nothing
+    hi.args[3] == m && return hi.args[2]
+    hi.args[2] == m && return hi.args[3]
+    return nothing
+end
+
+# every distinct :ref of `e` (a ref that nests another is refused later: an array read is not a loop-invariant index)
+function cgen_reduction_collect_refs!(e, refs::Vector{Any})
+    e isa Expr || return true
+    if e.head == :ref
+        any(x -> x == e, refs) || push!(refs, e)
+        return true
+    end
+    return all(a -> cgen_reduction_collect_refs!(a, refs), e.args)
 end
 
 # Replaces every symbol of `e` found in `env` by its value. Used to inline the single-assignment temporaries of a loop body into
@@ -9517,7 +9636,7 @@ end
 # Every target must be a local scalar (not in `fn_args`); a mix with a boxed accumulator is left to the kernel path.
 function cgen_local_scalar_reductions(body::Vector{NamedTuple}, loopvar::Symbol, loop_stmt, root_body, fn_args::Set{Symbol})
     if length(body) == 1
-        r = cgen_idiomatic_scalar_reduction(body, loopvar)
+        r = cgen_idiomatic_scalar_reduction(body, loopvar; hdr = loop_stmt)
         return (r !== nothing && r[1] isa Symbol && !(r[1] in fn_args)) ? [r] : nothing
     end
     all(st -> st.kind == :assign && st.lhs isa Symbol, body) || return nothing
@@ -9552,7 +9671,7 @@ function cgen_local_scalar_reductions(body::Vector{NamedTuple}, loopvar::Symbol,
         inl_vars = Set{Symbol}(); cgen_collect_expr_vars!(inl, inl_vars)
         any(t -> t in inl_vars && t != st.lhs, targets) && return nothing   # an accumulator read by a term
         count(==(st.lhs), (inl.args[2], inl.args[3])) == 1 || return nothing
-        r = cgen_idiomatic_scalar_reduction(NamedTuple[(kind = :assign, lhs = st.lhs, rhs = inl)], loopvar)
+        r = cgen_idiomatic_scalar_reduction(NamedTuple[(kind = :assign, lhs = st.lhs, rhs = inl)], loopvar; hdr = loop_stmt)
         r === nothing && return nothing
         push!(out, r)
     end
@@ -9585,10 +9704,9 @@ end
 # untouched -- used to turn a proven idiomatic-reduction term into a
 # mapreduce closure body operating on plain scalar values rather than
 # array elements.
-function cgen_substitute_indexed_refs(e, subst::Dict{Symbol,Symbol}, loopvar::Symbol)
-    if e isa Expr && e.head == :ref && length(e.args) == 2 &&
-       e.args[1] isa Symbol && e.args[2] === loopvar && haskey(subst, e.args[1])
-        return subst[e.args[1]]
+function cgen_substitute_indexed_refs(e, subst::Dict, loopvar::Symbol)
+    if e isa Expr && e.head == :ref && haskey(subst, e)
+        return subst[e]
     elseif e isa Expr
         return Expr(e.head, [cgen_substitute_indexed_refs(a, subst, loopvar) for a in e.args]...)
     else
@@ -9612,8 +9730,11 @@ end
 # through `mapreduce` against 132.5 us through the atomic kernel it replaces, both exact. A vendor
 # path that cannot be measured is not a fast path.
 function cgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Symbol, lo, step, hi; dims::Bool = false)
-    rng = cgen_reduction_range(lo, step, hi)
-    src = [Expr(:call, :view, a, rng) for a in arrs]
+    views = cgen_reduction_term_views(term, loopvar, nothing; hdr = (lo = lo, step = step, hi = hi))
+    views === nothing && error("cgen_idiomatic_reduction_value: a term the gate accepted has no view form")
+    # one closure argument per distinct read, in a fixed order; for the plain `a[i]` form this is the sorted array list, as before
+    views = sort(views; by = v -> (string(v.ref.args[1]), string(v.ref)))
+    src = Any[cgen_reduction_view(v, lo, step, hi) for v in views]
     # `init` is not decoration. A loop that may not run has not run, and
     # its reduction must contribute zero. Julia infers a neutral element
     # for a multi-collection mapreduce but NOT for a single collection
@@ -9627,18 +9748,42 @@ function cgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Sym
     # `zero(eltype(·))` resolves at run time, so no precision assumption
     # is baked in, and it changes no non-empty result because the operator
     # is always `+`.
-    init = Expr(:kw, :init, Expr(:call, :zero, Expr(:call, :eltype, src[1])))
+    init = Expr(:kw, :init, Expr(:call, :zero, Expr(:call, :eltype, views[1].ref.args[1])))
     # dims = true keeps the result on the device as a one-element array, so no host synchronization is needed
     kws = dims ? Any[init, Expr(:kw, :dims, 1)] : Any[init]
-    if length(arrs) == 1 && term == Expr(:call, :^, Expr(:ref, arrs[1], loopvar), 2)
+    if length(views) == 1 && views[1].kind === :lin && term == Expr(:call, :^, Expr(:ref, views[1].ref.args[1], loopvar), 2)
         return Expr(:call, :sum, kws..., :abs2, src[1])
     else
-        closure_args = [Symbol(:__mr_, i) for i in eachindex(arrs)]
-        subst = Dict(arrs[i] => closure_args[i] for i in eachindex(arrs))
+        closure_args = [Symbol(:__mr_, i) for i in eachindex(views)]
+        subst = Dict{Any,Symbol}(views[i].ref => closure_args[i] for i in eachindex(views))
         closure_body = cgen_substitute_indexed_refs(term, subst, loopvar)
         return Expr(:call, :mapreduce, kws...,
                     Expr(:->, Expr(:tuple, closure_args...), closure_body), :+, src...)
     end
+end
+
+cgen_reduction_shift(x, off) = off == 0 ? x : Expr(:call, :+, x, off)
+
+# The view of one read. :lin shifts the loop range by the read's offset and holds every invariant index fixed (a scalar index drops
+# its dimension, so every view is a vector). :dec is the K x M rectangle of a flattened 2D nest.
+function cgen_reduction_view(v, lo, step, hi)
+    if v.kind === :lin
+        idx = Any[]
+        for (k, i) in enumerate(v.idx)
+            if v.lin[k] === nothing
+                push!(idx, i)
+            else
+                off = v.lin[k]
+                push!(idx, cgen_reduction_range(cgen_reduction_shift(lo, off), step, cgen_reduction_shift(hi, off)))
+            end
+        end
+        return Expr(:call, :view, v.ref.args[1], idx...)
+    end
+    k = cgen_reduction_rows(hi, v.m)
+    # div(i - 1, M) runs 0 .. K - 1 and mod(i - 1, M) runs 0 .. M - 1, so the rows read are a .. a + K - 1 and the columns b .. b + M - 1
+    rows = Expr(:call, :(:), v.a, Expr(:call, :-, cgen_reduction_shift(k, v.a), 1))
+    cols = Expr(:call, :(:), v.b, Expr(:call, :-, cgen_reduction_shift(v.m, v.b), 1))
+    return Expr(:call, :view, v.ref.args[1], rows, cols)
 end
 
 # The reduction reads exactly the elements the loop visited, and no more.
@@ -9994,7 +10139,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             eligible = stage === :ok
             verdict = :host
             if eligible
-                red = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
+                red = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var; hdr = stmt)
                 verdict = red !== nothing ? :reduction : :kernel
                 if red !== nothing
                     target, op, arrs, term = red
@@ -10078,7 +10223,7 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 flush_pending!()
                 push!(exprs, emit_if(Expr(:call, :<,
                                           cgen_trip_count(stmt.lo, stmt.step, stmt.hi),
-                                          reduction_threshold),
+                                          min(reduction_threshold, cgen_local_reduction_threshold())),
                                      Any[loop_branch], red_branch))
             else
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1)))
@@ -10184,6 +10329,18 @@ cgen_kernel_fname(owner::Symbol, idx::Int, backend) =
 # The atomic against the mapreduce crosses near 6e5 iterations there, so the old mapreduce side only paid off far above this default. The
 # default stays at 32768: below it the two kernels tie, and the atomic keeps its coarsened and private-array variants.
 cgen_reduction_threshold_default() = 32768
+
+# The threshold above is for an array-element accumulator, where the alternative to the device reduction is an atomic kernel. A LOCAL scalar
+# accumulator has no kernel to fall back on: below the threshold it runs as a host loop that reads the device arrays one element at a time,
+# about 8 to 12 us per read on a Tesla V100. The device reduction costs 60 to 130 us whatever the length, so the two cross near 10 to 16
+# elements, not near 32768. Measured on a V100, same kernels, threshold 32768 against 0 (seconds, best of one run):
+#   conjugate gradient, 32 x 32 grid, 125 iterations    6.28 -> 0.015 (CUDA)   6.26 -> 0.032 (JACC)
+#   power iteration, n = 256, 2421 iterations          29.39 -> 0.36  (CUDA)  29.12 -> 0.67  (JACC)
+#   Jacobi, 32 x 32 grid, 4331 iterations              did not finish in 15 min -> 0.24 (CUDA) / 0.57 (JACC)
+#   conjugate gradient, 5 x 5 grid, 13 iterations       0.0166 -> 0.0012
+# The earlier mlp1d point (n_h = 16, host loop 12% ahead) sits at the crossover. A local reduction therefore uses the smaller of
+# `reduction_threshold` and this value; `reduction_threshold = 0` still means every reduction runs on the device.
+cgen_local_reduction_threshold() = 16
 
 function cgen_trip_count(lo, step, hi)
     step isa Number && abs(step) == 1 &&
@@ -14861,7 +15018,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             eligible = stage === :ok
             verdict = :host
             if eligible
-                red = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var)
+                red = cgen_idiomatic_scalar_reduction(stmt.body, stmt.var; hdr = stmt)
                 verdict = red !== nothing ? :reduction : :kernel
                 if red !== nothing
                     target, op, arrs, term = red
@@ -14943,7 +15100,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     push!(red_stmts, Expr(:(=), lt, Expr(:call, lop, lt, Expr(:ref, Expr(:call, :Array, redvar), 1))))
                 end
                 red_branch = emit_if(Expr(:call, :>, n_iter, 0), red_stmts, Any[])
-                push!(exprs, emit_if(Expr(:call, :<, n_iter, reduction_threshold), Any[loop_branch], Any[red_branch]))
+                push!(exprs, emit_if(Expr(:call, :<, n_iter, min(reduction_threshold, cgen_local_reduction_threshold())), Any[loop_branch], Any[red_branch]))
             else
                 push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, depth = depth + 1, hoist_atomics)))
             end
@@ -15648,18 +15805,28 @@ function jgen_idiomatic_reduction_value(arrs::Vector{Symbol}, term, loopvar::Sym
                           Expr(:call, :+, lo, Expr(:call, :*, shift, step))
         closure = Expr(:->, Expr(:tuple, k, arrs...), jgen_substitute_loop_index(term, loopvar, pos))
     end
-    return Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_reduce"))), nothing,
+    call = Expr(:macrocall, Expr(:., :JACC, QuoteNode(Symbol("@parallel_reduce"))), nothing,
                 Expr(:(=), :range, n_iter), Expr(:call, closure, arrs...))
+    # A host scalar the closure reads (an offset, a row index) is captured by reference. If the enclosing host
+    # function assigns it more than once Julia boxes it (Core.Box), the closure is no longer isbits and the
+    # device compile fails (measured on V100: transformer's row_sum reduction). `let v = v` rebinds each one to
+    # a fresh single-assignment local, so the closure captures plain values.
+    free = Set{Symbol}()
+    cgen_collect_expr_vars!(term, free)
+    cgen_collect_expr_vars!(lo, free)
+    cgen_collect_expr_vars!(step, free)
+    setdiff!(free, Set{Symbol}(arrs)); delete!(free, loopvar); delete!(free, :__jgen_k)
+    isempty(free) && return call
+    binds = Any[Expr(:(=), v, v) for v in sort!(collect(free); by = string)]
+    return Expr(:let, Expr(:block, binds...), Expr(:block, call))
 end
 
 # Rewrites `arr[loopvar]` to `arr[idx]` everywhere in `e`. Narrower than substituting the bare symbol on
 # purpose: cgen_idiomatic_scalar_reduction accepts a term only when loopvar occurs nowhere except as a
 # sole :ref index, so any other thing wearing that name is not this loop's variable.
 function jgen_substitute_loop_index(e, loopvar::Symbol, idx)
+    e === loopvar && return idx
     e isa Expr || return e
-    if e.head == :ref && length(e.args) == 2 && e.args[2] === loopvar
-        return Expr(:ref, e.args[1], idx)
-    end
     return Expr(e.head, Any[jgen_substitute_loop_index(a, loopvar, idx) for a in e.args]...)
 end
 
