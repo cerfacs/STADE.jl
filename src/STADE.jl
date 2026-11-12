@@ -10098,7 +10098,9 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
     for stmt in body
         if stmt.kind == :stackpush
             flush_pending!()
-            push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
+            # a push! of a device element is a scalar read of a device array: it needs the same allowscalar block as any host read
+            pe = Expr(:call, :push!, stmt.stack, stmt.value)
+            push!(exprs, cgen_expr_has_ref(stmt.value) ? Expr(:macrocall, backend.allowscalar_macro, nothing, Expr(:block, pe)) : pe)
         elseif stmt.kind == :assign
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? cgen_stack_device_expr(stmt.rhs, backend) : stmt.rhs
             push!(pending, Expr(:(=), stmt.lhs, rhs))
@@ -15045,7 +15047,8 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
     for stmt in body
         if stmt.kind == :stackpush
             flush_pending!()
-            push!(exprs, Expr(:call, :push!, stmt.stack, stmt.value))
+            pe = Expr(:call, :push!, stmt.stack, stmt.value)
+            push!(exprs, cgen_expr_has_ref(stmt.value) && allowscalar_macro !== nothing ? Expr(:macrocall, allowscalar_macro, nothing, Expr(:block, pe)) : pe)
         elseif stmt.kind == :assign
             rhs = cgen_is_sized_stack_alloc(stmt.rhs) ? jgen_stack_device_expr(stmt.rhs) : stmt.rhs
             push!(pending, Expr(:(=), stmt.lhs, rhs))
