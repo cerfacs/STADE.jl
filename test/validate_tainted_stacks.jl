@@ -5,6 +5,8 @@
 #   Defect 3: a scalar that the guard arm alone assigns (`nfm = nfine - 1`) was read by the sizing loop of initstacks in a pass where the guard is false:
 #   UndefVarError. The scalar now starts at 0 before that loop.
 #   Defect 2: initstacks counted its slots with `x += 1`, which cgen_parse_generated does not read, so the GPU ingest of the initstacks refused it.
+#   Defect 4: the host code pushed a device element onto a push!/pop! stack with no allowscalar block (`push!(u_stack, u[j, l])`): "Scalar indexing is
+#   disallowed" on the V100 for phc_mg_solve, CUDA and JACC.
 # usage: julia validate_tainted_stacks.jl
 include(joinpath(dirname(@__DIR__), "src", "STADE.jl"))
 
@@ -87,6 +89,20 @@ function ts_guard_scalar(u, f, nfine, maxit)
     return nothing
 end"""
 
+# number of `push!(stack, <expression with an array read>)` outside an allowscalar macro call
+function ts_bare_push(e, inside = false)
+    e isa Expr || return 0
+    if e.head == :macrocall
+        nm = string(e.args[1])
+        return sum(ts_bare_push(a, inside || occursin("allowscalar", nm)) for a in e.args[2:end]; init = 0)
+    end
+    n = 0
+    if e.head == :call && length(e.args) == 3 && e.args[1] == :push! && !inside && STADE.cgen_expr_has_ref(e.args[3])
+        n += 1
+    end
+    return n + sum(ts_bare_push(a, inside) for a in e.args; init = 0)
+end
+
 function validate_tainted_stacks(; verbose = true)
     bad = 0; checks = 0
     say(ok, msg) = (checks += 1; ok || (bad += 1; verbose && println("NOT OK ", msg)))
@@ -134,6 +150,17 @@ function validate_tainted_stacks(; verbose = true)
             ok = try f(); true catch ex; verbose && println("  ", label, " ", mode, ": ", first(sprint(showerror, ex), 160)); false end
             say(ok, "$mode/$label: the initstacks is refused by the GPU ingest")
         end
+    end
+    # host push! of a device element: wrapped, CUDA and JACC, adjoint and HVP (cgen_host_box_refs-style scan of the generated host code)
+    for (mode, gen) in (("adjoint", a1), ("hvp", h1))
+        ex = mode == "hvp" ? gen.hvp : gen.adjoint
+        hc = STADE.stade_gpu(ex, STADE.cgen_backend_cuda()).host
+        hj = STADE.stade_jacc(ex).host
+        say(occursin("push!", string(hc)) && occursin("push!", string(hj)), "$mode: no host push! to scan")
+        say(ts_bare_push(hc) == 0, "$mode/cuda: $(ts_bare_push(hc)) push! of a device element outside allowscalar")
+        say(ts_bare_push(hj) == 0, "$mode/jacc: $(ts_bare_push(hj)) push! of a device element outside allowscalar")
+        # sabotage: the detector must see a bare push
+        say(ts_bare_push(Meta.parse("begin; push!(s, u[1]); end")) == 1, "sabotage: detector missed a bare push of a device element")
     end
     println(bad == 0 ? "all $checks tainted-stack checks passed" : "$bad of $checks NOT OK")
     return bad
