@@ -221,7 +221,7 @@ function validate_array_snapshot(dir::String = joinpath(@__DIR__, "val-corpus"))
     for (nm, patches, kernel, probe) in (
             ("G10: a body that writes one slot is snapshotted", [(g10, "")], "asnap_direct", "asnap_plan_string"),
             ("G13: a write that follows the loop variable is snapshotted", [(g13, "")], "asnap_slice", "asnap_plan_string"),
-            ("G14: a loop with no scatter is snapshotted", [(g14, "")], "asnap_readbetween", "asnap_plan_string"),
+            ("G14: a loop with no scatter is snapshotted", [(g14, "")], "asnap_noscatter", "asnap_plan_string"),
             ("G6: the same array is snapshotted again in an inner loop", [(g6, "")], "asnap_nestedboth", "asnap_plan_string"))
         want = get(expected, kernel, "-")
         r = sabotaged_text(patches, "$(probe)($(repr(path(kernel))))")

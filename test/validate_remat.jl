@@ -49,7 +49,9 @@ function validate_remat(dir::String = joinpath(@__DIR__, "val-corpus"))
                           "head{xv3 = x[(t + ci) - 1]}", "head{xv4 = x[t + cj]}", "w[2ci - 1]"],
         "cross_readbefore" => String[], "cross_entry" => String[], "cross_after" => String[],
         "cross_ifwrite" => String[], "cross_nested" => String[], "cross_branchlocal" => String[], "cross_argread" => String[],
-        "cross_mixed" => ["cross(tmp)", "head{tmp = x[ci] * w[ci]}"],
+        # `tmp` is loop-local, and its first write is no longer a save site (site-level TBR drops it), so there is nothing to rebuild.
+        # `xv` keeps both of its first-write saves, and its all-or-nothing veto still holds, so the plan is empty.
+        "cross_mixed" => String[],
         "so_tile" => sort(["cross(wv)", "cross(wv)", "cross(xv)", "cross(xv)",
                            "head{wv = w[(ci - 1) * 2 + 1]; xv = y[t + ci]}", "head{wv = w[(ci - 1) * 2 + 2]; xv = x[t + ci]}",
                            "w[(ci - 1) * 2 + 1]", "w[(ci - 1) * 2 + 2]", "x[(t + ci) - 1]", "y[(t + ci) - 1]"]),
