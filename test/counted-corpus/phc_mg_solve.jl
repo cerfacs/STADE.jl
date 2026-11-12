@@ -15,7 +15,7 @@
 # LOOP jn I K
 function phc_mg_solve(u, f, r, nfine, num_levels, h1, nu1, nu2, tol, maxit)
     rn = 1.0
-    # loop-invariant, defined outside the guard: a size computed from a scalar first defined inside the guard is read when the guard is false
+    # loop-invariant, so computed once outside the guard
     hf2 = h1 * h1
     nfm = nfine - 1
     for kk = 1:maxit

@@ -41,8 +41,7 @@ function cw_plan(e, mode; force_dead = nothing)
     return (host = pg.host, init = init)
 end
 
-# phc_mg_solve is skipped: its initstacks does not reach the GPU parser yet (open defect, tracked for the next release)
-const CW_SKIP = Set(["phc_mg_solve.jl"])
+const CW_SKIP = Set{String}()
 for f in sort(readdir(CW_DIR)); endswith(f, ".jl") || continue
     f in CW_SKIP && (println("skip ", f, " (open defect)"); continue)
     e = STADE.io_read_corpus_entry(joinpath(CW_DIR, f))
@@ -55,7 +54,7 @@ end
 # sabotage: forcing the shrink of a stack the host still indexes must be caught. The kernels that stay on the host (gs1d and the other carried-value
 # solvers) are the ones that index a stack; the offloaded element-wise kernels no longer do, so the target is looked up and not named.
 sab = nothing
-for f in sort(readdir(CW_DIR)); endswith(f, ".jl") && f != "phc_mg_solve.jl" || continue
+for f in sort(readdir(CW_DIR)); endswith(f, ".jl") || continue
     e = STADE.io_read_corpus_entry(joinpath(CW_DIR, f))
     hi = cw_host_indexed(cw_plan(e, :hvp).host)
     if !isempty(hi); global sab = (f, e, sort(collect(hi))); break; end

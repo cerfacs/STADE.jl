@@ -5049,6 +5049,9 @@ function agen_tier_b_sizing_stmts(kernel, active_map, value_needed, exempt, stac
     return (vcat(decls, body), total_of)
 end
 
+# `x = x + 1`, not `x += 1`: cgen_parse_generated ingests plain assignments only, and a counter in initstacks has to reach it
+agen_size_incr(v) = Expr(:(=), v, Expr(:call, :+, v, 1))
+
 function agen_tier_b_sizing_walk(body, kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
     out = Any[]
     for (idx, stmt) in enumerate(body)
@@ -5058,19 +5061,19 @@ function agen_tier_b_sizing_walk(body, kinds, active_map, value_needed, reassign
             if kinds[var] in (:scalar_float, :array_float) && get(active_map, var, false) &&
                agen_needs_snapshot(stmt.lhs, stmt.rhs, var, site_source, agen_site_key(body, idx)) && !(var in exempt)
                 nm = agen_site_stack_name((kind = agen_snapshot_kind(stmt.lhs), array = var, at = 0))
-                haskey(total_of, nm) && push!(out, Expr(:(+=), total_of[nm], 1))
+                haskey(total_of, nm) && push!(out, agen_size_incr(total_of[nm]))
             end
             if kinds[var] in (:scalar_float, :scalar_int) && !agen_expr_reads_array(stmt.rhs, kinds)
                 push!(out, Expr(:(=), var, stmt.rhs))
             end
         elseif stmt.kind == :for
             for bv in agen_tripcount_bound_vars(stmt, reassigned)
-                haskey(total_of, :tripcount_stack) && push!(out, Expr(:(+=), total_of[:tripcount_stack], 1))
+                haskey(total_of, :tripcount_stack) && push!(out, agen_size_incr(total_of[:tripcount_stack]))
             end
             inner = agen_tier_b_sizing_walk(stmt.body, kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
             push!(out, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, inner))
         elseif stmt.kind == :if
-            haskey(total_of, :branch_stack) && push!(out, Expr(:(+=), total_of[:branch_stack], 1))
+            haskey(total_of, :branch_stack) && push!(out, agen_size_incr(total_of[:branch_stack]))
             then_inner = agen_tier_b_sizing_walk(stmt.then, kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
             els_inner = agen_tier_b_sizing_walk(stmt.els, kinds, active_map, value_needed, reassigned, exempt, stacks, total_of, push_pop)
             push!(out, emit_if(stmt.cond, then_inner, els_inner))
@@ -5078,7 +5081,7 @@ function agen_tier_b_sizing_walk(body, kinds, active_map, value_needed, reassign
     end
     for var in agen_block_boundary_vars(body, kinds, value_needed, exempt, stacks)
         nm = stacks[(:value, var)]
-        haskey(total_of, nm) && push!(out, Expr(:(+=), total_of[nm], 1))
+        haskey(total_of, nm) && push!(out, agen_size_incr(total_of[nm]))
     end
     return out
 end
@@ -5176,7 +5179,31 @@ end
 # `agen_pos0(header)+1` (Phase C's read uses the same index, guaranteeing agreement), then updates the total. Also builds a
 # per-iteration `val_<var>_<block_id>` table for every block-local scalar a sizing formula depends on, so agen_site_index can
 # resolve it by lookup instead of an unsafe bare reference.
-function agen_tier_b_block_stmts(block_id, blk, kinds)
+# A size-relevant scalar that the block body assigns only inside an `if` arm or a nested loop has no value in an iteration where that arm does not
+# run, and the sizing loop reads it right after (UndefVarError for a counted loop whose guard goes false). Such a scalar is given a 0 before the loop,
+# unless an earlier statement of the skeleton already assigns it. Sizes then only ever stay too large for a pass that did not run, never undefined.
+function agen_tier_b_cond_only_scalars(blk, kinds, relevant, defined_before)
+    top = Set{Symbol}(st.lhs for st in blk.body if st.kind == :assign && st.lhs isa Symbol)
+    nested = Set{Symbol}()
+    function collect(b)
+        for st in b
+            if st.kind == :assign
+                st.lhs isa Symbol && push!(nested, st.lhs)
+            elseif st.kind == :if
+                collect(st.then); collect(st.els)
+            elseif st.kind in (:for, :while)
+                collect(st.body)
+            end
+        end
+    end
+    for st in blk.body
+        st.kind == :assign && continue
+        st.kind == :if ? (collect(st.then); collect(st.els)) : collect(st.body)
+    end
+    return sort([v for v in relevant if v in nested && !(v in top) && !(v in defined_before) && haskey(kinds, v) && kinds[v] in (:scalar_int, :scalar_float)]; by = string)
+end
+
+function agen_tier_b_block_stmts(block_id, blk, kinds; defined_before = Set{Symbol}())
     header = blk.header
     # clamped: this table is indexed by agen_pos0(header) + 1, so its length must be the
     # header's ACTUAL trip count -- a negative would be a Vector length, not just a bad sum
@@ -5203,6 +5230,9 @@ function agen_tier_b_block_stmts(block_id, blk, kinds)
     relevant = Set{Symbol}(value_vars)
     for s_ in stack_names
         agen_collect_expr_vars!(blk.local_sizes[s_], relevant)
+    end
+    for v in agen_tier_b_cond_only_scalars(blk, kinds, relevant, defined_before)
+        v == header.var || push!(decls, Expr(:(=), v, kinds[v] == :scalar_int ? 0 : 0.0))
     end
     split_at = agen_tier_b_split_point(blk.body, relevant)
     pre_body = split_at === nothing ? blk.body : blk.body[1:split_at - 1]
@@ -5242,7 +5272,8 @@ function agen_tier_b_kernel_skeleton(body, kinds, layout, done = Set{Symbol}())
             key = agen_site_key(body, idx)
             if haskey(layout.block_of, key)
                 block_id = layout.block_of[key]
-                append!(out, agen_tier_b_block_stmts(block_id, layout.blocks[block_id], kinds))
+                append!(out, agen_tier_b_block_stmts(block_id, layout.blocks[block_id], kinds;
+                                                      defined_before = Set{Symbol}(e.args[1] for e in out if e isa Expr && e.head == :(=) && e.args[1] isa Symbol)))
             else
                 # A captured term inside this loop nest goes in front of the outermost loop when nothing in the nest changes
                 # what it reads: the replay loop then holds no live-out scalar and still offloads.
@@ -6241,7 +6272,9 @@ function agen_forward_body(body, kinds, active_map, value_needed, reassigned, st
             # addresses each flag by its own key, so its emission stays as it was.
             then_exprs = Any[]
             els_exprs = Any[]
-            if ectx.keep_push_pop
+            # The same holds in indexed mode for a flag stack that fell back to push!/pop! (agen_use_stack_push): the
+            # flag has to sit below the pushes of the arm's body, or the backward pop reads one of them instead.
+            if ectx.keep_push_pop || agen_use_stack_push(ectx, nm)
                 append!(then_exprs, agen_forward_body(stmt.then, kinds, active_map, value_needed, reassigned, stacks, exempt;
                                                         ectx = ectx,
                                                         lin_body = lin_body === nothing ? nothing : lin_body[idx].then,
@@ -6828,8 +6861,12 @@ function cgen_parse_return_values(ret_stmt::Expr)
     error("cgen_parse_generated: unsupported return form `$(ret_stmt)` -- expected `return nothing`, a bare variable, or a tuple of variables")
 end
 
+# `sizehint!(stack, n)` in an initstacks only presizes a host push!/pop! stack (see agen_tier_b_sizing_stmts); it changes no value, so the
+# ingest drops it instead of refusing the whole initstacks.
+cgen_is_sizehint(s) = s isa Expr && s.head == :call && !isempty(s.args) && s.args[1] == :sizehint!
+
 function cgen_parse_generated_statements(stmts::Vector)
-    return NamedTuple[cgen_parse_generated_statement(s) for s in stmts]
+    return NamedTuple[cgen_parse_generated_statement(s) for s in stmts if !cgen_is_sizehint(s)]
 end
 
 function cgen_parse_generated_statement(stmt)
@@ -6851,7 +6888,7 @@ function cgen_parse_generated_statement(stmt)
         return cgen_parse_generated_if(stmt)
     elseif stmt.head == :call && stmt.args[1] == :push!
         length(stmt.args) == 3 || error("cgen_parse_generated: malformed push! `$(stmt)`")
-        return (kind = :stackpush, stack = stmt.args[2], value = stmt.args[3])
+        return (kind = :stackpush, stack = stmt.args[2], value = stmt.args[3], body = NamedTuple[])  # empty body: a walker that falls through to `st.body` sees no nested statements
     else
         error("cgen_parse_generated: unrecognized statement form `Expr(:$(stmt.head), ...)` -- this parser only understands STADE's own tgen_/agen_ output, never arbitrary user source")
     end
@@ -7058,6 +7095,8 @@ function cgen_gather_resets(body::Vector{NamedTuple})
         for st in b
             if st.kind == :assign
                 st.lhs isa Symbol && (last[st.lhs] = st.rhs isa Number ? st.rhs : nothing)
+            elseif st.kind == :stackpush
+                # a push! writes no variable
             else
                 spoil(st.kind == :if ? vcat(st.then, st.els) : st.body)
             end

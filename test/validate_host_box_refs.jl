@@ -44,7 +44,6 @@ function validate_host_box_refs(; verbose = true)
     seen_gs1d = false
     for f in sort(readdir(dir))
         endswith(f, ".jl") || continue
-        f == "phc_mg_solve.jl" && continue   # its initstacks does not ingest yet (open defect, not this one)
         e = STADE.io_read_corpus_entry(joinpath(dir, f))
         for mode in (:adjoint, :hvp)
             g = mode == :hvp ? STADE.stade_hvp(e; keep_push_pop = false) : STADE.stade_adjoint(e; keep_push_pop = false)

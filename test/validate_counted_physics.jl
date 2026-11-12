@@ -60,8 +60,6 @@ if abspath(PROGRAM_FILE) == @__FILE__
     for mk in ph_all()
         spec = mk(); nm = replace(spec.file, ".jl" => "")
         (isempty(want) || nm in want) || continue
-        # ph_mg_solve fails (reverse-sweep BoundsError with two or more cycles): an open defect, so a default run skips it; name it to run it
-        if isempty(want) && nm == "ph_mg_solve"; println(rpad(nm, 18), "skipped (open defect, run by name)"); continue; end
         cspec = pc_counted_spec(spec)
         r = try ph_check(cspec; kpp = false) catch e; Dict(:error => first(sprint(showerror, e, catch_backtrace()), 600)); end
         c = try pc_compare(spec, cspec) catch e; (error = first(sprint(showerror, e, catch_backtrace()), 600),) end
