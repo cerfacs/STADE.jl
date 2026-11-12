@@ -80,7 +80,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "ddp_written_per_sample" => 0,
         # Array-snapshot witnesses. Each of these scatters into an array that the loop reads after every write, so the array snapshot
         # replaces the per-write saves and the scatter loops leave the host. The v0.4.7 ceilings were 7 (10 for nested, 9 for ii).
-        "asnap_ok" => 3, "asnap_2d" => 3, "asnap_ifwrite" => 3, "asnap_twoarrays" => 3, "asnap_zerocover" => 3, "asnap_zerotrip" => 3,
+        "asnap_ok" => 3, "asnap_noscatter" => 3, "asnap_2d" => 3, "asnap_ifwrite" => 3, "asnap_twoarrays" => 3, "asnap_zerocover" => 3, "asnap_zerotrip" => 3,
         "asnap_outside" => 3, "asnap_nested" => 6, "asnap_nestedboth" => 6, "asnap_ii" => 3,
         # Kernels the snapshot must refuse. These keep their host loops. asnap_nameclash keeps the scatter into m on the host,
         # because the name of its snapshot stack would collide with the array m_snap.

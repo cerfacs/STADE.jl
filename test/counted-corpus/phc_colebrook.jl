@@ -6,12 +6,14 @@ function phc_colebrook(re, rough, fric, tol, n, maxit)
         x1 = 8.0
         dx = 1.0
         for k1 = 1:maxit
+            # x = -2 log10( rough/3.7 + 2.51 x / Re ), computed every pass and applied while the last applied change was above tol.
+            # dx is assigned outside the guard: a scalar assigned only inside it keeps the adjoint of this loop on the host.
+            xn = -2.0 * log10(rough[i1] / 3.7 + 2.51 * x1 / re[i1])
+            dn = abs(xn - x1)
             if dx > tol
-                # x = -2 log10( rough/3.7 + 2.51 x / Re )
-                xn = -2.0 * log10(rough[i1] / 3.7 + 2.51 * x1 / re[i1])
-                dx = abs(xn - x1)
                 x1 = xn
             end
+            dx = dn
         end
         fric[i1] = 1.0 / (x1 * x1)
     end

@@ -197,7 +197,7 @@ function ph_masks(kernel, spec)
     return m
 end
 
-function ph_check(spec; verbose = true)
+function ph_check(spec; verbose = true, kpp = true)
     Random.seed!(20261110)
     path = joinpath(PH_DIR, spec.file)
     expr = STADE.io_read_corpus_entry(path)
@@ -244,21 +244,24 @@ function ph_check(spec; verbose = true)
     end
     res[:tan_ref] = e2; res[:tan_fd] = e3
     # (4)-(6) adjoint and HVP, stack mode
-    ad = STADE.stade_adjoint(expr; keep_push_pop = true)
+    ad = STADE.stade_adjoint(expr; keep_push_pop = kpp)
     adf = STADE.val_compile(ad.adjoint); isf = STADE.val_compile(ad.initstacks)
-    hv = STADE.stade_hvp(expr; keep_push_pop = true)
-    hvf = STADE.val_compile(hv.hvp)
+    hv = STADE.stade_hvp(expr; keep_push_pop = kpp)
+    hvf = STADE.val_compile(hv.hvp); hsf = STADE.val_compile(hv.initstacks)
+    # keep_push_pop = false: the stack sizes come from integer arguments, named by the parameters of initstacks
+    san = kpp ? Symbol[] : Symbol[a for a in ad.initstacks.args[1].args[2:end]]
+    hsan = kpp ? Symbol[] : Symbol[a for a in hv.initstacks.args[1].args[2:end]]
     seed = STADE.val_random_values_like(kernel, V)
     for a in keys(seed); a in spec.outs || (seed[a] = seed[a] isa Number ? 0.0 : zeros(size(seed[a]))); end
     hasproperty(spec, :level1) && for a in spec.outs; seed[a][:, 2:end] .= 0.0; end
     seedf = STADE.val_flatten(kernel, seed)
-    grad(x) = STADE.val_call_adjoint(adf, isf, kernel, I, STADE.val_unflatten(kernel, I, V, x), seed)
+    grad(x) = STADE.val_call_adjoint(adf, isf, kernel, I, STADE.val_unflatten(kernel, I, V, x), seed; stack_arg_names = san)
     e4 = 0.0
     for t in 1:3
         xd = ph_proj(spec, kernel, I, V, STADE.val_randn(length(x0)) .* mask)
         yb = STADE.val_random_values_like(kernel, V)
         ydv = jvp(x0, xd)
-        xb = STADE.val_call_adjoint(adf, isf, kernel, I, STADE.val_unflatten(kernel, I, V, x0), yb)
+        xb = STADE.val_call_adjoint(adf, isf, kernel, I, STADE.val_unflatten(kernel, I, V, x0), yb; stack_arg_names = san)
         lhs = sum(STADE.val_flatten(kernel, yb) .* ydv); rhs = sum(xb .* xd)
         e4 = max(e4, abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1.0))
     end
@@ -271,8 +274,8 @@ function ph_check(spec; verbose = true)
         fd = (sum(f_eval(x0 .+ h .* d) .* seedf) - sum(f_eval(x0 .- h .* d) .* seedf)) / (2h)
         e5 = max(e5, abs(fd - sum(g0 .* d)) / max(abs(fd), 1e-12))
         gfd = (grad(x0 .+ h .* d) .- grad(x0 .- h .* d)) ./ (2h)
-        hvv = STADE.val_call_hv(hvf, isf, kernel, I, STADE.val_unflatten(kernel, I, V, x0), seed,
-                                STADE.val_unflatten(kernel, I, STADE.val_zeros_like(kernel, V), d), STADE.val_zeros_like(kernel, V))
+        hvv = STADE.val_call_hv(hvf, hsf, kernel, I, STADE.val_unflatten(kernel, I, V, x0), seed,
+                                STADE.val_unflatten(kernel, I, STADE.val_zeros_like(kernel, V), d), STADE.val_zeros_like(kernel, V); stack_arg_names = hsan)
         e6 = max(e6, maximum(abs.((gfd .- hvv) .* mask)) / max(maximum(abs.(gfd .* mask)), 1e-12))
     end
     res[:grad_fd] = e5; res[:hvp_fd] = e6

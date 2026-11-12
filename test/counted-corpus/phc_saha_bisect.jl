@@ -5,17 +5,17 @@ function phc_saha_bisect(s, w, xion, tol, n, maxit)
     for i1 = 1:n
         lo = 0.0
         hi = w[i1]
-        wid = hi - lo
         for k1 = 1:maxit
+            # mid and the sign of g are computed every pass; the bracket moves only while it is wider than tol
+            wid = hi - lo
+            mid = 0.5 * (lo + hi)
+            gm = mid * mid - s[i1] * (1.0 - mid)
             if wid > tol
-                mid = 0.5 * (lo + hi)
-                # g(mid) = mid^2 - s (1 - mid)
-                if mid * mid - s[i1] * (1.0 - mid) > 0.0
+                if gm > 0.0
                     hi = mid
                 else
                     lo = mid
                 end
-                wid = hi - lo
             end
         end
         x1 = 0.5 * (lo + hi)

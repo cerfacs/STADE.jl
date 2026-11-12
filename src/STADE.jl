@@ -11632,6 +11632,43 @@ end
 
 cgen_host_fname(name::Symbol, backend) = Symbol(string(name) * backend.suffix)
 
+# A scalar boxed into a 1-element device array (cgen_emit / jgen_emit) is still a bare name in the host code of a loop the splitter left sequential
+# (`h2b = h2b + f[i] * c`): CuArray + Float64, or a silent rebinding of the box to a Float64. Each host reference becomes `v[1]` under one allowscalar block;
+# a launch macro keeps the box as its argument.
+function cgen_host_box_refs(e, vars::Set{Symbol}, asc, inside::Bool = false)
+    (isempty(vars) || asc === nothing) && return e
+    e isa Expr || return e
+    sub(x) = x isa Symbol && x in vars ? Expr(:ref, x, 1) : x isa Expr ? Expr(x.head, Any[sub(a) for a in x.args]...) : x
+    uses(x) = x isa Symbol ? x in vars : x isa Expr && any(uses, x.args)
+    wrap(x) = Expr(:macrocall, asc, nothing, x)
+    h = e.head
+    if h == :macrocall
+        nm = e.args[1]
+        nms = nm isa Symbol ? string(nm) : nm isa Expr && nm.args[end] isa QuoteNode ? string(nm.args[end].value) : ""
+        nms in ("@cuda", "@roc", "@metal", "@parallel_for") && return e
+        return Expr(h, Any[cgen_host_box_refs(a, vars, asc, inside || endswith(nms, "@allowscalar")) for a in e.args]...)
+    elseif h in (:block, :try, :catch, :function, :let, :for, :while, :if, :elseif)
+        args = Any[a for a in e.args]
+        if h in (:if, :elseif, :while) && !isempty(args)
+            args[1] = uses(args[1]) ? (inside ? sub(args[1]) : wrap(sub(args[1]))) : args[1]
+            for i in 2:length(args)
+                args[i] = cgen_host_box_refs(args[i], vars, asc, inside)
+            end
+        elseif h == :for && !isempty(args)
+            for i in 2:length(args)
+                args[i] = cgen_host_box_refs(args[i], vars, asc, inside)
+            end
+        else
+            for i in eachindex(args)
+                args[i] = cgen_host_box_refs(args[i], vars, asc, inside)
+            end
+        end
+        return Expr(h, args...)
+    end
+    uses(e) || return e
+    return inside ? sub(e) : wrap(Expr(:block, sub(e)))
+end
+
 function cgen_emit(gk, backend; reduction_threshold::Int = cgen_reduction_threshold_default())
     kernels = Expr[]
     reduce_vars = Set{Symbol}()
@@ -11639,6 +11676,7 @@ function cgen_emit(gk, backend; reduction_threshold::Int = cgen_reduction_thresh
     outer_defs = cgen_scalar_def_map(gk.body)
     decisions = NamedTuple[]
     host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, decisions)
+    host_body = Any[cgen_host_box_refs(st, reduce_vars, backend.allowscalar_macro) for st in host_body]
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     # Every scalar cross-thread reduction free var must already be a 1-element device array
     # before the first kernel launch that atomically writes it, and must be unboxed to a plain
@@ -15264,6 +15302,7 @@ function jgen_emit(gk; reduction_threshold::Int = cgen_reduction_threshold_defau
     outer_defs = cgen_scalar_def_map(gk.body)
     decisions = NamedTuple[]
     host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, decisions, hoist_atomics)
+    host_body = Any[cgen_host_box_refs(st, reduce_vars, allowscalar_macro) for st in host_body]
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the reverse.
     reduce_vars_sorted = sort(collect(reduce_vars); by = string)

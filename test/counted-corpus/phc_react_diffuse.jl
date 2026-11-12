@@ -8,11 +8,12 @@ function phc_react_diffuse(u0, v, u, kap, dt, nu, tol, n, maxit)
         v1 = u0[i1]
         st = 1.0
         for k1 = 1:maxit
+            # Newton step, computed every pass and applied while the last applied step was above tol (st is assigned outside the guard, see phc_kepler_newton)
+            dlt = (v1 + dt * kap * v1 * v1 * v1 - u0[i1]) / (1.0 + 3.0 * dt * kap * v1 * v1)
             if st > tol
-                dlt = (v1 + dt * kap * v1 * v1 * v1 - u0[i1]) / (1.0 + 3.0 * dt * kap * v1 * v1)
                 v1 = v1 - dlt
-                st = abs(dlt)
             end
+            st = abs(dlt)
         end
         v[i1] = v1
     end
