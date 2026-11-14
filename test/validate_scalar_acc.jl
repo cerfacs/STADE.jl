@@ -21,20 +21,20 @@ const SA_EXPECT = Dict(
     "sa_a13" => (0, "", 0, ""),                          # private per-iteration accumulator: offloaded before and unchanged
     "sa_a14" => (1, "accread", 3, "accread+scalar"),     # scalar ARGUMENT as a running sum: host (it was a silent wrong offload)
     "sa_a2"  => (1, "accread", 3, "accread+scalar"),     # running sum read in its own loop: order-dependent, host
-    "sa_a3"  => (1, "scope", 3, "scope"),                # a second loop reads the accumulated scalar as a plain value: not boxed (conservative)
+    "sa_a3"  => (0, "", 0, ""),                          # a second loop reads the accumulated scalar as a plain value: its kernel reads the box (v0.5.19; host before)
     "sa_a4"  => (0, "", 0, ""),                          # two accumulators, if/else
     "sa_a5"  => (0, "", 0, ""),                          # the name `acc` is private in one kernel and an accumulator in another
     "sa_a6"  => (0, "", 0, ""),                          # private accumulator inside, boxed accumulator outside
     "sa_a7"  => (1, "accread", 3, "accread"),            # zero-trip, an outer loop reads the accumulator; the inner loop is offloaded
     "sa_a8"  => (0, "", 0, ""),                          # two loops accumulate the same local, host read between
-    "sa_a9"  => (2, "array+scope", 5, "array+scope"),    # sequential recurrence reads the accumulator: host
+    "sa_a9"  => (1, "array", 3, "array"),                # a sequential recurrence reads the accumulator: host; the accumulating loop and the other reader are offloaded (v0.5.19)
     "sa_pw"  => (1, "array", 3, "array+scalar"),         # power iteration, two local accumulators
     "sa_sd"  => (1, "array", 3, "array+scalar"),         # steepest descent, two local accumulators
 )
 # loops lowered as a pure reduction (mapreduce) rather than a kernel with a box: a loop whose only effect is the accumulation keeps that lowering
 const SA_RED = Dict("sa_a1" => (1, 2), "sa_sd" => (1, 2))   # (primal, adjoint); every other kernel 0
 # locals boxed in the primal CUDA output (a scalar argument that is boxed is not listed: only locals have a literal start value); every other kernel none
-const SA_BOXED = Dict("sa_a0" => ["acc"], "sa_a1" => ["rsn"], "sa_a11" => ["acc"], "sa_a4" => ["a", "b"], "sa_a5" => ["acc"], "sa_a6" => ["tot"],
+const SA_BOXED = Dict("sa_a0" => ["acc"], "sa_a1" => ["rsn"], "sa_a11" => ["acc"], "sa_a3" => ["acc"], "sa_a9" => ["acc"], "sa_a4" => ["a", "b"], "sa_a5" => ["acc"], "sa_a6" => ["tot"],
                       "sa_a7" => ["acc"], "sa_a8" => ["acc"], "sa_pw" => ["nrm", "num"], "sa_sd" => ["rr"])
 # kernels whose derivatives need keep_push_pop = true (an Int that is read after an iteration-dependent update)
 const SA_KPP_TRUE_ONLY = ("sa_a12",)
@@ -63,7 +63,8 @@ end
 # boxed locals in a generated file: names assigned `CuArray([0.0...])` / `JACC.array([0.0...])` at a function entry
 sa_boxed_names(text) = Set{String}(m.captures[1] for m in eachmatch(r"(?m)^\s*(\w+) = (?:CuArray|JACC\.array)\(\[0\.0(?:f0)?\]\)", text))
 
-# every kernel (cuda_kernel_ / jacc_kernel_) that receives a boxed name uses it only as the target of the atomic helper
+# every kernel (cuda_kernel_ / jacc_kernel_) that receives a boxed name uses it only as the target of the atomic helper or reads it as `b[1]` (v0.5.19:
+# a loop that reads a boxed accumulator as a plain value; validate_plain_read.jl has the exact sets of readers)
 function sa_check_boxes(text, say, label)
     boxed = sa_boxed_names(text)
     fns = sa_functions(text)
@@ -77,7 +78,8 @@ function sa_check_boxes(text, say, label)
             occursin(Regex("\\b" * b * "\\b"), sig) || continue
             received += 1
             stripped = replace(rest, Regex("__stade_wa_add!\\(\\s*" * b * ",\\s*1,") => "")
-            say(!occursin(Regex("\\b" * b * "\\b"), stripped), "$label: kernel $fname reads the boxed local $b other than through the atomic helper")
+            stripped = replace(stripped, Regex("\\b" * b * "\\[1\\](?!\\s*[-+*/]?=(?!=))") => "")
+            say(!occursin(Regex("\\b" * b * "\\b"), stripped), "$label: kernel $fname uses the boxed local $b other than through the atomic helper or as $b[1]")
         end
     end
     say(isempty(boxed) || received > 0, "$label: boxed locals $(sort(collect(boxed))) exist but no kernel receives one (the static check saw nothing)")
