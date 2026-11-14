@@ -3822,17 +3822,30 @@ end
 # different moments, a trip count before its loop and a while count after
 # it, so one shared stack would interleave them and a wrong count would be
 # hard to attribute. See section 8.1 of the plan.
-# The counter a `while` forward sweep increments. Named from the site key so
-# the backward sweep can never pick a different one, and so two `while`
-# statements in one body cannot collide.
-agen_whilecount_var(body, idx) =
-    Symbol("__wcount_", string(hash(agen_site_key(body, idx)), base = 16)[1:6])
+# FNV-1a over the bytes of a string. Julia's `hash` of a Symbol or of an objectid depends on the process, so
+# a name built from either differs between two runs of the same input. This one does not.
+function agen_stable_hash(s::AbstractString)
+    h = 0xcbf29ce484222325
+    for b in codeunits(s)
+        h = (h ⊻ UInt64(b)) * 0x00000100000001b3
+    end
+    return h
+end
+
+# The tag of a `while` statement, taken from its content and its position in its body, never from the identity
+# of the body. Two identical loops in one body differ by `idx`. Two identical loops in different bodies get one
+# tag, which is safe: the counter is live only between the loop's own `cnt = 0` and its replay, and two
+# loops whose windows overlap are nested, so one contains the other and their content differs.
+agen_while_tag(body, idx) = string(agen_stable_hash(string(idx, "|", body[idx])), base = 16, pad = 16)[1:8]
+
+# The counter a `while` forward sweep increments. Named from the loop's own tag, so the backward sweep
+# picks the same name, and two `while` statements in one body get different ones.
+agen_whilecount_var(body, idx) = Symbol("__wcount_", agen_while_tag(body, idx))
 
 # The replay loop's own index. It indexes nothing and exists only to run the
 # body the recorded number of times, but it still needs a name no primal
 # statement can shadow.
-agen_whilecount_iter_var(body, idx) =
-    Symbol("__witer_", string(hash(agen_site_key(body, idx)), base = 16)[1:6])
+agen_whilecount_iter_var(body, idx) = Symbol("__witer_", agen_while_tag(body, idx))
 
 function agen_site_stack_name(site)
     site.kind in (:array, :value) && return Symbol(string(site.array) * "_stack")
