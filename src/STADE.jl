@@ -3028,7 +3028,7 @@ end
 # decision: w needs its pre-write value iff (a) w self-references, or (b) a nonlinear read of var
 # occurred strictly before w in forward order. This is the production path, reached via snap_plan's
 # site_needed kwarg; stade_site_level_tbr_check asserts it stays a subset of the whole-variable set.
-function snap_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}())
+function snap_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}(), boxed = Dict{Symbol,Any}())
     for idx in eachindex(body)
         stmt = body[idx]
         if stmt.kind == :assign
@@ -3042,15 +3042,17 @@ function snap_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}()
             snap_var_value_needed!(stmt.rhs, local_reads, false)
             decisions[agen_site_key(body, idx)] = active_map[var] && (var in local_reads || var in seen)
             seen = union(seen, local_reads)
+            # a reset of a boxed element: see snap_boxed_reset
+            snap_boxed_reset(stmt, boxed) && (seen = setdiff(seen, (var,)))
         elseif stmt.kind == :if
             snap_var_value_needed!(stmt.cond, seen, true)   # cond always conservative
-            seen_then = snap_fwd_walk!(stmt.then, copy(seen), active_map, decisions, bvars)
-            seen_els  = snap_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars)
+            seen_then = snap_fwd_walk!(stmt.then, copy(seen), active_map, decisions, bvars, boxed)
+            seen_els  = snap_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars, boxed)
             seen = union(seen_then, seen_els)
         elseif stmt.kind == :for
-            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
+            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars, boxed)
         elseif stmt.kind == :while
-            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
+            seen = snap_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars, boxed)
         end
     end
     # This body's block-boundary push re-establishes each of these vars at the head of its own reverse body, so every
@@ -3068,16 +3070,92 @@ end
 # need a snapshot due to a read near the bottom, one iteration back. `seen` only grows
 # across passes, so this terminates; a final pass re-walks with the converged set so
 # `decisions` reflects the fixed point.
-function snap_fwd_walk_loop!(body, in_seen, active_map, decisions, bvars = Set{Symbol}())
+function snap_fwd_walk_loop!(body, in_seen, active_map, decisions, bvars = Set{Symbol}(), boxed = Dict{Symbol,Any}())
     seen = copy(in_seen)
     while true
         scratch = Dict{Any,Bool}()
-        out_seen = snap_fwd_walk!(body, union(seen, in_seen), active_map, scratch, bvars)
+        out_seen = snap_fwd_walk!(body, union(seen, in_seen), active_map, scratch, bvars, boxed)
         out_seen == seen && break
         seen = out_seen
     end
     final_in = union(seen, in_seen)
-    return snap_fwd_walk!(body, final_in, active_map, decisions, bvars)
+    out = snap_fwd_walk!(body, final_in, active_map, decisions, bvars, boxed)
+    # a loop that may not run has not run: what a reset inside it removed from `seen` is still seen if the body never executes
+    isempty(boxed) && return out
+    return union(out, intersect(in_seen, keys(boxed)))
+end
+
+# ---- boxed-element reset kill (site-level TBR) ----
+# A length-1 array used as a boxed scalar (`s[1] = 0.0; for i ...; s[1] += x; end; out = rs / s[1]`) has one literal index everywhere in
+# the kernel, so an element is the whole array. A nonlinear read that reaches a loop body only over the back edge (the `out = rs / s[1]`
+# of the previous iteration) saw the version a reset at the top of the body kills, and that reset's own snapshot restores it. The
+# partial sums the accumulation writes afterwards are never read by it, so they need no snapshot. `seen` therefore drops the array right
+# after an unconditional reset that does not read it. Scalars have the same kill through the block-boundary push, which has no array form.
+# Soundness rests on three facts: the reset is a top-level statement of the walked body (a branch merges with `union`, a loop keeps its
+# entry set when the body never runs), its own snapshot is taken (it is decided before the kill), and every access has the same index.
+function snap_boxed_arrays(kernel)
+    idxs = Dict{Symbol,Any}()
+    bad = Set{Symbol}()
+    snap_boxed_collect!(kernel.body, kernel.sig.kinds, idxs, bad)
+    for b in bad
+        delete!(idxs, b)
+    end
+    return idxs
+end
+
+function snap_boxed_ref!(e, kinds, idxs, bad)
+    if e isa Expr
+        if e.head == :ref && e.args[1] isa Symbol && get(kinds, e.args[1], :none) == :array_float
+            a = e.args[1]
+            if length(e.args) == 2 && e.args[2] isa Integer
+                haskey(idxs, a) && idxs[a] != e.args[2] && push!(bad, a)
+                idxs[a] = e.args[2]
+            else
+                push!(bad, a)
+            end
+            for x in e.args[2:end]
+                snap_boxed_ref!(x, kinds, idxs, bad)
+            end
+        else
+            for x in e.args
+                snap_boxed_ref!(x, kinds, idxs, bad)
+            end
+        end
+    elseif e isa Symbol && get(kinds, e, :none) == :array_float
+        push!(bad, e)   # an array name used bare is not an element access
+    end
+    return nothing
+end
+
+function snap_boxed_collect!(body, kinds, idxs, bad)
+    for stmt in body
+        if stmt.kind == :assign
+            snap_boxed_ref!(stmt.lhs, kinds, idxs, bad)
+            snap_boxed_ref!(stmt.rhs, kinds, idxs, bad)
+        elseif stmt.kind == :for
+            for x in (stmt.lo, stmt.hi, stmt.step)
+                snap_boxed_ref!(x, kinds, idxs, bad)
+            end
+            snap_boxed_collect!(stmt.body, kinds, idxs, bad)
+        elseif stmt.kind == :while
+            snap_boxed_ref!(stmt.cond, kinds, idxs, bad)
+            snap_boxed_collect!(stmt.body, kinds, idxs, bad)
+        elseif stmt.kind == :if
+            snap_boxed_ref!(stmt.cond, kinds, idxs, bad)
+            snap_boxed_collect!(stmt.then, kinds, idxs, bad)
+            snap_boxed_collect!(stmt.els, kinds, idxs, bad)
+        end
+    end
+    return nothing
+end
+
+# `A[c] = rhs` with A boxed at index c and no read of A in rhs
+function snap_boxed_reset(stmt, boxed)
+    isempty(boxed) && return false
+    l = stmt.lhs
+    (l isa Expr && l.head == :ref && length(l.args) == 2 && l.args[1] isa Symbol) || return false
+    get(boxed, l.args[1], nothing) == l.args[2] || return false
+    return snap_count_var_refs(stmt.rhs, l.args[1]) == 0
 end
 
 # public entry point: per-site (not per-variable) TBR decisions for every :assign in
@@ -3085,7 +3163,7 @@ end
 # via stade_site_level_tbr_check, by agen_needs_snapshot.
 function snap_value_needed_sites(kernel)
     decisions = Dict{Any,Bool}()
-    snap_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions, snap_boundary_stack_vars(kernel))
+    snap_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions, snap_boundary_stack_vars(kernel), snap_boxed_arrays(kernel))
     return decisions
 end
 
@@ -4414,7 +4492,7 @@ end
 # every agen_/snap_ pair in this file. stade_site_level_tbr_check asserts exact Dict
 # equality against snap_value_needed_sites on every call -- forward push and backward pop
 # must decide identically at every site or push/pop counts desync.
-function agen_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}())
+function agen_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}(), boxed = Dict{Symbol,Any}())
     for idx in eachindex(body)
         stmt = body[idx]
         if stmt.kind == :assign
@@ -4423,15 +4501,16 @@ function agen_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}()
             agen_var_value_needed!(stmt.rhs, local_reads, false)
             decisions[agen_site_key(body, idx)] = active_map[var] && (var in local_reads || var in seen)
             seen = union(seen, local_reads)
+            agen_boxed_reset(stmt, boxed) && (seen = setdiff(seen, (var,)))
         elseif stmt.kind == :if
             agen_var_value_needed!(stmt.cond, seen, true)
-            seen_then = agen_fwd_walk!(stmt.then, copy(seen), active_map, decisions, bvars)
-            seen_els  = agen_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars)
+            seen_then = agen_fwd_walk!(stmt.then, copy(seen), active_map, decisions, bvars, boxed)
+            seen_els  = agen_fwd_walk!(stmt.els,  copy(seen), active_map, decisions, bvars, boxed)
             seen = union(seen_then, seen_els)
         elseif stmt.kind == :for
-            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
+            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars, boxed)
         elseif stmt.kind == :while
-            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars)
+            seen = agen_fwd_walk_loop!(stmt.body, seen, active_map, decisions, bvars, boxed)
         end
     end
     # end-of-body block-boundary kill -- see snap_fwd_walk!'s comment for the full argument
@@ -4440,21 +4519,89 @@ function agen_fwd_walk!(body, seen, active_map, decisions, bvars = Set{Symbol}()
     return setdiff(seen, kill)
 end
 
-function agen_fwd_walk_loop!(body, in_seen, active_map, decisions, bvars = Set{Symbol}())
+function agen_fwd_walk_loop!(body, in_seen, active_map, decisions, bvars = Set{Symbol}(), boxed = Dict{Symbol,Any}())
     seen = copy(in_seen)
     while true
         scratch = Dict{Any,Bool}()
-        out_seen = agen_fwd_walk!(body, union(seen, in_seen), active_map, scratch, bvars)
+        out_seen = agen_fwd_walk!(body, union(seen, in_seen), active_map, scratch, bvars, boxed)
         out_seen == seen && break
         seen = out_seen
     end
     final_in = union(seen, in_seen)
-    return agen_fwd_walk!(body, final_in, active_map, decisions, bvars)
+    out = agen_fwd_walk!(body, final_in, active_map, decisions, bvars, boxed)
+    # see snap_fwd_walk_loop!
+    isempty(boxed) && return out
+    return union(out, intersect(in_seen, keys(boxed)))
+end
+
+# see snap_boxed_arrays -- identical logic, duplicated for the same purity-rule reason as every other agen_/snap_ pair
+function agen_boxed_arrays(kernel)
+    idxs = Dict{Symbol,Any}()
+    bad = Set{Symbol}()
+    agen_boxed_collect!(kernel.body, kernel.sig.kinds, idxs, bad)
+    for b in bad
+        delete!(idxs, b)
+    end
+    return idxs
+end
+
+function agen_boxed_ref!(e, kinds, idxs, bad)
+    if e isa Expr
+        if e.head == :ref && e.args[1] isa Symbol && get(kinds, e.args[1], :none) == :array_float
+            a = e.args[1]
+            if length(e.args) == 2 && e.args[2] isa Integer
+                haskey(idxs, a) && idxs[a] != e.args[2] && push!(bad, a)
+                idxs[a] = e.args[2]
+            else
+                push!(bad, a)
+            end
+            for x in e.args[2:end]
+                agen_boxed_ref!(x, kinds, idxs, bad)
+            end
+        else
+            for x in e.args
+                agen_boxed_ref!(x, kinds, idxs, bad)
+            end
+        end
+    elseif e isa Symbol && get(kinds, e, :none) == :array_float
+        push!(bad, e)
+    end
+    return nothing
+end
+
+function agen_boxed_collect!(body, kinds, idxs, bad)
+    for stmt in body
+        if stmt.kind == :assign
+            agen_boxed_ref!(stmt.lhs, kinds, idxs, bad)
+            agen_boxed_ref!(stmt.rhs, kinds, idxs, bad)
+        elseif stmt.kind == :for
+            for x in (stmt.lo, stmt.hi, stmt.step)
+                agen_boxed_ref!(x, kinds, idxs, bad)
+            end
+            agen_boxed_collect!(stmt.body, kinds, idxs, bad)
+        elseif stmt.kind == :while
+            agen_boxed_ref!(stmt.cond, kinds, idxs, bad)
+            agen_boxed_collect!(stmt.body, kinds, idxs, bad)
+        elseif stmt.kind == :if
+            agen_boxed_ref!(stmt.cond, kinds, idxs, bad)
+            agen_boxed_collect!(stmt.then, kinds, idxs, bad)
+            agen_boxed_collect!(stmt.els, kinds, idxs, bad)
+        end
+    end
+    return nothing
+end
+
+function agen_boxed_reset(stmt, boxed)
+    isempty(boxed) && return false
+    l = stmt.lhs
+    (l isa Expr && l.head == :ref && length(l.args) == 2 && l.args[1] isa Symbol) || return false
+    get(boxed, l.args[1], nothing) == l.args[2] || return false
+    return agen_count_var_refs(stmt.rhs, l.args[1]) == 0
 end
 
 function agen_value_needed_sites(kernel)
     decisions = Dict{Any,Bool}()
-    agen_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions, agen_boundary_stack_vars(kernel))
+    agen_fwd_walk!(kernel.body, Set{Symbol}(), act_analyze(kernel), decisions, agen_boundary_stack_vars(kernel), agen_boxed_arrays(kernel))
     return decisions
 end
 
