@@ -26,6 +26,7 @@ const PV_EXPECT = Dict(
     "pv_a17" => (1, "array", 0, 3, "array+scalar", 0),             # power iteration, norm boxed, read in the outer loop
     "pv_a18" => (1, "array", 1, 3, "array+scalar", 2),             # CG, rsn boxed, read in the next loop
     "pv_a19" => (0, "", 0, 0, "", 0),                              # an Int ARGUMENT counted in one loop, the bound of the next
+    "pv_a20" => (0, "", 0, 1, "accread", 0),                       # the phases of pv_a13 with a bound for each accumulating loop
     "pv_a2"  => (0, "", 0, 0, "", 0),                              # read in an if
     "pv_a3"  => (0, "", 0, 0, "", 0),                              # read in an inner loop
     "pv_a4"  => (0, "", 0, 0, "", 0),                              # split into two kernels, one reads
@@ -37,13 +38,13 @@ const PV_EXPECT = Dict(
 )
 # boxed locals of the primal CUDA output (exact); every other kernel none
 const PV_BOXED = Dict("pv_a0" => ["acc"], "pv_a10" => ["acc"], "pv_a13" => ["acc"], "pv_a14" => ["acc"], "pv_a15" => ["acc"], "pv_a17" => ["nrm"],
-                      "pv_a18" => ["rsn"], "pv_a2" => ["acc"], "pv_a3" => ["acc"], "pv_a4" => ["acc"], "pv_a5" => ["acc", "nrm"], "pv_a6" => ["acc"],
+                      "pv_a18" => ["rsn"], "pv_a2" => ["acc"], "pv_a20" => ["acc"], "pv_a3" => ["acc"], "pv_a4" => ["acc"], "pv_a5" => ["acc", "nrm"], "pv_a6" => ["acc"],
                       "pv_a7" => ["acc"], "pv_a8" => ["acc"], "pv_a9" => ["acc"])
 # boxed scalar ARGUMENTS of the primal CUDA output (exact)
 const PV_BOXED_ARGS = Dict("pv_a1" => ["acc"], "pv_a19" => ["cnt"])
 # boxes some kernel of the primal CUDA output reads as `b[1]` (exact; a reader that is a host reduction or a host loop does not count)
 const PV_READS = Dict("pv_a0" => ["acc"], "pv_a1" => ["acc"], "pv_a10" => ["acc"], "pv_a13" => ["acc"], "pv_a15" => ["acc"], "pv_a17" => ["nrm"],
-                      "pv_a18" => ["rsn"], "pv_a19" => ["cnt"], "pv_a2" => ["acc"], "pv_a3" => ["acc"], "pv_a4" => ["acc"], "pv_a5" => ["acc"],
+                      "pv_a18" => ["rsn"], "pv_a19" => ["cnt"], "pv_a2" => ["acc"], "pv_a20" => ["acc"], "pv_a3" => ["acc"], "pv_a4" => ["acc"], "pv_a5" => ["acc"],
                       "pv_a7" => ["acc"], "pv_a8" => ["acc"], "pv_a9" => ["acc"])
 # kernels whose only box read is the CUDA guard `__tid > trip count` (a JACC kernel has no guard: its range is the launch's)
 const PV_CUDA_ONLY = ("pv_a19",)
