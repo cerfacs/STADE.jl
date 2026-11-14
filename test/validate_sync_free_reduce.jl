@@ -25,14 +25,26 @@ function validate_sync_free_reduce(dir::String = joinpath(@__DIR__, "val-corpus"
     is_view_cell(e) = e isa Expr && e.head == :call && length(e.args) == 3 && e.args[1] === :view
     # sync-free form: a broadcast assignment into a one-element view
     count_sf(e) = e isa Expr ? (e.head == :(.=) && is_view_cell(e.args[1]) ? 1 : 0) + sum(count_sf(a) for a in e.args; init = 0) : 0
+    # boxed locals (v0.5.18): `v = CuArray([0.0])` at entry. A local scalar reduction was always a host-side `v = v + mapreduce(...)`; boxing the local
+    # only rewrites it to `v[1] = v[1] + mapreduce(...)`. That is a local accumulator, not an array-element reduction, and it synchronizes as before.
+    boxed_locals(e, acc = Set{Symbol}()) = begin
+        if e isa Expr
+            e.head == :(=) && e.args[1] isa Symbol && e.args[2] isa Expr && e.args[2].head == :call && e.args[2].args[1] === :CuArray && push!(acc, e.args[1])
+            for a in e.args; boxed_locals(a, acc); end
+        end
+        acc
+    end
+    is_box_cell(t, bx) = t isa Expr && t.head == :ref && length(t.args) == 2 && t.args[1] in bx && t.args[2] == 1
     # host form: an allowscalar block that assigns an array element from a mapreduce or a sum
-    function count_host(e)
+    function count_host(e, bx = Set{Symbol}())
         e isa Expr || return 0
         n = 0
         if e.head == :macrocall && length(e.args) >= 3 && e.args[3] isa Expr && (has_call(e.args[3], :mapreduce) || has_call(e.args[3], :sum))
-            n += 1
+            blk = e.args[3]
+            asg = blk.head == :block ? [a for a in blk.args if a isa Expr && a.head == :(=)] : [blk]
+            all(a -> is_box_cell(a.args[1], bx), asg) && !isempty(asg) || (n += 1)
         end
-        return n + sum(count_host(a) for a in e.args; init = 0)
+        return n + sum(count_host(a, bx) for a in e.args; init = 0)
     end
     src(e) = STADE.io_expr_to_source(e)
     total = 0; plans_with = 0
@@ -43,7 +55,7 @@ function validate_sync_free_reduce(dir::String = joinpath(@__DIR__, "val-corpus"
             e = mode == "hvp" ? out.hvp : out.adjoint
             on = STADE.stade_gpu(e, cuda; reduction_threshold = 0, reduce_block = false, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
             off = STADE.stade_gpu(e, cuda; reduction_threshold = 0, sync_free_reduce = false, reduce_block = false, inbounds = false, dead_scalars = false, split_reduce = 0, contraction = 0)
-            n_on = count_sf(on.host); n_off = count_host(off.host)
+            n_on = count_sf(on.host); n_off = count_host(off.host, boxed_locals(off.host))
             total += n_off; n_off > 0 && (plans_with += 1)
             check(n_on == n_off, "$name [$mode]: $n_on sync-free form(s) replace $n_off allowscalar reduction(s)")
             check(length(on.kernels) == length(off.kernels) && all(src(a) == src(b) for (a, b) in zip(on.kernels, off.kernels)), "$name [$mode]: kernels unchanged")

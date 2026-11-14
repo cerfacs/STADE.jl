@@ -19,7 +19,10 @@ const WT_CASES = [
     ("scalar set only inside the while, read after", "function g(x, y, tol, n)\n q1 = 0.0\n for i1 = 1:n\n r1 = x[i1]\n while r1 > tol\n r1 = 0.5 * r1\n q1 = r1\n end\n y[i1] = q1\n end\n return nothing\nend", false),
     ("M condition reads an undefined local", "function g(x, y, tol, n)\n q1 = 1.0\n for i1 = 1:n\n r1 = x[i1]\n while q1 > tol\n r1 = 0.5 * r1\n q1 = r1\n end\n q1 = x[i1]\n y[i1] = r1\n end\n return nothing\nend", false),
     ("carried condition scalar", "function g(x, y, tol, n)\n c1 = 1.0\n for i1 = 1:n\n while c1 > tol\n c1 = 0.5 * c1\n end\n y[i1] = c1 + x[i1]\n end\n return nothing\nend", false),
-    ("outer counter bumped in the while", "function g(x, y, tol, n)\n tot = 0.0\n for i1 = 1:n\n r1 = x[i1]\n while r1 > tol\n r1 = 0.5 * r1\n tot = tot + 1.0\n end\n y[i1] = r1\n end\n y[1] = tot\n return nothing\nend", false),
+    # v0.5.18: a plain accumulation into an outer scalar is boxed (atomic add in the thread, `tot[1]` on the host), so this loop is offloaded
+    ("outer counter accumulated in the while (boxed)", "function g(x, y, tol, n)\n tot = 0.0\n for i1 = 1:n\n r1 = x[i1]\n while r1 > tol\n r1 = 0.5 * r1\n tot = tot + 1.0\n end\n y[i1] = r1\n end\n y[1] = tot\n return nothing\nend", true),
+    # the guard that case used to isolate: an outer scalar updated in the while by something that is not a plain accumulation has no atomic form
+    ("outer scalar recurrence in the while", "function g(x, y, tol, n)\n tot = 0.0\n for i1 = 1:n\n r1 = x[i1]\n while r1 > tol\n r1 = 0.5 * r1\n tot = tot * 0.5 + 1.0\n end\n y[i1] = r1\n end\n y[1] = tot\n return nothing\nend", false),
     ("N condition reads the neighbour element", "function g(x, y, tol, n)\n for i1 = 1:n-1\n r1 = x[i1]\n while r1 > y[i1 + 1]\n r1 = 0.5 * r1\n end\n y[i1] = r1\n end\n return nothing\nend", false),
     ("O the same through a scalar index", "function g(x, y, tol, n)\n for i1 = 1:n-1\n j1 = i1 + 1\n r1 = x[i1]\n while r1 > y[j1]\n r1 = 0.5 * r1\n end\n y[i1] = r1\n end\n return nothing\nend", false),
     ("R the same inside an inner for", "function g(x, y, tol, n, m)\n for i1 = 1:n-1\n r1 = x[i1]\n for c1 = 1:m\n while r1 > y[i1 + 1]\n r1 = 0.5 * r1\n end\n end\n y[i1] = r1\n end\n return nothing\nend", false),

@@ -69,7 +69,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         # Two top-level reductions into locals, one of them guarded (see
         # mlp1d above). The other never lowers: CSE splits its body into
         # two statements and cgen_idiomatic_scalar_reduction requires one.
-        "red_two_locals" => 6,
+        "red_two_locals" => 4,
         "ddp_affine" => 0,
         "ddp_ambiguous_reduce" => 0,
         "ddp_batch_hist" => 0,
@@ -88,8 +88,8 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         # Cost refusals: the snapshot would be correct and would not pay (guards G5, G10, G13).
         "asnap_condread" => 11, "asnap_direct" => 3, "asnap_slice" => 3,  # v0.5.4: the primal loops of both are order-dependent (B1, B2 of the battle test) and stay on the host
         "advection" => 3, "advection_multi" => 3, "affine_loss" => 0,
-        "bilinear" => 0, "bnd_branch" => 3, "bnd_carried" => 1,
-        "bnd_nested_only" => 5, "bnd_readfirst" => 6,
+        "bilinear" => 0, "bnd_branch" => 1, "bnd_carried" => 1,
+        "bnd_nested_only" => 5, "bnd_readfirst" => 3,
         "branchsel" => 0, "cascadic_mg_prolong" => 22,
         "cellscatter" => 3,
         "clamped_sumsq" => 0, "coarsen_retire" => 3, "cond_field_choice" => 0,
@@ -120,17 +120,17 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # stay on the host. A drop below 3 is not an improvement here; it means an
     # unsafe loop reached the device. Do NOT lower this baseline.
     "halo_assembly" => 3,
-        "fixed_sweeps" => 3, "ii_kill" => 6, "ii_readbefore" => 4, "ii_readnested" => 2,
-        "matvec_loss" => 0, "mg_vcycle" => 27, "mg_vcycle_multi" => 27,
+        "fixed_sweeps" => 3, "ii_kill" => 6, "ii_readbefore" => 2, "ii_readnested" => 2,
+        "matvec_loss" => 0, "mg_vcycle" => 26, "mg_vcycle_multi" => 26,
         "mpnn" => 0, "normcomp" => 0, "pipeline" => 0, "prefixscan" => 3,
-        "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 5,
+        "quadloss" => 0, "raggedii" => 1, "raggedind" => 1, "red_escape" => 4,
         "retire_empty" => 4, "retire_nested" => 11, "retire_if" => 6,
     # Witnesses for the nested-`if` and branch-scalar shapes. The two in-place stencils (inplace_stencil_if, nest_if_scalar) read the array
     # they overwrite, so every loop stays on the host. Each HVP matches its adjoint.
         "nest_if" => 0, "nest_if_scalar" => 6, "if_scalar_then_if" => 3, "if_scalar_then_loop_if" => 3, "retire_in_if" => 5,
-        "inplace_stencil_if" => 6, "if_top_scalar" => 1, "if_top_two" => 1, "if_in_outer_loop" => 2, "early_stage_offset" => 13,
+        "inplace_stencil_if" => 6, "if_top_scalar" => 0, "if_top_two" => 0, "if_in_outer_loop" => 1, "early_stage_offset" => 13,
         "relu_field" => 0, "richardson_substep" => 7, "stencil_loss" => 0,
-        "sumsq_shifted" => 0, "transformer" => 31, "ttgc" => 6,
+        "sumsq_shifted" => 0, "transformer" => 22, "ttgc" => 6,
         "two_field_loss" => 0, "unet" => 0, "weightedsumsq" => 0,
         "windowed_relax_retire" => 7,
     # idm_*: the idiom relaxation of the GPU split gate (cgen_split_loop_gate). The four
@@ -139,6 +139,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
     # is refused and why, since an improvement there would mean an unsafe loop reached the device.
         "idm_slots" => 0, "idm_zerotrip" => 0, "idm_acc_two" => 0, "idm_tile" => 0,
         "idm_dup_write" => 0,
+        # v0.5.18 lowered (local scalar accumulators are boxed and offloaded): bnd_branch, bnd_readfirst, cross_mixed, gat_sum_scalar, if_in_outer_loop, if_top_scalar, if_top_two, ii_readbefore, liveout_red_top, mg_vcycle(_multi), red_escape, red_two_locals, so_carry, transformer
         # loop-invariant atomic hoisting: ragged per-row loops that accumulate into a shared bin; the one host loop of hoist_sentinel is the prefix table of its Tier B trip counts in initstacks_*
         "hoist_bins" => 0, "hoist_nested" => 0, "hoist_sentinel" => 1,
         "idm_cse_acc" => 2, "ii_multiversion" => 0, "idm_src_consume" => 2, "idm_gather_rmw" => 6, "idm_overlap_plain" => 3,
@@ -150,13 +151,13 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         "lin_carried_sum" => 3, "lin_carried_scale" => 3,
         # gat_*: affine stencil adjoints (v0.4.28 gather form). The rewrite leaves the host-loop counts unchanged, with it on or off: the gather loop is offloaded where the scatter loop was. Adjoint and HVP match.
         "gat_accum_out" => 0, "gat_alias" => 0, "gat_const_idx" => 1, "gat_diff1" => 0, "gat_inplace_seq" => 3, "gat_nonlinear" => 0, "gat_pingpong" => 3,
-        "gat_reduce_scalar" => 3, "gat_reverse" => 0, "gat_rows" => 0, "gat_stride" => 0, "gat_sum_scalar" => 2, "gat_two_targets" => 0, "gat_wide" => 0,
-        "so_tile" => 0, "so_hostread" => 4, "so_liveout" => 9, "so_carry" => 5, "so_inner" => 5,
+        "gat_reduce_scalar" => 3, "gat_reverse" => 0, "gat_rows" => 0, "gat_stride" => 0, "gat_sum_scalar" => 0, "gat_two_targets" => 0, "gat_wide" => 0,
+        "so_tile" => 0, "so_hostread" => 4, "so_liveout" => 9, "so_carry" => 3, "so_inner" => 5,
         # correctness kernels for the rematerialized-restore guards and the branch-scalar rewrite; not offload targets
         "if_scalar_rewrite" => 0, "remat_shapes" => 20,
-        "liveout_red_nest" => 0, "liveout_red_fused" => 0, "liveout_red_top" => 3, "liveout_local_last" => 0, "remat_cross" => 6,
+        "liveout_red_nest" => 0, "liveout_red_fused" => 0, "liveout_red_top" => 1, "liveout_local_last" => 0, "remat_cross" => 6,
         "cross_readbefore" => 0, "cross_entry" => 0, "cross_after" => 0, "cross_ifwrite" => 0, "cross_nested" => 0, "cross_branchlocal" => 2,
-        "cross_mixed" => 6, "cross_argread" => 3, "selfrace_conv" => 0, "selfrace_layout" => 0,
+        "cross_mixed" => 0, "cross_argread" => 3, "selfrace_conv" => 0, "selfrace_layout" => 0,
     )
     # kernel => decisions that MUST appear in the offload report of its adjoint: (verdict, reason, array).
     # A listed loop that reaches a kernel instead is a failure, not an improvement.
@@ -172,7 +173,7 @@ function validate_offload(dir::String = joinpath(@__DIR__, "val-corpus"))
         # so_*: the save-only scalar relaxation (cgen_saveonly_synth). so_tile offloads; each control breaks one of its four conditions
         "so_hostread" => [(:host, :scalar, nothing)],
         "so_liveout" => [(:host, :liveout, nothing)],
-        "so_carry" => [(:host, :scalar, nothing), (:host, :scope, nothing)],
+        "so_carry" => [(:host, :scalar, nothing)],   # v0.5.18: the inner loop that accumulates `a` is offloaded (boxed local), so its former :scope host decision is gone; the carried `run` keeps the :scalar one
         "so_inner" => [(:host, :scalar, nothing)],
     )
     # idiom acceptance MUST appear for these (the loop is offloaded only because of the idiom)

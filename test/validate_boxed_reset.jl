@@ -83,8 +83,9 @@ function validate_boxed_reset(; verbose = true, only = String[])
         end
     end
     # CUDA output: the fixed shapes have no element loop left on the host in the forward sweep of the adjoint
-    # (the counts of br_cg1d2, br_pw, br_sd and br_gs are what remains after the fix: loops with a local scalar accumulator or an order-dependent sweep, not a claim of minimum)
-    for (nm, expect) in (("br_m4", 0), ("br_a0", 0), ("br_n2", 0), ("br_cg1d2", 2), ("br_sd", 1), ("br_pw", 1), ("br_gs", 2))
+    # (v0.5.17 left 2, 1 and 1 element loops on the host in br_cg1d2, br_sd and br_pw: loops with a local scalar accumulator. v0.5.18 boxes those locals and offloads them.
+    # br_gs keeps its 2: an order-dependent sweep. The counts are what remains, not a claim of minimum)
+    for (nm, expect) in (("br_m4", 0), ("br_a0", 0), ("br_n2", 0), ("br_cg1d2", 0), ("br_sd", 0), ("br_pw", 0), ("br_gs", 2))
         nm in names || continue
         b = joinpath(tmp, nm * "_b.jl"); c = joinpath(tmp, nm * "_b_cuda.jl")
         STADE.stade_adjoint_file(joinpath(dir, nm * ".jl"), b; keep_push_pop = false, fuse_ii_loops = true)
