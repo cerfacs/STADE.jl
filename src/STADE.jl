@@ -8303,9 +8303,9 @@ end
 #   - `v` is accumulated somewhere (`v = v + term`) and is no argument and no loop variable;
 #   - one assignment to `v` is a Float64 literal (a start value). A variable has one shape, so this says `v` is a Float64 and keeps an Int
 #     counter out, whose box would have the wrong type;
-#   - no loop mentions `v` as a free scalar without reducing into it. Such a loop could become a kernel, which would receive the box where it
-#     reads a plain value. A scalar assigned inside the loop is private to it and is not free.
-# cgen_split_loop_gate refuses a loop that reads its own accumulator, so a kernel that gets the box only ever adds to it.
+# A loop that reads `v` without accumulating into it is a reader. v0.5.18 pruned `v` when a reader existed, which kept every such loop on the host;
+# the kernel of a reader now receives the box and reads `v[1]` (cgen_box_reads_loop), for the names cgen_box_read_set finds boxed in the final output.
+# cgen_split_loop_gate refuses a loop that reads its own accumulator, so a kernel that adds to the box never reads it.
 function cgen_boxable_locals(body::Vector{NamedTuple}, fn_args::Set{Symbol})
     selfref = Set{Symbol}()
     plain = Dict{Symbol,Vector{Any}}()
@@ -8318,7 +8318,6 @@ function cgen_boxable_locals(body::Vector{NamedTuple}, fn_args::Set{Symbol})
         rs === nothing && continue
         any(r -> r isa Float64, rs) && push!(cand, v)
     end
-    isempty(cand) || cgen_boxable_prune!(body, cand)
     return cand
 end
 
@@ -8336,25 +8335,6 @@ function cgen_boxable_collect!(body::Vector{NamedTuple}, selfref::Set{Symbol}, p
         elseif st.kind == :if
             cgen_boxable_collect!(st.then, selfref, plain)
             cgen_boxable_collect!(st.els, selfref, plain)
-        end
-    end
-    return nothing
-end
-
-function cgen_boxable_prune!(body::Vector{NamedTuple}, cand::Set{Symbol})
-    for st in body
-        if st.kind == :for
-            fv = cgen_free_vars(st, st.var)
-            red = cgen_scalar_reduction_vars(st.body)
-            for v in collect(cand)
-                v in fv && !(v in red) && delete!(cand, v)
-            end
-            cgen_boxable_prune!(st.body, cand)
-        elseif st.kind == :while
-            cgen_boxable_prune!(st.body, cand)
-        elseif st.kind == :if
-            cgen_boxable_prune!(st.then, cand)
-            cgen_boxable_prune!(st.els, cand)
         end
     end
     return nothing
@@ -8400,6 +8380,84 @@ function cgen_accumulator_used_elsewhere(body::Vector{NamedTuple}, v::Symbol)
         end
     end
     return false
+end
+
+# ---- plain reads of a boxed scalar ----------------------------------------
+# A scalar that cgen_emit boxes (a 1-element device array, the host name `v` then standing for the box) can also be READ by a loop that does not
+# accumulate into it: `z[i] = y[i] * acc` after the loop that built `acc`. The kernel of such a loop receives the box and reads `v[1]`. The rewrite is
+# made on a copy of the loop before the kernel is defined, so every pass after it (coarsening, private and shared arrays, split, reductions, the JACC
+# twin) sees an ordinary indexed read of an array argument. The launch and the host code keep the original loop: cgen_host_box_refs turns the host
+# reads into `v[1]`. A host reduction (`mapreduce` / `JACC.@parallel_reduce`) must not capture the box in its closure: it gets a host copy
+# `__pv_v = v` made inside its own branch.
+#
+# Which names are boxed is known only after a whole pass (a later loop may be the one that accumulates), so cgen_emit/jgen_emit generate once,
+# and again with `box_reads` set to the boxed names when some loop reads one (cgen_box_read_set). A pass that reads none is the first one unchanged.
+#
+# A loop's read names: free in the loop, boxed, not accumulated in it (that loop is :accread or a reduction into it), not assigned in it (private).
+function cgen_box_read_names(stmt, box_reads::Set{Symbol})
+    isempty(box_reads) && return Symbol[]
+    red = cgen_scalar_reduction_vars(stmt.body)
+    return Symbol[v for v in cgen_free_vars(stmt, stmt.var) if v in box_reads && !(v in red)]
+end
+
+function cgen_subst_scalars(e, m::Dict{Symbol,Any})
+    e isa Symbol && return get(m, e, e)
+    e isa Expr || return e
+    e.head === :call && return Expr(:call, e.args[1], Any[cgen_subst_scalars(a, m) for a in e.args[2:end]]...)
+    return Expr(e.head, Any[cgen_subst_scalars(a, m) for a in e.args]...)
+end
+
+function cgen_subst_body(body::Vector{NamedTuple}, m::Dict{Symbol,Any})
+    out = NamedTuple[]
+    for st in body
+        if st.kind == :assign
+            lhs = st.lhs isa Symbol ? st.lhs : cgen_subst_scalars(st.lhs, m)
+            push!(out, merge(st, (lhs = lhs, rhs = cgen_subst_scalars(st.rhs, m))))
+        elseif st.kind == :for
+            push!(out, merge(st, (lo = cgen_subst_scalars(st.lo, m), hi = cgen_subst_scalars(st.hi, m), step = cgen_subst_scalars(st.step, m),
+                                  body = cgen_subst_body(st.body, m))))
+        elseif st.kind == :while
+            push!(out, merge(st, (cond = cgen_subst_scalars(st.cond, m), body = cgen_subst_body(st.body, m))))
+        elseif st.kind == :if
+            push!(out, merge(st, (cond = cgen_subst_scalars(st.cond, m), then = cgen_subst_body(st.then, m), els = cgen_subst_body(st.els, m))))
+        else
+            push!(out, st)
+        end
+    end
+    return out
+end
+
+# kernel copy of a loop: each name read as `v[1]`
+function cgen_box_reads_loop(stmt, names::Vector{Symbol})
+    m = Dict{Symbol,Any}(v => Expr(:ref, v, 1) for v in names)
+    return merge(stmt, (lo = cgen_subst_scalars(stmt.lo, m), hi = cgen_subst_scalars(stmt.hi, m), step = cgen_subst_scalars(stmt.step, m),
+                        body = cgen_subst_body(stmt.body, m)))
+end
+
+# host reduction: the name of the host copy of `v`, the map that rewrites a term to it, and the statements that make the copies
+cgen_host_copy_name(v::Symbol) = Symbol("__pv_", v)
+cgen_host_copy_map(names::Vector{Symbol}) = Dict{Symbol,Any}(v => cgen_host_copy_name(v) for v in names)
+cgen_host_copy_stmts(names::Vector{Symbol}) = Any[Expr(:(=), cgen_host_copy_name(v), v) for v in names]
+# A closure captures a variable assigned more than once as a Core.Box, which no GPU kernel accepts (measured: CUDA `partial_mapreduce_grid` failed to
+# compile in an adjoint whose recomputed loop made a second copy). The reduction statement therefore runs under a fresh binding `let __pv_v = __pv_v`.
+cgen_host_copy_scope(names::Vector{Symbol}, st) = isempty(names) ? st :
+    Expr(:let, Expr(:block, Any[Expr(:(=), cgen_host_copy_name(v), cgen_host_copy_name(v)) for v in names]...), Expr(:block, st))
+
+# every boxed name some loop of `body` reads as a plain value
+function cgen_box_read_set(body::Vector{NamedTuple}, boxed::Set{Symbol})
+    out = Set{Symbol}()
+    for st in body
+        if st.kind == :for
+            union!(out, cgen_box_read_names(st, boxed))
+            union!(out, cgen_box_read_set(st.body, boxed))
+        elseif st.kind == :while
+            union!(out, cgen_box_read_set(st.body, boxed))
+        elseif st.kind == :if
+            union!(out, cgen_box_read_set(st.then, boxed))
+            union!(out, cgen_box_read_set(st.els, boxed))
+        end
+    end
+    return out
 end
 
 # ---- reduction-eligibility check ------------------------------------
@@ -10335,7 +10393,7 @@ function cgen_rb_helper_exprs()
     return Expr[cgen_strip_macro_lines(Base.remove_linenums!(a)) for a in Meta.parseall(src).args if a isa Expr]
 end
 
-function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; reduction_threshold::Int = cgen_reduction_threshold_default(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, boxable::Set{Symbol} = Set{Symbol}(), depth::Int = 0)
+function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, backend, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}; reduction_threshold::Int = cgen_reduction_threshold_default(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, boxable::Set{Symbol} = Set{Symbol}(), box_reads::Set{Symbol} = Set{Symbol}(), depth::Int = 0)
     exprs = Any[]
     # Seeded from the enclosing body's own known_consts at the point this body was reached (never written back) -- a scalar
     # reset at the tail of a non-split ancestor loop's body converges by induction to the same literal on every iteration, so
@@ -10388,11 +10446,11 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # through and vanish from the generated host function.
             # A condition that reads a device array needs the allowscalar wrap, as an `if` condition does (v0.5.8).
             flush_pending!()
-            push!(exprs, emit_while(cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1)))
+            push!(exprs, emit_while(cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1)))
         elseif stmt.kind == :if
             flush_pending!()
             cond = cgen_expr_has_ref(stmt.cond) ? Expr(:macrocall, backend.allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1)))
+            push!(exprs, emit_if(cond, cgen_body(stmt.then, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1), cgen_body(stmt.els, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -10433,11 +10491,13 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # A local accumulator that cgen_emit boxes (cgen_boxable_locals) is written by the kernel like a boxed argument. A loop the mapreduce
             # lowering above already owns keeps it, so nothing that lowered before changes.
             boxed_ok = !safe_scope && local_red === nothing && issubset(loop_reduce_vars, union(fn_args, boxable))
+            rnames = cgen_box_read_names(stmt, box_reads)
+            stmt_k = isempty(rnames) ? stmt : cgen_box_reads_loop(stmt, rnames)
             # `stage` names the first gate that refuses the loop, in the order the gates run
             stage = synth === nothing ? gate.reason : !(safe_scope || boxed_ok) ? :scope : cgen_contains_stackop(stmt.body) ? :stackop : :ok
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
             # codegen rather than a structural approximation of it
-            stage === :ok && !cgen_kernel_def_ok(() -> cgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), backend, loop_reduce_vars, synth)) && (stage = :kernel_def)
+            stage === :ok && !cgen_kernel_def_ok(() -> cgen_kernel_def(stmt_k, owner, 0, cgen_free_vars(stmt, stmt.var), backend, loop_reduce_vars, synth)) && (stage = :kernel_def)
             # see cgen_liveout_is_zeroed -- refuses a split whose local scalars a later host
             # statement reads, which would read them stale
             stage === :ok && !cgen_liveout_is_zeroed(stmt, root_body, cgen_collect_loop_vars(root_body, Set{Symbol}()), synth === nothing ? Dict{Symbol,Any}() : synth, gate.saveonly) && (stage = :liveout)
@@ -10448,6 +10508,9 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 verdict = red !== nothing ? :reduction : :kernel
                 if red !== nothing
                     target, op, arrs, term = red
+                    # a kernel reads the box; the host reduction reads a host copy (cgen_host_copy_stmts)
+                    term_k = isempty(rnames) ? term : cgen_subst_scalars(term, Dict{Symbol,Any}(v => Expr(:ref, v, 1) for v in rnames))
+                    term = isempty(rnames) ? term : cgen_subst_scalars(term, cgen_host_copy_map(rnames))
                     value = cgen_idiomatic_reduction_value(arrs, term, stmt.var, stmt.lo, stmt.step, stmt.hi)
                     # Emit BOTH lowerings and pick at run time on the trip
                     # count. Neither wins everywhere, measured on a Tesla
@@ -10473,32 +10536,34 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     idx = cgen_kernel_count(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
-                    kdef = cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
+                    kdef = cgen_kernel_def(stmt_k, owner, idx, fargs, backend, loop_reduce_vars, synth)
                     push!(kernels, kdef)
                     parr = cgen_private_on(backend) ? cgen_private_arrays(kdef) : Symbol[]
-                    cv = cgen_kernel_def_coarse(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
+                    cv = cgen_kernel_def_coarse(stmt_k, owner, idx, fargs, backend, loop_reduce_vars, synth)
                     cv === nothing || push!(kernels, cv.kdef)
                     atomic_branch = cgen_launch_stmts(stmt, owner, idx, fargs, backend, parr, Set{Symbol}(a for a in parr if cgen_private_straight(kdef, a)); coarse = cv)
+                    rtmps = Any[]
                     if cgen_reduce_block_ok(backend, target, op)
                         ridx = cgen_kernel_count(kernels) + 1
-                        push!(kernels, cgen_reduce_block_kernel(stmt, owner, ridx, fargs, backend, target, op, term))
+                        push!(kernels, cgen_reduce_block_kernel(stmt_k, owner, ridx, fargs, backend, target, op, term_k))
                         reduce_branch = cgen_reduce_block_launch(stmt, owner, ridx, fargs, backend)
                     else
-                        reduce_branch = cgen_reduce_into_element(backend, target, op, value, arrs, term, stmt)
+                        rtmps = cgen_host_copy_stmts(rnames)
+                        reduce_branch = cgen_host_copy_scope(rnames, cgen_reduce_into_element(backend, target, op, value, arrs, term, stmt))
                     end
                     flush_pending!()
                     push!(exprs, emit_if(Expr(:call, :<,
                                               cgen_trip_count(stmt.lo, stmt.step, stmt.hi),
                                               reduction_threshold),
-                                         atomic_branch, Any[reduce_branch]))
+                                         atomic_branch, Any[rtmps..., reduce_branch]))
                 else
                     idx = cgen_kernel_count(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
-                    kdef = cgen_kernel_def(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
+                    kdef = cgen_kernel_def(stmt_k, owner, idx, fargs, backend, loop_reduce_vars, synth)
                     push!(kernels, kdef)
                     parr = cgen_private_on(backend) ? cgen_private_arrays(kdef) : Symbol[]
-                    cv = cgen_kernel_def_coarse(stmt, owner, idx, fargs, backend, loop_reduce_vars, synth)
+                    cv = cgen_kernel_def_coarse(stmt_k, owner, idx, fargs, backend, loop_reduce_vars, synth)
                     cv === nothing || push!(kernels, cv.kdef)
                     append!(exprs, cgen_launch_stmts(stmt, owner, idx, fargs, backend, parr, Set{Symbol}(a for a in parr if cgen_private_straight(kdef, a)); coarse = cv))
                 end
@@ -10520,18 +10585,20 @@ function cgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 # counts, so the choice is the trip count, not the shape.
                 loop_branch = emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step,
                                            cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs,
-                                                     outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1))
+                                                     outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1))
                 # the target is a host scalar and every array is read through
                 # a view, so this branch needs no allowscalar
-                red_branch = Any[Expr(:(=), lt, Expr(:call, lop, lt, cgen_idiomatic_reduction_value(larrs, lterm, stmt.var, stmt.lo, stmt.step, stmt.hi)))
-                                 for (lt, lop, larrs, lterm) in local_red]
+                hmap = cgen_host_copy_map(rnames)
+                red_branch = vcat(cgen_host_copy_stmts(rnames),
+                                  Any[cgen_host_copy_scope(rnames, Expr(:(=), lt, Expr(:call, lop, lt, cgen_idiomatic_reduction_value(larrs, cgen_subst_scalars(lterm, hmap), stmt.var, stmt.lo, stmt.step, stmt.hi))))
+                                      for (lt, lop, larrs, lterm) in local_red])
                 flush_pending!()
                 push!(exprs, emit_if(Expr(:call, :<,
                                           cgen_trip_count(stmt.lo, stmt.step, stmt.hi),
                                           min(reduction_threshold, cgen_local_reduction_threshold())),
                                      Any[loop_branch], red_branch))
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, cgen_body(stmt.body, kernels, owner, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1)))
             end
             decisions === nothing || push!(decisions, cgen_decision_record(owner, stmt, depth, verdict, stage, gate.array, gate.idiom))
             delete!(known_consts, stmt.var)
@@ -11950,7 +12017,12 @@ function cgen_host_box_refs(e, vars::Set{Symbol}, asc, inside::Bool = false)
     if h == :macrocall
         nm = e.args[1]
         nms = nm isa Symbol ? string(nm) : nm isa Expr && nm.args[end] isa QuoteNode ? string(nm.args[end].value) : ""
-        nms in ("@cuda", "@roc", "@metal", "@parallel_for") && return e
+        if nms in ("@cuda", "@roc", "@metal", "@parallel_for")
+            # the launch keeps the box as the kernel's argument, but a grid expression (`blocks = ...`, `range = ...`) is computed on the host and
+            # reads the VALUE: `div(cnt - 1, 1)` with `cnt` the box fails. Those keyword expressions read `v[1]`, the launch runs under one allowscalar.
+            any(a -> a isa Expr && a.head == :(=) && uses(a.args[2]), e.args) || return e
+            return wrap(Expr(:block, Expr(h, Any[a isa Expr && a.head == :(=) && uses(a.args[2]) ? Expr(:(=), a.args[1], sub(a.args[2])) : a for a in e.args]...)))
+        end
         return Expr(h, Any[cgen_host_box_refs(a, vars, asc, inside || endswith(nms, "@allowscalar")) for a in e.args]...)
     elseif h in (:block, :try, :catch, :function, :let, :for, :while, :if, :elseif)
         args = Any[a for a in e.args]
@@ -11982,6 +12054,19 @@ function cgen_emit(gk, backend; reduction_threshold::Int = cgen_reduction_thresh
     decisions = NamedTuple[]
     boxable = cgen_boxable_locals(gk.body, fn_args)
     host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, decisions, boxable)
+    # a loop that reads a boxed name needs the second pass (see cgen_box_read_names); one that reads none keeps the first
+    box_reads = Set{Symbol}()
+    settled = false
+    for _ in 1:4
+        if cgen_box_read_set(gk.body, reduce_vars) == cgen_box_read_set(gk.body, box_reads)
+            settled = true
+            break
+        end
+        box_reads = copy(reduce_vars)
+        kernels = Expr[]; reduce_vars = Set{Symbol}(); decisions = NamedTuple[]
+        host_body = cgen_body(gk.body, kernels, gk.name, backend, reduce_vars, fn_args; reduction_threshold, outer_defs, decisions, boxable, box_reads)
+    end
+    settled || error("cgen_emit: the set of boxed scalars did not settle for $(gk.name)")
     host_body = Any[cgen_host_box_refs(st, reduce_vars, backend.allowscalar_macro) for st in host_body]
     isempty(kernels) || pushfirst!(host_body, :(nthread_per_block = 256))
     # Every scalar cross-thread reduction free var must already be a 1-element device array
@@ -15291,7 +15376,7 @@ end
 # device-array-backed ref) via a bare host assignment is a host setindex! against a device array; unlike
 # CUDA/AMDGPU/Metal, JACC has no allowscalar escape hatch (confirmed live: 'Scalar indexing is disallowed'). Fix:
 # accumulate on-device via a synthesized range=1 kernel instead.
-function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; reduction_threshold::Int = cgen_reduction_threshold_default(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, boxable::Set{Symbol} = Set{Symbol}(), depth::Int = 0, hoist_atomics::Bool = true)
+function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbol, reduce_vars::Set{Symbol}, fn_args::Set{Symbol}, allowscalar_macro; reduction_threshold::Int = cgen_reduction_threshold_default(), outer_defs::Dict{Symbol,Any} = Dict{Symbol,Any}(), outer_known_consts::Dict{Symbol,Any} = Dict{Symbol,Any}(), root_body = body, decisions::Union{Nothing,Vector{NamedTuple}} = nothing, boxable::Set{Symbol} = Set{Symbol}(), box_reads::Set{Symbol} = Set{Symbol}(), depth::Int = 0, hoist_atomics::Bool = true)
     exprs = Any[]
     # See cgen_body's matching comment: seeded from the enclosing body's own known_consts so a
     # reduction scalar reset at the tail of a non-split ancestor loop's body stays provably known
@@ -15335,7 +15420,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # A missing clause here would be silent: the statement would fall
             # through and vanish from the generated host function.
             flush_pending!()
-            push!(exprs, emit_while(cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ? Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1, hoist_atomics)))
+            push!(exprs, emit_while(cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ? Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1, hoist_atomics)))
         elseif stmt.kind == :if
             flush_pending!()
             # A host-side branch condition that reads a device array element needs the same @allowscalar
@@ -15345,7 +15430,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             # the first full-corpus live GPU run.
             cond = cgen_expr_has_ref(stmt.cond) && allowscalar_macro !== nothing ?
                    Expr(:macrocall, allowscalar_macro, nothing, stmt.cond) : stmt.cond
-            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1, hoist_atomics), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1, hoist_atomics)))
+            push!(exprs, emit_if(cond, jgen_body(stmt.then, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1, hoist_atomics), jgen_body(stmt.els, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1, hoist_atomics)))
             for v in cgen_all_assigned_scalars(vcat(stmt.then, stmt.els))
                 delete!(known_consts, v)
             end
@@ -15363,11 +15448,13 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
             end
             # same rule as cgen_body: a boxed local accumulator is written by the kernel, unless the reduction lowering owns the loop
             boxed_ok = !safe_scope && local_red === nothing && issubset(loop_reduce_vars, union(fn_args, boxable))
+            rnames = cgen_box_read_names(stmt, box_reads)
+            stmt_k = isempty(rnames) ? stmt : cgen_box_reads_loop(stmt, rnames)
             # `stage` names the first gate that refuses the loop, in the order the gates run
             stage = synth === nothing ? gate.reason : !(safe_scope || boxed_ok) ? :scope : cgen_contains_stackop(stmt.body) ? :stackop : :ok
             # see cgen_kernel_def_ok -- the last gate, and the only one that asks the backend's own
             # codegen rather than a structural approximation of it
-            stage === :ok && !cgen_kernel_def_ok(() -> jgen_kernel_def(stmt, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth, hoist_atomics)) && (stage = :kernel_def)
+            stage === :ok && !cgen_kernel_def_ok(() -> jgen_kernel_def(stmt_k, owner, 0, cgen_free_vars(stmt, stmt.var), loop_reduce_vars, synth, hoist_atomics)) && (stage = :kernel_def)
             # Same live-out refusal cgen_body applies -- jgen_body had no equivalent, and no root_body
             # to apply it against. A split loop's scalars live on the device; a later host statement
             # reading one gets the stale host copy instead. ii_kill is the witness: cgen keeps that loop
@@ -15381,6 +15468,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 verdict = red !== nothing ? :reduction : :kernel
                 if red !== nothing
                     target, op, arrs, term = red
+                    term = isempty(rnames) ? term : cgen_subst_scalars(term, cgen_host_copy_map(rnames))
                     n_iter = cgen_trip_count(stmt.lo, stmt.step, stmt.hi)
                     value = jgen_idiomatic_reduction_value(arrs, term, stmt.var, stmt.lo, stmt.step, n_iter)
                     # `target - value` (op==:-) is normalized to a signed
@@ -15427,13 +15515,13 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     # reduction_threshold = 0 the test is `0 < 0`, false, and the reduce branch ran empty.
                     # CUDA has no matching hazard: its mapreduce carries `init`, so it returns zero.
                     red_exprs = Any[emit_if(Expr(:call, :>, n_iter, 0),
-                                            Any[Expr(:(=), redvar, signed_value),
+                                            Any[cgen_host_copy_stmts(rnames)..., Expr(:(=), redvar, signed_value),
                                                 jgen_reduction_writeback_launch(owner, widx, wfargs, redvar)],
                                             Any[])]
                     aidx = cgen_kernel_count(kernels) + 1
                     afargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
-                    push!(kernels, jgen_kernel_def(stmt, owner, aidx, afargs, loop_reduce_vars, synth, hoist_atomics))
+                    push!(kernels, jgen_kernel_def(stmt_k, owner, aidx, afargs, loop_reduce_vars, synth, hoist_atomics))
                     push!(exprs, emit_if(Expr(:call, :<, n_iter, reduction_threshold),
                                          Any[jgen_launch_expr(stmt, owner, aidx, afargs)],
                                          red_exprs))
@@ -15441,7 +15529,7 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                     idx = cgen_kernel_count(kernels) + 1
                     fargs = cgen_free_vars(stmt, stmt.var)
                     union!(reduce_vars, loop_reduce_vars)
-                    push!(kernels, jgen_kernel_def(stmt, owner, idx, fargs, loop_reduce_vars, synth, hoist_atomics))
+                    push!(kernels, jgen_kernel_def(stmt_k, owner, idx, fargs, loop_reduce_vars, synth, hoist_atomics))
                     push!(exprs, jgen_launch_expr(stmt, owner, idx, fargs))
                 end
             elseif local_red !== nothing
@@ -15451,17 +15539,17 @@ function jgen_body(body::Vector{NamedTuple}, kernels::Vector{Expr}, owner::Symbo
                 # own top-level host statement (see the array-element case), and the guard keeps JACC away from a zero range, which it raises on.
                 loop_branch = emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step,
                                            jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs,
-                                                     outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1, hoist_atomics))
-                red_stmts = Any[]
+                                                     outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1, hoist_atomics))
+                red_stmts = cgen_host_copy_stmts(rnames)
                 for (j, (lt, lop, larrs, lterm)) in enumerate(local_red)
                     redvar = Symbol("__jgen_lred_", cgen_kernel_count(kernels), "_", length(exprs), "_", depth, "_", j)
-                    push!(red_stmts, Expr(:(=), redvar, jgen_idiomatic_reduction_value(larrs, lterm, stmt.var, stmt.lo, stmt.step, n_iter)))
+                    push!(red_stmts, Expr(:(=), redvar, jgen_idiomatic_reduction_value(larrs, cgen_subst_scalars(lterm, cgen_host_copy_map(rnames)), stmt.var, stmt.lo, stmt.step, n_iter)))
                     push!(red_stmts, Expr(:(=), lt, Expr(:call, lop, lt, Expr(:ref, Expr(:call, :Array, redvar), 1))))
                 end
                 red_branch = emit_if(Expr(:call, :>, n_iter, 0), red_stmts, Any[])
                 push!(exprs, emit_if(Expr(:call, :<, n_iter, min(reduction_threshold, cgen_local_reduction_threshold())), Any[loop_branch], Any[red_branch]))
             else
-                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, depth = depth + 1, hoist_atomics)))
+                push!(exprs, emit_forloop(stmt.var, stmt.lo, stmt.hi, stmt.step, jgen_body(stmt.body, kernels, owner, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, outer_known_consts = known_consts, root_body, decisions, boxable, box_reads, depth = depth + 1, hoist_atomics)))
             end
             decisions === nothing || push!(decisions, cgen_decision_record(owner, stmt, depth, verdict, stage, gate.array, gate.idiom))
             delete!(known_consts, stmt.var)
@@ -15613,6 +15701,18 @@ function jgen_emit(gk; reduction_threshold::Int = cgen_reduction_threshold_defau
     decisions = NamedTuple[]
     boxable = cgen_boxable_locals(gk.body, fn_args)
     host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, decisions, hoist_atomics, boxable)
+    box_reads = Set{Symbol}()
+    settled = false
+    for _ in 1:4
+        if cgen_box_read_set(gk.body, reduce_vars) == cgen_box_read_set(gk.body, box_reads)
+            settled = true
+            break
+        end
+        box_reads = copy(reduce_vars)
+        kernels = Expr[]; reduce_vars = Set{Symbol}(); decisions = NamedTuple[]
+        host_body = jgen_body(gk.body, kernels, gk.name, reduce_vars, fn_args, allowscalar_macro; reduction_threshold, outer_defs, decisions, hoist_atomics, boxable, box_reads)
+    end
+    settled || error("jgen_emit: the set of boxed scalars did not settle for $(gk.name)")
     host_body = Any[cgen_host_box_refs(st, reduce_vars, allowscalar_macro) for st in host_body]
     # Mirrors cgen_emit's box/unbox handling, JACC v1.x API: JACC.array
     # for a host->device whole-array transfer, JACC.to_host for the reverse.
